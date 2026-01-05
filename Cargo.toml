@@ -87,7 +87,7 @@ mysql_async = { version = "0.36", default-features = false, features = ["default
 tokio-rusqlite = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
-bb8 = "0.8"
+bb8 = "0.9"
 bb8-tiberius = "0.15"
 mongodb = { version = "2.8", default-features = false, features = ["tokio-runtime"] }
 bson = { version = "2.13", features = ["chrono-0_4", "uuid-1", "serde_with"] }
