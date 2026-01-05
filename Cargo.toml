@@ -122,7 +122,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Testing
 insta = { version = "1.45", features = ["yaml"] }
 pretty_assertions = "1.4"
-tempfile = "3.10"
+tempfile = "3.24"
 trybuild = "1.0"
 
 # Benchmarking
