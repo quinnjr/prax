@@ -43,6 +43,9 @@ tracing-subscriber = { workspace = true, optional = true }
 dhat = { workspace = true, optional = true }
 memory-stats = { workspace = true, optional = true }
 
+# MongoDB support
+bson = { workspace = true, optional = true }
+
 [dev-dependencies]
 dhat = { workspace = true }
 memory-stats = { workspace = true }
@@ -94,7 +97,7 @@ harness = false
 default = []
 tracing-subscriber = ["dep:tracing-subscriber"]
 thread-local-tenant = []
-mongodb = []
+mongodb = ["dep:bson"]
 profiling = ["dep:dhat", "dep:memory-stats"]
 dhat-heap = ["dep:dhat"]
 
