@@ -754,18 +754,6 @@ checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
 name = "bb8"
-version = "0.8.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89aabfae550a5c44b43ab941844ffcd2e993cb6900b342debf59e9ea74acdb8"
-dependencies = [
- "async-trait",
- "futures-util",
- "parking_lot",
- "tokio",
-]
-
-[[package]]
-name = "bb8"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
@@ -778,12 +766,11 @@ dependencies = [
 
 [[package]]
 name = "bb8-tiberius"
-version = "0.15.0"
+version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73caefcf24fc336bd39345ee068f8cd64506f38c92a198dc2400a9693d129f33"
+checksum = "3a5023b318f47a294d02b46ce0d82ac8e7df0afce2257f041ba7316566d6cd56"
 dependencies = [
- "async-trait",
- "bb8 0.8.6",
+ "bb8",
  "thiserror 1.0.69",
  "tiberius",
  "tokio",
@@ -4026,7 +4013,7 @@ name = "prax-mssql"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "bb8 0.9.1",
+ "bb8",
  "bb8-tiberius",
  "chrono",
  "futures",
