@@ -25,7 +25,7 @@ async-trait = { workspace = true }
 # SQL Server driver (tiberius)
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
 bb8 = "0.9"
-bb8-tiberius = "0.15"
+bb8-tiberius = "0.16"
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
