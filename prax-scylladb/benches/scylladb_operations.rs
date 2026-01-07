@@ -3,7 +3,8 @@
 //! Note: These benchmarks require a running ScyllaDB instance.
 //! Skip by default; run with: cargo bench --package prax-scylladb --features bench-scylla
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use std::hint::black_box;
 
 /// Benchmark configuration parsing
 fn bench_config_parsing(c: &mut Criterion) {

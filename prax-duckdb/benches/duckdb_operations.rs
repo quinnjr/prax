@@ -1,6 +1,7 @@
 //! DuckDB operations benchmarks.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
 use prax_duckdb::{DuckDbConfig, DuckDbEngine, DuckDbPool};
 use prax_query::filter::FilterValue;
 use std::collections::HashMap;

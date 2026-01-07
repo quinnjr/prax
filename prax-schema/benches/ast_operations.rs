@@ -1,6 +1,7 @@
 //! Benchmarks for AST operations including creation, traversal, and manipulation.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use prax_schema::ast::{
     Attribute, AttributeArg, AttributeValue, Enum, EnumVariant, Field, FieldType, Ident, Model,
     Relation, RelationType, ScalarType, Schema, Span, TypeModifier, View,

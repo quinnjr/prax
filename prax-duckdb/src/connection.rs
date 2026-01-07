@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use duckdb::{Connection, Statement};
+use duckdb::Connection;
 use parking_lot::Mutex;
 use serde_json::Value as JsonValue;
 use tracing::{debug, instrument};
@@ -120,8 +120,27 @@ impl DuckDbConnection {
             .map(|p| p as &dyn duckdb::ToSql)
             .collect();
 
-        let rows = stmt.query(param_refs.as_slice())?;
-        self.rows_to_json(rows)
+        let mut rows = stmt.query(param_refs.as_slice())?;
+
+        // Get column names from the statement via rows.as_ref()
+        let column_names: Vec<String> = rows
+            .as_ref()
+            .map(|stmt| stmt.column_names())
+            .unwrap_or_default();
+
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            let mut obj = serde_json::Map::new();
+
+            for (i, name) in column_names.iter().enumerate() {
+                let value = row.get_ref(i)?;
+                obj.insert(name.clone(), duckdb_value_ref_to_json(value));
+            }
+
+            results.push(JsonValue::Object(obj));
+        }
+
+        Ok(results)
     }
 
     /// Execute a query and return the first row.
@@ -173,53 +192,27 @@ impl DuckDbConnection {
         Ok(())
     }
 
-    /// Execute an INSERT and return the last inserted row ID.
+    /// Execute an INSERT statement.
+    ///
+    /// Note: DuckDB doesn't have `last_insert_rowid()` like SQLite.
+    /// Use `INSERT ... RETURNING id` if you need the inserted ID.
     #[instrument(skip(self, params), fields(sql = %sql))]
-    pub fn insert(&self, sql: &str, params: &[FilterValue]) -> DuckDbResult<i64> {
+    pub fn insert(&self, sql: &str, params: &[FilterValue]) -> DuckDbResult<usize> {
         debug!("Executing insert");
-
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(sql)?;
-
-        let duckdb_params: Vec<DuckDbParam<'_>> = params.iter().map(DuckDbParam).collect();
-        let param_refs: Vec<&dyn duckdb::ToSql> = duckdb_params
-            .iter()
-            .map(|p| p as &dyn duckdb::ToSql)
-            .collect();
-
-        stmt.execute(param_refs.as_slice())?;
-
-        // Get last insert rowid
-        let rowid: i64 = conn.last_insert_rowid();
-        Ok(rowid)
+        self.execute(sql, params)
     }
 
-    /// Convert DuckDB rows to JSON.
-    fn rows_to_json(&self, mut rows: duckdb::Rows<'_>) -> DuckDbResult<Vec<JsonValue>> {
-        let mut results = Vec::new();
-
-        // Get column names from the statement
-        let column_count = rows.as_ref().map(|r| r.column_count()).unwrap_or(0);
-        let column_names: Vec<String> = (0..column_count)
-            .map(|i| {
-                rows.as_ref()
-                    .map(|r| r.column_name(i).unwrap_or("").to_string())
-                    .unwrap_or_default()
-            })
-            .collect();
-
-        while let Some(row) = rows.next()? {
-            let mut obj = serde_json::Map::new();
-
-            for (i, name) in column_names.iter().enumerate() {
-                let value = row.get_ref(i)?;
-                obj.insert(name.clone(), duckdb_value_ref_to_json(value));
-            }
-
-            results.push(JsonValue::Object(obj));
-        }
-
-        Ok(results)
+    /// Execute an INSERT with RETURNING clause to get inserted values.
+    ///
+    /// Example: `INSERT INTO users (name) VALUES (?) RETURNING id`
+    #[instrument(skip(self, params), fields(sql = %sql))]
+    pub fn insert_returning(
+        &self,
+        sql: &str,
+        params: &[FilterValue],
+    ) -> DuckDbResult<Vec<JsonValue>> {
+        debug!("Executing insert with returning");
+        self.query(sql, params)
     }
 
     /// Begin a transaction.
@@ -382,7 +375,8 @@ mod tests {
     #[test]
     fn test_query_with_params() {
         let conn = DuckDbConnection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR);").unwrap();
+        conn.execute_batch("CREATE TABLE users (id INTEGER, name VARCHAR);")
+            .unwrap();
         conn.execute(
             "INSERT INTO users VALUES (?, ?)",
             &[FilterValue::Int(1), FilterValue::String("Alice".to_string())],
@@ -401,14 +395,15 @@ mod tests {
     #[test]
     fn test_transaction() {
         let conn = DuckDbConnection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE test (id INTEGER);").unwrap();
+        conn.execute_batch("CREATE TABLE test (id INTEGER);")
+            .unwrap();
 
         conn.begin_transaction().unwrap();
-        conn.execute("INSERT INTO test VALUES (?)", &[FilterValue::Int(1)]).unwrap();
+        conn.execute("INSERT INTO test VALUES (?)", &[FilterValue::Int(1)])
+            .unwrap();
         conn.rollback().unwrap();
 
         let results = conn.query("SELECT * FROM test", &[]).unwrap();
         assert!(results.is_empty());
     }
 }
-

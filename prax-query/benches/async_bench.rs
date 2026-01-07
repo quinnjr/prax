@@ -2,7 +2,8 @@
 //!
 //! Run with: `cargo bench --package prax-query --bench async_bench`
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use prax_query::async_optimize::{
     concurrent::{ConcurrencyConfig, ConcurrentExecutor, execute_batch},
     introspect::{ConcurrentIntrospector, IntrospectionConfig, TableMetadata},

@@ -1,6 +1,7 @@
 //! Benchmarks for pagination operations (ordering, cursor, offset)
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use prax_query::{
     filter::FilterValue,
     pagination::{Cursor, CursorDirection, CursorValue, Pagination},

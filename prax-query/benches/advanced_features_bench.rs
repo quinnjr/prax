@@ -11,7 +11,8 @@
 //! - Stored Procedures
 //! - Security (RLS, Roles)
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 use prax_query::cte::Cte;
 use prax_query::json::JsonPath;

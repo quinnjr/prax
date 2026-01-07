@@ -19,6 +19,7 @@ prax/
 ├── prax-duckdb/         # DuckDB analytical driver
 ├── prax-scylladb/       # ScyllaDB driver
 ├── prax-migrate/        # Migration engine
+├── prax-import/         # Import from Prisma/Diesel/SeaORM
 ├── prax-cli/            # CLI tool
 ├── prax-armature/       # Armature integration
 ├── prax-axum/           # Axum integration

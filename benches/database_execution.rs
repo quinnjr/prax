@@ -31,7 +31,8 @@
 //! - `MYSQL_URL`: MySQL connection string (default: mysql://prax:prax_test_password@localhost:3306/prax_test)
 //! - `SKIP_DB_BENCHMARKS`: Set to "1" to skip database benchmarks
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use std::env;
 use std::time::Duration;
 

@@ -29,6 +29,7 @@ async fn run() -> CliResult<()> {
         Command::Format(args) => commands::format::run(args).await,
         Command::Migrate(args) => commands::migrate::run(args).await,
         Command::Db(args) => commands::db::run(args).await,
+        Command::Import(args) => commands::import::run(args).await,
         Command::Version => commands::version::run().await,
     }
 }

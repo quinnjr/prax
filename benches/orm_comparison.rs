@@ -45,7 +45,8 @@
 //!    - Rust types to SQL parameters
 //!    - Parameter binding
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 // ==============================================================================
 // Prax ORM Benchmarks

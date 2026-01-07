@@ -6,6 +6,7 @@
 //! Run with: `cargo bench --package prax-query --bench throughput_bench`
 
 use criterion::{
+use std::hint::black_box;
     black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
 };
 use prax_query::{

@@ -72,9 +72,8 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
             }
         }
         Value::Blob(bytes) => {
-            // Encode as base64
-            use base64::Engine;
-            JsonValue::String(base64::engine::general_purpose::STANDARD.encode(&bytes))
+            // Encode as hex string (simpler than base64, no extra dependency)
+            JsonValue::String(bytes.iter().map(|b| format!("{:02x}", b)).collect())
         }
         Value::Date32(days) => {
             // Days since epoch
@@ -99,11 +98,12 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
         Value::List(list) => {
             JsonValue::Array(list.into_iter().map(duckdb_value_to_json).collect())
         }
-        Value::Enum(e) => JsonValue::String(e.to_string()),
+        Value::Enum(e) => JsonValue::String(e),
         Value::Struct(fields) => {
+            // OrderedMap uses .iter(), not into_iter()
             let obj: serde_json::Map<String, JsonValue> = fields
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), duckdb_value_to_json(v)))
+                .iter()
+                .map(|(k, v)| (k.clone(), duckdb_value_to_json(v.clone())))
                 .collect();
             JsonValue::Object(obj)
         }
@@ -111,9 +111,10 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
             JsonValue::Array(arr.into_iter().map(duckdb_value_to_json).collect())
         }
         Value::Map(map) => {
+            // OrderedMap uses .iter(), not into_iter()
             let obj: serde_json::Map<String, JsonValue> = map
-                .into_iter()
-                .map(|(k, v)| (format!("{:?}", k), duckdb_value_to_json(v)))
+                .iter()
+                .map(|(k, v)| (format!("{:?}", k), duckdb_value_to_json(v.clone())))
                 .collect();
             JsonValue::Object(obj)
         }
@@ -122,6 +123,9 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
 }
 
 /// Convert a DuckDB ValueRef to a JSON value.
+///
+/// For complex types (List, Struct, Map, etc.), we convert to owned Value first
+/// since the Arrow-based API requires careful index handling.
 pub fn duckdb_value_ref_to_json(value: ValueRef<'_>) -> JsonValue {
     match value {
         ValueRef::Null => JsonValue::Null,
@@ -151,8 +155,8 @@ pub fn duckdb_value_ref_to_json(value: ValueRef<'_>) -> JsonValue {
             }
         }
         ValueRef::Blob(bytes) => {
-            use base64::Engine;
-            JsonValue::String(base64::engine::general_purpose::STANDARD.encode(bytes))
+            // Encode as hex string
+            JsonValue::String(bytes.iter().map(|b| format!("{:02x}", b)).collect())
         }
         ValueRef::Date32(days) => {
             let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719163);
@@ -164,36 +168,16 @@ pub fn duckdb_value_ref_to_json(value: ValueRef<'_>) -> JsonValue {
         ValueRef::Time64(..) => JsonValue::String(format!("{:?}", value)),
         ValueRef::Timestamp(..) => JsonValue::String(format!("{:?}", value)),
         ValueRef::Interval { .. } => JsonValue::String(format!("{:?}", value)),
-        ValueRef::List(list, _) => {
-            JsonValue::Array(list.values().iter().map(duckdb_value_ref_to_json).collect())
+        // For complex types, convert to owned Value and then to JSON
+        ValueRef::List(..)
+        | ValueRef::Enum(..)
+        | ValueRef::Struct(..)
+        | ValueRef::Array(..)
+        | ValueRef::Map(..)
+        | ValueRef::Union(..) => {
+            // Use to_owned() to convert complex ValueRef types to Value
+            duckdb_value_to_json(value.to_owned())
         }
-        ValueRef::Enum(e, _) => JsonValue::String(e.to_string()),
-        ValueRef::Struct(fields, _) => {
-            let obj: serde_json::Map<String, JsonValue> = fields
-                .iter()
-                .map(|(k, v)| (k.to_string(), duckdb_value_ref_to_json(v)))
-                .collect();
-            JsonValue::Object(obj)
-        }
-        ValueRef::Array(arr, _) => {
-            JsonValue::Array(arr.values().iter().map(duckdb_value_ref_to_json).collect())
-        }
-        ValueRef::Map(map, _) => {
-            let obj: serde_json::Map<String, JsonValue> = map
-                .keys()
-                .values()
-                .iter()
-                .zip(map.values().values().iter())
-                .map(|(k, v)| {
-                    (
-                        format!("{:?}", k),
-                        duckdb_value_ref_to_json(v),
-                    )
-                })
-                .collect();
-            JsonValue::Object(obj)
-        }
-        ValueRef::Union(u, _) => duckdb_value_ref_to_json(*u),
     }
 }
 
@@ -256,4 +240,3 @@ mod tests {
         );
     }
 }
-

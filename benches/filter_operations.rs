@@ -1,7 +1,8 @@
 #![allow(dead_code, unused, clippy::type_complexity)]
 //! Benchmarks for filter operations and SQL generation.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::raw::Sql;
 use prax_query::sql::DatabaseType;

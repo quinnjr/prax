@@ -6,7 +6,8 @@
 //! - Leak detection overhead
 //! - Snapshot comparison performance
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::memory::{BufferPool, StringPool, GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL};
 use prax_query::mem_optimize::{GlobalInterner, QueryArena, ScopedInterner};

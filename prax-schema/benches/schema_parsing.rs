@@ -1,6 +1,7 @@
 //! Benchmarks for schema parsing operations.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use prax_schema::parser::parse_schema;
 
 /// A minimal schema with a single model.

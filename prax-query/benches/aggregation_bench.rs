@@ -3,7 +3,8 @@
 //! Note: Aggregate operations require a QueryEngine which isn't available
 //! in benchmarks, so we focus on filter and SQL building performance.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 use prax_query::{
     filter::{Filter, FilterValue},
     sql::SqlBuilder,
