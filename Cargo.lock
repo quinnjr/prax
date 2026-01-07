@@ -4282,6 +4282,7 @@ name = "prax-query"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "bson",
  "bumpalo",
  "criterion 0.8.1",
  "dhat",
