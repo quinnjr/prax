@@ -250,7 +250,6 @@ where
 #[derive(Debug, Clone)]
 pub struct DatabaseConnection(pub Arc<PraxClient>);
 
-#[axum::async_trait]
 impl<S> FromRequestParts<S> for DatabaseConnection
 where
     Arc<PraxClient>: FromRef<S>,
