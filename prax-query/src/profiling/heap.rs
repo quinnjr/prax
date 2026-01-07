@@ -315,13 +315,13 @@ pub mod dhat_profiler {
 
     /// Start DHAT heap profiling.
     pub fn start_dhat() -> DhatGuard {
-        let profiler = ProfilerBuilder::new().build();
+        let profiler = dhat::Profiler::builder().build();
         DhatGuard { profiler }
     }
 
     /// Start DHAT with custom options.
     pub fn start_dhat_with_file(path: &str) -> DhatGuard {
-        let profiler = ProfilerBuilder::new()
+        let profiler = dhat::Profiler::builder()
             .file_name(path)
             .build();
         DhatGuard { profiler }
