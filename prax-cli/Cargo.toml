@@ -34,7 +34,7 @@ thiserror = { workspace = true }
 owo-colors = "4.1"
 
 # Configuration
-toml = "0.8"
+toml = "0.9"
 serde = { workspace = true }
 serde_json = { workspace = true }
 

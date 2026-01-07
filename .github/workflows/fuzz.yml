@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -45,7 +45,7 @@ jobs:
           components: llvm-tools-preview
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -53,7 +53,7 @@ jobs:
           key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: fuzz/corpus
           key: ${{ runner.os }}-fuzz-corpus-${{ matrix.target }}-${{ github.run_number }}
@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload corpus
         if: steps.check.outputs.should_run == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: corpus-${{ matrix.target }}
           path: fuzz/corpus/${{ matrix.target }}/
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload crashes
         if: steps.crashes.outputs.has_crashes == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: crashes-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/
@@ -122,7 +122,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -133,7 +133,7 @@ jobs:
         run: cargo install cargo-fuzz
 
       - name: Download all corpus artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: corpus-*
           path: fuzz/corpus/
@@ -171,7 +171,7 @@ jobs:
 
     steps:
       - name: Create issue for crashes
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const targets = [

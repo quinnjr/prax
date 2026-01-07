@@ -18,7 +18,7 @@ prax-mysql = { workspace = true, optional = true }
 prax-sqlite = { workspace = true, optional = true }
 
 # Axum
-axum = "0.7"
+axum = "0.8"
 tower = "0.5"
 tower-layer = "0.3"
 tower-service = "0.3"

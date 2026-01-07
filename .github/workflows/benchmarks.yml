@@ -24,7 +24,7 @@ jobs:
     name: Benchmark Regression Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # Full history for baseline comparison
 
@@ -34,7 +34,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -45,7 +45,7 @@ jobs:
             ${{ runner.os }}-cargo-bench-
 
       - name: Cache benchmark baselines
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: target/criterion
           key: ${{ runner.os }}-criterion-${{ github.base_ref || 'main' }}
@@ -90,7 +90,7 @@ jobs:
           cargo bench --package prax-query -- --save-baseline ${{ github.ref_name }}
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
@@ -104,7 +104,7 @@ jobs:
     name: Throughput Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -112,7 +112,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -146,7 +146,7 @@ jobs:
     name: Memory Efficiency Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -154,7 +154,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -187,7 +187,7 @@ jobs:
     name: Async Performance Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -195,7 +195,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -226,10 +226,10 @@ jobs:
     needs: [benchmark-regression, throughput-benchmarks, memory-benchmarks, async-benchmarks]
     if: always()
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: benchmark-artifacts
         continue-on-error: true
@@ -249,7 +249,7 @@ jobs:
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
