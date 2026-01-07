@@ -55,6 +55,7 @@ prax-schema = { workspace = true }
 prax-codegen = { workspace = true }
 prax-migrate = { workspace = true }
 prax-query = { workspace = true }
+prax-import = { workspace = true }
 
 # Database drivers for introspection
 tokio-postgres = { workspace = true, optional = true }
@@ -65,8 +66,9 @@ predicates = "3.1"
 tempfile = { workspace = true }
 
 [features]
-default = ["postgres"]
+default = ["postgres", "seaorm"]
 postgres = ["tokio-postgres"]
 mysql = []
 sqlite = []
 mssql = []
+seaorm = ["prax-import/seaorm"]

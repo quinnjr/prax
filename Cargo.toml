@@ -16,7 +16,7 @@ members = [
     "prax-cli",
     "prax-armature",
     "prax-axum",
-    "prax-actix",
+    "prax-actix", "prax-import",
 ]
 exclude = ["fuzz"]
 
@@ -47,6 +47,7 @@ prax-sqlx = { path = "prax-sqlx", version = "0.4.0" }
 prax-armature = { path = "prax-armature", version = "0.4.0" }
 prax-axum = { path = "prax-axum", version = "0.4.0" }
 prax-actix = { path = "prax-actix", version = "0.4.0" }
+prax-import = { path = "prax-import", version = "0.4.0" }
 
 # Code generation (proc-macros)
 proc-macro2 = "1.0"

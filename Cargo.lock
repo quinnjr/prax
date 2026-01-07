@@ -4091,6 +4091,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "prax-import"
+version = "0.4.0"
+dependencies = [
+ "convert_case 0.6.0",
+ "criterion 0.5.1",
+ "indexmap",
+ "insta",
+ "miette",
+ "once_cell",
+ "pest",
+ "pest_derive",
+ "prax-schema",
+ "pretty_assertions",
+ "proc-macro2",
+ "quote",
+ "regex-lite",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "syn 2.0.111",
+ "tempfile",
+ "thiserror 2.0.17",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "prax-migrate"
 version = "0.4.0"
 dependencies = [
@@ -4214,6 +4240,7 @@ dependencies = [
  "miette",
  "owo-colors",
  "prax-codegen",
+ "prax-import",
  "prax-migrate",
  "prax-query",
  "prax-schema",

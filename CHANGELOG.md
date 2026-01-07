@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Schema Import from Prisma, Diesel, and SeaORM** (`prax-import`)
+  - Parse Prisma schema files (`.prisma`) and convert to Prax
+  - Parse Diesel schema files (`table!` macros) and convert to Prax
+  - Parse SeaORM entity files (`DeriveEntityModel`) and convert to Prax
+  - Automatic type mapping between ORM schemas
+  - Relation preservation and foreign key conversion
+  - Model attribute conversion (@@map, @@index, @@unique)
+  - Field attribute conversion (@id, @unique, @default, @relation)
+  - Enum definition conversion
+  - CLI integration via `prax import --from <prisma|diesel|sea-orm>`
+  - Comprehensive test coverage for all import paths
+  - Performance benchmarks with Criterion.rs
+
+### Performance
+
+- **Import Performance Optimization** (`prax-import`)
+  - Regex compilation caching using `once_cell::sync::Lazy`
+  - 42-57% faster Prisma imports (2.31x speedup on small schemas)
+  - 15-45% faster Diesel imports (1.80x speedup on small schemas)
+  - Throughput: ~7,675 Prisma schemas/sec, ~8,135 Diesel schemas/sec
+  - Comprehensive benchmark suite with small/medium/large test cases
+
 ## [0.4.0] - 2025-12-28
 
 ### Added
