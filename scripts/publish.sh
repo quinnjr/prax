@@ -49,10 +49,15 @@ TIER_1=(
 # Tier 2: Depends only on Tier 1
 TIER_2=(
     "prax-codegen"
+    "prax-import"
     "prax-migrate"
     "prax-postgres"
     "prax-mysql"
     "prax-sqlite"
+    "prax-mssql"
+    "prax-mongodb"
+    "prax-duckdb"
+    "prax-scylladb"
     "prax-sqlx"
 )
 
