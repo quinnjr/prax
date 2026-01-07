@@ -37,6 +37,9 @@ pub enum Command {
     /// Direct database operations
     Db(DbArgs),
 
+    /// Import schema from Prisma or Diesel
+    Import(ImportArgs),
+
     /// Display version information
     Version,
 }
@@ -385,4 +388,51 @@ pub struct DbExecuteArgs {
     /// Skip confirmation prompt
     #[arg(short = 'y', long)]
     pub force: bool,
+}
+
+// =============================================================================
+// Import Command
+// =============================================================================
+
+/// Arguments for the `import` command
+#[derive(Args, Debug)]
+pub struct ImportArgs {
+    /// Source ORM to import from
+    #[arg(long, value_enum)]
+    pub from: ImportSource,
+
+    /// Input schema file path
+    #[arg(short, long)]
+    pub input: PathBuf,
+
+    /// Output Prax schema file path
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Database provider for the imported schema
+    #[arg(short = 'P', long)]
+    pub provider: Option<DatabaseProvider>,
+
+    /// Database connection URL for the imported schema
+    #[arg(short, long)]
+    pub url: Option<String>,
+
+    /// Print to stdout instead of writing to file
+    #[arg(long)]
+    pub print: bool,
+
+    /// Overwrite existing output file without prompting
+    #[arg(short, long)]
+    pub force: bool,
+}
+
+/// Source ORM for import
+#[derive(ValueEnum, Debug, Clone, Copy)]
+pub enum ImportSource {
+    /// Prisma schema (.prisma files)
+    Prisma,
+    /// Diesel schema (schema.rs files with table! macros)
+    Diesel,
+    /// SeaORM entity (entity files with DeriveEntityModel)
+    SeaOrm,
 }
