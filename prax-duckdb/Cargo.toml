@@ -1,6 +1,6 @@
 [package]
 name = "prax-duckdb"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["Pegasus Heavy Industries LLC"]
 description = "DuckDB database driver for Prax ORM - optimized for analytical workloads"
@@ -11,7 +11,7 @@ categories = ["database", "asynchronous"]
 rust-version = "1.85"
 
 [dependencies]
-prax-query = { path = "../prax-query", version = "0.4.0" }
+prax-query = { path = "../prax-query", version = "0.5.0" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "sync"] }
