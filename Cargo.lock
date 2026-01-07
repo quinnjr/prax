@@ -765,13 +765,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bb8"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "457d7ed3f888dfd2c7af56d4975cade43c622f74bdcddfed6d4352f57acc6310"
+dependencies = [
+ "futures-util",
+ "parking_lot",
+ "portable-atomic",
+ "tokio",
+]
+
+[[package]]
 name = "bb8-tiberius"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73caefcf24fc336bd39345ee068f8cd64506f38c92a198dc2400a9693d129f33"
 dependencies = [
  "async-trait",
- "bb8",
+ "bb8 0.8.6",
  "thiserror 1.0.69",
  "tiberius",
  "tokio",
@@ -3775,6 +3787,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f89776e4d69bb58bc6993e99ffa1d11f228b839984854c7daeb5d37f87cbe950"
+
+[[package]]
 name = "postgres-derive"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4008,7 +4026,7 @@ name = "prax-mssql"
 version = "0.4.0"
 dependencies = [
  "async-trait",
- "bb8",
+ "bb8 0.9.1",
  "bb8-tiberius",
  "chrono",
  "futures",
