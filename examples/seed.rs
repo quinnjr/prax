@@ -137,17 +137,19 @@ fn seed_comments() {
 fn mask_url(url: &str) -> String {
     // Simple URL masking - hide password portion
     if let Some(at_pos) = url.find('@')
-        && let Some(scheme_end) = url.find("://") {
-            let scheme = &url[..scheme_end + 3];
-            let after_at = &url[at_pos..];
-            // Check if there's a password (contains :)
-            let user_info = &url[scheme_end + 3..at_pos];
-            if user_info.contains(':')
-                && let Some(colon_pos) = user_info.find(':') {
-                    let user = &user_info[..colon_pos];
-                    return format!("{}{}:****{}", scheme, user, after_at);
-                }
+        && let Some(scheme_end) = url.find("://")
+    {
+        let scheme = &url[..scheme_end + 3];
+        let after_at = &url[at_pos..];
+        // Check if there's a password (contains :)
+        let user_info = &url[scheme_end + 3..at_pos];
+        if user_info.contains(':')
+            && let Some(colon_pos) = user_info.find(':')
+        {
+            let user = &user_info[..colon_pos];
+            return format!("{}{}:****{}", scheme, user, after_at);
         }
+    }
     // No password found, return truncated URL
     if url.len() > 50 {
         format!("{}...", &url[..50])

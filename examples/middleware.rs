@@ -212,9 +212,10 @@ impl Middleware for TimingMiddleware {
 
     fn after_query(&self, ctx: &QueryContext, result: &QueryResult) {
         if result.duration > self.threshold
-            && let Some(callback) = &self.on_slow_query {
-                callback(ctx, result.duration);
-            }
+            && let Some(callback) = &self.on_slow_query
+        {
+            callback(ctx, result.duration);
+        }
     }
 }
 
