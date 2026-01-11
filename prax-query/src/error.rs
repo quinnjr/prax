@@ -615,8 +615,11 @@ impl QueryError {
     /// Create an unsupported operation error.
     pub fn unsupported(message: impl Into<String>) -> Self {
         let message = message.into();
-        Self::new(ErrorCode::InvalidConfiguration, format!("Unsupported: {}", message))
-            .with_help("This operation is not supported by the current database driver")
+        Self::new(
+            ErrorCode::InvalidConfiguration,
+            format!("Unsupported: {}", message),
+        )
+        .with_help("This operation is not supported by the current database driver")
     }
 
     // ============== Error Checks ==============

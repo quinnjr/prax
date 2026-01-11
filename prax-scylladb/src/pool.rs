@@ -4,16 +4,16 @@
 //! pooling and automatic reconnection. This module provides a higher-level wrapper
 //! that integrates with the Prax ORM ecosystem.
 
-use std::sync::Arc;
-use scylla::Session;
 use parking_lot::RwLock;
+use scylla::Session;
+use std::sync::Arc;
 
 use crate::config::ScyllaConfig;
-use crate::connection::{connect, ScyllaConnection};
+use crate::connection::{ScyllaConnection, connect};
 use crate::engine::ScyllaEngine;
-use crate::error::ScyllaResult;
 #[allow(unused_imports)]
 use crate::error::ScyllaError;
+use crate::error::ScyllaResult;
 
 /// A connection pool for ScyllaDB.
 ///
@@ -26,7 +26,9 @@ pub struct ScyllaPool {
     connection: Arc<ScyllaConnection>,
     config: Arc<ScyllaConfig>,
     /// Cache of prepared statements
-    prepared_cache: Arc<RwLock<std::collections::HashMap<String, scylla::prepared_statement::PreparedStatement>>>,
+    prepared_cache: Arc<
+        RwLock<std::collections::HashMap<String, scylla::prepared_statement::PreparedStatement>>,
+    >,
 }
 
 impl ScyllaPool {
@@ -104,7 +106,10 @@ impl ScyllaPool {
     }
 
     /// Prepare a statement (cached).
-    pub async fn prepare(&self, query: &str) -> ScyllaResult<scylla::prepared_statement::PreparedStatement> {
+    pub async fn prepare(
+        &self,
+        query: &str,
+    ) -> ScyllaResult<scylla::prepared_statement::PreparedStatement> {
         // Check cache first
         {
             let cache = self.prepared_cache.read();
@@ -182,4 +187,3 @@ mod tests {
         assert_eq!(stats.known_nodes, 3);
     }
 }
-

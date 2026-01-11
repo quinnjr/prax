@@ -320,7 +320,8 @@ impl Trigger {
         // Action
         sql.push_str("    EXECUTE ");
         match &self.action {
-            TriggerAction::ExecuteFunction { name, args: _ } | TriggerAction::FunctionReference { name } => {
+            TriggerAction::ExecuteFunction { name, args: _ }
+            | TriggerAction::FunctionReference { name } => {
                 sql.push_str("FUNCTION ");
                 sql.push_str(name);
                 sql.push('(');
@@ -595,10 +596,7 @@ impl Trigger {
                 format!("DROP TRIGGER IF EXISTS {};", self.name)
             }
             DatabaseType::MSSQL => {
-                format!(
-                    "DROP TRIGGER IF EXISTS {};",
-                    self.qualified_name()
-                )
+                format!("DROP TRIGGER IF EXISTS {};", self.qualified_name())
             }
         }
     }
@@ -1283,7 +1281,10 @@ mod tests {
         let cond = TriggerCondition::column_changed("email")
             .and(TriggerCondition::new_not_null("verified"));
 
-        assert!(cond.expression.contains("OLD.email IS DISTINCT FROM NEW.email"));
+        assert!(
+            cond.expression
+                .contains("OLD.email IS DISTINCT FROM NEW.email")
+        );
         assert!(cond.expression.contains("NEW.verified IS NOT NULL"));
     }
 
@@ -1363,7 +1364,10 @@ mod tests {
                 .full_document(FullDocument::UpdateLookup)
                 .batch_size(100);
 
-            assert_eq!(builder.build_options().full_document, FullDocument::UpdateLookup);
+            assert_eq!(
+                builder.build_options().full_document,
+                FullDocument::UpdateLookup
+            );
             assert_eq!(builder.build_options().batch_size, Some(100));
         }
 
@@ -1382,4 +1386,3 @@ mod tests {
         }
     }
 }
-

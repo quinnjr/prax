@@ -150,7 +150,11 @@ pub struct PipelineError {
 
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Pipeline query {} failed: {}", self.query_index, self.message)
+        write!(
+            f,
+            "Pipeline query {} failed: {}",
+            self.query_index, self.message
+        )
     }
 }
 
@@ -618,8 +622,8 @@ impl BulkInsertPipeline {
     /// Convert to query pipeline.
     pub fn to_pipeline(self) -> QueryPipeline {
         let statements = self.to_insert_statements();
-        let mut pipeline = QueryPipeline::new(PipelineConfig::for_bulk_inserts())
-            .for_database(self.db_type);
+        let mut pipeline =
+            QueryPipeline::new(PipelineConfig::for_bulk_inserts()).for_database(self.db_type);
 
         for (sql, params) in statements {
             pipeline = pipeline.add_insert(sql, params);
@@ -746,8 +750,8 @@ impl BulkUpdatePipeline {
     /// Convert to query pipeline.
     pub fn to_pipeline(self) -> QueryPipeline {
         let statements = self.to_update_statements();
-        let mut pipeline = QueryPipeline::new(PipelineConfig::for_bulk_updates())
-            .for_database(self.db_type);
+        let mut pipeline =
+            QueryPipeline::new(PipelineConfig::for_bulk_updates()).for_database(self.db_type);
 
         for (sql, params) in statements {
             pipeline = pipeline.add_update(sql, params);
@@ -763,7 +767,10 @@ impl BulkUpdatePipeline {
 #[allow(async_fn_in_trait)]
 pub trait PipelineExecutor {
     /// Execute a pipeline and return results.
-    async fn execute_pipeline(&self, pipeline: &QueryPipeline) -> Result<PipelineResult, PipelineError>;
+    async fn execute_pipeline(
+        &self,
+        pipeline: &QueryPipeline,
+    ) -> Result<PipelineResult, PipelineError>;
 }
 
 /// Simulated pipeline execution for testing and benchmarking.
@@ -775,7 +782,10 @@ pub struct SimulatedExecutor {
 impl SimulatedExecutor {
     /// Create a new simulated executor.
     pub fn new(latency: Duration, error_rate: f64) -> Self {
-        Self { latency, error_rate }
+        Self {
+            latency,
+            error_rate,
+        }
     }
 
     /// Execute pipeline with simulated latency.
@@ -844,20 +854,35 @@ mod tests {
     #[test]
     fn test_pipeline_builder() {
         let pipeline = QueryPipeline::new(PipelineConfig::default())
-            .add_insert("INSERT INTO users (name) VALUES ($1)", vec![FilterValue::String("Alice".into())])
-            .add_insert("INSERT INTO users (name) VALUES ($1)", vec![FilterValue::String("Bob".into())]);
+            .add_insert(
+                "INSERT INTO users (name) VALUES ($1)",
+                vec![FilterValue::String("Alice".into())],
+            )
+            .add_insert(
+                "INSERT INTO users (name) VALUES ($1)",
+                vec![FilterValue::String("Bob".into())],
+            );
 
         assert_eq!(pipeline.len(), 2);
     }
 
     #[test]
     fn test_bulk_insert_pipeline() {
-        let mut pipeline = BulkInsertPipeline::new("users", vec!["name".into(), "age".into()])
-            .with_batch_size(2);
+        let mut pipeline =
+            BulkInsertPipeline::new("users", vec!["name".into(), "age".into()]).with_batch_size(2);
 
-        pipeline.add_row(vec![FilterValue::String("Alice".into()), FilterValue::Int(30)]);
-        pipeline.add_row(vec![FilterValue::String("Bob".into()), FilterValue::Int(25)]);
-        pipeline.add_row(vec![FilterValue::String("Charlie".into()), FilterValue::Int(35)]);
+        pipeline.add_row(vec![
+            FilterValue::String("Alice".into()),
+            FilterValue::Int(30),
+        ]);
+        pipeline.add_row(vec![
+            FilterValue::String("Bob".into()),
+            FilterValue::Int(25),
+        ]);
+        pipeline.add_row(vec![
+            FilterValue::String("Charlie".into()),
+            FilterValue::Int(35),
+        ]);
 
         let statements = pipeline.to_insert_statements();
 
@@ -897,7 +922,10 @@ mod tests {
     fn test_renumber_params() {
         let sql = "SELECT * FROM users WHERE id = $1 AND name = $2";
         let renumbered = renumber_params(sql, 5);
-        assert_eq!(renumbered, "SELECT * FROM users WHERE id = $6 AND name = $7");
+        assert_eq!(
+            renumbered,
+            "SELECT * FROM users WHERE id = $6 AND name = $7"
+        );
     }
 
     #[test]
@@ -944,4 +972,3 @@ mod tests {
         assert_eq!(result.total_affected, 2);
     }
 }
-

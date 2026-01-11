@@ -97,7 +97,8 @@ impl<T> CacheEntry<T> {
 
     /// Get remaining TTL.
     pub fn remaining_ttl(&self) -> Option<Duration> {
-        self.ttl.map(|ttl| ttl.saturating_sub(self.created_at.elapsed()))
+        self.ttl
+            .map(|ttl| ttl.saturating_sub(self.created_at.elapsed()))
     }
 }
 
@@ -238,12 +239,7 @@ impl CacheBackend for NoopCache {
         Ok(None)
     }
 
-    async fn set<T>(
-        &self,
-        _key: &CacheKey,
-        _value: &T,
-        _ttl: Option<Duration>,
-    ) -> CacheResult<()>
+    async fn set<T>(&self, _key: &CacheKey, _value: &T, _ttl: Option<Duration>) -> CacheResult<()>
     where
         T: serde::Serialize + Sync,
     {
@@ -304,5 +300,3 @@ mod tests {
         assert!(result.is_none());
     }
 }
-
-

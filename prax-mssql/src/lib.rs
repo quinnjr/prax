@@ -76,5 +76,3 @@ pub mod prelude {
     pub use crate::rls::{BlockOperation, SecurityPolicy, SecurityPolicyGenerator};
     pub use crate::row::MssqlRow;
 }
-
-

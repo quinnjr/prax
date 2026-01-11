@@ -85,7 +85,9 @@ impl JsonPath {
                 // Extract field name before bracket
                 let field_name = &segment[..bracket_pos];
                 if !field_name.is_empty() {
-                    json_path.segments.push(PathSegment::Field(field_name.to_string()));
+                    json_path
+                        .segments
+                        .push(PathSegment::Field(field_name.to_string()));
                 }
 
                 // Extract index
@@ -98,7 +100,9 @@ impl JsonPath {
                     }
                 }
             } else {
-                json_path.segments.push(PathSegment::Field(segment.to_string()));
+                json_path
+                    .segments
+                    .push(PathSegment::Field(segment.to_string()));
             }
         }
 
@@ -336,18 +340,16 @@ impl JsonFilter {
                 format!("{} ? $1", col)
             }
             Self::HasAnyKey(col, keys) => {
-                let placeholders: Vec<String> = (1..=keys.len())
-                    .map(|i| format!("${}", i))
-                    .collect();
+                let placeholders: Vec<String> =
+                    (1..=keys.len()).map(|i| format!("${}", i)).collect();
                 for key in keys {
                     params.push(FilterValue::String(key.clone()));
                 }
                 format!("{} ?| ARRAY[{}]", col, placeholders.join(", "))
             }
             Self::HasAllKeys(col, keys) => {
-                let placeholders: Vec<String> = (1..=keys.len())
-                    .map(|i| format!("${}", i))
-                    .collect();
+                let placeholders: Vec<String> =
+                    (1..=keys.len()).map(|i| format!("${}", i)).collect();
                 for key in keys {
                     params.push(FilterValue::String(key.clone()));
                 }
@@ -437,15 +439,20 @@ impl JsonFilter {
                 let (sql, params) = match self {
                     Self::Equals(path, value) => {
                         let expr = path.to_sqlite_expr();
-                        (format!("{} = json(?)", expr), vec![FilterValue::Json(value.clone())])
+                        (
+                            format!("{} = json(?)", expr),
+                            vec![FilterValue::Json(value.clone())],
+                        )
                     }
-                    Self::IsNull(path) => {
-                        (format!("{} IS NULL", path.to_sqlite_expr()), vec![])
-                    }
+                    Self::IsNull(path) => (format!("{} IS NULL", path.to_sqlite_expr()), vec![]),
                     Self::IsNotNull(path) => {
                         (format!("{} IS NOT NULL", path.to_sqlite_expr()), vec![])
                     }
-                    _ => return Err(QueryError::unsupported("This JSON filter is not supported in SQLite")),
+                    _ => {
+                        return Err(QueryError::unsupported(
+                            "This JSON filter is not supported in SQLite",
+                        ));
+                    }
                 };
                 Ok((sql, params))
             }
@@ -453,15 +460,20 @@ impl JsonFilter {
                 let (sql, params) = match self {
                     Self::Equals(path, value) => {
                         let expr = path.to_mssql_expr();
-                        (format!("{} = ?", expr), vec![FilterValue::Json(value.clone())])
+                        (
+                            format!("{} = ?", expr),
+                            vec![FilterValue::Json(value.clone())],
+                        )
                     }
-                    Self::IsNull(path) => {
-                        (format!("{} IS NULL", path.to_mssql_expr()), vec![])
-                    }
+                    Self::IsNull(path) => (format!("{} IS NULL", path.to_mssql_expr()), vec![]),
                     Self::IsNotNull(path) => {
                         (format!("{} IS NOT NULL", path.to_mssql_expr()), vec![])
                     }
-                    _ => return Err(QueryError::unsupported("This JSON filter is not supported in MSSQL")),
+                    _ => {
+                        return Err(QueryError::unsupported(
+                            "This JSON filter is not supported in MSSQL",
+                        ));
+                    }
                 };
                 Ok((sql, params))
             }
@@ -473,26 +485,54 @@ impl JsonFilter {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum JsonOp {
     /// Set a value at a path.
-    Set { column: String, path: String, value: JsonValue },
+    Set {
+        column: String,
+        path: String,
+        value: JsonValue,
+    },
     /// Insert a value at a path (only if not exists).
-    Insert { column: String, path: String, value: JsonValue },
+    Insert {
+        column: String,
+        path: String,
+        value: JsonValue,
+    },
     /// Replace a value at a path (only if exists).
-    Replace { column: String, path: String, value: JsonValue },
+    Replace {
+        column: String,
+        path: String,
+        value: JsonValue,
+    },
     /// Remove a key/element.
     Remove { column: String, path: String },
     /// Append to an array.
-    ArrayAppend { column: String, path: String, value: JsonValue },
+    ArrayAppend {
+        column: String,
+        path: String,
+        value: JsonValue,
+    },
     /// Prepend to an array.
-    ArrayPrepend { column: String, path: String, value: JsonValue },
+    ArrayPrepend {
+        column: String,
+        path: String,
+        value: JsonValue,
+    },
     /// Merge two JSON objects.
     Merge { column: String, value: JsonValue },
     /// Increment a numeric value.
-    Increment { column: String, path: String, amount: f64 },
+    Increment {
+        column: String,
+        path: String,
+        amount: f64,
+    },
 }
 
 impl JsonOp {
     /// Create a set operation.
-    pub fn set(column: impl Into<String>, path: impl Into<String>, value: impl Into<JsonValue>) -> Self {
+    pub fn set(
+        column: impl Into<String>,
+        path: impl Into<String>,
+        value: impl Into<JsonValue>,
+    ) -> Self {
         Self::Set {
             column: column.into(),
             path: path.into(),
@@ -501,7 +541,11 @@ impl JsonOp {
     }
 
     /// Create an insert operation.
-    pub fn insert(column: impl Into<String>, path: impl Into<String>, value: impl Into<JsonValue>) -> Self {
+    pub fn insert(
+        column: impl Into<String>,
+        path: impl Into<String>,
+        value: impl Into<JsonValue>,
+    ) -> Self {
         Self::Insert {
             column: column.into(),
             path: path.into(),
@@ -518,7 +562,11 @@ impl JsonOp {
     }
 
     /// Create an array append operation.
-    pub fn array_append(column: impl Into<String>, path: impl Into<String>, value: impl Into<JsonValue>) -> Self {
+    pub fn array_append(
+        column: impl Into<String>,
+        path: impl Into<String>,
+        value: impl Into<JsonValue>,
+    ) -> Self {
         Self::ArrayAppend {
             column: column.into(),
             path: path.into(),
@@ -548,40 +596,78 @@ impl JsonOp {
         let mut params = Vec::new();
 
         let expr = match self {
-            Self::Set { column, path, value } => {
+            Self::Set {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
-                format!("jsonb_set({}, '{{{}}}', $1::jsonb)", column, path.replace('.', ","))
+                format!(
+                    "jsonb_set({}, '{{{}}}', $1::jsonb)",
+                    column,
+                    path.replace('.', ",")
+                )
             }
-            Self::Insert { column, path, value } => {
+            Self::Insert {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
-                format!("jsonb_set({}, '{{{}}}', $1::jsonb, true)", column, path.replace('.', ","))
+                format!(
+                    "jsonb_set({}, '{{{}}}', $1::jsonb, true)",
+                    column,
+                    path.replace('.', ",")
+                )
             }
-            Self::Replace { column, path, value } => {
+            Self::Replace {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
-                format!("jsonb_set({}, '{{{}}}', $1::jsonb, false)", column, path.replace('.', ","))
+                format!(
+                    "jsonb_set({}, '{{{}}}', $1::jsonb, false)",
+                    column,
+                    path.replace('.', ",")
+                )
             }
             Self::Remove { column, path } => {
                 format!("{} #- '{{{}}}' ", column, path.replace('.', ","))
             }
-            Self::ArrayAppend { column, path, value } => {
+            Self::ArrayAppend {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 if path.is_empty() || path == "$" {
                     format!("{} || $1::jsonb", column)
                 } else {
                     format!(
                         "jsonb_set({}, '{{{}}}', ({} -> '{}') || $1::jsonb)",
-                        column, path.replace('.', ","), column, path
+                        column,
+                        path.replace('.', ","),
+                        column,
+                        path
                     )
                 }
             }
-            Self::ArrayPrepend { column, path, value } => {
+            Self::ArrayPrepend {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 if path.is_empty() || path == "$" {
                     format!("$1::jsonb || {}", column)
                 } else {
                     format!(
                         "jsonb_set({}, '{{{}}}', $1::jsonb || ({} -> '{}'))",
-                        column, path.replace('.', ","), column, path
+                        column,
+                        path.replace('.', ","),
+                        column,
+                        path
                     )
                 }
             }
@@ -589,11 +675,18 @@ impl JsonOp {
                 params.push(FilterValue::Json(value.clone()));
                 format!("{} || $1::jsonb", column)
             }
-            Self::Increment { column, path, amount } => {
+            Self::Increment {
+                column,
+                path,
+                amount,
+            } => {
                 params.push(FilterValue::Float(*amount));
                 format!(
                     "jsonb_set({}, '{{{}}}', to_jsonb((({} -> '{}')::numeric + $1)))",
-                    column, path.replace('.', ","), column, path
+                    column,
+                    path.replace('.', ","),
+                    column,
+                    path
                 )
             }
         };
@@ -606,27 +699,46 @@ impl JsonOp {
         let mut params = Vec::new();
 
         let expr = match self {
-            Self::Set { column, path, value } => {
+            Self::Set {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 format!("JSON_SET({}, '$.{}', CAST(? AS JSON))", column, path)
             }
-            Self::Insert { column, path, value } => {
+            Self::Insert {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 format!("JSON_INSERT({}, '$.{}', CAST(? AS JSON))", column, path)
             }
-            Self::Replace { column, path, value } => {
+            Self::Replace {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 format!("JSON_REPLACE({}, '$.{}', CAST(? AS JSON))", column, path)
             }
             Self::Remove { column, path } => {
                 format!("JSON_REMOVE({}, '$.{}')", column, path)
             }
-            Self::ArrayAppend { column, path, value } => {
+            Self::ArrayAppend {
+                column,
+                path,
+                value,
+            } => {
                 params.push(FilterValue::Json(value.clone()));
                 if path.is_empty() || path == "$" {
                     format!("JSON_ARRAY_APPEND({}, '$', CAST(? AS JSON))", column)
                 } else {
-                    format!("JSON_ARRAY_APPEND({}, '$.{}', CAST(? AS JSON))", column, path)
+                    format!(
+                        "JSON_ARRAY_APPEND({}, '$.{}', CAST(? AS JSON))",
+                        column, path
+                    )
                 }
             }
             Self::Merge { column, value } => {
@@ -644,31 +756,35 @@ impl JsonOp {
         match db_type {
             DatabaseType::PostgreSQL => Ok(self.to_postgres_expr()),
             DatabaseType::MySQL => Ok(self.to_mysql_expr()),
-            DatabaseType::SQLite => {
-                match self {
-                Self::Set { column, path, value } => {
-                    Ok((
-                        format!("json_set({}, '$.{}', json(?))", column, path),
-                        vec![FilterValue::Json(value.clone())],
-                    ))
+            DatabaseType::SQLite => match self {
+                Self::Set {
+                    column,
+                    path,
+                    value,
+                } => Ok((
+                    format!("json_set({}, '$.{}', json(?))", column, path),
+                    vec![FilterValue::Json(value.clone())],
+                )),
+                Self::Remove { column, path } => {
+                    Ok((format!("json_remove({}, '$.{}')", column, path), vec![]))
                 }
-                    Self::Remove { column, path } => {
-                        Ok((format!("json_remove({}, '$.{}')", column, path), vec![]))
-                    }
-                    _ => Err(QueryError::unsupported("This JSON operation is not supported in SQLite")),
-                }
-            }
-            DatabaseType::MSSQL => {
-                match self {
-                    Self::Set { column, path, value } => {
-                        Ok((
-                            format!("JSON_MODIFY({}, '$.{}', JSON_QUERY(?))", column, path),
-                            vec![FilterValue::Json(value.clone())],
-                        ))
-                    }
-                    _ => Err(QueryError::unsupported("This JSON operation is not supported in MSSQL")),
-                }
-            }
+                _ => Err(QueryError::unsupported(
+                    "This JSON operation is not supported in SQLite",
+                )),
+            },
+            DatabaseType::MSSQL => match self {
+                Self::Set {
+                    column,
+                    path,
+                    value,
+                } => Ok((
+                    format!("JSON_MODIFY({}, '$.{}', JSON_QUERY(?))", column, path),
+                    vec![FilterValue::Json(value.clone())],
+                )),
+                _ => Err(QueryError::unsupported(
+                    "This JSON operation is not supported in MSSQL",
+                )),
+            },
         }
     }
 }
@@ -690,9 +806,16 @@ fn column_name_from_op(op: &JsonOp) -> &str {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JsonAgg {
     /// Aggregate rows into a JSON array.
-    ArrayAgg { column: String, distinct: bool, order_by: Option<String> },
+    ArrayAgg {
+        column: String,
+        distinct: bool,
+        order_by: Option<String>,
+    },
     /// Aggregate rows into a JSON object.
-    ObjectAgg { key_column: String, value_column: String },
+    ObjectAgg {
+        key_column: String,
+        value_column: String,
+    },
     /// Build a JSON object from key-value pairs.
     BuildObject { pairs: Vec<(String, String)> },
     /// Build a JSON array from expressions.
@@ -720,7 +843,11 @@ impl JsonAgg {
     /// Generate PostgreSQL SQL.
     pub fn to_postgres_sql(&self) -> String {
         match self {
-            Self::ArrayAgg { column, distinct, order_by } => {
+            Self::ArrayAgg {
+                column,
+                distinct,
+                order_by,
+            } => {
                 let mut sql = String::from("jsonb_agg(");
                 if *distinct {
                     sql.push_str("DISTINCT ");
@@ -733,7 +860,10 @@ impl JsonAgg {
                 sql.push(')');
                 sql
             }
-            Self::ObjectAgg { key_column, value_column } => {
+            Self::ObjectAgg {
+                key_column,
+                value_column,
+            } => {
                 format!("jsonb_object_agg({}, {})", key_column, value_column)
             }
             Self::BuildObject { pairs } => {
@@ -755,7 +885,10 @@ impl JsonAgg {
             Self::ArrayAgg { column, .. } => {
                 format!("JSON_ARRAYAGG({})", column)
             }
-            Self::ObjectAgg { key_column, value_column } => {
+            Self::ObjectAgg {
+                key_column,
+                value_column,
+            } => {
                 format!("JSON_OBJECTAGG({}, {})", key_column, value_column)
             }
             Self::BuildObject { pairs } => {
@@ -776,24 +909,25 @@ impl JsonAgg {
         match db_type {
             DatabaseType::PostgreSQL => self.to_postgres_sql(),
             DatabaseType::MySQL => self.to_mysql_sql(),
-            DatabaseType::SQLite => {
-                match self {
-                    Self::ArrayAgg { column, .. } => format!("json_group_array({})", column),
-                    Self::ObjectAgg { key_column, value_column } => {
-                        format!("json_group_object({}, {})", key_column, value_column)
-                    }
-                    Self::BuildObject { pairs } => {
-                        let args: Vec<String> = pairs
-                            .iter()
-                            .flat_map(|(k, v)| vec![format!("'{}'", k), v.clone()])
-                            .collect();
-                        format!("json_object({})", args.join(", "))
-                    }
-                    Self::BuildArray { elements } => {
-                        format!("json_array({})", elements.join(", "))
-                    }
+            DatabaseType::SQLite => match self {
+                Self::ArrayAgg { column, .. } => format!("json_group_array({})", column),
+                Self::ObjectAgg {
+                    key_column,
+                    value_column,
+                } => {
+                    format!("json_group_object({}, {})", key_column, value_column)
                 }
-            }
+                Self::BuildObject { pairs } => {
+                    let args: Vec<String> = pairs
+                        .iter()
+                        .flat_map(|(k, v)| vec![format!("'{}'", k), v.clone()])
+                        .collect();
+                    format!("json_object({})", args.join(", "))
+                }
+                Self::BuildArray { elements } => {
+                    format!("json_array({})", elements.join(", "))
+                }
+            },
             DatabaseType::MSSQL => {
                 // MSSQL uses FOR JSON
                 match self {
@@ -837,17 +971,30 @@ pub mod mongodb {
     #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
     pub enum ArrayOp {
         /// Push element to array ($push).
-        Push { field: String, value: JsonValue, position: Option<i32> },
+        Push {
+            field: String,
+            value: JsonValue,
+            position: Option<i32>,
+        },
         /// Push all elements ($push with $each).
-        PushAll { field: String, values: Vec<JsonValue> },
+        PushAll {
+            field: String,
+            values: Vec<JsonValue>,
+        },
         /// Pull element from array ($pull).
         Pull { field: String, value: JsonValue },
         /// Pull all matching elements ($pullAll).
-        PullAll { field: String, values: Vec<JsonValue> },
+        PullAll {
+            field: String,
+            values: Vec<JsonValue>,
+        },
         /// Add to set if not exists ($addToSet).
         AddToSet { field: String, value: JsonValue },
         /// Add all to set ($addToSet with $each).
-        AddToSetAll { field: String, values: Vec<JsonValue> },
+        AddToSetAll {
+            field: String,
+            values: Vec<JsonValue>,
+        },
         /// Remove first or last element ($pop).
         Pop { field: String, first: bool },
     }
@@ -879,7 +1026,9 @@ pub mod mongodb {
                 Self::CurrentDate(field) => serde_json::json!({ "$currentDate": { field: true } }),
                 Self::Min(field, value) => serde_json::json!({ "$min": { field: value } }),
                 Self::Max(field, value) => serde_json::json!({ "$max": { field: value } }),
-                Self::SetOnInsert(field, value) => serde_json::json!({ "$setOnInsert": { field: value } }),
+                Self::SetOnInsert(field, value) => {
+                    serde_json::json!({ "$setOnInsert": { field: value } })
+                }
             }
         }
     }
@@ -913,7 +1062,11 @@ pub mod mongodb {
         /// Convert to BSON document.
         pub fn to_bson(&self) -> serde_json::Value {
             match self {
-                Self::Push { field, value, position } => {
+                Self::Push {
+                    field,
+                    value,
+                    position,
+                } => {
                     if let Some(pos) = position {
                         serde_json::json!({
                             "$push": { field: { "$each": [value], "$position": pos } }
@@ -1002,8 +1155,10 @@ pub mod mongodb {
                 if let serde_json::Value::Object(map) = op {
                     for (key, value) in map {
                         if let Some(existing) = result.get_mut(&key) {
-                            if let (serde_json::Value::Object(existing_map), serde_json::Value::Object(new_map)) =
-                                (existing, value)
+                            if let (
+                                serde_json::Value::Object(existing_map),
+                                serde_json::Value::Object(new_map),
+                            ) = (existing, value)
                             {
                                 for (k, v) in new_map {
                                     existing_map.insert(k, v);
@@ -1077,7 +1232,10 @@ impl JsonIndex {
                     "ALTER TABLE {} ADD COLUMN {} VARCHAR(255) GENERATED ALWAYS AS (JSON_UNQUOTE(JSON_EXTRACT({}, '$.{}'))) STORED;",
                     self.table, gen_col, self.column, path
                 ),
-                format!("CREATE INDEX {} ON {} ({});", self.name, self.table, gen_col),
+                format!(
+                    "CREATE INDEX {} ON {} ({});",
+                    self.name, self.table, gen_col
+                ),
             ]
         } else {
             vec!["-- MySQL requires generated columns for JSON indexing".to_string()]
@@ -1162,18 +1320,14 @@ mod tests {
 
     #[test]
     fn test_json_path_basic() {
-        let path = JsonPath::new("metadata")
-            .field("user")
-            .field("name");
+        let path = JsonPath::new("metadata").field("user").field("name");
 
         assert_eq!(path.to_jsonpath_string(), "$.user.name");
     }
 
     #[test]
     fn test_json_path_with_index() {
-        let path = JsonPath::new("items")
-            .field("tags")
-            .index(0);
+        let path = JsonPath::new("items").field("tags").index(0);
 
         assert_eq!(path.to_jsonpath_string(), "$.tags[0]");
     }
@@ -1188,9 +1342,7 @@ mod tests {
 
     #[test]
     fn test_postgres_path_expr() {
-        let path = JsonPath::new("metadata")
-            .field("role")
-            .text();
+        let path = JsonPath::new("metadata").field("role").text();
 
         let expr = path.to_postgres_expr();
         assert!(expr.contains(" ->> "));
@@ -1198,9 +1350,7 @@ mod tests {
 
     #[test]
     fn test_mysql_path_expr() {
-        let path = JsonPath::new("data")
-            .field("name")
-            .text();
+        let path = JsonPath::new("data").field("name").text();
 
         let expr = path.to_mysql_expr();
         assert!(expr.contains("JSON_UNQUOTE"));
@@ -1209,8 +1359,7 @@ mod tests {
 
     #[test]
     fn test_mongodb_path() {
-        let path = JsonPath::new("address")
-            .field("city");
+        let path = JsonPath::new("address").field("city");
 
         assert_eq!(path.to_mongodb_path(), "address.city");
     }
@@ -1361,4 +1510,3 @@ mod tests {
         }
     }
 }
-

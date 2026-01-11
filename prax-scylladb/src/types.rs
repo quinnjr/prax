@@ -135,7 +135,9 @@ impl ToCqlValue for FilterValue {
             FilterValue::String(v) => Ok(CqlValue::Text(v.clone())),
             FilterValue::Json(json) => {
                 // Convert JSON to text representation
-                Ok(CqlValue::Text(serde_json::to_string(json).unwrap_or_default()))
+                Ok(CqlValue::Text(
+                    serde_json::to_string(json).unwrap_or_default(),
+                ))
             }
             FilterValue::List(arr) => {
                 let values: ScyllaResult<Vec<CqlValue>> = arr.iter().map(|v| v.to_cql()).collect();
@@ -161,22 +163,30 @@ impl ToCqlValue for ScyllaValue {
                 let mantissa = v.mantissa();
                 let scale = v.scale();
                 let bytes = mantissa.to_be_bytes().to_vec();
-                Ok(CqlValue::Decimal(scylla::frame::value::CqlDecimal::from_signed_be_bytes_and_exponent(bytes, -(scale as i32))))
+                Ok(CqlValue::Decimal(
+                    scylla::frame::value::CqlDecimal::from_signed_be_bytes_and_exponent(
+                        bytes,
+                        -(scale as i32),
+                    ),
+                ))
             }
             ScyllaValue::Text(v) => Ok(CqlValue::Text(v.clone())),
             ScyllaValue::Blob(v) => Ok(CqlValue::Blob(v.clone())),
             ScyllaValue::Uuid(v) => Ok(CqlValue::Uuid(*v)),
-            ScyllaValue::TimeUuid(v) => Ok(CqlValue::Timeuuid(scylla::frame::value::CqlTimeuuid::from(*v))),
-            ScyllaValue::Date(v) => {
-                Ok(CqlValue::Date(scylla::frame::value::CqlDate(v.num_days_from_ce() as u32)))
-            }
+            ScyllaValue::TimeUuid(v) => Ok(CqlValue::Timeuuid(
+                scylla::frame::value::CqlTimeuuid::from(*v),
+            )),
+            ScyllaValue::Date(v) => Ok(CqlValue::Date(scylla::frame::value::CqlDate(
+                v.num_days_from_ce() as u32,
+            ))),
             ScyllaValue::Time(v) => {
-                let nanos = v.num_seconds_from_midnight() as i64 * 1_000_000_000 + i64::from(v.nanosecond());
+                let nanos = v.num_seconds_from_midnight() as i64 * 1_000_000_000
+                    + i64::from(v.nanosecond());
                 Ok(CqlValue::Time(scylla::frame::value::CqlTime(nanos)))
             }
-            ScyllaValue::Timestamp(v) => {
-                Ok(CqlValue::Timestamp(scylla::frame::value::CqlTimestamp(v.timestamp_millis())))
-            }
+            ScyllaValue::Timestamp(v) => Ok(CqlValue::Timestamp(
+                scylla::frame::value::CqlTimestamp(v.timestamp_millis()),
+            )),
             ScyllaValue::Duration(v) => Ok(CqlValue::Duration(*v)),
             ScyllaValue::List(v) => {
                 let values: ScyllaResult<Vec<CqlValue>> = v.iter().map(|x| x.to_cql()).collect();
@@ -217,9 +227,11 @@ impl From<CqlValue> for ScyllaValue {
             CqlValue::Inet(v) => ScyllaValue::Inet(v),
             CqlValue::List(v) => ScyllaValue::List(v.into_iter().map(Into::into).collect()),
             CqlValue::Set(v) => ScyllaValue::Set(v.into_iter().map(Into::into).collect()),
-            CqlValue::Map(v) => {
-                ScyllaValue::Map(v.into_iter().map(|(k, val)| (k.into(), val.into())).collect())
-            }
+            CqlValue::Map(v) => ScyllaValue::Map(
+                v.into_iter()
+                    .map(|(k, val)| (k.into(), val.into()))
+                    .collect(),
+            ),
             _ => ScyllaValue::Null, // Handle other types as null for now
         }
     }
@@ -235,11 +247,9 @@ impl From<ScyllaValue> for JsonValue {
             ScyllaValue::SmallInt(v) => JsonValue::Number(v.into()),
             ScyllaValue::Int(v) => JsonValue::Number(v.into()),
             ScyllaValue::BigInt(v) => JsonValue::Number(v.into()),
-            ScyllaValue::Float(v) => {
-                serde_json::Number::from_f64(f64::from(v))
-                    .map(JsonValue::Number)
-                    .unwrap_or(JsonValue::Null)
-            }
+            ScyllaValue::Float(v) => serde_json::Number::from_f64(f64::from(v))
+                .map(JsonValue::Number)
+                .unwrap_or(JsonValue::Null),
             ScyllaValue::Double(v) => serde_json::Number::from_f64(v)
                 .map(JsonValue::Number)
                 .unwrap_or(JsonValue::Null),
@@ -420,4 +430,3 @@ mod tests {
         assert!(json.is_array());
     }
 }
-

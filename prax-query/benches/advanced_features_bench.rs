@@ -11,9 +11,10 @@
 //! - Stored Procedures
 //! - Security (RLS, Roles)
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
+use prax_query::Point;
 use prax_query::cte::Cte;
 use prax_query::json::JsonPath;
 use prax_query::procedure::ProcedureCall;
@@ -24,7 +25,6 @@ use prax_query::sql::DatabaseType;
 use prax_query::trigger::{TriggerBuilder, TriggerEvent, TriggerTiming};
 use prax_query::upsert::UpsertBuilder;
 use prax_query::window::{FrameBound, WindowFn, WindowFunction, WindowSpec};
-use prax_query::Point;
 
 // ============================================================================
 // CTE (Common Table Expressions) Benchmarks
@@ -36,8 +36,7 @@ fn bench_cte_operations(c: &mut Criterion) {
     group.bench_function("create_simple_cte", |b| {
         b.iter(|| {
             black_box(
-                Cte::new("active_users")
-                    .as_query("SELECT * FROM users WHERE status = 'active'"),
+                Cte::new("active_users").as_query("SELECT * FROM users WHERE status = 'active'"),
             )
         })
     });
@@ -59,8 +58,7 @@ fn bench_cte_operations(c: &mut Criterion) {
     });
 
     group.bench_function("cte_to_sql_postgres", |b| {
-        let cte = Cte::new("active_users")
-            .as_query("SELECT * FROM users WHERE status = 'active'");
+        let cte = Cte::new("active_users").as_query("SELECT * FROM users WHERE status = 'active'");
 
         b.iter(|| black_box(cte.to_sql(DatabaseType::PostgreSQL)))
     });
@@ -331,11 +329,21 @@ fn bench_sequence_operations(c: &mut Criterion) {
     });
 
     group.bench_function("nextval_sql", |b| {
-        b.iter(|| black_box(sequence::ops::nextval("order_seq", DatabaseType::PostgreSQL)))
+        b.iter(|| {
+            black_box(sequence::ops::nextval(
+                "order_seq",
+                DatabaseType::PostgreSQL,
+            ))
+        })
     });
 
     group.bench_function("currval_sql", |b| {
-        b.iter(|| black_box(sequence::ops::currval("order_seq", DatabaseType::PostgreSQL)))
+        b.iter(|| {
+            black_box(sequence::ops::currval(
+                "order_seq",
+                DatabaseType::PostgreSQL,
+            ))
+        })
     });
 
     group.finish();
@@ -367,7 +375,11 @@ fn bench_trigger_operations(c: &mut Criterion) {
                 TriggerBuilder::new("audit_changes")
                     .on_table("accounts")
                     .timing(TriggerTiming::After)
-                    .events(vec![TriggerEvent::Insert, TriggerEvent::Update, TriggerEvent::Delete])
+                    .events(vec![
+                        TriggerEvent::Insert,
+                        TriggerEvent::Update,
+                        TriggerEvent::Delete,
+                    ])
                     .for_each_row()
                     .execute_function("log_balance_change")
                     .build(),
@@ -456,13 +468,7 @@ fn bench_security_operations(c: &mut Criterion) {
     });
 
     group.bench_function("create_role", |b| {
-        b.iter(|| {
-            black_box(
-                RoleBuilder::new("app_readonly")
-                    .login()
-                    .build(),
-            )
-        })
+        b.iter(|| black_box(RoleBuilder::new("app_readonly").login().build()))
     });
 
     group.finish();
@@ -483,12 +489,25 @@ fn bench_extension_operations(c: &mut Criterion) {
     });
 
     group.bench_function("distance_sql_postgres", |b| {
-        b.iter(|| black_box(extension::geo::distance_sql("location1", "location2", DatabaseType::PostgreSQL)))
+        b.iter(|| {
+            black_box(extension::geo::distance_sql(
+                "location1",
+                "location2",
+                DatabaseType::PostgreSQL,
+            ))
+        })
     });
 
     group.bench_function("within_distance_sql", |b| {
         let p = Point::new(-122.4194, 37.7749);
-        b.iter(|| black_box(extension::geo::within_distance_sql("location", &p, 10000.0, DatabaseType::PostgreSQL)))
+        b.iter(|| {
+            black_box(extension::geo::within_distance_sql(
+                "location",
+                &p,
+                10000.0,
+                DatabaseType::PostgreSQL,
+            ))
+        })
     });
 
     // UUID
@@ -559,14 +578,20 @@ fn bench_batch_throughput(c: &mut Criterion) {
     // Batch JSON path creation
     for size in [10, 50, 100].iter() {
         group.throughput(Throughput::Elements(*size as u64));
-        group.bench_with_input(BenchmarkId::new("create_n_json_paths", size), size, |b, &n| {
-            b.iter(|| {
-                let paths: Vec<_> = (0..n)
-                    .map(|i| JsonPath::from_path("data", &format!("$.level1.level2.field_{}", i)))
-                    .collect();
-                black_box(paths)
-            })
-        });
+        group.bench_with_input(
+            BenchmarkId::new("create_n_json_paths", size),
+            size,
+            |b, &n| {
+                b.iter(|| {
+                    let paths: Vec<_> = (0..n)
+                        .map(|i| {
+                            JsonPath::from_path("data", &format!("$.level1.level2.field_{}", i))
+                        })
+                        .collect();
+                    black_box(paths)
+                })
+            },
+        );
     }
 
     group.finish();

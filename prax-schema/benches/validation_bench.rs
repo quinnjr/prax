@@ -1,9 +1,9 @@
 //! Benchmarks for validation operations.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_schema::ast::{Field, FieldType, Ident, ScalarType, Span, TypeModifier};
 use prax_schema::{EnhancedDocumentation, FieldMetadata, ValidationType};
+use std::hint::black_box;
 
 // ============================================================================
 // Helper Functions

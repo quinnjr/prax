@@ -8,7 +8,7 @@
   <a href="https://crates.io/crates/prax-orm"><img src="https://img.shields.io/crates/v/prax-orm.svg" alt="crates.io"></a>
   <a href="https://docs.rs/prax-orm"><img src="https://docs.rs/prax-orm/badge.svg" alt="docs.rs"></a>
   <a href="https://github.com/pegasusheavy/prax-orm/actions"><img src="https://github.com/pegasusheavy/prax-orm/workflows/CI/badge.svg" alt="CI"></a>
-  <img src="https://img.shields.io/badge/rust-1.85%2B-blue.svg" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/rust-1.89%2B-blue.svg" alt="Rust 1.89+">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%2FApache--2.0-blue.svg" alt="License"></a>
 </p>
 

@@ -1256,4 +1256,3 @@ mod tests {
         assert!(mssql.policy_sql.contains("dbo.Orders"));
     }
 }
-

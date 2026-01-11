@@ -2,8 +2,7 @@
 //!
 //! Run with: `cargo bench --package prax-query --bench async_bench`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::async_optimize::{
     concurrent::{ConcurrencyConfig, ConcurrentExecutor, execute_batch},
     introspect::{ConcurrentIntrospector, IntrospectionConfig, TableMetadata},
@@ -11,6 +10,7 @@ use prax_query::async_optimize::{
 };
 use prax_query::filter::FilterValue;
 use prax_query::sql::DatabaseType;
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 
@@ -50,10 +50,12 @@ fn bench_concurrent_executor(c: &mut Criterion) {
                         let executor = ConcurrentExecutor::new(config);
 
                         let tasks: Vec<_> = (0..num_tasks)
-                            .map(|i| move || async move {
-                                // Simulate minimal work
-                                tokio::task::yield_now().await;
-                                Ok::<_, String>(i * 2)
+                            .map(|i| {
+                                move || async move {
+                                    // Simulate minimal work
+                                    tokio::task::yield_now().await;
+                                    Ok::<_, String>(i * 2)
+                                }
                             })
                             .collect();
 
@@ -83,8 +85,7 @@ fn bench_concurrent_with_latency(c: &mut Criterion) {
                 latency_ms,
                 |b, &latency_ms| {
                     b.to_async(&rt).iter(|| async {
-                        let config = ConcurrencyConfig::default()
-                            .with_max_concurrency(16);
+                        let config = ConcurrencyConfig::default().with_max_concurrency(16);
 
                         let executor = ConcurrentExecutor::new(config);
 
@@ -127,14 +128,13 @@ fn bench_execute_batch(c: &mut Criterion) {
                 b.to_async(&rt).iter(|| async {
                     let items: Vec<i32> = (0..num_items).collect();
 
-                    let results = execute_batch(
-                        items,
-                        8,
-                        |item: i32| async move {
-                            Ok::<_, String>(item * 2)
-                        },
-                    )
-                    .await;
+                    let results =
+                        execute_batch(
+                            items,
+                            8,
+                            |item: i32| async move { Ok::<_, String>(item * 2) },
+                        )
+                        .await;
 
                     black_box(results);
                 });
@@ -316,10 +316,8 @@ fn bench_pipeline_execution_simulated(c: &mut Criterion) {
                     let mut pipeline = QueryPipeline::new(PipelineConfig::default());
 
                     for i in 0..num_queries {
-                        pipeline = pipeline.add_insert(
-                            format!("INSERT INTO t VALUES ({})", i),
-                            vec![],
-                        );
+                        pipeline =
+                            pipeline.add_insert(format!("INSERT INTO t VALUES ({})", i), vec![]);
                     }
 
                     let result = executor.execute(&pipeline).await;
@@ -365,11 +363,9 @@ fn bench_realistic_workload(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let executor = SimulatedExecutor::new(Duration::from_millis(1), 0.0);
 
-            let mut pipeline = BulkInsertPipeline::new(
-                "users",
-                vec!["name".into(), "email".into()],
-            )
-            .with_batch_size(100);
+            let mut pipeline =
+                BulkInsertPipeline::new("users", vec!["name".into(), "email".into()])
+                    .with_batch_size(100);
 
             for i in 0..1000 {
                 pipeline.add_row(vec![
@@ -401,4 +397,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

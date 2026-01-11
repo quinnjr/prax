@@ -129,7 +129,7 @@ seaorm_import/large     time:   [31.698 µs 32.002 µs 32.329 µs]
 ### Environment
 
 - **CPU**: Varies by system
-- **Rust**: 1.85+ (2024 edition)
+- **Rust**: 1.89+ (2024 edition)
 - **Criterion**: 0.5
 - **Iterations**: 100 samples per benchmark
 - **Warmup**: 3 seconds

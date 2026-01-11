@@ -4,7 +4,7 @@
 //! allowing you to compare before/after states and identify changes.
 
 use super::allocation::{AllocationStats, AllocationTracker, SizeHistogram};
-use crate::memory::{PoolStats, GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL};
+use crate::memory::{GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL, PoolStats};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -196,9 +196,17 @@ impl SnapshotDiff {
         // Bytes
         s.push_str("\nMemory:\n");
         let bytes_str = if self.bytes_delta >= 0 {
-            format!("+{} bytes (+{:.2} KB)", self.bytes_delta, self.bytes_delta as f64 / 1024.0)
+            format!(
+                "+{} bytes (+{:.2} KB)",
+                self.bytes_delta,
+                self.bytes_delta as f64 / 1024.0
+            )
         } else {
-            format!("{} bytes ({:.2} KB)", self.bytes_delta, self.bytes_delta as f64 / 1024.0)
+            format!(
+                "{} bytes ({:.2} KB)",
+                self.bytes_delta,
+                self.bytes_delta as f64 / 1024.0
+            )
         };
         s.push_str(&format!("  Current bytes: {}\n", bytes_str));
 
@@ -292,9 +300,7 @@ impl SnapshotSeries {
     /// Get the diff between first and last snapshots.
     pub fn total_diff(&self) -> Option<SnapshotDiff> {
         match (self.first(), self.last()) {
-            (Some(first), Some(last)) if !std::ptr::eq(first, last) => {
-                Some(last.diff(first))
-            }
+            (Some(first), Some(last)) if !std::ptr::eq(first, last) => Some(last.diff(first)),
             _ => None,
         }
     }
@@ -340,8 +346,8 @@ impl Default for SnapshotSeries {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::allocation::AllocationTracker;
+    use super::*;
 
     #[test]
     fn test_memory_snapshot() {
@@ -439,4 +445,3 @@ mod tests {
         assert!(report.contains("Potential memory leak"));
     }
 }
-

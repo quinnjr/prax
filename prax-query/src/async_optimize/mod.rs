@@ -36,9 +36,10 @@ pub mod concurrent;
 pub mod introspect;
 pub mod pipeline;
 
-pub use concurrent::{ConcurrencyConfig, ConcurrentExecutor, ExecutionStats, TaskError, TaskResult};
+pub use concurrent::{
+    ConcurrencyConfig, ConcurrentExecutor, ExecutionStats, TaskError, TaskResult,
+};
 pub use introspect::{
     ConcurrentIntrospector, IntrospectionConfig, IntrospectionResult, TableMetadata,
 };
 pub use pipeline::{PipelineConfig, PipelineError, PipelineResult, QueryPipeline};
-

@@ -145,7 +145,9 @@ impl ProcedureResult {
     where
         T: TryFrom<FilterValue>,
     {
-        self.outputs.get(name).and_then(|v| T::try_from(v.clone()).ok())
+        self.outputs
+            .get(name)
+            .and_then(|v| T::try_from(v.clone()).ok())
     }
 
     /// Get the return value.
@@ -230,7 +232,11 @@ impl ProcedureCall {
     }
 
     /// Add an output parameter with type hint.
-    pub fn out_param_typed(mut self, name: impl Into<String>, type_hint: impl Into<String>) -> Self {
+    pub fn out_param_typed(
+        mut self,
+        name: impl Into<String>,
+        type_hint: impl Into<String>,
+    ) -> Self {
         self.parameters
             .push(Parameter::output(name).with_type_hint(type_hint));
         self
@@ -309,7 +315,10 @@ impl ProcedureCall {
         let placeholders: Vec<String> = (1..=params.len()).map(|i| format!("@P{}", i)).collect();
 
         if self.is_function {
-            (format!("SELECT {}({})", name, placeholders.join(", ")), params)
+            (
+                format!("SELECT {}({})", name, placeholders.join(", ")),
+                params,
+            )
         } else if self.has_outputs() {
             // For procedures with OUT params, use EXEC with output variable declarations
             let mut parts = vec![String::from("DECLARE ")];
@@ -732,8 +741,7 @@ mod tests {
 
     #[test]
     fn test_postgres_function_sql() {
-        let call = ProcedureCall::function("calculate_total")
-            .param("order_id", 123i32);
+        let call = ProcedureCall::function("calculate_total").param("order_id", 123i32);
 
         let (sql, params) = call.to_postgres_sql();
         assert_eq!(sql, "SELECT calculate_total($1)");
@@ -827,7 +835,9 @@ mod tests {
     #[test]
     fn test_procedure_result() {
         let mut result = ProcedureResult::default();
-        result.outputs.insert("total".to_string(), FilterValue::Int(100));
+        result
+            .outputs
+            .insert("total".to_string(), FilterValue::Int(100));
         result.return_value = Some(FilterValue::Bool(true));
 
         assert!(result.get("total").is_some());
@@ -878,4 +888,3 @@ mod tests {
         assert_eq!(window.num_args, 0);
     }
 }
-

@@ -107,12 +107,19 @@ pub enum NormalizedType {
     Float,
     Double,
     /// Fixed precision.
-    Decimal { precision: Option<i32>, scale: Option<i32> },
+    Decimal {
+        precision: Option<i32>,
+        scale: Option<i32>,
+    },
     /// String types.
     String,
     Text,
-    Char { length: Option<i32> },
-    VarChar { length: Option<i32> },
+    Char {
+        length: Option<i32>,
+    },
+    VarChar {
+        length: Option<i32>,
+    },
     /// Binary.
     Bytes,
     /// Boolean.
@@ -150,7 +157,9 @@ impl NormalizedType {
             Self::Float => "Float".to_string(),
             Self::Double => "Float".to_string(),
             Self::Decimal { .. } => "Decimal".to_string(),
-            Self::String | Self::Text | Self::VarChar { .. } | Self::Char { .. } => "String".to_string(),
+            Self::String | Self::Text | Self::VarChar { .. } | Self::Char { .. } => {
+                "String".to_string()
+            }
             Self::Bytes => "Bytes".to_string(),
             Self::Boolean => "Boolean".to_string(),
             Self::DateTime | Self::Timestamp => "DateTime".to_string(),
@@ -349,7 +358,9 @@ pub mod queries {
                 )
             }
             DatabaseType::MySQL => {
-                let schema_filter = schema.map(|s| format!("AND table_schema = '{}'", s)).unwrap_or_default();
+                let schema_filter = schema
+                    .map(|s| format!("AND table_schema = '{}'", s))
+                    .unwrap_or_default();
                 format!(
                     "SELECT table_name, table_comment as comment \
                      FROM information_schema.tables \
@@ -358,12 +369,11 @@ pub mod queries {
                     schema_filter
                 )
             }
-            DatabaseType::SQLite => {
-                "SELECT name as table_name, NULL as comment \
+            DatabaseType::SQLite => "SELECT name as table_name, NULL as comment \
                  FROM sqlite_master \
                  WHERE type = 'table' AND name NOT LIKE 'sqlite_%' \
-                 ORDER BY name".to_string()
-            }
+                 ORDER BY name"
+                .to_string(),
             DatabaseType::MSSQL => {
                 let schema_filter = schema.unwrap_or("dbo");
                 format!(
@@ -419,7 +429,9 @@ pub mod queries {
                      WHERE table_name = '{}' {} \
                      ORDER BY ordinal_position",
                     table,
-                    schema.map(|s| format!("AND table_schema = '{}'", s)).unwrap_or_default()
+                    schema
+                        .map(|s| format!("AND table_schema = '{}'", s))
+                        .unwrap_or_default()
                 )
             }
             DatabaseType::SQLite => {
@@ -476,7 +488,9 @@ pub mod queries {
                      WHERE constraint_name = 'PRIMARY' AND table_name = '{}' {} \
                      ORDER BY ordinal_position",
                     table,
-                    schema.map(|s| format!("AND table_schema = '{}'", s)).unwrap_or_default()
+                    schema
+                        .map(|s| format!("AND table_schema = '{}'", s))
+                        .unwrap_or_default()
                 )
             }
             DatabaseType::SQLite => {
@@ -536,7 +550,9 @@ pub mod queries {
                      WHERE referenced_table_name IS NOT NULL AND table_name = '{}' {} \
                      ORDER BY constraint_name, ordinal_position",
                     table,
-                    schema.map(|s| format!("AND table_schema = '{}'", s)).unwrap_or_default()
+                    schema
+                        .map(|s| format!("AND table_schema = '{}'", s))
+                        .unwrap_or_default()
                 )
             }
             DatabaseType::SQLite => {
@@ -606,7 +622,9 @@ pub mod queries {
                      WHERE table_name = '{}' {} \
                      ORDER BY index_name, seq_in_index",
                     table,
-                    schema.map(|s| format!("AND table_schema = '{}'", s)).unwrap_or_default()
+                    schema
+                        .map(|s| format!("AND table_schema = '{}'", s))
+                        .unwrap_or_default()
                 )
             }
             DatabaseType::SQLite => {
@@ -679,7 +697,8 @@ pub mod queries {
                 "SELECT name as view_name, sql as view_definition, 0 as is_materialized \
                  FROM sqlite_master \
                  WHERE type = 'view' \
-                 ORDER BY name".to_string()
+                 ORDER BY name"
+                    .to_string()
             }
             DatabaseType::MSSQL => {
                 let schema_filter = schema.unwrap_or("dbo");
@@ -704,18 +723,31 @@ pub mod queries {
 // ============================================================================
 
 /// Map database types to normalized types.
-pub fn normalize_type(db_type: DatabaseType, type_name: &str, max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> NormalizedType {
+pub fn normalize_type(
+    db_type: DatabaseType,
+    type_name: &str,
+    max_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> NormalizedType {
     let type_lower = type_name.to_lowercase();
 
     match db_type {
-        DatabaseType::PostgreSQL => normalize_postgres_type(&type_lower, max_length, precision, scale),
+        DatabaseType::PostgreSQL => {
+            normalize_postgres_type(&type_lower, max_length, precision, scale)
+        }
         DatabaseType::MySQL => normalize_mysql_type(&type_lower, max_length, precision, scale),
         DatabaseType::SQLite => normalize_sqlite_type(&type_lower),
         DatabaseType::MSSQL => normalize_mssql_type(&type_lower, max_length, precision, scale),
     }
 }
 
-fn normalize_postgres_type(type_name: &str, _max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> NormalizedType {
+fn normalize_postgres_type(
+    type_name: &str,
+    _max_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> NormalizedType {
     match type_name {
         "int2" | "smallint" | "smallserial" => NormalizedType::SmallInt,
         "int4" | "integer" | "int" | "serial" => NormalizedType::Int,
@@ -725,24 +757,35 @@ fn normalize_postgres_type(type_name: &str, _max_length: Option<i32>, precision:
         "numeric" | "decimal" => NormalizedType::Decimal { precision, scale },
         "bool" | "boolean" => NormalizedType::Boolean,
         "text" => NormalizedType::Text,
-        "varchar" | "character varying" => NormalizedType::VarChar { length: _max_length },
-        "char" | "character" | "bpchar" => NormalizedType::Char { length: _max_length },
+        "varchar" | "character varying" => NormalizedType::VarChar {
+            length: _max_length,
+        },
+        "char" | "character" | "bpchar" => NormalizedType::Char {
+            length: _max_length,
+        },
         "bytea" => NormalizedType::Bytes,
         "timestamp" | "timestamp without time zone" => NormalizedType::Timestamp,
         "timestamptz" | "timestamp with time zone" => NormalizedType::DateTime,
         "date" => NormalizedType::Date,
-        "time" | "time without time zone" | "timetz" | "time with time zone" => NormalizedType::Time,
+        "time" | "time without time zone" | "timetz" | "time with time zone" => {
+            NormalizedType::Time
+        }
         "json" | "jsonb" => NormalizedType::Json,
         "uuid" => NormalizedType::Uuid,
         t if t.ends_with("[]") => {
-            let inner = normalize_postgres_type(&t[..t.len()-2], None, None, None);
+            let inner = normalize_postgres_type(&t[..t.len() - 2], None, None, None);
             NormalizedType::Array(Box::new(inner))
         }
         t => NormalizedType::Unknown(t.to_string()),
     }
 }
 
-fn normalize_mysql_type(type_name: &str, max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> NormalizedType {
+fn normalize_mysql_type(
+    type_name: &str,
+    max_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> NormalizedType {
     match type_name {
         "tinyint" | "smallint" => NormalizedType::SmallInt,
         "int" | "integer" | "mediumint" => NormalizedType::Int,
@@ -754,7 +797,9 @@ fn normalize_mysql_type(type_name: &str, max_length: Option<i32>, precision: Opt
         "text" | "mediumtext" | "longtext" => NormalizedType::Text,
         "varchar" => NormalizedType::VarChar { length: max_length },
         "char" => NormalizedType::Char { length: max_length },
-        "tinyblob" | "blob" | "mediumblob" | "longblob" | "binary" | "varbinary" => NormalizedType::Bytes,
+        "tinyblob" | "blob" | "mediumblob" | "longblob" | "binary" | "varbinary" => {
+            NormalizedType::Bytes
+        }
         "datetime" | "timestamp" => NormalizedType::DateTime,
         "date" => NormalizedType::Date,
         "time" => NormalizedType::Time,
@@ -780,13 +825,20 @@ fn normalize_sqlite_type(type_name: &str) -> NormalizedType {
     }
 }
 
-fn normalize_mssql_type(type_name: &str, max_length: Option<i32>, precision: Option<i32>, scale: Option<i32>) -> NormalizedType {
+fn normalize_mssql_type(
+    type_name: &str,
+    max_length: Option<i32>,
+    precision: Option<i32>,
+    scale: Option<i32>,
+) -> NormalizedType {
     match type_name {
         "tinyint" | "smallint" => NormalizedType::SmallInt,
         "int" => NormalizedType::Int,
         "bigint" => NormalizedType::BigInt,
         "real" | "float" => NormalizedType::Float,
-        "decimal" | "numeric" | "money" | "smallmoney" => NormalizedType::Decimal { precision, scale },
+        "decimal" | "numeric" | "money" | "smallmoney" => {
+            NormalizedType::Decimal { precision, scale }
+        }
         "bit" => NormalizedType::Boolean,
         "text" | "ntext" => NormalizedType::Text,
         "varchar" | "nvarchar" => NormalizedType::VarChar { length: max_length },
@@ -927,7 +979,7 @@ fn generate_relation(fk: &ForeignKeyInfo, all_tables: &[TableInfo]) -> String {
         // Derive relation name from FK column (e.g., user_id -> user)
         let col = &fk.columns[0];
         if col.ends_with("_id") {
-            camel_case(&col[..col.len()-3])
+            camel_case(&col[..col.len() - 3])
         } else {
             camel_case(&fk.referenced_table)
         }
@@ -937,8 +989,16 @@ fn generate_relation(fk: &ForeignKeyInfo, all_tables: &[TableInfo]) -> String {
 
     let mut attrs = vec![format!(
         "@relation(fields: [{}], references: [{}]",
-        fk.columns.iter().map(|c| camel_case(c)).collect::<Vec<_>>().join(", "),
-        fk.referenced_columns.iter().map(|c| camel_case(c)).collect::<Vec<_>>().join(", ")
+        fk.columns
+            .iter()
+            .map(|c| camel_case(c))
+            .collect::<Vec<_>>()
+            .join(", "),
+        fk.referenced_columns
+            .iter()
+            .map(|c| camel_case(c))
+            .collect::<Vec<_>>()
+            .join(", ")
     )];
 
     // Add referential actions if not default
@@ -987,13 +1047,22 @@ fn generate_model_attributes(table: &TableInfo) -> String {
 fn generate_view(view: &ViewInfo) -> String {
     let mut output = String::new();
 
-    let keyword = if view.is_materialized { "materializedView" } else { "view" };
+    let keyword = if view.is_materialized {
+        "materializedView"
+    } else {
+        "view"
+    };
     output.push_str(&format!("{} {} {{\n", keyword, pascal_case(&view.name)));
 
     for col in &view.columns {
         let type_str = col.normalized_type.to_prax_type();
         let optional = if col.nullable { "?" } else { "" };
-        output.push_str(&format!("    {} {}{}\n", camel_case(&col.name), type_str, optional));
+        output.push_str(&format!(
+            "    {} {}{}\n",
+            camel_case(&col.name),
+            type_str,
+            optional
+        ));
     }
 
     if let Some(ref def) = view.definition {
@@ -1056,11 +1125,14 @@ pub mod mongodb {
         }
 
         fn infer_field(&mut self, name: &str, value: &JsonValue) {
-            let field = self.fields.entry(name.to_string()).or_insert_with(|| FieldSchema {
-                name: name.to_string(),
-                required: true,
-                ..Default::default()
-            });
+            let field = self
+                .fields
+                .entry(name.to_string())
+                .or_insert_with(|| FieldSchema {
+                    name: name.to_string(),
+                    required: true,
+                    ..Default::default()
+                });
 
             let type_name = match value {
                 JsonValue::Null => "null",
@@ -1140,7 +1212,9 @@ pub mod mongodb {
             NormalizedType::Boolean
         } else if field.types.contains(&"int".to_string()) {
             NormalizedType::Int
-        } else if field.types.contains(&"double".to_string()) || field.types.contains(&"number".to_string()) {
+        } else if field.types.contains(&"double".to_string())
+            || field.types.contains(&"number".to_string())
+        {
             NormalizedType::Double
         } else if field.types.contains(&"array".to_string()) {
             let inner = match field.array_type.as_deref() {
@@ -1224,7 +1298,7 @@ fn simplify_default(default: &str) -> String {
     }
 
     if d.starts_with("'") && d.ends_with("'") {
-        return format!("\"{}\"", &d[1..d.len()-1]);
+        return format!("\"{}\"", &d[1..d.len() - 1]);
     }
 
     if d.eq_ignore_ascii_case("true") || d.eq_ignore_ascii_case("false") {
@@ -1258,26 +1332,62 @@ mod tests {
 
     #[test]
     fn test_normalize_postgres_type() {
-        assert_eq!(normalize_postgres_type("int4", None, None, None), NormalizedType::Int);
-        assert_eq!(normalize_postgres_type("bigint", None, None, None), NormalizedType::BigInt);
-        assert_eq!(normalize_postgres_type("text", None, None, None), NormalizedType::Text);
-        assert_eq!(normalize_postgres_type("timestamptz", None, None, None), NormalizedType::DateTime);
-        assert_eq!(normalize_postgres_type("jsonb", None, None, None), NormalizedType::Json);
-        assert_eq!(normalize_postgres_type("uuid", None, None, None), NormalizedType::Uuid);
+        assert_eq!(
+            normalize_postgres_type("int4", None, None, None),
+            NormalizedType::Int
+        );
+        assert_eq!(
+            normalize_postgres_type("bigint", None, None, None),
+            NormalizedType::BigInt
+        );
+        assert_eq!(
+            normalize_postgres_type("text", None, None, None),
+            NormalizedType::Text
+        );
+        assert_eq!(
+            normalize_postgres_type("timestamptz", None, None, None),
+            NormalizedType::DateTime
+        );
+        assert_eq!(
+            normalize_postgres_type("jsonb", None, None, None),
+            NormalizedType::Json
+        );
+        assert_eq!(
+            normalize_postgres_type("uuid", None, None, None),
+            NormalizedType::Uuid
+        );
     }
 
     #[test]
     fn test_normalize_mysql_type() {
-        assert_eq!(normalize_mysql_type("int", None, None, None), NormalizedType::Int);
-        assert_eq!(normalize_mysql_type("varchar", Some(255), None, None), NormalizedType::VarChar { length: Some(255) });
-        assert_eq!(normalize_mysql_type("datetime", None, None, None), NormalizedType::DateTime);
+        assert_eq!(
+            normalize_mysql_type("int", None, None, None),
+            NormalizedType::Int
+        );
+        assert_eq!(
+            normalize_mysql_type("varchar", Some(255), None, None),
+            NormalizedType::VarChar { length: Some(255) }
+        );
+        assert_eq!(
+            normalize_mysql_type("datetime", None, None, None),
+            NormalizedType::DateTime
+        );
     }
 
     #[test]
     fn test_referential_action() {
-        assert_eq!(ReferentialAction::from_str("CASCADE"), ReferentialAction::Cascade);
-        assert_eq!(ReferentialAction::from_str("SET NULL"), ReferentialAction::SetNull);
-        assert_eq!(ReferentialAction::from_str("NO ACTION"), ReferentialAction::NoAction);
+        assert_eq!(
+            ReferentialAction::from_str("CASCADE"),
+            ReferentialAction::Cascade
+        );
+        assert_eq!(
+            ReferentialAction::from_str("SET NULL"),
+            ReferentialAction::SetNull
+        );
+        assert_eq!(
+            ReferentialAction::from_str("NO ACTION"),
+            ReferentialAction::NoAction
+        );
     }
 
     #[test]
@@ -1368,4 +1478,3 @@ mod tests {
         }
     }
 }
-

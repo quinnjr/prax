@@ -226,11 +226,7 @@ impl<'a> ArenaScope<'a> {
 
     /// Create a STARTS WITH filter.
     #[inline]
-    pub fn starts_with<V: Into<ScopedValue<'a>>>(
-        &self,
-        field: &str,
-        value: V,
-    ) -> ScopedFilter<'a> {
+    pub fn starts_with<V: Into<ScopedValue<'a>>>(&self, field: &str, value: V) -> ScopedFilter<'a> {
         ScopedFilter::StartsWith(self.alloc_str(field), value.into())
     }
 
@@ -767,4 +763,3 @@ mod tests {
         assert_eq!(stats.allocations, 2);
     }
 }
-

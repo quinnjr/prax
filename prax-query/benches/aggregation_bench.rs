@@ -4,11 +4,11 @@
 //! in benchmarks, so we focus on filter and SQL building performance.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_query::{
     filter::{Filter, FilterValue},
     sql::SqlBuilder,
 };
+use std::hint::black_box;
 
 // ============================================================================
 // Complex Filter Benchmarks (Aggregation-style queries)

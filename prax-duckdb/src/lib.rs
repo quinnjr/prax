@@ -94,4 +94,3 @@ pub mod prelude {
     pub use crate::pool::{DuckDbPool, DuckDbPoolBuilder};
     pub use crate::row::FromDuckDbRow;
 }
-

@@ -5,18 +5,15 @@
 //!
 //! Run with: `cargo bench --package prax-query --bench throughput_bench`
 
-use criterion::{
-use std::hint::black_box;
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use prax_query::{
     filter::{Filter, FilterValue},
-    sql::SqlBuilder,
-    types::{OrderByField, Select},
     mem_optimize::{
         arena::QueryArena,
         interning::{GlobalInterner, ScopedInterner},
     },
+    sql::SqlBuilder,
+    types::{OrderByField, Select},
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -142,7 +139,9 @@ fn bench_batch_throughput(c: &mut Criterion) {
 
         // IN clause query
         group.bench_function(BenchmarkId::new("in_clause_query", batch_size), |b| {
-            let ids: Vec<FilterValue> = (0..batch_size).map(|i| FilterValue::Int(i as i64)).collect();
+            let ids: Vec<FilterValue> = (0..batch_size)
+                .map(|i| FilterValue::Int(i as i64))
+                .collect();
             let filter = Filter::In("id".into(), ids);
             b.iter(|| {
                 let (sql, params) = filter.to_sql(0);
@@ -153,7 +152,9 @@ fn bench_batch_throughput(c: &mut Criterion) {
 
         // Batch delete
         group.bench_function(BenchmarkId::new("batch_delete", batch_size), |b| {
-            let ids: Vec<FilterValue> = (0..batch_size).map(|i| FilterValue::Int(i as i64)).collect();
+            let ids: Vec<FilterValue> = (0..batch_size)
+                .map(|i| FilterValue::Int(i as i64))
+                .collect();
             let filter = Filter::In("id".into(), ids);
             b.iter(|| {
                 let (sql, params) = filter.to_sql(0);
@@ -294,9 +295,8 @@ fn bench_high_throughput(c: &mut Criterion) {
 
         b.iter(|| {
             for i in 0..1000 {
-                let sql = arena.scope(|scope| {
-                    scope.build_select("users", scope.eq("id", i as i64))
-                });
+                let sql =
+                    arena.scope(|scope| scope.build_select("users", scope.eq("id", i as i64)));
                 black_box(sql);
             }
         });
@@ -345,7 +345,8 @@ fn bench_realistic_scenarios(c: &mut Criterion) {
         b.iter(|| {
             let mut builder = SqlBuilder::postgres();
             builder.push("WITH user_stats AS (");
-            builder.push("SELECT user_id, COUNT(*) as action_count, MAX(created_at) as last_action ");
+            builder
+                .push("SELECT user_id, COUNT(*) as action_count, MAX(created_at) as last_action ");
             builder.push("FROM user_actions WHERE created_at >= NOW() - INTERVAL '7 days' ");
             builder.push("AND user_id = ");
             builder.push_param(FilterValue::Int(12345));
@@ -365,7 +366,8 @@ fn bench_realistic_scenarios(c: &mut Criterion) {
             builder.push("SELECT p.*, u.name as author_name, u.avatar_url ");
             builder.push("FROM posts p ");
             builder.push("INNER JOIN users u ON u.id = p.user_id ");
-            builder.push("WHERE p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ");
+            builder
+                .push("WHERE p.user_id IN (SELECT following_id FROM follows WHERE follower_id = ");
             builder.push_param(FilterValue::Int(12345));
             builder.push(") AND p.status = ");
             builder.push_param(FilterValue::String("published".into()));
@@ -403,7 +405,10 @@ fn bench_realistic_scenarios(c: &mut Criterion) {
             let filter = Filter::and(vec![
                 Filter::Equals("tenant_id".into(), FilterValue::Int(42)),
                 Filter::Equals("status".into(), FilterValue::String("active".into())),
-                Filter::Gte("created_at".into(), FilterValue::String("2024-01-01".into())),
+                Filter::Gte(
+                    "created_at".into(),
+                    FilterValue::String("2024-01-01".into()),
+                ),
             ]);
             let (sql, params) = filter.to_sql(0);
             let query = format!(
@@ -431,12 +436,7 @@ fn bench_allocation_throughput(c: &mut Criterion) {
     group.bench_function("100_filters_no_optimization", |b| {
         b.iter(|| {
             let filters: Vec<Filter> = (0..100)
-                .map(|i| {
-                    Filter::Equals(
-                        format!("field_{}", i % 10).into(),
-                        FilterValue::Int(i),
-                    )
-                })
+                .map(|i| Filter::Equals(format!("field_{}", i % 10).into(), FilterValue::Int(i)))
                 .collect();
             black_box(filters)
         });
@@ -451,12 +451,7 @@ fn bench_allocation_throughput(c: &mut Criterion) {
 
         b.iter(|| {
             let filters: Vec<Filter> = (0..100)
-                .map(|i| {
-                    Filter::Equals(
-                        field_names[i % 10].to_cow(),
-                        FilterValue::Int(i as i64),
-                    )
-                })
+                .map(|i| Filter::Equals(field_names[i % 10].to_cow(), FilterValue::Int(i as i64)))
                 .collect();
             black_box(filters)
         });
@@ -493,4 +488,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

@@ -85,7 +85,11 @@ impl RlsPolicy {
             "CREATE POLICY {} ON {} AS {} FOR {}",
             self.name,
             self.table,
-            if self.permissive { "PERMISSIVE" } else { "RESTRICTIVE" },
+            if self.permissive {
+                "PERMISSIVE"
+            } else {
+                "RESTRICTIVE"
+            },
             self.command.to_sql()
         );
 
@@ -142,7 +146,9 @@ impl RlsPolicy {
     /// Generate DROP POLICY SQL.
     pub fn to_drop_sql(&self, db_type: DatabaseType) -> String {
         match db_type {
-            DatabaseType::PostgreSQL => format!("DROP POLICY IF EXISTS {} ON {}", self.name, self.table),
+            DatabaseType::PostgreSQL => {
+                format!("DROP POLICY IF EXISTS {} ON {}", self.name, self.table)
+            }
             DatabaseType::MSSQL => format!("DROP SECURITY POLICY IF EXISTS {}_policy", self.name),
             _ => String::new(),
         }
@@ -309,7 +315,10 @@ impl TenantPolicy {
                 _ => format!("SELECT set_config('app.tenant_id', '{}', true)", tenant_id),
             },
             DatabaseType::MSSQL => {
-                format!("EXEC sp_set_session_context @key = N'tenant_id', @value = {}", tenant_id)
+                format!(
+                    "EXEC sp_set_session_context @key = N'tenant_id', @value = {}",
+                    tenant_id
+                )
             }
             _ => String::new(),
         }
@@ -429,7 +438,10 @@ impl Role {
                 sql.push_str("''");
             }
             sqls.push(sql);
-            sqls.push(format!("USE {}; CREATE USER {} FOR LOGIN {}", database, self.name, self.name));
+            sqls.push(format!(
+                "USE {}; CREATE USER {} FOR LOGIN {}",
+                database, self.name, self.name
+            ));
         } else {
             sqls.push(format!("USE {}; CREATE ROLE {}", database, self.name));
         }
@@ -611,7 +623,10 @@ impl Privilege {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GrantObject {
     /// Table with optional column list.
-    Table { name: String, columns: Option<Vec<String>> },
+    Table {
+        name: String,
+        columns: Option<Vec<String>>,
+    },
     /// Schema.
     Schema(String),
     /// Database.
@@ -682,7 +697,10 @@ impl Grant {
     pub fn to_postgres_sql(&self) -> String {
         let privs: Vec<&str> = self.privileges.iter().map(Privilege::to_sql).collect();
         let priv_sql = match &self.object {
-            GrantObject::Table { columns: Some(cols), .. } => {
+            GrantObject::Table {
+                columns: Some(cols),
+                ..
+            } => {
                 // Column-level grants need special handling
                 privs
                     .iter()
@@ -694,7 +712,10 @@ impl Grant {
         };
 
         let obj_sql = match &self.object {
-            GrantObject::Table { name, columns: Some(_) } => format!("TABLE {}", name),
+            GrantObject::Table {
+                name,
+                columns: Some(_),
+            } => format!("TABLE {}", name),
             _ => self.object.to_sql(),
         };
 
@@ -711,13 +732,14 @@ impl Grant {
     pub fn to_mysql_sql(&self) -> String {
         let privs: Vec<&str> = self.privileges.iter().map(Privilege::to_sql).collect();
         let priv_sql = match &self.object {
-            GrantObject::Table { columns: Some(cols), .. } => {
-                privs
-                    .iter()
-                    .map(|p| format!("{} ({})", p, cols.join(", ")))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
+            GrantObject::Table {
+                columns: Some(cols),
+                ..
+            } => privs
+                .iter()
+                .map(|p| format!("{} ({})", p, cols.join(", ")))
+                .collect::<Vec<_>>()
+                .join(", "),
             _ => privs.join(", "),
         };
 
@@ -854,7 +876,10 @@ impl GrantBuilder {
     /// Build the grant.
     pub fn build(self) -> QueryResult<Grant> {
         let object = self.object.ok_or_else(|| {
-            QueryError::invalid_input("object", "Grant requires an object (use on_table, on_schema, etc.)")
+            QueryError::invalid_input(
+                "object",
+                "Grant requires an object (use on_table, on_schema, etc.)",
+            )
         })?;
 
         if self.privileges.is_empty() {
@@ -896,7 +921,11 @@ pub enum MaskFunction {
     /// Email masking (aXXX@XXXX.com).
     Email,
     /// Partial masking (show prefix/suffix).
-    Partial { prefix: usize, padding: String, suffix: usize },
+    Partial {
+        prefix: usize,
+        padding: String,
+        suffix: usize,
+    },
     /// Random value.
     Random,
     /// Custom masking function.
@@ -927,7 +956,11 @@ impl DataMask {
                  CONCAT(LEFT({}, 1), '***@', SPLIT_PART({}, '@', 2)) END",
                 self.column, self.column, self.column
             ),
-            MaskFunction::Partial { prefix, padding, suffix } => format!(
+            MaskFunction::Partial {
+                prefix,
+                padding,
+                suffix,
+            } => format!(
                 "CONCAT(LEFT({}, {}), '{}', RIGHT({}, {}))",
                 self.column, prefix, padding, self.column, suffix
             ),
@@ -947,7 +980,11 @@ impl DataMask {
         let mask_func = match &self.mask_function {
             MaskFunction::Default => "default()".to_string(),
             MaskFunction::Email => "email()".to_string(),
-            MaskFunction::Partial { prefix, padding, suffix } => {
+            MaskFunction::Partial {
+                prefix,
+                padding,
+                suffix,
+            } => {
                 format!("partial({}, '{}', {})", prefix, padding, suffix)
             }
             MaskFunction::Random => "random(1, 100)".to_string(),
@@ -998,7 +1035,10 @@ impl ConnectionProfile {
         sqls.push(format!("SET ROLE {}", self.role));
 
         if !self.search_path.is_empty() {
-            sqls.push(format!("SET search_path TO {}", self.search_path.join(", ")));
+            sqls.push(format!(
+                "SET search_path TO {}",
+                self.search_path.join(", ")
+            ));
         }
 
         if self.read_only {
@@ -1254,7 +1294,9 @@ pub mod mongodb {
             S: Into<String>,
         {
             self.privileges.push(MongoPrivilege {
-                resource: MongoResource::Database { db: self.db.clone() },
+                resource: MongoResource::Database {
+                    db: self.db.clone(),
+                },
                 actions: actions.into_iter().map(Into::into).collect(),
             });
             self
@@ -1309,10 +1351,7 @@ pub mod mongodb {
             client_secret: String,
         },
         /// Google Cloud KMS.
-        Gcp {
-            email: String,
-            private_key: String,
-        },
+        Gcp { email: String, private_key: String },
     }
 
     impl FieldEncryption {
@@ -1365,7 +1404,11 @@ pub mod mongodb {
                 KmsProviders::Local { key } => {
                     serde_json::json!({ "local": { "key": key } })
                 }
-                KmsProviders::Aws { access_key_id, secret_access_key, region } => {
+                KmsProviders::Aws {
+                    access_key_id,
+                    secret_access_key,
+                    region,
+                } => {
                     serde_json::json!({
                         "aws": {
                             "accessKeyId": access_key_id,
@@ -1374,7 +1417,11 @@ pub mod mongodb {
                         }
                     })
                 }
-                KmsProviders::Azure { tenant_id, client_id, client_secret } => {
+                KmsProviders::Azure {
+                    tenant_id,
+                    client_id,
+                    client_secret,
+                } => {
                     serde_json::json!({
                         "azure": {
                             "tenantId": tenant_id,
@@ -1565,7 +1612,10 @@ mod tests {
 
         let sqls = profile.to_postgres_setup();
         assert!(sqls.iter().any(|s| s.contains("SET ROLE app_readonly")));
-        assert!(sqls.iter().any(|s| s.contains("search_path TO app, public")));
+        assert!(
+            sqls.iter()
+                .any(|s| s.contains("search_path TO app, public"))
+        );
         assert!(sqls.iter().any(|s| s.contains("read_only = ON")));
         assert!(sqls.iter().any(|s| s.contains("statement_timeout = 5000")));
     }
@@ -1594,7 +1644,12 @@ mod tests {
                     key: "base64key".to_string(),
                 },
             )
-            .encrypt_field("mydb.users", "ssn", EncryptionAlgorithm::Deterministic, "keyid");
+            .encrypt_field(
+                "mydb.users",
+                "ssn",
+                EncryptionAlgorithm::Deterministic,
+                "keyid",
+            );
 
             let opts = enc.to_options();
             assert!(opts["kmsProviders"]["local"].is_object());
@@ -1617,7 +1672,3 @@ mod tests {
         }
     }
 }
-
-
-
-

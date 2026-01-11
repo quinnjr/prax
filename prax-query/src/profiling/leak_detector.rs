@@ -508,4 +508,3 @@ mod tests {
         assert_eq!(delta.allocation_rate(), 10.0);
     }
 }
-

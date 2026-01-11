@@ -6,5 +6,7 @@
 mod parser;
 pub mod types;
 
-pub use parser::{import_seaorm_entity, import_seaorm_entity_file, parse_seaorm_entity, parse_seaorm_entity_file};
+pub use parser::{
+    import_seaorm_entity, import_seaorm_entity_file, parse_seaorm_entity, parse_seaorm_entity_file,
+};
 pub use types::*;

@@ -749,4 +749,3 @@ mod tests {
         assert_eq!(s2.as_str(), "from_string");
     }
 }
-

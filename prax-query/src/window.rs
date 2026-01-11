@@ -109,7 +109,11 @@ impl WindowFn {
             Self::Ntile(n) => format!("NTILE({})", n),
             Self::PercentRank => "PERCENT_RANK()".to_string(),
             Self::CumeDist => "CUME_DIST()".to_string(),
-            Self::Lag { expr, offset, default } => {
+            Self::Lag {
+                expr,
+                offset,
+                default,
+            } => {
                 let mut sql = format!("LAG({})", expr);
                 if let Some(off) = offset {
                     sql = format!("LAG({}, {})", expr, off);
@@ -119,7 +123,11 @@ impl WindowFn {
                 }
                 sql
             }
-            Self::Lead { expr, offset, default } => {
+            Self::Lead {
+                expr,
+                offset,
+                default,
+            } => {
                 let mut sql = format!("LEAD({})", expr);
                 if let Some(off) = offset {
                     sql = format!("LEAD({}, {})", expr, off);
@@ -399,11 +407,7 @@ impl FrameClause {
         };
 
         let bounds = if let Some(ref end) = self.end {
-            format!(
-                "BETWEEN {} AND {}",
-                self.start.to_sql(),
-                end.to_sql()
-            )
+            format!("BETWEEN {} AND {}", self.start.to_sql(), end.to_sql())
         } else {
             self.start.to_sql()
         };
@@ -527,7 +531,10 @@ impl NamedWindow {
         let spec_parts = {
             let mut parts = Vec::new();
             if !self.spec.partition_by.is_empty() {
-                parts.push(format!("PARTITION BY {}", self.spec.partition_by.join(", ")));
+                parts.push(format!(
+                    "PARTITION BY {}",
+                    self.spec.partition_by.join(", ")
+                ));
             }
             if !self.spec.order_by.is_empty() {
                 let orders: Vec<String> = self
@@ -610,7 +617,11 @@ pub fn lag_offset(expr: impl Into<String>, offset: u32) -> WindowFunctionBuilder
 }
 
 /// Create LAG() with offset and default.
-pub fn lag_full(expr: impl Into<String>, offset: u32, default: impl Into<String>) -> WindowFunctionBuilder {
+pub fn lag_full(
+    expr: impl Into<String>,
+    offset: u32,
+    default: impl Into<String>,
+) -> WindowFunctionBuilder {
     WindowFunction::new(WindowFn::Lag {
         expr: expr.into(),
         offset: Some(offset),
@@ -637,7 +648,11 @@ pub fn lead_offset(expr: impl Into<String>, offset: u32) -> WindowFunctionBuilde
 }
 
 /// Create LEAD() with offset and default.
-pub fn lead_full(expr: impl Into<String>, offset: u32, default: impl Into<String>) -> WindowFunctionBuilder {
+pub fn lead_full(
+    expr: impl Into<String>,
+    offset: u32,
+    default: impl Into<String>,
+) -> WindowFunctionBuilder {
     WindowFunction::new(WindowFn::Lead {
         expr: expr.into(),
         offset: Some(offset),
@@ -796,28 +811,22 @@ pub mod mongodb {
 
         /// Add $rowNumber output field.
         pub fn row_number(mut self, output_field: impl Into<String>) -> Self {
-            self.output.insert(
-                output_field.into(),
-                serde_json::json!({ "$rowNumber": {} }),
-            );
+            self.output
+                .insert(output_field.into(), serde_json::json!({ "$rowNumber": {} }));
             self
         }
 
         /// Add $rank output field.
         pub fn rank(mut self, output_field: impl Into<String>) -> Self {
-            self.output.insert(
-                output_field.into(),
-                serde_json::json!({ "$rank": {} }),
-            );
+            self.output
+                .insert(output_field.into(), serde_json::json!({ "$rank": {} }));
             self
         }
 
         /// Add $denseRank output field.
         pub fn dense_rank(mut self, output_field: impl Into<String>) -> Self {
-            self.output.insert(
-                output_field.into(),
-                serde_json::json!({ "$denseRank": {} }),
-            );
+            self.output
+                .insert(output_field.into(), serde_json::json!({ "$denseRank": {} }));
             self
         }
 
@@ -829,11 +838,15 @@ pub mod mongodb {
             window: Option<MongoWindow>,
         ) -> Self {
             let mut spec = serde_json::Map::new();
-            spec.insert("$sum".to_string(), JsonValue::String(format!("${}", input.into())));
+            spec.insert(
+                "$sum".to_string(),
+                JsonValue::String(format!("${}", input.into())),
+            );
             if let Some(w) = window {
                 spec.insert("window".to_string(), w.to_bson());
             }
-            self.output.insert(output_field.into(), JsonValue::Object(spec));
+            self.output
+                .insert(output_field.into(), JsonValue::Object(spec));
             self
         }
 
@@ -845,11 +858,15 @@ pub mod mongodb {
             window: Option<MongoWindow>,
         ) -> Self {
             let mut spec = serde_json::Map::new();
-            spec.insert("$avg".to_string(), JsonValue::String(format!("${}", input.into())));
+            spec.insert(
+                "$avg".to_string(),
+                JsonValue::String(format!("${}", input.into())),
+            );
             if let Some(w) = window {
                 spec.insert("window".to_string(), w.to_bson());
             }
-            self.output.insert(output_field.into(), JsonValue::Object(spec));
+            self.output
+                .insert(output_field.into(), JsonValue::Object(spec));
             self
         }
 
@@ -880,15 +897,16 @@ pub mod mongodb {
             default: Option<JsonValue>,
         ) -> Self {
             let mut spec = serde_json::Map::new();
-            spec.insert("output".to_string(), JsonValue::String(format!("${}", output.into())));
+            spec.insert(
+                "output".to_string(),
+                JsonValue::String(format!("${}", output.into())),
+            );
             spec.insert("by".to_string(), JsonValue::Number(by.into()));
             if let Some(def) = default {
                 spec.insert("default".to_string(), def);
             }
-            self.output.insert(
-                output_field.into(),
-                serde_json::json!({ "$shift": spec }),
-            );
+            self.output
+                .insert(output_field.into(), serde_json::json!({ "$shift": spec }));
             self
         }
 
@@ -1019,9 +1037,11 @@ mod tests {
     #[test]
     fn test_row_number() {
         let wf = row_number()
-            .over(WindowSpec::new()
-                .partition_by(["dept"])
-                .order_by("salary", SortOrder::Desc))
+            .over(
+                WindowSpec::new()
+                    .partition_by(["dept"])
+                    .order_by("salary", SortOrder::Desc),
+            )
             .build();
 
         let sql = wf.to_sql(DatabaseType::PostgreSQL);
@@ -1032,10 +1052,14 @@ mod tests {
 
     #[test]
     fn test_rank_functions() {
-        let r = rank().over(WindowSpec::new().order_by("score", SortOrder::Desc)).build();
+        let r = rank()
+            .over(WindowSpec::new().order_by("score", SortOrder::Desc))
+            .build();
         assert!(r.to_sql(DatabaseType::PostgreSQL).contains("RANK()"));
 
-        let dr = dense_rank().over(WindowSpec::new().order_by("score", SortOrder::Desc)).build();
+        let dr = dense_rank()
+            .over(WindowSpec::new().order_by("score", SortOrder::Desc))
+            .build();
         assert!(dr.to_sql(DatabaseType::PostgreSQL).contains("DENSE_RANK()"));
     }
 
@@ -1050,26 +1074,42 @@ mod tests {
 
     #[test]
     fn test_lag_lead() {
-        let l = lag("price").over(WindowSpec::new().order_by("date", SortOrder::Asc)).build();
+        let l = lag("price")
+            .over(WindowSpec::new().order_by("date", SortOrder::Asc))
+            .build();
         assert!(l.to_sql(DatabaseType::PostgreSQL).contains("LAG(price)"));
 
-        let l2 = lag_offset("price", 2).over(WindowSpec::new().order_by("date", SortOrder::Asc)).build();
-        assert!(l2.to_sql(DatabaseType::PostgreSQL).contains("LAG(price, 2)"));
+        let l2 = lag_offset("price", 2)
+            .over(WindowSpec::new().order_by("date", SortOrder::Asc))
+            .build();
+        assert!(
+            l2.to_sql(DatabaseType::PostgreSQL)
+                .contains("LAG(price, 2)")
+        );
 
-        let l3 = lag_full("price", 1, "0").over(WindowSpec::new().order_by("date", SortOrder::Asc)).build();
-        assert!(l3.to_sql(DatabaseType::PostgreSQL).contains("LAG(price, 1, 0)"));
+        let l3 = lag_full("price", 1, "0")
+            .over(WindowSpec::new().order_by("date", SortOrder::Asc))
+            .build();
+        assert!(
+            l3.to_sql(DatabaseType::PostgreSQL)
+                .contains("LAG(price, 1, 0)")
+        );
 
-        let ld = lead("price").over(WindowSpec::new().order_by("date", SortOrder::Asc)).build();
+        let ld = lead("price")
+            .over(WindowSpec::new().order_by("date", SortOrder::Asc))
+            .build();
         assert!(ld.to_sql(DatabaseType::PostgreSQL).contains("LEAD(price)"));
     }
 
     #[test]
     fn test_aggregate_window() {
         let s = sum("amount")
-            .over(WindowSpec::new()
-                .partition_by(["account_id"])
-                .order_by("date", SortOrder::Asc)
-                .rows_unbounded_preceding())
+            .over(
+                WindowSpec::new()
+                    .partition_by(["account_id"])
+                    .order_by("date", SortOrder::Asc)
+                    .rows_unbounded_preceding(),
+            )
             .alias("running_total")
             .build();
 
@@ -1111,8 +1151,7 @@ mod tests {
 
     #[test]
     fn test_nulls_position() {
-        let spec = WindowSpec::new()
-            .order_by_nulls("value", SortOrder::Desc, NullsPosition::Last);
+        let spec = WindowSpec::new().order_by_nulls("value", SortOrder::Desc, NullsPosition::Last);
 
         let pg_sql = spec.to_sql(DatabaseType::PostgreSQL);
         assert!(pg_sql.contains("NULLS LAST"));
@@ -1125,21 +1164,34 @@ mod tests {
     #[test]
     fn test_first_last_value() {
         let fv = first_value("salary")
-            .over(WindowSpec::new()
-                .partition_by(["dept"])
-                .order_by("hire_date", SortOrder::Asc))
+            .over(
+                WindowSpec::new()
+                    .partition_by(["dept"])
+                    .order_by("hire_date", SortOrder::Asc),
+            )
             .build();
 
-        assert!(fv.to_sql(DatabaseType::PostgreSQL).contains("FIRST_VALUE(salary)"));
+        assert!(
+            fv.to_sql(DatabaseType::PostgreSQL)
+                .contains("FIRST_VALUE(salary)")
+        );
 
         let lv = last_value("salary")
-            .over(WindowSpec::new()
-                .partition_by(["dept"])
-                .order_by("hire_date", SortOrder::Asc)
-                .rows(FrameBound::UnboundedPreceding, Some(FrameBound::UnboundedFollowing)))
+            .over(
+                WindowSpec::new()
+                    .partition_by(["dept"])
+                    .order_by("hire_date", SortOrder::Asc)
+                    .rows(
+                        FrameBound::UnboundedPreceding,
+                        Some(FrameBound::UnboundedFollowing),
+                    ),
+            )
             .build();
 
-        assert!(lv.to_sql(DatabaseType::PostgreSQL).contains("LAST_VALUE(salary)"));
+        assert!(
+            lv.to_sql(DatabaseType::PostgreSQL)
+                .contains("LAST_VALUE(salary)")
+        );
     }
 
     mod mongodb_tests {
@@ -1175,7 +1227,11 @@ mod tests {
             let stage = set_window_fields()
                 .partition_by("account")
                 .sort_by("date")
-                .sum("runningTotal", "amount", Some(MongoWindow::documents_to_current()))
+                .sum(
+                    "runningTotal",
+                    "amount",
+                    Some(MongoWindow::documents_to_current()),
+                )
                 .build();
 
             let bson = stage.to_bson();
@@ -1211,7 +1267,3 @@ mod tests {
         }
     }
 }
-
-
-
-

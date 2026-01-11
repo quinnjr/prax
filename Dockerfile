@@ -6,7 +6,7 @@
 # -----------------------------------------------------------------------------
 # Stage 1: Chef - Dependency caching
 # -----------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS chef
+FROM rust:1.89-bookworm AS chef
 RUN cargo install cargo-chef
 WORKDIR /app
 
@@ -41,7 +41,7 @@ RUN cargo build --release --workspace
 # -----------------------------------------------------------------------------
 # Stage 4: Test Runner - For running integration tests
 # -----------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS test-runner
+FROM rust:1.89-bookworm AS test-runner
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
@@ -68,7 +68,7 @@ CMD ["cargo", "test", "--workspace", "--all-features"]
 # -----------------------------------------------------------------------------
 # Stage 5: Development - For local development with hot reload
 # -----------------------------------------------------------------------------
-FROM rust:1.85-bookworm AS development
+FROM rust:1.89-bookworm AS development
 
 # Install development dependencies
 RUN apt-get update && apt-get install -y \
@@ -97,7 +97,7 @@ CMD ["cargo", "watch", "-x", "check", "-x", "test"]
 # -----------------------------------------------------------------------------
 # Stage 6: CI - Minimal image for CI/CD pipelines
 # -----------------------------------------------------------------------------
-FROM rust:1.85-slim-bookworm AS ci
+FROM rust:1.89-slim-bookworm AS ci
 
 # Install minimal runtime dependencies
 RUN apt-get update && apt-get install -y \

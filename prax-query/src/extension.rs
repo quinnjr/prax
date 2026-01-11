@@ -194,7 +194,10 @@ impl Point {
     /// Generate PostGIS point.
     pub fn to_postgis(&self) -> String {
         if let Some(srid) = self.srid {
-            format!("ST_SetSRID(ST_MakePoint({}, {}), {})", self.longitude, self.latitude, srid)
+            format!(
+                "ST_SetSRID(ST_MakePoint({}, {}), {})",
+                self.longitude, self.latitude, srid
+            )
         } else {
             format!("ST_MakePoint({}, {})", self.longitude, self.latitude)
         }
@@ -203,9 +206,15 @@ impl Point {
     /// Generate MySQL spatial point.
     pub fn to_mysql(&self) -> String {
         if let Some(srid) = self.srid {
-            format!("ST_GeomFromText('POINT({} {})', {})", self.longitude, self.latitude, srid)
+            format!(
+                "ST_GeomFromText('POINT({} {})', {})",
+                self.longitude, self.latitude, srid
+            )
         } else {
-            format!("ST_GeomFromText('POINT({} {})')", self.longitude, self.latitude)
+            format!(
+                "ST_GeomFromText('POINT({} {})')",
+                self.longitude, self.latitude
+            )
         }
     }
 
@@ -213,7 +222,9 @@ impl Point {
     pub fn to_mssql(&self) -> String {
         format!(
             "geography::Point({}, {}, {})",
-            self.latitude, self.longitude, self.srid.unwrap_or(4326)
+            self.latitude,
+            self.longitude,
+            self.srid.unwrap_or(4326)
         )
     }
 
@@ -302,11 +313,12 @@ impl Polygon {
 
     /// Generate GeoJSON.
     pub fn to_geojson(&self) -> serde_json::Value {
-        let mut coordinates = vec![self
-            .exterior
-            .iter()
-            .map(|(x, y)| vec![*x, *y])
-            .collect::<Vec<_>>()];
+        let mut coordinates = vec![
+            self.exterior
+                .iter()
+                .map(|(x, y)| vec![*x, *y])
+                .collect::<Vec<_>>(),
+        ];
 
         for interior in &self.interiors {
             coordinates.push(interior.iter().map(|(x, y)| vec![*x, *y]).collect());
@@ -351,7 +363,9 @@ pub mod geo {
     /// Generate distance SQL between two columns.
     pub fn distance_sql(col1: &str, col2: &str, db_type: DatabaseType) -> String {
         match db_type {
-            DatabaseType::PostgreSQL => format!("ST_Distance({}::geography, {}::geography)", col1, col2),
+            DatabaseType::PostgreSQL => {
+                format!("ST_Distance({}::geography, {}::geography)", col1, col2)
+            }
             DatabaseType::MySQL => format!("ST_Distance_Sphere({}, {})", col1, col2),
             DatabaseType::MSSQL => format!("{}.STDistance({})", col1, col2),
             DatabaseType::SQLite => format!("Distance({}, {})", col1, col2),
@@ -431,7 +445,17 @@ pub mod geo {
             DatabaseType::MySQL => {
                 format!(
                     "MBRContains(ST_GeomFromText('POLYGON(({} {}, {} {}, {} {}, {} {}, {} {}))'), {})",
-                    min_lon, min_lat, max_lon, min_lat, max_lon, max_lat, min_lon, max_lat, min_lon, min_lat, col
+                    min_lon,
+                    min_lat,
+                    max_lon,
+                    min_lat,
+                    max_lon,
+                    max_lat,
+                    min_lon,
+                    max_lat,
+                    min_lon,
+                    min_lat,
+                    col
                 )
             }
             _ => "1=1".to_string(),
@@ -533,7 +557,11 @@ pub mod crypto {
                 if algorithm == HashAlgorithm::Md5 {
                     format!("md5({})", expr)
                 } else {
-                    format!("encode(digest({}, '{}'), 'hex')", expr, algorithm.postgres_name())
+                    format!(
+                        "encode(digest({}, '{}'), 'hex')",
+                        expr,
+                        algorithm.postgres_name()
+                    )
                 }
             }
             DatabaseType::MySQL => match algorithm {
@@ -784,7 +812,11 @@ pub mod mongodb {
 
     impl VectorSearch {
         /// Create a new vector search.
-        pub fn new(index: impl Into<String>, path: impl Into<String>, query: Vec<f32>) -> VectorSearchBuilder {
+        pub fn new(
+            index: impl Into<String>,
+            path: impl Into<String>,
+            query: Vec<f32>,
+        ) -> VectorSearchBuilder {
             VectorSearchBuilder::new(index, path, query)
         }
 
@@ -1046,11 +1078,19 @@ mod tests {
 
     #[test]
     fn test_hash_sql() {
-        let pg = crypto::hash_sql("password", crypto::HashAlgorithm::Sha256, DatabaseType::PostgreSQL);
+        let pg = crypto::hash_sql(
+            "password",
+            crypto::HashAlgorithm::Sha256,
+            DatabaseType::PostgreSQL,
+        );
         assert!(pg.contains("digest"));
         assert!(pg.contains("sha256"));
 
-        let mysql = crypto::hash_sql("password", crypto::HashAlgorithm::Sha256, DatabaseType::MySQL);
+        let mysql = crypto::hash_sql(
+            "password",
+            crypto::HashAlgorithm::Sha256,
+            DatabaseType::MySQL,
+        );
         assert!(mysql.contains("SHA2"));
         assert!(mysql.contains("256"));
     }
@@ -1125,5 +1165,3 @@ mod tests {
         }
     }
 }
-
-

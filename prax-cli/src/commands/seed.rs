@@ -789,7 +789,8 @@ fn extract_prax_version(content: &str) -> Option<String> {
         return Some(caps.get(1)?.as_str().to_string());
     }
 
-    let complex_re = regex_lite::Regex::new(r#"prax-orm\s*=\s*\{[^}]*version\s*=\s*"([^"]+)""#).ok()?;
+    let complex_re =
+        regex_lite::Regex::new(r#"prax-orm\s*=\s*\{[^}]*version\s*=\s*"([^"]+)""#).ok()?;
     if let Some(caps) = complex_re.captures(content) {
         return Some(caps.get(1)?.as_str().to_string());
     }

@@ -120,8 +120,8 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
 
     #[cfg(feature = "postgres")]
     let db_schema = {
-        use crate::commands::introspect::postgres::PostgresIntrospector;
         use crate::commands::introspect::Introspector;
+        use crate::commands::introspect::postgres::PostgresIntrospector;
 
         if config.database.provider.to_lowercase().contains("postgres") {
             let introspector = PostgresIntrospector::new(database_url.clone());
@@ -138,7 +138,8 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     #[cfg(not(feature = "postgres"))]
     let db_schema = {
         return Err(CliError::Config(
-            "No database driver enabled. Compile with --features postgres, mysql, sqlite, or mssql".to_string()
+            "No database driver enabled. Compile with --features postgres, mysql, sqlite, or mssql"
+                .to_string(),
         ));
     };
 
@@ -193,11 +194,7 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
         output::newline();
         output::section("Tables Introspected");
         for table in &db_schema.tables {
-            output::list_item(&format!(
-                "{} ({} columns)",
-                table.name,
-                table.columns.len()
-            ));
+            output::list_item(&format!("{} ({} columns)", table.name, table.columns.len()));
         }
     }
 
@@ -386,4 +383,3 @@ fn calculate_schema_changes(_schema: &prax_schema::ast::Schema) -> CliResult<Vec
     // For now, return empty changes
     Ok(Vec::new())
 }
-

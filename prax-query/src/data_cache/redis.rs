@@ -267,7 +267,8 @@ impl RedisPipeline {
 
     /// Add a SET command.
     pub fn set(mut self, key: impl Into<String>, value: Vec<u8>, ttl: Option<Duration>) -> Self {
-        self.commands.push(PipelineCommand::Set(key.into(), value, ttl));
+        self.commands
+            .push(PipelineCommand::Set(key.into(), value, ttl));
         self
     }
 
@@ -344,18 +345,13 @@ impl CacheBackend for RedisCache {
         }
     }
 
-    async fn set<T>(
-        &self,
-        key: &CacheKey,
-        value: &T,
-        ttl: Option<Duration>,
-    ) -> CacheResult<()>
+    async fn set<T>(&self, key: &CacheKey, value: &T, ttl: Option<Duration>) -> CacheResult<()>
     where
         T: serde::Serialize + Sync,
     {
         let full_key = self.full_key(key);
-        let data = serde_json::to_vec(value)
-            .map_err(|e| CacheError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(value).map_err(|e| CacheError::Serialization(e.to_string()))?;
 
         let effective_ttl = ttl.or(self.config.default_ttl);
         self.conn.set(&full_key, &data, effective_ttl).await
@@ -466,8 +462,7 @@ mod tests {
 
     #[test]
     fn test_full_key() {
-        let config = RedisCacheConfig::new("redis://localhost")
-            .with_prefix("app:cache");
+        let config = RedisCacheConfig::new("redis://localhost").with_prefix("app:cache");
 
         let key = CacheKey::new("User", "id:123");
         let full = config.full_key(&key);
@@ -485,4 +480,3 @@ mod tests {
         assert_eq!(cache.config().pool_size, 10);
     }
 }
-

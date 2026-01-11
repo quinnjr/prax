@@ -7,7 +7,7 @@ use prax_schema::ast::*;
 use smol_str::SmolStr;
 use std::fs;
 use std::path::Path;
-use syn::{Attribute, Fields, Item, Type, Meta};
+use syn::{Attribute, Fields, Item, Meta, Type};
 
 /// Parse a SeaORM entity file from a string.
 pub fn parse_seaorm_entity(input: &str) -> ImportResult<SeaOrmEntity> {
@@ -177,7 +177,9 @@ fn parse_field_type(ty: &Type) -> ImportResult<(SeaOrmFieldType, bool)> {
                 "Vec" => {
                     // Check if Vec<u8>
                     if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                        if let Some(syn::GenericArgument::Type(Type::Path(inner_path))) = args.args.first() {
+                        if let Some(syn::GenericArgument::Type(Type::Path(inner_path))) =
+                            args.args.first()
+                        {
                             if let Some(seg) = inner_path.path.segments.last() {
                                 if seg.ident == "u8" {
                                     return Ok((SeaOrmFieldType::Bytes, false));
@@ -296,7 +298,9 @@ fn parse_relation_attribute(name: String, meta: syn::Meta) -> ImportResult<Optio
                 }
             } else if let syn::Expr::Path(path) = &nv.value {
                 // Handle super::entity::Entity format
-                path.path.segments.iter()
+                path.path
+                    .segments
+                    .iter()
                     .filter(|seg| seg.ident != "super" && seg.ident != "Entity")
                     .map(|seg| seg.ident.to_string())
                     .last()
