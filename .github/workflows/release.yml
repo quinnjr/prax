@@ -23,11 +23,13 @@ jobs:
       - name: Verify version matches tag
         run: |
           TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          # Extract workspace version from [workspace.package] section
+          CARGO_VERSION=$(awk '/^\[workspace\.package\]/,/^\[/ {if (/^version = /) {gsub(/[^0-9.]/, "", $3); print $3; exit}}' Cargo.toml)
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "Tag version ($TAG_VERSION) doesn't match Cargo.toml version ($CARGO_VERSION)"
+            echo "Tag version ($TAG_VERSION) doesn't match Cargo.toml workspace version ($CARGO_VERSION)"
             exit 1
           fi
+          echo "✓ Version matches: v$TAG_VERSION"
 
       - name: Run full test suite
         run: cargo test --all-features
@@ -50,8 +52,11 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Publish to crates.io
-        run: cargo publish --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Install curl
+        run: sudo apt-get update && sudo apt-get install -y curl
+
+      - name: Publish all crates to crates.io
+        run: ./scripts/publish.sh --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
 
