@@ -151,6 +151,52 @@ pub use introspect::{
     ColumnInfo, ConstraintInfo, EnumInfo, IndexInfo, IntrospectionConfig, IntrospectionResult,
     Introspector, SchemaBuilder, SkippedTable, TableInfo,
 };
+pub use procedure::{
+    // MongoDB Atlas Triggers
+    AtlasOperation,
+    AtlasTrigger,
+    AtlasTriggerType,
+    AuthOperation,
+    // Procedure types
+    ChangeType,
+    // Event Scheduler types (MySQL)
+    EventAlterDiff,
+    EventDiff,
+    EventInterval,
+    EventSchedule,
+    IntervalUnit,
+    // SQL Agent types (MSSQL)
+    JobSchedule,
+    JobStep,
+    NotifyLevel,
+    OnCompletion,
+    ParallelSafety,
+    ParameterMode,
+    ProcedureAlterDiff,
+    ProcedureChange,
+    ProcedureDefinition,
+    ProcedureDiff,
+    ProcedureDiffer,
+    ProcedureHistoryEntry,
+    ProcedureLanguage,
+    ProcedureParameter,
+    ProcedureSqlGenerator,
+    ProcedureStore,
+    ReturnColumn,
+    ScheduleFrequency,
+    ScheduledEvent,
+    SqlAgentJob,
+    StepAction,
+    StepType,
+    // Trigger types
+    TriggerAlterDiff,
+    TriggerDefinition,
+    TriggerEvent,
+    TriggerLevel,
+    TriggerTiming,
+    Volatility,
+    Weekday,
+};
 pub use resolution::{
     ConflictStrategy, Resolution, ResolutionAction, ResolutionBuilder, ResolutionConfig,
     ResolutionCounts, ResolutionWarning,
@@ -158,21 +204,5 @@ pub use resolution::{
 pub use shadow::{
     FieldDrift, IndexDrift, SchemaDrift, ShadowConfig, ShadowDatabase, ShadowDatabaseManager,
     ShadowDiffResult, ShadowState, detect_drift,
-};
-pub use procedure::{
-    // Procedure types
-    ChangeType, ParameterMode, ParallelSafety, ProcedureAlterDiff, ProcedureChange,
-    ProcedureDefinition, ProcedureDiff, ProcedureDiffer, ProcedureHistoryEntry, ProcedureLanguage,
-    ProcedureParameter, ProcedureSqlGenerator, ProcedureStore, ReturnColumn, Volatility,
-    // Trigger types
-    TriggerAlterDiff, TriggerDefinition, TriggerEvent, TriggerLevel, TriggerTiming,
-    // Event Scheduler types (MySQL)
-    EventAlterDiff, EventDiff, EventInterval, EventSchedule, IntervalUnit, OnCompletion,
-    ScheduledEvent,
-    // SQL Agent types (MSSQL)
-    JobSchedule, JobStep, NotifyLevel, ScheduleFrequency, SqlAgentJob, StepAction, StepType,
-    Weekday,
-    // MongoDB Atlas Triggers
-    AtlasOperation, AtlasTrigger, AtlasTriggerType, AuthOperation,
 };
 pub use sql::{MigrationSql, PostgresSqlGenerator};

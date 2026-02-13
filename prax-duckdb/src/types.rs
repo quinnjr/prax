@@ -32,7 +32,9 @@ pub fn filter_value_to_json(value: &FilterValue) -> JsonValue {
             .unwrap_or(JsonValue::Null),
         FilterValue::String(s) => JsonValue::String(s.clone()),
         FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => JsonValue::Array(list.iter().map(filter_value_to_json).collect()),
+        FilterValue::List(list) => {
+            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
+        }
     }
 }
 
@@ -95,9 +97,7 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
             // Interval as string
             JsonValue::String(format!("{:?}", value))
         }
-        Value::List(list) => {
-            JsonValue::Array(list.into_iter().map(duckdb_value_to_json).collect())
-        }
+        Value::List(list) => JsonValue::Array(list.into_iter().map(duckdb_value_to_json).collect()),
         Value::Enum(e) => JsonValue::String(e),
         Value::Struct(fields) => {
             // OrderedMap uses .iter(), not into_iter()
@@ -107,9 +107,7 @@ pub fn duckdb_value_to_json(value: Value) -> JsonValue {
                 .collect();
             JsonValue::Object(obj)
         }
-        Value::Array(arr) => {
-            JsonValue::Array(arr.into_iter().map(duckdb_value_to_json).collect())
-        }
+        Value::Array(arr) => JsonValue::Array(arr.into_iter().map(duckdb_value_to_json).collect()),
         Value::Map(map) => {
             // OrderedMap uses .iter(), not into_iter()
             let obj: serde_json::Map<String, JsonValue> = map

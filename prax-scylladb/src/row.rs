@@ -29,7 +29,9 @@ impl<'a> RowAccessor<'a> {
         self.row
             .columns
             .get(index)
-            .ok_or_else(|| ScyllaError::deserialization(format!("Column index {} out of bounds", index)))?
+            .ok_or_else(|| {
+                ScyllaError::deserialization(format!("Column index {} out of bounds", index))
+            })?
             .as_ref()
             .map(|v| T::from_cql(v))
             .transpose()?
@@ -159,10 +161,8 @@ impl FromCqlValue for uuid::Uuid {
 impl FromCqlValue for chrono::DateTime<chrono::Utc> {
     fn from_cql(value: &CqlValue) -> ScyllaResult<Self> {
         match value {
-            CqlValue::Timestamp(ts) => {
-                chrono::DateTime::from_timestamp_millis(ts.0)
-                    .ok_or_else(|| ScyllaError::type_conversion("Invalid timestamp"))
-            }
+            CqlValue::Timestamp(ts) => chrono::DateTime::from_timestamp_millis(ts.0)
+                .ok_or_else(|| ScyllaError::type_conversion("Invalid timestamp")),
             _ => Err(ScyllaError::type_conversion("Expected timestamp")),
         }
     }
@@ -171,10 +171,8 @@ impl FromCqlValue for chrono::DateTime<chrono::Utc> {
 impl FromCqlValue for chrono::NaiveDate {
     fn from_cql(value: &CqlValue) -> ScyllaResult<Self> {
         match value {
-            CqlValue::Date(d) => {
-                chrono::NaiveDate::from_num_days_from_ce_opt(d.0 as i32)
-                    .ok_or_else(|| ScyllaError::type_conversion("Invalid date"))
-            }
+            CqlValue::Date(d) => chrono::NaiveDate::from_num_days_from_ce_opt(d.0 as i32)
+                .ok_or_else(|| ScyllaError::type_conversion("Invalid date")),
             _ => Err(ScyllaError::type_conversion("Expected date")),
         }
     }
@@ -314,4 +312,3 @@ mod tests {
         assert_eq!(result, vec![1, 2, 3]);
     }
 }
-

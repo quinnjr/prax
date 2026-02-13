@@ -196,29 +196,21 @@ impl Display for InvalidationEventType {
 pub enum InvalidationStrategy {
     /// Invalidate on every write.
     Immediate,
-    
+
     /// Invalidate after a delay (batching).
-    Delayed {
-        delay_ms: u64,
-    },
-    
+    Delayed { delay_ms: u64 },
+
     /// Invalidate based on events.
-    EventBased {
-        events: Vec<InvalidationEventType>,
-    },
-    
+    EventBased { events: Vec<InvalidationEventType> },
+
     /// Only invalidate specific tags.
-    TagBased {
-        tags: Vec<EntityTag>,
-    },
-    
+    TagBased { tags: Vec<EntityTag> },
+
     /// Time-based expiration only (no explicit invalidation).
     TtlOnly,
-    
+
     /// Custom invalidation logic.
-    Custom {
-        name: String,
-    },
+    Custom { name: String },
 }
 
 impl InvalidationStrategy {
@@ -253,9 +245,7 @@ impl InvalidationStrategy {
             Self::Immediate => true,
             Self::Delayed { .. } => true, // Will be batched
             Self::EventBased { events } => events.contains(&event.event_type),
-            Self::TagBased { tags } => {
-                event.all_tags().iter().any(|t| tags.contains(t))
-            }
+            Self::TagBased { tags } => event.all_tags().iter().any(|t| tags.contains(t)),
             Self::TtlOnly => false,
             Self::Custom { .. } => true, // Let custom logic decide
         }
@@ -339,5 +329,3 @@ mod tests {
         assert!(!tag.matches("entity:Post"));
     }
 }
-
-

@@ -57,10 +57,7 @@ impl ScyllaConnection {
     }
 
     /// Execute a raw CQL query.
-    pub async fn execute_raw(
-        &self,
-        query: &str,
-    ) -> ScyllaResult<scylla::QueryResult> {
+    pub async fn execute_raw(&self, query: &str) -> ScyllaResult<scylla::QueryResult> {
         self.session
             .query_unpaged(query, &[])
             .await
@@ -68,7 +65,10 @@ impl ScyllaConnection {
     }
 
     /// Prepare a statement for execution.
-    pub async fn prepare(&self, query: &str) -> ScyllaResult<scylla::prepared_statement::PreparedStatement> {
+    pub async fn prepare(
+        &self,
+        query: &str,
+    ) -> ScyllaResult<scylla::prepared_statement::PreparedStatement> {
         self.session.prepare(query).await.map_err(Into::into)
     }
 }
@@ -145,4 +145,3 @@ mod tests {
         assert_eq!(config.default_keyspace(), Some("test"));
     }
 }
-

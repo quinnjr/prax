@@ -134,9 +134,7 @@ impl From<DuckDbError> for QueryError {
             DuckDbError::Connection(msg) => QueryError::connection(msg),
             DuckDbError::Query(msg) => QueryError::database(msg),
             DuckDbError::Deserialization(msg) => QueryError::serialization(msg),
-            DuckDbError::TypeConversion(msg) => {
-                QueryError::serialization(format!("type: {}", msg))
-            }
+            DuckDbError::TypeConversion(msg) => QueryError::serialization(format!("type: {}", msg)),
             DuckDbError::Timeout(_) => QueryError::timeout(5000),
             DuckDbError::FileIo(msg) => QueryError::internal(format!("file: {}", msg)),
             DuckDbError::Parquet(msg) => QueryError::internal(format!("parquet: {}", msg)),
@@ -159,7 +157,10 @@ mod tests {
     #[test]
     fn test_error_constructors() {
         assert!(matches!(DuckDbError::pool("test"), DuckDbError::Pool(_)));
-        assert!(matches!(DuckDbError::config("test"), DuckDbError::Config(_)));
+        assert!(matches!(
+            DuckDbError::config("test"),
+            DuckDbError::Config(_)
+        ));
         assert!(matches!(
             DuckDbError::connection("test"),
             DuckDbError::Connection(_)
@@ -178,4 +179,3 @@ mod tests {
         assert!(query_err.is_timeout());
     }
 }
-

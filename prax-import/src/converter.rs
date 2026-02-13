@@ -49,8 +49,8 @@ impl SchemaBuilder {
     /// Set the datasource configuration.
     pub fn with_datasource(mut self, provider_str: String, url: String) -> Self {
         // Parse provider
-        let provider = DatabaseProvider::from_str(&provider_str)
-            .unwrap_or(DatabaseProvider::PostgreSQL); // Default to PostgreSQL if unknown
+        let provider =
+            DatabaseProvider::from_str(&provider_str).unwrap_or(DatabaseProvider::PostgreSQL); // Default to PostgreSQL if unknown
 
         let datasource = Datasource {
             name: SmolStr::from("db"),

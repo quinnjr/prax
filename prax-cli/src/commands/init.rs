@@ -5,6 +5,7 @@ use std::path::Path;
 use crate::cli::{DatabaseProvider, InitArgs};
 use crate::config::{
     CONFIG_FILE_NAME, Config, MIGRATIONS_DIR, PRAX_DIR, SCHEMA_FILE_NAME, SCHEMA_FILE_PATH,
+    SEEDS_DIR,
 };
 use crate::error::CliResult;
 use crate::output::{self, confirm, input, select, success};
@@ -114,7 +115,8 @@ pub async fn run(args: InitArgs) -> CliResult<()> {
         &format!("  {}", SCHEMA_FILE_NAME),
         "Database schema definition",
     );
-    output::kv(&format!("  migrations/"), "Migration files");
+    output::kv("  migrations/", "Migration files");
+    output::kv("  seeds/", "Seed files");
     output::kv(".env", "Environment variables");
 
     Ok(())
@@ -133,6 +135,14 @@ fn create_project_structure(path: &Path) -> CliResult<()> {
     // Create .gitkeep in migrations
     let gitkeep_path = migrations_path.join(".gitkeep");
     std::fs::write(gitkeep_path, "")?;
+
+    // Create seeds directory inside prax/
+    let seeds_path = path.join(SEEDS_DIR);
+    std::fs::create_dir_all(&seeds_path)?;
+
+    // Create .gitkeep in seeds
+    let seeds_gitkeep_path = seeds_path.join(".gitkeep");
+    std::fs::write(seeds_gitkeep_path, "")?;
 
     Ok(())
 }

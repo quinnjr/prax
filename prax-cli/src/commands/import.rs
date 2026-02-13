@@ -6,6 +6,7 @@ use std::path::Path;
 use prax_import::prelude::*;
 
 use crate::cli::{ImportArgs, ImportSource};
+use crate::config::SCHEMA_FILE_PATH;
 use crate::error::{CliError, CliResult};
 use crate::output;
 
@@ -55,8 +56,8 @@ pub async fn run(args: ImportArgs) -> CliResult<()> {
     } else {
         // Determine output path
         let output_path = args.output.unwrap_or_else(|| {
-            // Default to schema.prax in current directory
-            std::path::PathBuf::from("schema.prax")
+            // Default to prax/schema.prax
+            std::path::PathBuf::from(SCHEMA_FILE_PATH)
         });
 
         // Check if file exists and prompt if not forcing
@@ -76,10 +77,7 @@ pub async fn run(args: ImportArgs) -> CliResult<()> {
             ))
         })?;
 
-        output::success(&format!(
-            "✓ Schema written to {}",
-            output_path.display()
-        ));
+        output::success(&format!("✓ Schema written to {}", output_path.display()));
     }
 
     // Print helpful next steps
@@ -97,18 +95,16 @@ pub async fn run(args: ImportArgs) -> CliResult<()> {
 fn import_from_prisma(input: &Path) -> CliResult<prax_schema::Schema> {
     output::info(&format!("Reading Prisma schema from {}", input.display()));
 
-    import_prisma_schema_file(input).map_err(|e| {
-        CliError::Schema(format!("Failed to import Prisma schema: {}", e))
-    })
+    import_prisma_schema_file(input)
+        .map_err(|e| CliError::Schema(format!("Failed to import Prisma schema: {}", e)))
 }
 
 /// Import from a Diesel schema file.
 fn import_from_diesel(input: &Path) -> CliResult<prax_schema::Schema> {
     output::info(&format!("Reading Diesel schema from {}", input.display()));
 
-    import_diesel_schema_file(input).map_err(|e| {
-        CliError::Schema(format!("Failed to import Diesel schema: {}", e))
-    })
+    import_diesel_schema_file(input)
+        .map_err(|e| CliError::Schema(format!("Failed to import Diesel schema: {}", e)))
 }
 
 /// Import from a SeaORM entity file.
@@ -118,15 +114,14 @@ fn import_from_seaorm(input: &Path) -> CliResult<prax_schema::Schema> {
     #[cfg(feature = "seaorm")]
     {
         use prax_import::seaorm::import_seaorm_entity_file;
-        import_seaorm_entity_file(input).map_err(|e| {
-            CliError::Schema(format!("Failed to import SeaORM entity: {}", e))
-        })
+        import_seaorm_entity_file(input)
+            .map_err(|e| CliError::Schema(format!("Failed to import SeaORM entity: {}", e)))
     }
 
     #[cfg(not(feature = "seaorm"))]
     {
         Err(CliError::Config(
-            "SeaORM import support not enabled. Rebuild with --features seaorm".to_string()
+            "SeaORM import support not enabled. Rebuild with --features seaorm".to_string(),
         ))
     }
 }
@@ -237,7 +232,10 @@ fn format_schema(schema: &prax_schema::Schema) -> String {
 }
 
 /// Format a field type with its modifier.
-fn format_field_type(field_type: &prax_schema::FieldType, modifier: &prax_schema::TypeModifier) -> String {
+fn format_field_type(
+    field_type: &prax_schema::FieldType,
+    modifier: &prax_schema::TypeModifier,
+) -> String {
     let base = field_type.type_name().to_string();
 
     match modifier {
@@ -299,7 +297,10 @@ mod tests {
         use prax_schema::{FieldType, ScalarType, TypeModifier};
 
         assert_eq!(
-            format_field_type(&FieldType::Scalar(ScalarType::String), &TypeModifier::Required),
+            format_field_type(
+                &FieldType::Scalar(ScalarType::String),
+                &TypeModifier::Required
+            ),
             "String"
         );
 

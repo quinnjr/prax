@@ -1,30 +1,25 @@
 //! Diesel schema parser and converter.
 
 use crate::converter::{
-    column_name_to_field_name, table_name_to_model_name, FieldBuilder, ModelBuilder,
-    SchemaBuilder,
+    FieldBuilder, ModelBuilder, SchemaBuilder, column_name_to_field_name, table_name_to_model_name,
 };
 use crate::diesel::types::*;
 use crate::error::ImportResult;
-use prax_schema::ast::*;
 use once_cell::sync::Lazy;
+use prax_schema::ast::*;
 use regex_lite::Regex;
 use smol_str::SmolStr;
 use std::fs;
 use std::path::Path;
 
 // Pre-compiled regex patterns for better performance
-static TABLE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?s)table!\s*\{\s*(\w+)\s*\(([^)]+)\)\s*\{([^}]+)\}\s*\}").unwrap()
-});
+static TABLE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?s)table!\s*\{\s*(\w+)\s*\(([^)]+)\)\s*\{([^}]+)\}\s*\}").unwrap());
 
-static COLUMN_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(\w+)\s*->\s*([\w<>]+),?").unwrap()
-});
+static COLUMN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(\w+)\s*->\s*([\w<>]+),?").unwrap());
 
-static JOINABLE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"joinable!\s*\(\s*(\w+)\s*->\s*(\w+)\s*\((\w+)\)\s*\)").unwrap()
-});
+static JOINABLE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"joinable!\s*\(\s*(\w+)\s*->\s*(\w+)\s*\((\w+)\)\s*\)").unwrap());
 
 /// Parse a Diesel schema from a string.
 ///
@@ -63,10 +58,7 @@ fn parse_tables(input: &str) -> ImportResult<Vec<DieselTable>> {
         let pk_str = caps.get(2).unwrap().as_str();
         let body = caps.get(3).unwrap().as_str();
 
-        let primary_key = pk_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+        let primary_key = pk_str.split(',').map(|s| s.trim().to_string()).collect();
 
         let columns = parse_columns(body)?;
 

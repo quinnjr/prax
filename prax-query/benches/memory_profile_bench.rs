@@ -6,14 +6,14 @@
 //! - Leak detection overhead
 //! - Snapshot comparison performance
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::filter::{Filter, FilterValue};
-use prax_query::memory::{BufferPool, StringPool, GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL};
 use prax_query::mem_optimize::{GlobalInterner, QueryArena, ScopedInterner};
+use prax_query::memory::{BufferPool, GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL, StringPool};
 use prax_query::profiling::{
     AllocationTracker, HeapProfiler, LeakDetector, MemoryProfiler, MemorySnapshot,
 };
+use std::hint::black_box;
 use std::time::Duration;
 
 // ============================================================================
@@ -46,9 +46,7 @@ fn bench_allocation_tracking(c: &mut Criterion) {
             tracker.record_alloc(i * 0x1000, 1024, 8);
         }
 
-        b.iter(|| {
-            black_box(tracker.stats())
-        });
+        b.iter(|| black_box(tracker.stats()));
 
         prax_query::profiling::disable_profiling();
     });
@@ -75,9 +73,7 @@ fn bench_memory_snapshots(c: &mut Criterion) {
     group.bench_function("capture_snapshot", |b| {
         let tracker = AllocationTracker::new();
 
-        b.iter(|| {
-            black_box(MemorySnapshot::capture(&tracker))
-        });
+        b.iter(|| black_box(MemorySnapshot::capture(&tracker)));
     });
 
     group.bench_function("snapshot_diff", |b| {
@@ -93,9 +89,7 @@ fn bench_memory_snapshots(c: &mut Criterion) {
 
         let after = MemorySnapshot::capture(&tracker);
 
-        b.iter(|| {
-            black_box(after.diff(&before))
-        });
+        b.iter(|| black_box(after.diff(&before)));
     });
 
     group.bench_function("generate_diff_report", |b| {
@@ -104,9 +98,7 @@ fn bench_memory_snapshots(c: &mut Criterion) {
         let after = MemorySnapshot::capture(&tracker);
         let diff = after.diff(&before);
 
-        b.iter(|| {
-            black_box(diff.report())
-        });
+        b.iter(|| black_box(diff.report()));
     });
 
     group.finish();
@@ -123,9 +115,7 @@ fn bench_leak_detection(c: &mut Criterion) {
         let detector = LeakDetector::new();
         let tracker = AllocationTracker::new();
 
-        b.iter(|| {
-            black_box(detector.analyze(&tracker))
-        });
+        b.iter(|| black_box(detector.analyze(&tracker)));
     });
 
     group.bench_function("analyze_with_allocations", |b| {
@@ -140,9 +130,7 @@ fn bench_leak_detection(c: &mut Criterion) {
         // Wait a tiny bit so they're "old"
         std::thread::sleep(Duration::from_millis(2));
 
-        b.iter(|| {
-            black_box(detector.analyze(&tracker))
-        });
+        b.iter(|| black_box(detector.analyze(&tracker)));
 
         prax_query::profiling::disable_profiling();
     });
@@ -155,23 +143,19 @@ fn bench_leak_detection(c: &mut Criterion) {
             current_bytes: 50000,
             peak_bytes: 100000,
             old_allocations_count: 50,
-            potential_leaks: vec![
-                prax_query::profiling::PotentialLeak {
-                    pattern: prax_query::profiling::leak_detector::LeakPattern::RepeatedSize {
-                        size: 1024,
-                        count: 10,
-                    },
-                    severity: prax_query::profiling::LeakSeverity::Medium,
-                    total_bytes: 10240,
-                    oldest_age: Duration::from_secs(120),
-                    sample_backtrace: None,
+            potential_leaks: vec![prax_query::profiling::PotentialLeak {
+                pattern: prax_query::profiling::leak_detector::LeakPattern::RepeatedSize {
+                    size: 1024,
+                    count: 10,
                 },
-            ],
+                severity: prax_query::profiling::LeakSeverity::Medium,
+                total_bytes: 10240,
+                oldest_age: Duration::from_secs(120),
+                sample_backtrace: None,
+            }],
         };
 
-        b.iter(|| {
-            black_box(report.summary())
-        });
+        b.iter(|| black_box(report.summary()));
     });
 
     group.finish();
@@ -187,17 +171,13 @@ fn bench_heap_profiling(c: &mut Criterion) {
     group.bench_function("heap_sample", |b| {
         let profiler = HeapProfiler::new();
 
-        b.iter(|| {
-            black_box(profiler.sample())
-        });
+        b.iter(|| black_box(profiler.sample()));
     });
 
     group.bench_function("heap_stats", |b| {
         let profiler = HeapProfiler::new();
 
-        b.iter(|| {
-            black_box(profiler.stats())
-        });
+        b.iter(|| black_box(profiler.stats()));
     });
 
     group.bench_function("heap_report", |b| {
@@ -208,9 +188,7 @@ fn bench_heap_profiling(c: &mut Criterion) {
             profiler.sample();
         }
 
-        b.iter(|| {
-            black_box(profiler.report())
-        });
+        b.iter(|| black_box(profiler.report()));
     });
 
     group.finish();
@@ -239,17 +217,13 @@ fn bench_memory_pools(c: &mut Criterion) {
         let pool = StringPool::new();
         pool.intern("test_field");
 
-        b.iter(|| {
-            black_box(pool.intern("test_field"))
-        });
+        b.iter(|| black_box(pool.intern("test_field")));
     });
 
     group.bench_function("global_string_pool", |b| {
         GLOBAL_STRING_POOL.intern("benchmark_field");
 
-        b.iter(|| {
-            black_box(GLOBAL_STRING_POOL.intern("benchmark_field"))
-        });
+        b.iter(|| black_box(GLOBAL_STRING_POOL.intern("benchmark_field")));
     });
 
     // Buffer pool benchmarks
@@ -263,9 +237,7 @@ fn bench_memory_pools(c: &mut Criterion) {
     });
 
     group.bench_function("string_pool_stats", |b| {
-        b.iter(|| {
-            black_box(GLOBAL_STRING_POOL.stats())
-        });
+        b.iter(|| black_box(GLOBAL_STRING_POOL.stats()));
     });
 
     group.finish();
@@ -284,7 +256,10 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
             let filter = Filter::and(vec![
                 Filter::Equals("user_id".into(), FilterValue::Int(1)),
                 Filter::Equals("status".into(), FilterValue::String("active".into())),
-                Filter::Gt("created_at".into(), FilterValue::String("2024-01-01".into())),
+                Filter::Gt(
+                    "created_at".into(),
+                    FilterValue::String("2024-01-01".into()),
+                ),
             ]);
             black_box(filter.to_sql(0))
         });
@@ -300,7 +275,10 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
             let filter = Filter::and(vec![
                 Filter::Equals(user_id.as_ref().into(), FilterValue::Int(1)),
                 Filter::Equals(status.as_ref().into(), FilterValue::String("active".into())),
-                Filter::Gt(created_at.as_ref().into(), FilterValue::String("2024-01-01".into())),
+                Filter::Gt(
+                    created_at.as_ref().into(),
+                    FilterValue::String("2024-01-01".into()),
+                ),
             ]);
             black_box(filter.to_sql(0))
         });
@@ -334,9 +312,7 @@ fn bench_profiler_workflow(c: &mut Criterion) {
     group.bench_function("full_memory_report", |b| {
         let profiler = MemoryProfiler::new();
 
-        b.iter(|| {
-            black_box(profiler.report())
-        });
+        b.iter(|| black_box(profiler.report()));
     });
 
     group.bench_function("with_profiling_wrapper", |b| {
@@ -451,4 +427,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

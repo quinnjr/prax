@@ -1,13 +1,13 @@
 //! Benchmarks for query operations and SQL generation.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_query::{
     filter::{Filter, FilterValue, ScalarFilter},
     raw::Sql,
     sql::SqlBuilder,
     types::{OrderBy, OrderByField, Select},
 };
+use std::hint::black_box;
 
 // ============================================================================
 // Filter Creation Benchmarks

@@ -2,11 +2,11 @@
 //! Benchmarks for query builder operations.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_query::filter::{Filter, FilterValue, ScalarFilter};
 use prax_query::raw::Sql;
 use prax_query::sql::{DatabaseType, FastSqlBuilder, QueryCapacity, templates};
 use prax_query::types::{NullsOrder, OrderBy, OrderByField};
+use std::hint::black_box;
 
 /// Benchmark filter construction.
 fn bench_filter_construction(c: &mut Criterion) {

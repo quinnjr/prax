@@ -34,8 +34,11 @@
 - 🔗 **Relations** - Eager and lazy loading with `include` and `select`
 - 📦 **Migrations** - Schema diffing, SQL generation, and migration tracking
 - 🛠️ **Code Generation** - Proc-macros for compile-time model generation
-- 🗄️ **Multi-Database** - PostgreSQL, MySQL, and SQLite support
+- 🗄️ **Multi-Database** - PostgreSQL, MySQL, SQLite, MSSQL, MongoDB, DuckDB, ScyllaDB
+- 🧠 **Vector Search** - pgvector integration for AI/ML embeddings and similarity search
 - 🔌 **Framework Integration** - First-class support for [Armature](https://github.com/pegasusheavy/armature), Axum, and Actix-web
+- 🏢 **Multi-Tenancy** - Row-level security, schema-based, and database-based isolation
+- 📥 **Schema Import** - Migrate from Prisma, Diesel, or SeaORM
 
 ## Installation
 
@@ -43,7 +46,7 @@ Add Prax ORM to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-prax-orm = "0.3"
+prax-orm = "0.6"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -51,22 +54,31 @@ For specific database backends:
 
 ```toml
 # PostgreSQL (default)
-prax-orm = { version = "0.3", features = ["postgres"] }
+prax-orm = { version = "0.6", features = ["postgres"] }
 
 # MySQL
-prax-orm = { version = "0.3", features = ["mysql"] }
+prax-orm = { version = "0.6", features = ["mysql"] }
 
 # SQLite
-prax-orm = { version = "0.3", features = ["sqlite"] }
+prax-orm = { version = "0.6", features = ["sqlite"] }
+
+# MSSQL
+prax-mssql = "0.6"
+
+# MongoDB
+prax-mongodb = "0.6"
 
 # DuckDB (analytics)
-prax-orm = { version = "0.3", features = ["duckdb"] }
+prax-duckdb = "0.6"
 
 # ScyllaDB (high-performance Cassandra-compatible)
-prax-scylladb = "0.3"
+prax-scylladb = "0.6"
+
+# pgvector (AI/ML vector search)
+prax-pgvector = "0.6"
 
 # Armature framework integration
-prax-armature = "0.3"
+prax-armature = "0.6"
 ```
 
 ## Quick Start
@@ -269,6 +281,40 @@ let grouped = client
     .await?;
 ```
 
+### Vector Similarity Search (pgvector)
+
+```rust
+use prax_pgvector::prelude::*;
+
+// Create an embedding from your ML model output
+let query = Embedding::new(vec![0.1, 0.2, 0.3, /* ... */]);
+
+// Find the 10 most similar documents
+let search = VectorSearchBuilder::new("documents", "embedding")
+    .query(query)
+    .metric(DistanceMetric::Cosine)
+    .limit(10)
+    .build();
+
+// Hybrid search: combine vector similarity with full-text search
+let hybrid = HybridSearchBuilder::new("documents")
+    .vector_column("embedding")
+    .text_column("body")
+    .query_vector(Embedding::new(vec![0.1, 0.2, 0.3]))
+    .query_text("machine learning")
+    .vector_weight(0.7)
+    .text_weight(0.3)
+    .limit(10)
+    .build();
+
+// Manage HNSW indexes
+let index = VectorIndex::hnsw("idx_doc_embedding", "documents", "embedding")
+    .metric(DistanceMetric::Cosine)
+    .config(HnswConfig::high_recall())
+    .concurrent()
+    .build()?;
+```
+
 ## Architecture
 
 Prax ORM is organized as a workspace of focused crates:
@@ -277,13 +323,18 @@ Prax ORM is organized as a workspace of focused crates:
 prax-orm/
 ├── prax-schema/         # Schema parser and AST
 ├── prax-codegen/        # Proc-macro crate for code generation
-├── prax-query/          # Query builder implementation
+├── prax-query/          # Query builder + optimizations
 ├── prax-postgres/       # PostgreSQL (tokio-postgres) engine
 ├── prax-mysql/          # MySQL (mysql_async) engine
 ├── prax-sqlite/         # SQLite (rusqlite) engine
+├── prax-mssql/          # MSSQL (tiberius) engine
+├── prax-mongodb/        # MongoDB engine
 ├── prax-duckdb/         # DuckDB analytical engine
 ├── prax-scylladb/       # ScyllaDB (Cassandra-compatible) engine
+├── prax-pgvector/       # pgvector integration (embeddings, vector search)
+├── prax-sqlx/           # SQLx backend with compile-time checks
 ├── prax-migrate/        # Migration engine
+├── prax-import/         # Import from Prisma/Diesel/SeaORM
 ├── prax-cli/            # CLI tool (prax-orm-cli)
 ├── prax-armature/       # Armature framework integration
 ├── prax-axum/           # Axum framework integration
@@ -331,8 +382,9 @@ prax db pull
 | Fluent API | ✅ | ❌ | ✅ | ❌ |
 | Multi-Tenancy | ✅ | ❌ | ❌ | ❌ |
 | Built-in Caching | ✅ | ❌ | ❌ | ❌ |
-| DuckDB Support | ✅ | ❌ | ❌ | ❌ |
-| ScyllaDB Support | ✅ | ❌ | ❌ | ❌ |
+| Vector Search (pgvector) | ✅ | ❌ | ❌ | ❌ |
+| Schema Import | ✅ | ❌ | ❌ | ❌ |
+| 7+ Database Backends | ✅ | ❌ | ❌ | ❌ |
 
 ## Contributing
 
@@ -347,7 +399,7 @@ Licensed under either of:
 
 at your option.
 
-Copyright (c) 2025 Pegasus Heavy Industries LLC
+Copyright (c) 2025-2026 Pegasus Heavy Industries LLC
 
 ## Acknowledgments
 

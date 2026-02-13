@@ -7,14 +7,14 @@
 //!
 //! For benchmarks with real database connections, see the integration tests.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::{
     filter::{Filter, FilterValue},
     sql::{DatabaseType, SqlBuilder},
     types::{OrderByField, Select},
 };
 use std::borrow::Cow;
+use std::hint::black_box;
 
 // ============================================================================
 // Multi-Database SQL Generation Benchmarks
@@ -85,9 +85,7 @@ fn bench_postgres_specific(c: &mut Criterion) {
         b.iter(|| {
             let mut builder = SqlBuilder::postgres();
             builder.push("SELECT * FROM users WHERE metadata @> ");
-            builder.push_param(FilterValue::Json(
-                serde_json::json!({"role": "admin"}),
-            ));
+            builder.push_param(FilterValue::Json(serde_json::json!({"role": "admin"})));
             black_box(builder.build())
         });
     });
@@ -180,7 +178,8 @@ fn bench_mysql_specific(c: &mut Criterion) {
             builder.push_param(FilterValue::String("test@example.com".into()));
             builder.push(", ");
             builder.push_param(FilterValue::String("Test User".into()));
-            builder.push(", NOW()) ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = NOW()");
+            builder
+                .push(", NOW()) ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = NOW()");
             black_box(builder.build())
         });
     });
@@ -299,7 +298,9 @@ fn bench_mssql_style(c: &mut Criterion) {
             builder.push_param(FilterValue::String("Test User".into()));
             builder.push(" AS name) AS source ON target.email = source.email ");
             builder.push("WHEN MATCHED THEN UPDATE SET name = source.name ");
-            builder.push("WHEN NOT MATCHED THEN INSERT (email, name) VALUES (source.email, source.name);");
+            builder.push(
+                "WHEN NOT MATCHED THEN INSERT (email, name) VALUES (source.email, source.name);",
+            );
             black_box(builder.build())
         });
     });
@@ -308,7 +309,8 @@ fn bench_mssql_style(c: &mut Criterion) {
     group.bench_function("string_agg", |b| {
         b.iter(|| {
             let mut builder = SqlBuilder::postgres();
-            builder.push("SELECT user_id, STRING_AGG(tag, ', ') WITHIN GROUP (ORDER BY tag) as tags ");
+            builder
+                .push("SELECT user_id, STRING_AGG(tag, ', ') WITHIN GROUP (ORDER BY tag) as tags ");
             builder.push("FROM user_tags WHERE user_id IN (");
             for i in 0..5 {
                 if i > 0 {
@@ -340,7 +342,10 @@ fn bench_complex_queries(c: &mut Criterion) {
                     Filter::Contains("email".into(), FilterValue::String("@company.com".into())),
                     Filter::Equals("role".into(), FilterValue::String("admin".into())),
                 ]),
-                Filter::Gte("created_at".into(), FilterValue::String("2024-01-01".into())),
+                Filter::Gte(
+                    "created_at".into(),
+                    FilterValue::String("2024-01-01".into()),
+                ),
                 Filter::IsNotNull("verified_at".into()),
             ]);
 
@@ -377,7 +382,9 @@ fn bench_complex_queries(c: &mut Criterion) {
     group.bench_function("multi_join_query", |b| {
         b.iter(|| {
             let mut builder = SqlBuilder::postgres();
-            builder.push("SELECT u.id, u.email, COUNT(p.id) as post_count, MAX(p.created_at) as last_post ");
+            builder.push(
+                "SELECT u.id, u.email, COUNT(p.id) as post_count, MAX(p.created_at) as last_post ",
+            );
             builder.push("FROM users u ");
             builder.push("LEFT JOIN posts p ON p.user_id = u.id AND p.status = ");
             builder.push_param(FilterValue::String("published".into()));
@@ -482,4 +489,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

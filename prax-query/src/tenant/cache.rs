@@ -56,8 +56,8 @@ impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 10_000,
-            ttl: Duration::from_secs(300),           // 5 minutes
-            negative_ttl: Duration::from_secs(60),   // 1 minute
+            ttl: Duration::from_secs(300),         // 5 minutes
+            negative_ttl: Duration::from_secs(60), // 1 minute
             background_refresh: true,
             refresh_threshold: 0.8,
             enable_metrics: true,
@@ -564,9 +564,10 @@ impl ShardedTenantCache {
 
     /// Get the shard for a tenant ID.
     fn shard(&self, tenant_id: &TenantId) -> &TenantCache {
-        let hash = tenant_id.as_str().bytes().fold(0u64, |acc, b| {
-            acc.wrapping_mul(31).wrapping_add(b as u64)
-        });
+        let hash = tenant_id
+            .as_str()
+            .bytes()
+            .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
         &self.shards[(hash as usize) % self.shard_count]
     }
 
@@ -754,4 +755,3 @@ mod tests {
         assert!(result2.is_some());
     }
 }
-

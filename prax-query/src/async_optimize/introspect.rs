@@ -222,9 +222,17 @@ pub struct IntrospectionError {
 impl std::fmt::Display for IntrospectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.is_timeout {
-            write!(f, "Timeout introspecting table '{}': {}", self.table, self.message)
+            write!(
+                f,
+                "Timeout introspecting table '{}': {}",
+                self.table, self.message
+            )
         } else {
-            write!(f, "Error introspecting table '{}': {}", self.table, self.message)
+            write!(
+                f,
+                "Error introspecting table '{}': {}",
+                self.table, self.message
+            )
         }
     }
 }
@@ -544,7 +552,11 @@ pub mod queries {
     use crate::sql::DatabaseType;
 
     /// Generate SQL to fetch all columns for multiple tables at once.
-    pub fn batch_columns_query(db_type: DatabaseType, tables: &[&str], schema: Option<&str>) -> String {
+    pub fn batch_columns_query(
+        db_type: DatabaseType,
+        tables: &[&str],
+        schema: Option<&str>,
+    ) -> String {
         let schema_name = schema.unwrap_or("public");
         let table_list = tables
             .iter()
@@ -611,7 +623,11 @@ pub mod queries {
     }
 
     /// Generate SQL to fetch all indexes for multiple tables at once.
-    pub fn batch_indexes_query(db_type: DatabaseType, tables: &[&str], schema: Option<&str>) -> String {
+    pub fn batch_indexes_query(
+        db_type: DatabaseType,
+        tables: &[&str],
+        schema: Option<&str>,
+    ) -> String {
         let schema_name = schema.unwrap_or("public");
         let table_list = tables
             .iter()
@@ -666,7 +682,11 @@ pub mod queries {
     }
 
     /// Generate SQL to fetch all foreign keys for multiple tables at once.
-    pub fn batch_foreign_keys_query(db_type: DatabaseType, tables: &[&str], schema: Option<&str>) -> String {
+    pub fn batch_foreign_keys_query(
+        db_type: DatabaseType,
+        tables: &[&str],
+        schema: Option<&str>,
+    ) -> String {
         let schema_name = schema.unwrap_or("public");
         let table_list = tables
             .iter()
@@ -743,7 +763,11 @@ mod tests {
         let config = IntrospectionConfig::default().with_max_concurrency(4);
         let introspector = ConcurrentIntrospector::new(config);
 
-        let tables = vec!["users".to_string(), "posts".to_string(), "comments".to_string()];
+        let tables = vec![
+            "users".to_string(),
+            "posts".to_string(),
+            "comments".to_string(),
+        ];
 
         let result = introspector
             .introspect_tables(tables, |name| async move {
@@ -831,4 +855,3 @@ mod tests {
         assert!(sql.contains("'users', 'posts'"));
     }
 }
-

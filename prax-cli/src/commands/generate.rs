@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use crate::cli::GenerateArgs;
-use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_NAME};
+use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_PATH};
 use crate::error::{CliError, CliResult};
 use crate::output::{self, success};
 
@@ -25,7 +25,7 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
     let schema_path = args
         .schema
         .clone()
-        .unwrap_or_else(|| cwd.join(SCHEMA_FILE_NAME));
+        .unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
     if !schema_path.exists() {
         return Err(
             CliError::Config(format!("Schema file not found: {}", schema_path.display())).into(),
@@ -86,23 +86,17 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
     Ok(())
 }
 
-/// Parse the schema file
+/// Parse and validate the schema file
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    prax_schema::parse_schema(content)
-        .map_err(|e| CliError::Schema(format!("Failed to parse schema: {}", e)))
+    // Use validate_schema to ensure field types are properly resolved
+    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
+    prax_schema::validate_schema(content)
+        .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
 }
 
-/// Validate the schema
-fn validate_schema(schema: &prax_schema::Schema) -> CliResult<()> {
-    // Run schema validation using the Validator
-    let mut validator = prax_schema::Validator::new();
-    // Re-validate by cloning (validator takes ownership)
-    if let Err(e) = validator.validate(schema.clone()) {
-        return Err(CliError::Validation(format!(
-            "Schema validation failed: {}",
-            e
-        )));
-    }
+/// Validate the schema (now a no-op since parse_schema does validation)
+fn validate_schema(_schema: &prax_schema::Schema) -> CliResult<()> {
+    // Validation is now done in parse_schema via validate_schema()
     Ok(())
 }
 

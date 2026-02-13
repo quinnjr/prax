@@ -155,7 +155,8 @@ impl<'a> JsonPathRef<'a> {
     /// Add a field access segment (borrowed).
     #[inline]
     pub fn field(mut self, name: &'a str) -> Self {
-        self.segments.push(PathSegmentRef::Field(Cow::Borrowed(name)));
+        self.segments
+            .push(PathSegmentRef::Field(Cow::Borrowed(name)));
         self
     }
 
@@ -485,8 +486,7 @@ impl<'a> WindowSpecRef<'a> {
     /// Add order by column descending (borrowed).
     #[inline]
     pub fn order_by_desc(mut self, column: &'a str) -> Self {
-        self.order_by
-            .push((Cow::Borrowed(column), SortOrder::Desc));
+        self.order_by.push((Cow::Borrowed(column), SortOrder::Desc));
         self
     }
 
@@ -544,7 +544,9 @@ impl<'a> WindowSpecRef<'a> {
 
     /// Check if this spec uses only borrowed data.
     pub fn is_zero_copy(&self) -> bool {
-        self.partition_by.iter().all(|c| matches!(c, Cow::Borrowed(_)))
+        self.partition_by
+            .iter()
+            .all(|c| matches!(c, Cow::Borrowed(_)))
             && self
                 .order_by
                 .iter()
@@ -878,12 +880,7 @@ impl<'a> WithClauseRef<'a> {
     }
 
     /// Build a complete SELECT query with this WITH clause.
-    pub fn build_select(
-        &self,
-        columns: &[&str],
-        from: &str,
-        db_type: DatabaseType,
-    ) -> String {
+    pub fn build_select(&self, columns: &[&str], from: &str, db_type: DatabaseType) -> String {
         let with_sql = self.to_sql(db_type);
         let cols = if columns.is_empty() || columns == ["*"] {
             "*".to_string()
@@ -922,7 +919,10 @@ mod tests {
 
     #[test]
     fn test_json_path_ref_with_index() {
-        let path = JsonPathRef::new("items").field("products").index(0).field("name");
+        let path = JsonPathRef::new("items")
+            .field("products")
+            .index(0)
+            .field("name");
 
         let sql = path.to_sql(DatabaseType::PostgreSQL);
         assert!(sql.contains("products"));
@@ -1026,6 +1026,3 @@ mod tests {
         assert!(sql.contains("$.settings.theme"));
     }
 }
-
-
-

@@ -144,4 +144,3 @@ mod tests {
         assert_eq!(config.default_keyspace(), Some("my_keyspace"));
     }
 }
-

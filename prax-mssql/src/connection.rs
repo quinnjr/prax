@@ -303,4 +303,3 @@ impl<'a> Drop for MssqlTransaction<'a> {
 mod tests {
     // Connection tests require integration testing with a real SQL Server
 }
-

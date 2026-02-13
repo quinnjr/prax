@@ -2,14 +2,14 @@
 //!
 //! Run with: `cargo bench --package prax-query --bench mem_optimize_bench`
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::hint::black_box;
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::mem_optimize::{
     arena::QueryArena,
-    interning::{GlobalInterner, ScopedInterner, IdentifierCache},
+    interning::{GlobalInterner, IdentifierCache, ScopedInterner},
     lazy::LazySchema,
 };
 use std::collections::HashMap;
+use std::hint::black_box;
 
 // ============================================================================
 // String Interning Benchmarks
@@ -129,9 +129,7 @@ fn bench_arena_allocation(c: &mut Criterion) {
     group.bench_function("simple_filter", |b| {
         let arena = QueryArena::new();
         b.iter(|| {
-            let sql = arena.scope(|scope| {
-                scope.build_select("users", scope.eq("id", 42))
-            });
+            let sql = arena.scope(|scope| scope.build_select("users", scope.eq("id", 42)));
             black_box(sql);
         });
     });
@@ -142,10 +140,7 @@ fn bench_arena_allocation(c: &mut Criterion) {
             let sql = arena.scope(|scope| {
                 let filter = scope.and(vec![
                     scope.eq("active", true),
-                    scope.or(vec![
-                        scope.gt("age", 18),
-                        scope.is_not_null("verified_at"),
-                    ]),
+                    scope.or(vec![scope.gt("age", 18), scope.is_not_null("verified_at")]),
                     scope.is_in("status", vec!["pending".into(), "active".into()]),
                 ]);
                 scope.build_select("users", filter)
@@ -157,9 +152,7 @@ fn bench_arena_allocation(c: &mut Criterion) {
     group.bench_function("reuse_arena", |b| {
         let mut arena = QueryArena::with_capacity(4096);
         b.iter(|| {
-            let sql = arena.scope(|scope| {
-                scope.build_select("users", scope.eq("id", 1))
-            });
+            let sql = arena.scope(|scope| scope.build_select("users", scope.eq("id", 1)));
             arena.reset();
             black_box(sql);
         });
@@ -374,4 +367,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

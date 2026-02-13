@@ -39,8 +39,8 @@
 use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use super::context::TenantId;
@@ -274,7 +274,8 @@ impl AtomicPoolStats {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
 
         let wait_ms = wait_time.as_millis() as u64;
-        self.total_wait_time_ms.fetch_add(wait_ms, Ordering::Relaxed);
+        self.total_wait_time_ms
+            .fetch_add(wait_ms, Ordering::Relaxed);
 
         // Update max wait time (lock-free)
         let mut current = self.max_wait_time_ms.load(Ordering::Relaxed);
@@ -618,11 +619,7 @@ impl TenantPoolManagerBuilder {
 
     /// Use shared pool strategy.
     pub fn shared(self, max_connections: usize) -> Self {
-        self.config(
-            PoolConfig::builder()
-                .shared(max_connections)
-                .build(),
-        )
+        self.config(PoolConfig::builder().shared(max_connections).build())
     }
 
     /// Use per-tenant strategy.
@@ -675,8 +672,7 @@ mod tests {
 
     #[test]
     fn test_lru_cache() {
-        let cache: TenantLruCache<String, i32> =
-            TenantLruCache::new(3, Duration::from_secs(60));
+        let cache: TenantLruCache<String, i32> = TenantLruCache::new(3, Duration::from_secs(60));
 
         cache.insert("a".to_string(), 1);
         cache.insert("b".to_string(), 2);
@@ -695,8 +691,7 @@ mod tests {
 
     #[test]
     fn test_tenant_pool_entry() {
-        let entry = TenantPoolEntry::new(TenantId::new("test"))
-            .with_schema("tenant_test");
+        let entry = TenantPoolEntry::new(TenantId::new("test")).with_schema("tenant_test");
 
         assert_eq!(entry.schema, Some("tenant_test".to_string()));
         assert_eq!(entry.state, PoolState::Initializing);
@@ -704,9 +699,7 @@ mod tests {
 
     #[test]
     fn test_pool_manager_creation() {
-        let manager = TenantPoolManager::builder()
-            .per_tenant(100, 5)
-            .build();
+        let manager = TenantPoolManager::builder().per_tenant(100, 5).build();
 
         assert_eq!(manager.active_pools(), 0);
 
@@ -719,4 +712,3 @@ mod tests {
         assert_eq!(manager.active_pools(), 1);
     }
 }
-

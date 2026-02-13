@@ -668,10 +668,7 @@ pub struct ProcedureDiffer;
 
 impl ProcedureDiffer {
     /// Compute the diff between two sets of procedures.
-    pub fn diff(
-        from: &[ProcedureDefinition],
-        to: &[ProcedureDefinition],
-    ) -> ProcedureDiff {
+    pub fn diff(from: &[ProcedureDefinition], to: &[ProcedureDefinition]) -> ProcedureDiff {
         let mut diff = ProcedureDiff::default();
 
         let from_map: HashMap<_, _> = from.iter().map(|p| (p.qualified_name(), p)).collect();
@@ -709,10 +706,7 @@ impl ProcedureDiffer {
     }
 
     /// Compute trigger diff.
-    pub fn diff_triggers(
-        from: &[TriggerDefinition],
-        to: &[TriggerDefinition],
-    ) -> ProcedureDiff {
+    pub fn diff_triggers(from: &[TriggerDefinition], to: &[TriggerDefinition]) -> ProcedureDiff {
         let mut diff = ProcedureDiff::default();
 
         let from_map: HashMap<_, _> = from.iter().map(|t| (t.qualified_name(), t)).collect();
@@ -819,7 +813,11 @@ impl ProcedureSqlGenerator {
 
     /// Generate DROP FUNCTION/PROCEDURE SQL.
     pub fn drop_procedure(&self, proc: &ProcedureDefinition) -> String {
-        let obj_type = if proc.is_function { "FUNCTION" } else { "PROCEDURE" };
+        let obj_type = if proc.is_function {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
         let name = proc.qualified_name();
 
         match self.db_type {
@@ -868,9 +866,7 @@ impl ProcedureSqlGenerator {
                     self.create_mysql_procedure(&diff.new)
                 )
             }
-            DatabaseType::SQLite => {
-                self.create_sqlite_udf(&diff.new)
-            }
+            DatabaseType::SQLite => self.create_sqlite_udf(&diff.new),
             DatabaseType::MSSQL => {
                 // MSSQL uses ALTER
                 self.alter_mssql_procedure(&diff.new)
@@ -913,10 +909,19 @@ impl ProcedureSqlGenerator {
     fn create_postgres_procedure(&self, proc: &ProcedureDefinition) -> String {
         let mut sql = String::new();
 
-        let obj_type = if proc.is_function { "FUNCTION" } else { "PROCEDURE" };
+        let obj_type = if proc.is_function {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
         let or_replace = if proc.or_replace { "OR REPLACE " } else { "" };
 
-        sql.push_str(&format!("CREATE {}{}  {} (", or_replace, obj_type, proc.qualified_name()));
+        sql.push_str(&format!(
+            "CREATE {}{}  {} (",
+            or_replace,
+            obj_type,
+            proc.qualified_name()
+        ));
 
         // Parameters
         let params: Vec<String> = proc
@@ -1004,10 +1009,7 @@ impl ProcedureSqlGenerator {
             ""
         };
 
-        sql.push_str(&format!(
-            "CREATE {}TRIGGER {}\n",
-            or_replace, trigger.name
-        ));
+        sql.push_str(&format!("CREATE {}TRIGGER {}\n", or_replace, trigger.name));
 
         // Timing
         sql.push_str(&format!("{} ", trigger.timing.to_sql()));
@@ -1042,7 +1044,11 @@ impl ProcedureSqlGenerator {
     fn create_mysql_procedure(&self, proc: &ProcedureDefinition) -> String {
         let mut sql = String::new();
 
-        let obj_type = if proc.is_function { "FUNCTION" } else { "PROCEDURE" };
+        let obj_type = if proc.is_function {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
 
         // MySQL doesn't support CREATE OR REPLACE for procedures
         sql.push_str(&format!("CREATE {} {} (", obj_type, proc.qualified_name()));
@@ -1163,7 +1169,11 @@ impl ProcedureSqlGenerator {
     fn create_mssql_procedure(&self, proc: &ProcedureDefinition) -> String {
         let mut sql = String::new();
 
-        let obj_type = if proc.is_function { "FUNCTION" } else { "PROCEDURE" };
+        let obj_type = if proc.is_function {
+            "FUNCTION"
+        } else {
+            "PROCEDURE"
+        };
 
         sql.push_str(&format!("CREATE {} {} (", obj_type, proc.qualified_name()));
 
@@ -1199,7 +1209,8 @@ impl ProcedureSqlGenerator {
 
     fn alter_mssql_procedure(&self, proc: &ProcedureDefinition) -> String {
         // Change CREATE to ALTER
-        self.create_mssql_procedure(proc).replacen("CREATE", "ALTER", 1)
+        self.create_mssql_procedure(proc)
+            .replacen("CREATE", "ALTER", 1)
     }
 
     fn create_mssql_trigger(&self, trigger: &TriggerDefinition) -> String {
@@ -1260,7 +1271,10 @@ impl ProcedureSqlGenerator {
         // Drop triggers
         for name in &diff.drop_triggers {
             up.push(format!("DROP TRIGGER IF EXISTS {};", name));
-            down.push(format!("-- Recreate trigger {} (original definition needed)", name));
+            down.push(format!(
+                "-- Recreate trigger {} (original definition needed)",
+                name
+            ));
         }
 
         // Alter triggers
@@ -1365,8 +1379,7 @@ impl ProcedureStore {
     /// Load from file as TOML.
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        toml::from_str(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        toml::from_str(&content).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 
     /// Add an event.
@@ -1839,9 +1852,17 @@ impl JobSchedule {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ScheduleFrequency {
     Once,
-    Daily { every_n_days: u32 },
-    Weekly { every_n_weeks: u32, days: Vec<Weekday> },
-    Monthly { every_n_months: u32, day_of_month: u32 },
+    Daily {
+        every_n_days: u32,
+    },
+    Weekly {
+        every_n_weeks: u32,
+        days: Vec<Weekday>,
+    },
+    Monthly {
+        every_n_months: u32,
+        day_of_month: u32,
+    },
     OnIdle,
     OnAgentStart,
 }
@@ -1864,9 +1885,7 @@ impl ScheduleFrequency {
         match self {
             Self::Once => 0,
             Self::Daily { every_n_days } => *every_n_days,
-            Self::Weekly { days, .. } => {
-                days.iter().map(|d| d.bitmask()).fold(0, |acc, m| acc | m)
-            }
+            Self::Weekly { days, .. } => days.iter().map(|d| d.bitmask()).fold(0, |acc, m| acc | m),
             Self::Monthly { day_of_month, .. } => *day_of_month,
             Self::OnIdle | Self::OnAgentStart => 0,
         }
@@ -2090,12 +2109,17 @@ impl ProcedureSqlGenerator {
     fn create_mysql_event(&self, event: &ScheduledEvent) -> String {
         let mut sql = String::new();
 
-        sql.push_str(&format!("CREATE EVENT IF NOT EXISTS {}\n", event.qualified_name()));
+        sql.push_str(&format!(
+            "CREATE EVENT IF NOT EXISTS {}\n",
+            event.qualified_name()
+        ));
 
         // Schedule
         match &event.schedule {
             EventSchedule::Once => sql.push_str("ON SCHEDULE AT CURRENT_TIMESTAMP\n"),
-            EventSchedule::At(datetime) => sql.push_str(&format!("ON SCHEDULE AT '{}'\n", datetime)),
+            EventSchedule::At(datetime) => {
+                sql.push_str(&format!("ON SCHEDULE AT '{}'\n", datetime))
+            }
             EventSchedule::Every(interval) => {
                 sql.push_str(&format!("ON SCHEDULE EVERY {}\n", interval.to_mysql()));
                 if let Some(ref starts) = event.starts {
@@ -2159,7 +2183,10 @@ impl ProcedureSqlGenerator {
             sql.push_str("EXEC msdb.dbo.sp_add_jobstep\n");
             sql.push_str(&format!("    @job_name = N'{}',\n", job.name));
             sql.push_str(&format!("    @step_name = N'{}',\n", step.name));
-            sql.push_str(&format!("    @subsystem = N'{}',\n", step.step_type.subsystem()));
+            sql.push_str(&format!(
+                "    @subsystem = N'{}',\n",
+                step.step_type.subsystem()
+            ));
             sql.push_str(&format!(
                 "    @command = N'{}',\n",
                 step.command.replace('\'', "''")
@@ -2178,7 +2205,10 @@ impl ProcedureSqlGenerator {
                 step.on_failure.action_id()
             ));
             sql.push_str(&format!("    @retry_attempts = {},\n", step.retry_attempts));
-            sql.push_str(&format!("    @retry_interval = {};\n\n", step.retry_interval));
+            sql.push_str(&format!(
+                "    @retry_interval = {};\n\n",
+                step.retry_interval
+            ));
         }
 
         // Add schedules
@@ -2392,12 +2422,11 @@ mod tests {
     fn test_sql_agent_job() {
         let job = SqlAgentJob::new("nightly_backup")
             .description("Nightly database backup")
-            .tsql_step("Backup", "BACKUP DATABASE mydb TO DISK = 'C:\\backups\\mydb.bak'")
-            .schedule(
-                JobSchedule::new("daily_2am")
-                    .daily(1)
-                    .at("02:00:00")
-            );
+            .tsql_step(
+                "Backup",
+                "BACKUP DATABASE mydb TO DISK = 'C:\\backups\\mydb.bak'",
+            )
+            .schedule(JobSchedule::new("daily_2am").daily(1).at("02:00:00"));
 
         assert_eq!(job.name, "nightly_backup");
         assert_eq!(job.steps.len(), 1);
@@ -2408,8 +2437,7 @@ mod tests {
     fn test_sql_agent_job_sql() {
         let generator = ProcedureSqlGenerator::new(DatabaseType::MSSQL);
 
-        let job = SqlAgentJob::new("test_job")
-            .tsql_step("Step1", "SELECT 1");
+        let job = SqlAgentJob::new("test_job").tsql_step("Step1", "SELECT 1");
 
         let sql = generator.create_sql_agent_job(&job);
         assert!(sql.contains("sp_add_job"));
@@ -2425,7 +2453,9 @@ mod tests {
 
         assert_eq!(trigger.name, "on_user_create");
         assert!(trigger.full_document);
-        assert!(matches!(trigger.trigger_type, AtlasTriggerType::Database { .. }));
+        assert!(matches!(
+            trigger.trigger_type,
+            AtlasTriggerType::Database { .. }
+        ));
     }
 }
-

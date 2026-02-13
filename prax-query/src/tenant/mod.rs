@@ -147,7 +147,7 @@ pub use prepared::{
 };
 pub use rls::{PolicyCommand, RlsConfig, RlsManager, RlsManagerBuilder, RlsPolicy, TenantGuard};
 pub use task_local::{
-    current_tenant, current_tenant_id, has_tenant, require_tenant, set_sync_tenant, sync_tenant_id,
-    with_context, with_current_tenant, with_tenant, CompositeExtractor, HeaderExtractor,
-    JwtClaimExtractor, SyncTenantGuard, TenantExtractor, TenantNotSetError, TenantScope,
+    CompositeExtractor, HeaderExtractor, JwtClaimExtractor, SyncTenantGuard, TenantExtractor,
+    TenantNotSetError, TenantScope, current_tenant, current_tenant_id, has_tenant, require_tenant,
+    set_sync_tenant, sync_tenant_id, with_context, with_current_tenant, with_tenant,
 };

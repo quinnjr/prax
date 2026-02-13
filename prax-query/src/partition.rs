@@ -137,11 +137,7 @@ pub struct RangePartitionDef {
 
 impl RangePartitionDef {
     /// Create a new range partition definition.
-    pub fn new(
-        name: impl Into<String>,
-        from: RangeBound,
-        to: RangeBound,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, from: RangeBound, to: RangeBound) -> Self {
         Self {
             name: name.into(),
             from,
@@ -170,7 +166,10 @@ pub struct ListPartitionDef {
 
 impl ListPartitionDef {
     /// Create a new list partition definition.
-    pub fn new(name: impl Into<String>, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        values: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
             name: name.into(),
             values: values.into_iter().map(Into::into).collect(),
@@ -415,7 +414,8 @@ impl Partition {
 
                 // Create partition scheme
                 let scheme_name = format!("{}_ps", self.table);
-                let filegroups: Vec<String> = ranges.iter().map(|_| "PRIMARY".to_string()).collect();
+                let filegroups: Vec<String> =
+                    ranges.iter().map(|_| "PRIMARY".to_string()).collect();
                 sqls.push(format!(
                     "CREATE PARTITION SCHEME {}\nAS PARTITION {}\nTO ({});",
                     scheme_name,
@@ -572,13 +572,9 @@ impl PartitionBuilder {
     }
 
     /// Add a range partition.
-    pub fn add_range(
-        mut self,
-        name: impl Into<String>,
-        from: RangeBound,
-        to: RangeBound,
-    ) -> Self {
-        self.range_partitions.push(RangePartitionDef::new(name, from, to));
+    pub fn add_range(mut self, name: impl Into<String>, from: RangeBound, to: RangeBound) -> Self {
+        self.range_partitions
+            .push(RangePartitionDef::new(name, from, to));
         self
     }
 
@@ -590,9 +586,8 @@ impl PartitionBuilder {
         to: RangeBound,
         tablespace: impl Into<String>,
     ) -> Self {
-        self.range_partitions.push(
-            RangePartitionDef::new(name, from, to).tablespace(tablespace),
-        );
+        self.range_partitions
+            .push(RangePartitionDef::new(name, from, to).tablespace(tablespace));
         self
     }
 
@@ -602,13 +597,15 @@ impl PartitionBuilder {
         name: impl Into<String>,
         values: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
-        self.list_partitions.push(ListPartitionDef::new(name, values));
+        self.list_partitions
+            .push(ListPartitionDef::new(name, values));
         self
     }
 
     /// Add a hash partition.
     pub fn add_hash(mut self, name: impl Into<String>, modulus: u32, remainder: u32) -> Self {
-        self.hash_partitions.push(HashPartitionDef::new(name, modulus, remainder));
+        self.hash_partitions
+            .push(HashPartitionDef::new(name, modulus, remainder));
         self
     }
 
@@ -616,11 +613,8 @@ impl PartitionBuilder {
     pub fn add_hash_partitions(mut self, count: u32, name_prefix: impl Into<String>) -> Self {
         let prefix = name_prefix.into();
         for i in 0..count {
-            self.hash_partitions.push(HashPartitionDef::new(
-                format!("{}_{}", prefix, i),
-                count,
-                i,
-            ));
+            self.hash_partitions
+                .push(HashPartitionDef::new(format!("{}_{}", prefix, i), count, i));
         }
         self
     }
@@ -700,9 +694,7 @@ pub mod time_partitions {
         start_month: u32,
         count: u32,
     ) -> PartitionBuilder {
-        let mut builder = Partition::builder(table)
-            .range_partition()
-            .column(column);
+        let mut builder = Partition::builder(table).range_partition().column(column);
 
         let mut year = start_year;
         let mut month = start_month;
@@ -740,9 +732,7 @@ pub mod time_partitions {
         start_year: i32,
         count: u32,
     ) -> PartitionBuilder {
-        let mut builder = Partition::builder(table)
-            .range_partition()
-            .column(column);
+        let mut builder = Partition::builder(table).range_partition().column(column);
 
         let mut year = start_year;
         let mut quarter = 1;
@@ -781,9 +771,7 @@ pub mod time_partitions {
         start_year: i32,
         count: u32,
     ) -> PartitionBuilder {
-        let mut builder = Partition::builder(table)
-            .range_partition()
-            .column(column);
+        let mut builder = Partition::builder(table).range_partition().column(column);
 
         for i in 0..count {
             let year = start_year + i as i32;
@@ -934,10 +922,7 @@ pub mod mongodb {
         }
 
         /// Get the updateZoneKeyRange command.
-        pub fn update_zone_key_range_command(
-            &self,
-            namespace: &str,
-        ) -> serde_json::Value {
+        pub fn update_zone_key_range_command(&self, namespace: &str) -> serde_json::Value {
             serde_json::json!({
                 "updateZoneKeyRange": namespace,
                 "min": self.min,
@@ -1027,8 +1012,16 @@ mod tests {
             .schema("sales")
             .range_partition()
             .column("created_at")
-            .add_range("orders_2024_q1", RangeBound::date("2024-01-01"), RangeBound::date("2024-04-01"))
-            .add_range("orders_2024_q2", RangeBound::date("2024-04-01"), RangeBound::date("2024-07-01"))
+            .add_range(
+                "orders_2024_q1",
+                RangeBound::date("2024-01-01"),
+                RangeBound::date("2024-04-01"),
+            )
+            .add_range(
+                "orders_2024_q2",
+                RangeBound::date("2024-04-01"),
+                RangeBound::date("2024-07-01"),
+            )
             .build()
             .unwrap();
 
@@ -1042,7 +1035,11 @@ mod tests {
         let partition = Partition::builder("orders")
             .range_partition()
             .column("created_at")
-            .add_range("orders_2024", RangeBound::date("2024-01-01"), RangeBound::date("2025-01-01"))
+            .add_range(
+                "orders_2024",
+                RangeBound::date("2024-01-01"),
+                RangeBound::date("2025-01-01"),
+            )
             .build()
             .unwrap();
 
@@ -1055,7 +1052,11 @@ mod tests {
         let partition = Partition::builder("orders")
             .range_partition()
             .column("created_at")
-            .add_range("orders_2024", RangeBound::date("2024-01-01"), RangeBound::date("2025-01-01"))
+            .add_range(
+                "orders_2024",
+                RangeBound::date("2024-01-01"),
+                RangeBound::date("2025-01-01"),
+            )
             .build()
             .unwrap();
 
@@ -1104,8 +1105,16 @@ mod tests {
         let partition = Partition::builder("orders")
             .range_partition()
             .column("created_at")
-            .add_range("p2024", RangeBound::MinValue, RangeBound::date("2025-01-01"))
-            .add_range("p_future", RangeBound::date("2025-01-01"), RangeBound::MaxValue)
+            .add_range(
+                "p2024",
+                RangeBound::MinValue,
+                RangeBound::date("2025-01-01"),
+            )
+            .add_range(
+                "p_future",
+                RangeBound::date("2025-01-01"),
+                RangeBound::MaxValue,
+            )
             .build()
             .unwrap();
 
@@ -1120,11 +1129,17 @@ mod tests {
         let partition = Partition::builder("orders")
             .range_partition()
             .column("created_at")
-            .add_range("orders_2024", RangeBound::date("2024-01-01"), RangeBound::date("2025-01-01"))
+            .add_range(
+                "orders_2024",
+                RangeBound::date("2024-01-01"),
+                RangeBound::date("2025-01-01"),
+            )
             .build()
             .unwrap();
 
-        let sql = partition.detach_partition_sql("orders_2024", DatabaseType::PostgreSQL).unwrap();
+        let sql = partition
+            .detach_partition_sql("orders_2024", DatabaseType::PostgreSQL)
+            .unwrap();
         assert_eq!(sql, "ALTER TABLE orders DETACH PARTITION orders_2024;");
     }
 
@@ -1133,14 +1148,22 @@ mod tests {
         let partition = Partition::builder("orders")
             .range_partition()
             .column("created_at")
-            .add_range("orders_2024", RangeBound::date("2024-01-01"), RangeBound::date("2025-01-01"))
+            .add_range(
+                "orders_2024",
+                RangeBound::date("2024-01-01"),
+                RangeBound::date("2025-01-01"),
+            )
             .build()
             .unwrap();
 
-        let pg_sql = partition.drop_partition_sql("orders_2024", DatabaseType::PostgreSQL).unwrap();
+        let pg_sql = partition
+            .drop_partition_sql("orders_2024", DatabaseType::PostgreSQL)
+            .unwrap();
         assert_eq!(pg_sql, "DROP TABLE IF EXISTS orders_2024;");
 
-        let mysql_sql = partition.drop_partition_sql("orders_2024", DatabaseType::MySQL).unwrap();
+        let mysql_sql = partition
+            .drop_partition_sql("orders_2024", DatabaseType::MySQL)
+            .unwrap();
         assert!(mysql_sql.contains("DROP PARTITION"));
     }
 
@@ -1223,15 +1246,19 @@ mod tests {
                 .build();
 
             assert_eq!(key.fields.len(), 2);
-            assert_eq!(key.fields[0], ("tenant_id".to_string(), ShardKeyType::Hashed));
-            assert_eq!(key.fields[1], ("created_at".to_string(), ShardKeyType::Range));
+            assert_eq!(
+                key.fields[0],
+                ("tenant_id".to_string(), ShardKeyType::Hashed)
+            );
+            assert_eq!(
+                key.fields[1],
+                ("created_at".to_string(), ShardKeyType::Range)
+            );
         }
 
         #[test]
         fn test_shard_collection_command() {
-            let key = shard_key()
-                .hashed_field("user_id")
-                .build();
+            let key = shard_key().hashed_field("user_id").build();
 
             let cmd = key.shard_collection_command("mydb", "users");
             assert_eq!(cmd["shardCollection"], "mydb.users");
@@ -1241,8 +1268,16 @@ mod tests {
         #[test]
         fn test_zone_sharding() {
             let builder = zone_sharding()
-                .add_zone("US", serde_json::json!({"region": "US"}), serde_json::json!({"region": "US~"}))
-                .add_zone("EU", serde_json::json!({"region": "EU"}), serde_json::json!({"region": "EU~"}))
+                .add_zone(
+                    "US",
+                    serde_json::json!({"region": "US"}),
+                    serde_json::json!({"region": "US~"}),
+                )
+                .add_zone(
+                    "EU",
+                    serde_json::json!({"region": "EU"}),
+                    serde_json::json!({"region": "EU~"}),
+                )
                 .assign_shard("shard0", "US")
                 .assign_shard("shard1", "EU");
 
@@ -1263,7 +1298,3 @@ mod tests {
         }
     }
 }
-
-
-
-

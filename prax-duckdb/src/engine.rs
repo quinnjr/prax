@@ -345,11 +345,7 @@ impl DuckDbEngine {
 
     /// Execute a raw SQL statement and return the number of affected rows.
     #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_execute(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> DuckDbResult<u64> {
+    pub async fn raw_sql_execute(&self, sql: &str, params: &[FilterValue]) -> DuckDbResult<u64> {
         debug!("Executing raw SQL statement");
 
         let conn = self.pool.get().await?;
@@ -360,10 +356,7 @@ impl DuckDbEngine {
 
     /// Execute a raw SQL query using the Sql builder.
     #[instrument(skip(self, sql))]
-    pub async fn raw_sql(
-        &self,
-        sql: prax_query::raw::Sql,
-    ) -> DuckDbResult<Vec<DuckDbQueryResult>> {
+    pub async fn raw_sql(&self, sql: prax_query::raw::Sql) -> DuckDbResult<Vec<DuckDbQueryResult>> {
         let (query_string, params) = sql.build();
         debug!(sql = %query_string, "Executing raw SQL from builder");
         self.execute_raw(&query_string, &params).await
@@ -395,11 +388,7 @@ impl DuckDbEngine {
 
     /// Execute a raw SQL query and return a single scalar value.
     #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_scalar<T>(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> DuckDbResult<T>
+    pub async fn raw_sql_scalar<T>(&self, sql: &str, params: &[FilterValue]) -> DuckDbResult<T>
     where
         T: for<'a> serde::Deserialize<'a>,
     {
@@ -593,4 +582,3 @@ mod tests {
         assert_eq!(count, 3);
     }
 }
-

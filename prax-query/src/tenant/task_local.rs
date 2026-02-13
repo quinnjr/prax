@@ -377,10 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_tenant() {
-        let result = with_tenant("test-tenant", async {
-            current_tenant_id()
-        })
-        .await;
+        let result = with_tenant("test-tenant", async { current_tenant_id() }).await;
 
         assert_eq!(result.unwrap().as_str(), "test-tenant");
     }
@@ -454,5 +451,3 @@ mod tests {
         assert_eq!(id.unwrap().as_str(), "fallback-tenant");
     }
 }
-
-

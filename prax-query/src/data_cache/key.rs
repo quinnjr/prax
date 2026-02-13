@@ -70,11 +70,7 @@ impl CacheKey {
     }
 
     /// Create a key for a relation.
-    pub fn relation<I: Display>(
-        from_entity: &str,
-        from_id: I,
-        relation: &str,
-    ) -> Self {
+    pub fn relation<I: Display>(from_entity: &str, from_id: I, relation: &str) -> Self {
         Self::new(from_entity, format!("rel:{}:{}:{}", from_id, relation, ""))
     }
 
@@ -435,5 +431,3 @@ mod tests {
         assert_ne!(hash1, hash3);
     }
 }
-
-

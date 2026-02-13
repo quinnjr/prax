@@ -39,9 +39,7 @@ impl ScyllaEngine {
         let result = self.pool.execute(cql, values).await?;
 
         let rows = result.rows.unwrap_or_default();
-        rows.into_iter()
-            .map(|row| T::from_row(&row))
-            .collect()
+        rows.into_iter().map(|row| T::from_row(&row)).collect()
     }
 
     /// Execute a query and return a single row.
@@ -72,11 +70,7 @@ impl ScyllaEngine {
     }
 
     /// Execute a query that doesn't return rows (INSERT, UPDATE, DELETE).
-    pub async fn execute(
-        &self,
-        cql: &str,
-        values: impl SerializeRow,
-    ) -> ScyllaResult<()> {
+    pub async fn execute(&self, cql: &str, values: impl SerializeRow) -> ScyllaResult<()> {
         self.pool.execute(cql, values).await?;
         Ok(())
     }
@@ -407,7 +401,10 @@ impl<T: FromScyllaRow> TableQuery<T> {
         where_clause: &str,
         values: V,
     ) -> ScyllaResult<Option<T>> {
-        let cql = format!("SELECT * FROM {} WHERE {} LIMIT 1", self.table, where_clause);
+        let cql = format!(
+            "SELECT * FROM {} WHERE {} LIMIT 1",
+            self.table, where_clause
+        );
         self.engine.query_one(&cql, values).await
     }
 
@@ -422,7 +419,9 @@ impl<T: FromScyllaRow> TableQuery<T> {
         where_clause: &str,
         values: V,
     ) -> ScyllaResult<i64> {
-        self.engine.count(&self.table, Some(where_clause), values).await
+        self.engine
+            .count(&self.table, Some(where_clause), values)
+            .await
     }
 }
 
@@ -443,9 +442,8 @@ mod tests {
         // Test is disabled because ScyllaBatch requires a real connection pool
         // which cannot be zero-initialized (contains Arc, which is non-nullable).
         // This would need a mock or integration test with a real database.
-        
+
         // Verify that the Batch type compiles
         let _ = Batch::default();
     }
 }
-

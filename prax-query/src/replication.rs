@@ -136,12 +136,16 @@ impl ReplicaSetConfig {
 
     /// Get the primary replica.
     pub fn primary(&self) -> Option<&ReplicaConfig> {
-        self.replicas.iter().find(|r| r.role == ReplicaRole::Primary)
+        self.replicas
+            .iter()
+            .find(|r| r.role == ReplicaRole::Primary)
     }
 
     /// Get all secondary replicas.
     pub fn secondaries(&self) -> impl Iterator<Item = &ReplicaConfig> {
-        self.replicas.iter().filter(|r| r.role == ReplicaRole::Secondary)
+        self.replicas
+            .iter()
+            .filter(|r| r.role == ReplicaRole::Secondary)
     }
 
     /// Get replicas in a specific region.
@@ -270,7 +274,11 @@ impl ReadPreference {
     pub fn allows_primary(&self) -> bool {
         matches!(
             self,
-            Self::Primary | Self::PrimaryPreferred | Self::Nearest | Self::Region(_) | Self::TagSet(_)
+            Self::Primary
+                | Self::PrimaryPreferred
+                | Self::Nearest
+                | Self::Region(_)
+                | Self::TagSet(_)
         )
     }
 
@@ -415,7 +423,11 @@ impl ConnectionRouter {
     }
 
     /// Get replica for a query based on query type and read preference.
-    pub fn route(&self, query_type: QueryType, preference: Option<&ReadPreference>) -> QueryResult<&ReplicaConfig> {
+    pub fn route(
+        &self,
+        query_type: QueryType,
+        preference: Option<&ReadPreference>,
+    ) -> QueryResult<&ReplicaConfig> {
         let pref = preference.unwrap_or(&self.config.default_read_preference);
 
         match query_type {
@@ -426,9 +438,10 @@ impl ConnectionRouter {
 
     /// Get the primary replica.
     pub fn get_primary(&self) -> QueryResult<&ReplicaConfig> {
-        let primary_id = self.current_primary.as_ref().ok_or_else(|| {
-            QueryError::connection("No primary replica available")
-        })?;
+        let primary_id = self
+            .current_primary
+            .as_ref()
+            .ok_or_else(|| QueryError::connection("No primary replica available"))?;
 
         self.config
             .replicas
@@ -466,7 +479,9 @@ impl ConnectionRouter {
             .collect();
 
         if secondaries.is_empty() {
-            return Err(QueryError::connection("No healthy secondary replicas available"));
+            return Err(QueryError::connection(
+                "No healthy secondary replicas available",
+            ));
         }
 
         // Round-robin selection
@@ -519,14 +534,17 @@ impl ConnectionRouter {
 
     /// Check if a replica is healthy.
     fn is_replica_healthy(&self, id: &str) -> bool {
-        self.health
-            .get(id)
-            .map(|h| h.is_usable())
-            .unwrap_or(false)
+        self.health.get(id).map(|h| h.is_usable()).unwrap_or(false)
     }
 
     /// Update health status of a replica.
-    pub fn update_health(&mut self, id: &str, status: HealthStatus, latency: Option<Duration>, lag: Option<Duration>) {
+    pub fn update_health(
+        &mut self,
+        id: &str,
+        status: HealthStatus,
+        latency: Option<Duration>,
+        lag: Option<Duration>,
+    ) {
         if let Some(health) = self.health.get_mut(id) {
             match status {
                 HealthStatus::Healthy => {
@@ -574,7 +592,9 @@ impl ConnectionRouter {
             }
             None => {
                 self.in_failover.store(false, Ordering::SeqCst);
-                Err(QueryError::connection("No suitable failover candidate found"))
+                Err(QueryError::connection(
+                    "No suitable failover candidate found",
+                ))
             }
         }
     }
@@ -624,15 +644,16 @@ impl LagMonitor {
 
     /// Record a lag measurement.
     pub fn record(&mut self, replica_id: &str, lag: Duration) {
-        let entry = self.measurements.entry(replica_id.to_string()).or_insert_with(|| {
-            LagMeasurement {
+        let entry = self
+            .measurements
+            .entry(replica_id.to_string())
+            .or_insert_with(|| LagMeasurement {
                 current: Duration::ZERO,
                 average: Duration::ZERO,
                 max: Duration::ZERO,
                 timestamp: Instant::now(),
                 samples: 0,
-            }
-        });
+            });
 
         entry.current = lag;
         entry.max = entry.max.max(lag);
@@ -856,10 +877,16 @@ pub mod mongodb {
         /// Convert to MongoDB command options.
         pub fn to_command_options(&self) -> JsonValue {
             let mut opts = serde_json::Map::new();
-            opts.insert("mode".to_string(), serde_json::json!(self.mode.to_mongodb()));
+            opts.insert(
+                "mode".to_string(),
+                serde_json::json!(self.mode.to_mongodb()),
+            );
 
             if let Some(staleness) = self.max_staleness_seconds {
-                opts.insert("maxStalenessSeconds".to_string(), serde_json::json!(staleness));
+                opts.insert(
+                    "maxStalenessSeconds".to_string(),
+                    serde_json::json!(staleness),
+                );
             }
 
             if !self.tag_sets.is_empty() {
@@ -923,8 +950,8 @@ mod tests {
 
     #[test]
     fn test_replica_config() {
-        let primary = ReplicaConfig::primary("pg1", "postgres://primary:5432/db")
-            .with_region("us-east-1");
+        let primary =
+            ReplicaConfig::primary("pg1", "postgres://primary:5432/db").with_region("us-east-1");
 
         assert_eq!(primary.role, ReplicaRole::Primary);
         assert_eq!(primary.region.as_deref(), Some("us-east-1"));
@@ -948,7 +975,10 @@ mod tests {
     #[test]
     fn test_read_preference_mongodb() {
         assert_eq!(ReadPreference::Primary.to_mongodb(), "primary");
-        assert_eq!(ReadPreference::SecondaryPreferred.to_mongodb(), "secondaryPreferred");
+        assert_eq!(
+            ReadPreference::SecondaryPreferred.to_mongodb(),
+            "secondaryPreferred"
+        );
         assert_eq!(ReadPreference::Nearest.to_mongodb(), "nearest");
     }
 
@@ -962,8 +992,18 @@ mod tests {
         let mut router = ConnectionRouter::new(config);
 
         // Mark replicas as healthy
-        router.update_health("pg1", HealthStatus::Healthy, Some(Duration::from_millis(5)), None);
-        router.update_health("pg2", HealthStatus::Healthy, Some(Duration::from_millis(10)), Some(Duration::from_secs(1)));
+        router.update_health(
+            "pg1",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(5)),
+            None,
+        );
+        router.update_health(
+            "pg2",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(10)),
+            Some(Duration::from_secs(1)),
+        );
 
         // Write should go to primary
         let target = router.route(QueryType::Write, None).unwrap();
@@ -979,8 +1019,18 @@ mod tests {
             .build();
 
         let mut router = ConnectionRouter::new(config);
-        router.update_health("pg1", HealthStatus::Healthy, Some(Duration::from_millis(5)), None);
-        router.update_health("pg2", HealthStatus::Healthy, Some(Duration::from_millis(10)), Some(Duration::from_secs(1)));
+        router.update_health(
+            "pg1",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(5)),
+            None,
+        );
+        router.update_health(
+            "pg2",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(10)),
+            Some(Duration::from_secs(1)),
+        );
 
         // Read with Secondary preference should go to secondary
         let target = router.route(QueryType::Read, None).unwrap();
@@ -1005,14 +1055,28 @@ mod tests {
     fn test_failover() {
         let config = ReplicaSetConfig::new("test")
             .primary("pg1", "postgres://primary:5432/db")
-            .replica(ReplicaConfig::secondary("pg2", "postgres://secondary1:5432/db").with_priority(80))
-            .replica(ReplicaConfig::secondary("pg3", "postgres://secondary2:5432/db").with_priority(60))
+            .replica(
+                ReplicaConfig::secondary("pg2", "postgres://secondary1:5432/db").with_priority(80),
+            )
+            .replica(
+                ReplicaConfig::secondary("pg3", "postgres://secondary2:5432/db").with_priority(60),
+            )
             .build();
 
         let mut router = ConnectionRouter::new(config);
         router.update_health("pg1", HealthStatus::Unhealthy, None, None);
-        router.update_health("pg2", HealthStatus::Healthy, Some(Duration::from_millis(10)), None);
-        router.update_health("pg3", HealthStatus::Healthy, Some(Duration::from_millis(15)), None);
+        router.update_health(
+            "pg2",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(10)),
+            None,
+        );
+        router.update_health(
+            "pg3",
+            HealthStatus::Healthy,
+            Some(Duration::from_millis(15)),
+            None,
+        );
 
         let new_primary = router.initiate_failover().unwrap();
         assert_eq!(new_primary, "pg2"); // Higher priority
@@ -1055,4 +1119,3 @@ mod tests {
         }
     }
 }
-

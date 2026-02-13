@@ -176,6 +176,3 @@ mod tests {
         assert!(query_err.is_not_found());
     }
 }
-
-
-

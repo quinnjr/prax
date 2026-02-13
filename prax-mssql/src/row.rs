@@ -87,5 +87,3 @@ macro_rules! impl_from_mssql_row {
 mod tests {
     // Row tests require integration testing with a real SQL Server database
 }
-
-

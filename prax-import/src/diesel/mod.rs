@@ -6,5 +6,7 @@
 mod parser;
 pub mod types;
 
-pub use parser::{import_diesel_schema, import_diesel_schema_file, parse_diesel_file, parse_diesel_schema};
+pub use parser::{
+    import_diesel_schema, import_diesel_schema_file, parse_diesel_file, parse_diesel_schema,
+};
 pub use types::*;

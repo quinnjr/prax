@@ -45,8 +45,5 @@ pub mod interning;
 pub mod lazy;
 
 pub use arena::{ArenaScope, QueryArena, ScopedFilter, ScopedQuery, ScopedValue};
-pub use interning::{GlobalInterner, InternedStr, ScopedInterner, IdentifierCache};
-pub use lazy::{
-    LazyColumn, LazyForeignKey, LazyIndex, LazySchema, LazyTable, ParseOnDemand,
-};
-
+pub use interning::{GlobalInterner, IdentifierCache, InternedStr, ScopedInterner};
+pub use lazy::{LazyColumn, LazyForeignKey, LazyIndex, LazySchema, LazyTable, ParseOnDemand};

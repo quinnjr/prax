@@ -13,9 +13,8 @@ pub trait FromDuckDbRow: Sized {
 
 impl<T: DeserializeOwned> FromDuckDbRow for T {
     fn from_json(json: JsonValue) -> DuckDbResult<Self> {
-        serde_json::from_value(json).map_err(|e| {
-            DuckDbError::deserialization(format!("Failed to deserialize row: {}", e))
-        })
+        serde_json::from_value(json)
+            .map_err(|e| DuckDbError::deserialization(format!("Failed to deserialize row: {}", e)))
     }
 }
 
@@ -77,4 +76,3 @@ mod tests {
         assert!(result.is_err());
     }
 }
-

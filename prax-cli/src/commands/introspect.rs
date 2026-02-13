@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use prax_query::introspection::{
     ColumnInfo, DatabaseSchema, EnumInfo, ForeignKeyInfo, IndexColumn, IndexInfo,
-    ReferentialAction, SortOrder, TableInfo, ViewInfo,
-    generate_prax_schema, normalize_type, queries,
+    ReferentialAction, SortOrder, TableInfo, ViewInfo, generate_prax_schema, normalize_type,
+    queries,
 };
 use prax_query::sql::DatabaseType;
 
@@ -154,12 +154,20 @@ pub mod postgres {
                 let mut table = TableInfo {
                     name: table_name.clone(),
                     schema: Some(schema_name.to_string()),
-                    comment: if options.include_comments { comment } else { None },
+                    comment: if options.include_comments {
+                        comment
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
 
                 // Get columns
-                let cols_sql = queries::columns_query(DatabaseType::PostgreSQL, &table_name, Some(schema_name));
+                let cols_sql = queries::columns_query(
+                    DatabaseType::PostgreSQL,
+                    &table_name,
+                    Some(schema_name),
+                );
                 let col_rows = client
                     .query(&cols_sql, &[])
                     .await
@@ -195,17 +203,24 @@ pub mod postgres {
                         max_length,
                         precision,
                         scale,
-                        comment: if options.include_comments { comment } else { None },
+                        comment: if options.include_comments {
+                            comment
+                        } else {
+                            None
+                        },
                         ..Default::default()
                     });
                 }
 
                 // Get primary keys
-                let pk_sql = queries::primary_keys_query(DatabaseType::PostgreSQL, &table_name, Some(schema_name));
-                let pk_rows = client
-                    .query(&pk_sql, &[])
-                    .await
-                    .map_err(|e| CliError::Database(format!("Failed to query primary keys: {}", e)))?;
+                let pk_sql = queries::primary_keys_query(
+                    DatabaseType::PostgreSQL,
+                    &table_name,
+                    Some(schema_name),
+                );
+                let pk_rows = client.query(&pk_sql, &[]).await.map_err(|e| {
+                    CliError::Database(format!("Failed to query primary keys: {}", e))
+                })?;
 
                 for pk_row in pk_rows {
                     let col_name: String = pk_row.get(0);
@@ -218,11 +233,14 @@ pub mod postgres {
                 }
 
                 // Get foreign keys
-                let fk_sql = queries::foreign_keys_query(DatabaseType::PostgreSQL, &table_name, Some(schema_name));
-                let fk_rows = client
-                    .query(&fk_sql, &[])
-                    .await
-                    .map_err(|e| CliError::Database(format!("Failed to query foreign keys: {}", e)))?;
+                let fk_sql = queries::foreign_keys_query(
+                    DatabaseType::PostgreSQL,
+                    &table_name,
+                    Some(schema_name),
+                );
+                let fk_rows = client.query(&fk_sql, &[]).await.map_err(|e| {
+                    CliError::Database(format!("Failed to query foreign keys: {}", e))
+                })?;
 
                 let mut fk_map: HashMap<String, ForeignKeyInfo> = HashMap::new();
                 for fk_row in fk_rows {
@@ -234,17 +252,18 @@ pub mod postgres {
                     let delete_rule: String = fk_row.get(5);
                     let update_rule: String = fk_row.get(6);
 
-                    let fk = fk_map.entry(constraint_name.clone()).or_insert_with(|| {
-                        ForeignKeyInfo {
-                            name: constraint_name,
-                            columns: Vec::new(),
-                            referenced_table: ref_table,
-                            referenced_schema: ref_schema,
-                            referenced_columns: Vec::new(),
-                            on_delete: ReferentialAction::from_str(&delete_rule),
-                            on_update: ReferentialAction::from_str(&update_rule),
-                        }
-                    });
+                    let fk =
+                        fk_map
+                            .entry(constraint_name.clone())
+                            .or_insert_with(|| ForeignKeyInfo {
+                                name: constraint_name,
+                                columns: Vec::new(),
+                                referenced_table: ref_table,
+                                referenced_schema: ref_schema,
+                                referenced_columns: Vec::new(),
+                                on_delete: ReferentialAction::from_str(&delete_rule),
+                                on_update: ReferentialAction::from_str(&update_rule),
+                            });
 
                     fk.columns.push(column_name);
                     fk.referenced_columns.push(ref_column);
@@ -253,7 +272,11 @@ pub mod postgres {
                 table.foreign_keys = fk_map.into_values().collect();
 
                 // Get indexes
-                let idx_sql = queries::indexes_query(DatabaseType::PostgreSQL, &table_name, Some(schema_name));
+                let idx_sql = queries::indexes_query(
+                    DatabaseType::PostgreSQL,
+                    &table_name,
+                    Some(schema_name),
+                );
                 let idx_rows = client
                     .query(&idx_sql, &[])
                     .await
@@ -268,16 +291,16 @@ pub mod postgres {
                     let idx_type: Option<String> = idx_row.try_get(4).ok();
                     let filter: Option<String> = idx_row.try_get(5).ok();
 
-                    let idx = idx_map.entry(idx_name.clone()).or_insert_with(|| {
-                        IndexInfo {
+                    let idx = idx_map
+                        .entry(idx_name.clone())
+                        .or_insert_with(|| IndexInfo {
                             name: idx_name,
                             columns: Vec::new(),
                             is_unique,
                             is_primary,
                             index_type: idx_type,
                             filter,
-                        }
-                    });
+                        });
 
                     idx.columns.push(IndexColumn {
                         name: col_name,
@@ -303,13 +326,13 @@ pub mod postgres {
                 let enum_name: String = enum_row.get(0);
                 let enum_value: String = enum_row.get(1);
 
-                let enum_info = enum_map.entry(enum_name.clone()).or_insert_with(|| {
-                    EnumInfo {
+                let enum_info = enum_map
+                    .entry(enum_name.clone())
+                    .or_insert_with(|| EnumInfo {
                         name: enum_name,
                         schema: Some(schema_name.to_string()),
                         values: Vec::new(),
-                    }
-                });
+                    });
 
                 enum_info.values.push(enum_value);
             }
@@ -387,7 +410,10 @@ pub fn format_as_prax(schema: &DatabaseSchema, config: &Config) -> String {
     output.push_str("// Edit this file to customize your schema\n\n");
 
     output.push_str("datasource db {\n");
-    output.push_str(&format!("    provider = \"{}\"\n", config.database.provider));
+    output.push_str(&format!(
+        "    provider = \"{}\"\n",
+        config.database.provider
+    ));
     output.push_str("    url      = env(\"DATABASE_URL\")\n");
     output.push_str("}\n\n");
 
@@ -419,7 +445,11 @@ pub fn format_as_sql(schema: &DatabaseSchema, db_type: DatabaseType) -> String {
     if db_type == DatabaseType::PostgreSQL {
         for enum_info in &schema.enums {
             output.push_str(&format!("CREATE TYPE {} AS ENUM (\n", enum_info.name));
-            let values: Vec<String> = enum_info.values.iter().map(|v| format!("    '{}'", v)).collect();
+            let values: Vec<String> = enum_info
+                .values
+                .iter()
+                .map(|v| format!("    '{}'", v))
+                .collect();
             output.push_str(&values.join(",\n"));
             output.push_str("\n);\n\n");
         }
@@ -427,7 +457,10 @@ pub fn format_as_sql(schema: &DatabaseSchema, db_type: DatabaseType) -> String {
 
     // Generate tables
     for table in &schema.tables {
-        output.push_str(&format!("CREATE TABLE {} (\n", quote_identifier(&table.name, db_type)));
+        output.push_str(&format!(
+            "CREATE TABLE {} (\n",
+            quote_identifier(&table.name, db_type)
+        ));
 
         let mut col_defs: Vec<String> = Vec::new();
 
@@ -469,7 +502,11 @@ pub fn format_as_sql(schema: &DatabaseSchema, db_type: DatabaseType) -> String {
             }
 
             let unique = if idx.is_unique { "UNIQUE " } else { "" };
-            let cols: Vec<String> = idx.columns.iter().map(|c| quote_identifier(&c.name, db_type)).collect();
+            let cols: Vec<String> = idx
+                .columns
+                .iter()
+                .map(|c| quote_identifier(&c.name, db_type))
+                .collect();
 
             output.push_str(&format!(
                 "CREATE {}INDEX {} ON {} ({});\n",
@@ -503,4 +540,3 @@ fn quote_identifier(name: &str, db_type: DatabaseType) -> String {
         DatabaseType::MSSQL => format!("[{}]", name),
     }
 }
-

@@ -165,7 +165,12 @@ impl<B: CacheBackend> CacheManager<B> {
     }
 
     /// Set a value in the cache.
-    pub async fn set<T>(&self, key: &CacheKey, value: &T, options: Option<&CacheOptions>) -> CacheResult<()>
+    pub async fn set<T>(
+        &self,
+        key: &CacheKey,
+        value: &T,
+        options: Option<&CacheOptions>,
+    ) -> CacheResult<()>
     where
         T: serde::Serialize + Sync,
     {
@@ -375,5 +380,3 @@ mod tests {
         assert_eq!(call_count, 1); // Not incremented
     }
 }
-
-

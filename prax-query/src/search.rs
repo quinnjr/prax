@@ -404,7 +404,10 @@ impl SearchQuery {
             self.query.clone()
         };
 
-        let match_expr = format!("MATCH({}) AGAINST('{}'{}))", columns, search_query, match_mode);
+        let match_expr = format!(
+            "MATCH({}) AGAINST('{}'{}))",
+            columns, search_query, match_mode
+        );
 
         let mut select_cols = vec!["*".to_string()];
 
@@ -437,8 +440,16 @@ impl SearchQuery {
     pub fn to_sqlite_sql(&self, table: &str, fts_table: &str) -> QueryResult<SearchSql> {
         let search_query = match self.mode {
             SearchMode::Phrase => format!("\"{}\"", self.query),
-            SearchMode::All => self.query.split_whitespace().collect::<Vec<_>>().join(" AND "),
-            SearchMode::Any => self.query.split_whitespace().collect::<Vec<_>>().join(" OR "),
+            SearchMode::All => self
+                .query
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" AND "),
+            SearchMode::Any => self
+                .query
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" OR "),
             _ => self.query.clone(),
         };
 
@@ -446,7 +457,10 @@ impl SearchQuery {
 
         // Add ranking (SQLite uses bm25)
         if self.ranking.enabled {
-            select_cols.push(format!("bm25({}) AS {}", fts_table, self.ranking.score_alias));
+            select_cols.push(format!(
+                "bm25({}) AS {}",
+                fts_table, self.ranking.score_alias
+            ));
         }
 
         // Add highlighting
@@ -514,13 +528,7 @@ impl SearchQuery {
                 "SELECT {}.*, ft.RANK AS {} FROM {} \
                  INNER JOIN CONTAINSTABLE({}, ({}), '{}') AS ft \
                  ON {}.id = ft.[KEY]",
-                table,
-                self.ranking.score_alias,
-                table,
-                table,
-                columns,
-                contains_expr,
-                table
+                table, self.ranking.score_alias, table, table, columns, contains_expr, table
             );
 
             return Ok(SearchSql {
@@ -1327,7 +1335,10 @@ mod tests {
             .unwrap();
 
         let sql = index.to_mysql_sql();
-        assert_eq!(sql, "CREATE FULLTEXT INDEX posts_fulltext ON posts (title, body);");
+        assert_eq!(
+            sql,
+            "CREATE FULLTEXT INDEX posts_fulltext ON posts (title, body);"
+        );
     }
 
     #[test]
@@ -1397,9 +1408,7 @@ mod tests {
 
         #[test]
         fn test_atlas_search_pipeline() {
-            let query = search("database")
-                .path("content")
-                .highlight("content");
+            let query = search("database").path("content").highlight("content");
 
             let pipeline = query.to_pipeline();
             assert!(pipeline.len() >= 2);
@@ -1422,5 +1431,3 @@ mod tests {
         }
     }
 }
-
-

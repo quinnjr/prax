@@ -1,7 +1,7 @@
 //! `prax format` command - Format Prax schema file.
 
 use crate::cli::FormatArgs;
-use crate::config::SCHEMA_FILE_NAME;
+use crate::config::SCHEMA_FILE_PATH;
 use crate::error::{CliError, CliResult};
 use crate::output::{self, success};
 
@@ -10,7 +10,7 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
     output::header("Format Schema");
 
     let cwd = std::env::current_dir()?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_NAME));
+    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
     if !schema_path.exists() {
         return Err(
@@ -65,7 +65,10 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
 }
 
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    prax_schema::parse_schema(content).map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
+    // Use validate_schema to ensure field types are properly resolved
+    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
+    prax_schema::validate_schema(content)
+        .map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
 }
 
 /// Format a schema AST into a formatted string

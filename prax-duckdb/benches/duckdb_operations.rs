@@ -1,10 +1,10 @@
 //! DuckDB operations benchmarks.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use std::hint::black_box;
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use prax_duckdb::{DuckDbConfig, DuckDbEngine, DuckDbPool};
 use prax_query::filter::FilterValue;
 use std::collections::HashMap;
+use std::hint::black_box;
 use tokio::runtime::Runtime;
 
 fn create_runtime() -> Runtime {
@@ -77,12 +77,7 @@ fn bench_simple_select(c: &mut Criterion) {
             let mut filters = HashMap::new();
             filters.insert("id".to_string(), FilterValue::Int(500));
 
-            black_box(
-                engine
-                    .query_one("users", &[], &filters)
-                    .await
-                    .unwrap()
-            )
+            black_box(engine.query_one("users", &[], &filters).await.unwrap())
         })
     });
 }
@@ -94,9 +89,8 @@ fn bench_aggregation(c: &mut Criterion) {
     let mut group = c.benchmark_group("duckdb_aggregation");
 
     group.bench_function("count_all", |b| {
-        b.to_async(&rt).iter(|| async {
-            black_box(engine.count("users", &HashMap::new()).await.unwrap())
-        })
+        b.to_async(&rt)
+            .iter(|| async { black_box(engine.count("users", &HashMap::new()).await.unwrap()) })
     });
 
     group.bench_function("sum_with_groupby", |b| {
@@ -108,7 +102,7 @@ fn bench_aggregation(c: &mut Criterion) {
                         &[],
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -117,12 +111,9 @@ fn bench_aggregation(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             black_box(
                 engine
-                    .execute_raw(
-                        "SELECT AVG(age) FROM users WHERE active = true",
-                        &[],
-                    )
+                    .execute_raw("SELECT AVG(age) FROM users WHERE active = true", &[])
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -152,7 +143,7 @@ fn bench_window_functions(c: &mut Criterion) {
                         &[],
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -177,7 +168,7 @@ fn bench_window_functions(c: &mut Criterion) {
                         &[],
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -205,7 +196,7 @@ fn bench_joins(c: &mut Criterion) {
                         &[],
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -225,7 +216,7 @@ fn bench_joins(c: &mut Criterion) {
                         &[],
                     )
                     .await
-                    .unwrap()
+                    .unwrap(),
             )
         })
     });
@@ -294,4 +285,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

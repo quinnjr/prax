@@ -202,15 +202,22 @@ pub use filter::{
     AndFilterBuilder, FieldName, Filter, FilterValue, FluentFilterBuilder, LargeValueList,
     OrFilterBuilder, ScalarFilter, SmallValueList, ValueList,
 };
-pub use json::{
-    JsonAgg, JsonFilter, JsonIndex, JsonIndexBuilder, JsonOp, JsonPath, PathSegment,
-};
+pub use json::{JsonAgg, JsonFilter, JsonIndex, JsonIndexBuilder, JsonOp, JsonPath, PathSegment};
 pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
 pub use operations::{
-    CreateOperation, DeleteOperation, FindManyOperation, FindUniqueOperation, UpdateOperation,
+    CreateOperation,
+    DeleteOperation,
+    FindManyOperation,
+    FindUniqueOperation,
     // View operations
-    MaterializedViewAccessor, RefreshMaterializedViewOperation, ViewAccessor, ViewCountOperation,
-    ViewFindFirstOperation, ViewFindManyOperation, ViewQueryBuilder,
+    MaterializedViewAccessor,
+    RefreshMaterializedViewOperation,
+    UpdateOperation,
+    ViewAccessor,
+    ViewCountOperation,
+    ViewFindFirstOperation,
+    ViewFindManyOperation,
+    ViewQueryBuilder,
 };
 pub use pagination::{Cursor, CursorDirection, Pagination};
 pub use partition::{
@@ -309,17 +316,28 @@ pub use sql::{
 
 // Re-export optimized builder types
 pub use builder::{
-    BuilderPool, ColumnList, ColumnNameList, CowColumnList, CowIdentifier, ExprList, Identifier,
-    OptimizedWindowSpec, OrderByList, PartitionByList, ReusableBuilder, WindowFrame,
+    BuilderPool,
+    ColumnList,
+    ColumnNameList,
+    CowColumnList,
+    CowIdentifier,
+    ExprList,
     // Note: FrameBound and FrameType are also defined in window module
-    FrameBound as BuilderFrameBound, FrameType as BuilderFrameType,
+    FrameBound as BuilderFrameBound,
+    FrameType as BuilderFrameType,
+    Identifier,
+    OptimizedWindowSpec,
+    OrderByList,
+    PartitionByList,
+    ReusableBuilder,
+    WindowFrame,
 };
 
 // Re-export database optimization types
 pub use db_optimize::{
     BatchConfig, CachedStatement, IndexHint, IndexHintType, JoinHint, JoinMethod,
-    MongoPipelineBuilder, PipelineStage, PreparedStatementCache, PreparedStatementStats, QueryHints,
-    global_statement_cache,
+    MongoPipelineBuilder, PipelineStage, PreparedStatementCache, PreparedStatementStats,
+    QueryHints, global_statement_cache,
 };
 
 // Re-export zero-copy types
@@ -378,21 +396,20 @@ pub use logging::{
 
 // Re-export replication types
 pub use replication::{
-    ConnectionRouter, HealthStatus, LagMeasurement, LagMonitor, ReadPreference,
-    ReplicaConfig, ReplicaHealth, ReplicaRole, ReplicaSetBuilder, ReplicaSetConfig,
+    ConnectionRouter, HealthStatus, LagMeasurement, LagMonitor, ReadPreference, ReplicaConfig,
+    ReplicaHealth, ReplicaRole, ReplicaSetBuilder, ReplicaSetConfig,
 };
 
 // Re-export async optimization types
 pub use async_optimize::{
     ConcurrencyConfig, ConcurrentExecutor, ExecutionStats, IntrospectionConfig,
-    IntrospectionResult, PipelineConfig, PipelineError,
-    PipelineResult as AsyncPipelineResult, QueryPipeline, TaskError, TaskResult,
+    IntrospectionResult, PipelineConfig, PipelineError, PipelineResult as AsyncPipelineResult,
+    QueryPipeline, TaskError, TaskResult,
     concurrent::execute_batch as async_execute_batch,
     concurrent::execute_chunked as async_execute_chunked,
     introspect::{
         BatchIntrospector, ColumnMetadata, ConcurrentIntrospector, ForeignKeyMetadata,
-        IndexMetadata, IntrospectionError, IntrospectionPhase, IntrospectorBuilder,
-        TableMetadata,
+        IndexMetadata, IntrospectionError, IntrospectionPhase, IntrospectorBuilder, TableMetadata,
     },
     pipeline::{BulkInsertPipeline, BulkUpdatePipeline, SimulatedExecutor},
 };
@@ -401,7 +418,7 @@ pub use async_optimize::{
 pub use mem_optimize::{
     GlobalInterner, IdentifierCache, InternedStr, ScopedInterner,
     arena::{ArenaScope, ArenaStats, QueryArena, ScopedFilter, ScopedQuery, ScopedValue},
-    interning::{intern as global_intern, intern_component, intern_qualified, get_interned},
+    interning::{get_interned, intern as global_intern, intern_component, intern_qualified},
     lazy::{LazyColumn, LazyForeignKey, LazyIndex, LazySchema, LazySchemaStats, LazyTable},
 };
 
@@ -409,8 +426,8 @@ pub use mem_optimize::{
 pub use profiling::{
     AllocationRecord, AllocationStats, AllocationTracker, HeapProfiler, HeapReport, HeapStats,
     LeakDetector, LeakReport, LeakSeverity, MemoryProfiler, MemoryReport, MemorySnapshot,
-    PotentialLeak, SnapshotDiff, TrackedAllocator,
-    enable_profiling, disable_profiling, is_profiling_enabled, with_profiling,
+    PotentialLeak, SnapshotDiff, TrackedAllocator, disable_profiling, enable_profiling,
+    is_profiling_enabled, with_profiling,
 };
 
 // Re-export smallvec for macros
@@ -418,13 +435,12 @@ pub use smallvec;
 
 /// Prelude module for convenient imports.
 pub mod prelude {
+    pub use crate::advanced::{LateralJoin, Returning, RowLock, TableSample};
+    pub use crate::cte::{Cte, CteBuilder, WithClause};
     pub use crate::error::{QueryError, QueryResult};
     pub use crate::extension::{Extension, Point, Polygon};
     pub use crate::filter::{Filter, FilterValue, ScalarFilter};
-    pub use crate::advanced::{LateralJoin, Returning, RowLock, TableSample};
-    pub use crate::cte::{Cte, CteBuilder, WithClause};
     pub use crate::introspection::{DatabaseSchema, TableInfo, generate_prax_schema};
-    pub use crate::replication::{ConnectionRouter, ReadPreference, ReplicaSetConfig};
     pub use crate::json::{JsonFilter, JsonOp, JsonPath};
     pub use crate::nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
     pub use crate::operations::*;
@@ -437,6 +453,7 @@ pub mod prelude {
     pub use crate::raw::{RawExecuteOperation, RawQueryOperation, Sql};
     pub use crate::raw_query;
     pub use crate::relations::{Include, IncludeSpec, RelationSpec, SelectSpec};
+    pub use crate::replication::{ConnectionRouter, ReadPreference, ReplicaSetConfig};
     pub use crate::search::{FullTextIndex, SearchMode, SearchQuery, SearchQueryBuilder};
     pub use crate::security::{Grant, GrantBuilder, RlsPolicy, Role, RoleBuilder};
     pub use crate::sequence::{Sequence, SequenceBuilder};
@@ -461,9 +478,7 @@ pub mod prelude {
     };
 
     // Memory optimization types
-    pub use crate::mem_optimize::{
-        GlobalInterner, InternedStr, QueryArena, LazySchema,
-    };
+    pub use crate::mem_optimize::{GlobalInterner, InternedStr, LazySchema, QueryArena};
 
     // Profiling types
     pub use crate::profiling::{

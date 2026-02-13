@@ -5,8 +5,8 @@
 //! overwhelming the database connection pool.
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -356,9 +356,7 @@ impl ConcurrentExecutor {
         results
             .into_iter()
             .map(|r| match r {
-                TaskResult::Success {
-                    task_id, value, ..
-                } => (task_id, Ok(value)),
+                TaskResult::Success { task_id, value, .. } => (task_id, Ok(value)),
                 TaskResult::Error(e) => (e.task_id, Err(e)),
             })
             .collect()
@@ -518,10 +516,7 @@ where
 
     let (results, _) = executor.execute_all(tasks).await;
 
-    results
-        .into_iter()
-        .filter_map(|r| r.into_value())
-        .collect()
+    results.into_iter().filter_map(|r| r.into_value()).collect()
 }
 
 #[cfg(test)]
@@ -643,11 +638,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_batch() {
-        let results = execute_batch(
-            vec!["a", "b", "c"],
-            4,
-            |s: &str| async move { Ok::<_, String>(s.len()) },
-        )
+        let results = execute_batch(vec!["a", "b", "c"], 4, |s: &str| async move {
+            Ok::<_, String>(s.len())
+        })
         .await;
 
         assert_eq!(results.len(), 3);
@@ -659,15 +652,24 @@ mod tests {
         let config = ConcurrencyConfig::default().with_timeout(Duration::from_millis(50));
         let executor = ConcurrentExecutor::new(config);
 
-        let tasks: Vec<Box<dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<i32, String>> + Send>> + Send>> = vec![
-            Box::new(|| Box::pin(async {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                Ok::<_, String>(1)
-            })),
-            Box::new(|| Box::pin(async {
-                tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok::<_, String>(2)
-            })),
+        let tasks: Vec<
+            Box<
+                dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<i32, String>> + Send>>
+                    + Send,
+            >,
+        > = vec![
+            Box::new(|| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    Ok::<_, String>(1)
+                })
+            }),
+            Box::new(|| {
+                Box::pin(async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    Ok::<_, String>(2)
+                })
+            }),
         ];
 
         let (results, stats) = executor.execute_all(tasks).await;
@@ -676,4 +678,3 @@ mod tests {
         assert_eq!(stats.timed_out, 1);
     }
 }
-
