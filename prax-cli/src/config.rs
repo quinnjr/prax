@@ -20,6 +20,9 @@ pub const SCHEMA_FILE_PATH: &str = "prax/schema.prax";
 /// Default migrations directory (relative to project root)
 pub const MIGRATIONS_DIR: &str = "prax/migrations";
 
+/// Default seeds directory (relative to project root)
+pub const SEEDS_DIR: &str = "prax/seeds";
+
 /// Prax CLI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -155,7 +158,10 @@ impl Default for MigrationConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SeedConfig {
-    /// Path to seed script
+    /// Directory for seed files
+    pub directory: String,
+
+    /// Path to seed script (relative to seeds directory or absolute)
     pub script: Option<PathBuf>,
 
     /// Run seed automatically after migrations
@@ -175,6 +181,7 @@ impl Default for SeedConfig {
         environments.insert("production".to_string(), false);
 
         Self {
+            directory: SEEDS_DIR.to_string(),
             script: None,
             auto_seed: false,
             environments,

@@ -310,7 +310,7 @@ impl BatchConfig {
                 parallelism: 4,
             },
             DatabaseType::MySQL => Self {
-                batch_size: 500, // MySQL has packet size limits
+                batch_size: 500,                     // MySQL has packet size limits
                 max_payload_bytes: 16 * 1024 * 1024, // 16MB (default max_allowed_packet)
                 multi_row_insert: true,
                 use_copy: false,
@@ -734,7 +734,10 @@ impl PipelineStage {
             Self::Sort(sort) => format!(r#"{{ "$sort": {} }}"#, sort),
             Self::Limit(n) => format!(r#"{{ "$limit": {} }}"#, n),
             Self::Skip(n) => format!(r#"{{ "$skip": {} }}"#, n),
-            Self::Unwind { path, preserve_null } => {
+            Self::Unwind {
+                path,
+                preserve_null,
+            } => {
                 if *preserve_null {
                     format!(
                         r#"{{ "$unwind": {{ "path": "{}", "preserveNullAndEmptyArrays": true }} }}"#,
@@ -761,7 +764,9 @@ impl PipelineStage {
                 let quoted: Vec<_> = fields.iter().map(|f| format!(r#""{}""#, f)).collect();
                 format!(r#"{{ "$unset": [{}] }}"#, quoted.join(", "))
             }
-            Self::ReplaceRoot(root) => format!(r#"{{ "$replaceRoot": {{ "newRoot": {} }} }}"#, root),
+            Self::ReplaceRoot(root) => {
+                format!(r#"{{ "$replaceRoot": {{ "newRoot": {} }} }}"#, root)
+            }
             Self::Count(field) => format!(r#"{{ "$count": "{}" }}"#, field),
             Self::Facet(facets) => {
                 let facet_strs: Vec<_> = facets
@@ -1072,7 +1077,10 @@ impl QueryHints {
             settings.push("SET LOCAL enable_indexscan = off;".to_string());
         }
         if let Some(workers) = self.parallel_workers {
-            settings.push(format!("SET LOCAL max_parallel_workers_per_gather = {};", workers));
+            settings.push(format!(
+                "SET LOCAL max_parallel_workers_per_gather = {};",
+                workers
+            ));
         }
         if let Some(ms) = self.timeout_ms {
             settings.push(format!("SET LOCAL statement_timeout = {};", ms));
@@ -1120,7 +1128,10 @@ impl QueryHints {
                 IndexHintType::Prefer => "FORCE INDEX",
             };
             if let Some(ref table) = hint.table {
-                hints.push(format!("/* {} FOR {} ({}) */", hint_type, table, hint.index_name));
+                hints.push(format!(
+                    "/* {} FOR {} ({}) */",
+                    hint_type, table, hint.index_name
+                ));
             } else {
                 hints.push(format!("/* {} ({}) */", hint_type, hint.index_name));
             }
@@ -1165,7 +1176,10 @@ impl QueryHints {
                 }
                 IndexHintType::Prefer => {
                     if let Some(ref table) = hint.table {
-                        options.push(format!("TABLE HINT({}, FORCESEEK({}))", table, hint.index_name));
+                        options.push(format!(
+                            "TABLE HINT({}, FORCESEEK({}))",
+                            table, hint.index_name
+                        ));
                     }
                 }
             }
@@ -1292,10 +1306,7 @@ mod tests {
 
     #[test]
     fn test_query_hints_postgres() {
-        let hints = QueryHints::new()
-            .no_seq_scan()
-            .parallel(4)
-            .timeout(5000);
+        let hints = QueryHints::new().no_seq_scan().parallel(4).timeout(5000);
 
         let prefix = hints.to_sql_prefix(DatabaseType::PostgreSQL);
         assert!(prefix.contains("enable_seqscan = off"));
@@ -1325,4 +1336,3 @@ mod tests {
         assert!(result.contains("SELECT * FROM users"));
     }
 }
-

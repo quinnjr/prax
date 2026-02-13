@@ -764,7 +764,3 @@ mod tests {
         assert_eq!(count.as_document().unwrap().get_i32("$sum").unwrap(), 1);
     }
 }
-
-
-
-

@@ -362,4 +362,3 @@ mod tests {
         assert!(config.is_read_only());
     }
 }
-

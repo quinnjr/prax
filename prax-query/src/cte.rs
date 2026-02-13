@@ -390,7 +390,10 @@ impl WithClause {
     /// Generate the full SQL.
     pub fn to_sql(&self, db_type: DatabaseType) -> QueryResult<String> {
         if self.ctes.is_empty() {
-            return Err(QueryError::invalid_input("ctes", "WITH clause requires at least one CTE"));
+            return Err(QueryError::invalid_input(
+                "ctes",
+                "WITH clause requires at least one CTE",
+            ));
         }
 
         let mut sql = String::with_capacity(256);
@@ -561,11 +564,7 @@ pub mod patterns {
     }
 
     /// Create a CTE for pagination (row numbering).
-    pub fn paginated(
-        cte_name: &str,
-        query: &str,
-        order_by: &str,
-    ) -> Cte {
+    pub fn paginated(cte_name: &str, query: &str, order_by: &str) -> Cte {
         let paginated_query = format!(
             "SELECT *, ROW_NUMBER() OVER (ORDER BY {}) AS row_num FROM ({})",
             order_by, query
@@ -623,7 +622,12 @@ pub mod mongodb {
 
     impl Lookup {
         /// Create a simple $lookup (equality match).
-        pub fn simple(from: impl Into<String>, local: impl Into<String>, foreign: impl Into<String>, as_field: impl Into<String>) -> Self {
+        pub fn simple(
+            from: impl Into<String>,
+            local: impl Into<String>,
+            foreign: impl Into<String>,
+            as_field: impl Into<String>,
+        ) -> Self {
             Self {
                 from: from.into(),
                 local_field: Some(local.into()),
@@ -635,7 +639,10 @@ pub mod mongodb {
         }
 
         /// Create a $lookup with pipeline (subquery).
-        pub fn with_pipeline(from: impl Into<String>, as_field: impl Into<String>) -> LookupBuilder {
+        pub fn with_pipeline(
+            from: impl Into<String>,
+            as_field: impl Into<String>,
+        ) -> LookupBuilder {
             LookupBuilder {
                 from: from.into(),
                 as_field: as_field.into(),
@@ -651,7 +658,10 @@ pub mod mongodb {
 
             if let (Some(local), Some(foreign)) = (&self.local_field, &self.foreign_field) {
                 lookup.insert("localField".to_string(), JsonValue::String(local.clone()));
-                lookup.insert("foreignField".to_string(), JsonValue::String(foreign.clone()));
+                lookup.insert(
+                    "foreignField".to_string(),
+                    JsonValue::String(foreign.clone()),
+                );
             }
 
             lookup.insert("as".to_string(), JsonValue::String(self.as_field.clone()));
@@ -682,16 +692,15 @@ pub mod mongodb {
     impl LookupBuilder {
         /// Add a variable for the pipeline.
         pub fn let_var(mut self, name: impl Into<String>, expr: impl Into<String>) -> Self {
-            self.let_vars.insert(
-                name.into(),
-                JsonValue::String(format!("${}", expr.into())),
-            );
+            self.let_vars
+                .insert(name.into(), JsonValue::String(format!("${}", expr.into())));
             self
         }
 
         /// Add a $match stage to the pipeline.
         pub fn match_expr(mut self, expr: JsonValue) -> Self {
-            self.pipeline.push(serde_json::json!({ "$match": { "$expr": expr } }));
+            self.pipeline
+                .push(serde_json::json!({ "$match": { "$expr": expr } }));
             self
         }
 
@@ -703,7 +712,8 @@ pub mod mongodb {
 
         /// Add a $project stage.
         pub fn project(mut self, fields: JsonValue) -> Self {
-            self.pipeline.push(serde_json::json!({ "$project": fields }));
+            self.pipeline
+                .push(serde_json::json!({ "$project": fields }));
             self
         }
 
@@ -804,9 +814,18 @@ pub mod mongodb {
         pub fn to_bson(&self) -> JsonValue {
             let mut graph = serde_json::Map::new();
             graph.insert("from".to_string(), JsonValue::String(self.from.clone()));
-            graph.insert("startWith".to_string(), JsonValue::String(format!("${}", self.start_with)));
-            graph.insert("connectFromField".to_string(), JsonValue::String(self.connect_from_field.clone()));
-            graph.insert("connectToField".to_string(), JsonValue::String(self.connect_to_field.clone()));
+            graph.insert(
+                "startWith".to_string(),
+                JsonValue::String(format!("${}", self.start_with)),
+            );
+            graph.insert(
+                "connectFromField".to_string(),
+                JsonValue::String(self.connect_from_field.clone()),
+            );
+            graph.insert(
+                "connectToField".to_string(),
+                JsonValue::String(self.connect_to_field.clone()),
+            );
             graph.insert("as".to_string(), JsonValue::String(self.as_field.clone()));
 
             if let Some(max) = self.max_depth {
@@ -894,8 +913,7 @@ mod tests {
 
     #[test]
     fn test_simple_cte() {
-        let cte = Cte::new("active_users")
-            .as_query("SELECT * FROM users WHERE active = true");
+        let cte = Cte::new("active_users").as_query("SELECT * FROM users WHERE active = true");
 
         let sql = cte.to_sql(DatabaseType::PostgreSQL);
         assert!(sql.contains("active_users AS"));
@@ -920,7 +938,7 @@ mod tests {
                 "SELECT id, name, manager_id, 1 FROM employees WHERE manager_id IS NULL \
                  UNION ALL \
                  SELECT e.id, e.name, e.manager_id, s.depth + 1 \
-                 FROM employees e JOIN subordinates s ON e.manager_id = s.id"
+                 FROM employees e JOIN subordinates s ON e.manager_id = s.id",
             )
             .recursive();
 
@@ -970,8 +988,7 @@ mod tests {
 
     #[test]
     fn test_with_query_builder() {
-        let cte = Cte::new("active")
-            .as_query("SELECT * FROM users WHERE active = true");
+        let cte = Cte::new("active").as_query("SELECT * FROM users WHERE active = true");
 
         let sql = WithClause::new()
             .cte(cte)
@@ -1031,7 +1048,7 @@ mod tests {
                 "employees",
                 "id",
                 "manager_id",
-                "manager_id IS NULL"
+                "manager_id IS NULL",
             );
 
             assert!(cte.recursive);
@@ -1046,7 +1063,7 @@ mod tests {
                 "transactions",
                 "amount",
                 "transaction_date",
-                Some("account_id")
+                Some("account_id"),
             );
 
             assert!(cte.query.contains("SUM(amount)"));
@@ -1091,7 +1108,7 @@ mod tests {
                 "reportsTo",
                 "reportsTo",
                 "name",
-                "reportingHierarchy"
+                "reportingHierarchy",
             )
             .max_depth(5)
             .depth_field("level");
@@ -1114,7 +1131,7 @@ mod tests {
         fn test_union_with_pipeline() {
             let union = UnionWith::with_pipeline(
                 "archive",
-                vec![serde_json::json!({ "$match": { "year": 2023 } })]
+                vec![serde_json::json!({ "$match": { "year": 2023 } })],
             );
             let bson = union.to_bson();
 
@@ -1122,4 +1139,3 @@ mod tests {
         }
     }
 }
-

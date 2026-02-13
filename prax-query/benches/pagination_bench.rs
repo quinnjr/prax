@@ -1,13 +1,13 @@
 //! Benchmarks for pagination operations (ordering, cursor, offset)
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_query::{
     filter::FilterValue,
     pagination::{Cursor, CursorDirection, CursorValue, Pagination},
     sql::{FastSqlBuilder, QueryCapacity, SqlBuilder},
     types::{NullsOrder, OrderBy, OrderByBuilder, OrderByField, SortOrder, order_patterns},
 };
+use std::hint::black_box;
 
 // ============================================================================
 // Order By Field Creation Benchmarks

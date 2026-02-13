@@ -446,10 +446,7 @@ pub mod ops {
     pub fn nextval(sequence_name: &str, db_type: DatabaseType) -> QueryResult<String> {
         match db_type {
             DatabaseType::PostgreSQL => Ok(format!("SELECT nextval('{}')", sequence_name)),
-            DatabaseType::MSSQL => Ok(format!(
-                "SELECT NEXT VALUE FOR {}",
-                sequence_name
-            )),
+            DatabaseType::MSSQL => Ok(format!("SELECT NEXT VALUE FOR {}", sequence_name)),
             DatabaseType::MySQL | DatabaseType::SQLite => Err(QueryError::unsupported(
                 "This database does not support sequences.",
             )),
@@ -668,7 +665,10 @@ pub mod auto_increment {
             }
             DatabaseType::MySQL => {
                 if let Some(start_val) = start {
-                    format!("{} BIGINT AUTO_INCREMENT /* Start: {} */", column_name, start_val)
+                    format!(
+                        "{} BIGINT AUTO_INCREMENT /* Start: {} */",
+                        column_name, start_val
+                    )
                 } else {
                     format!("{} BIGINT AUTO_INCREMENT", column_name)
                 }
@@ -747,10 +747,7 @@ pub mod auto_increment {
                 )
             }
             DatabaseType::MSSQL => {
-                format!(
-                    "SELECT IDENT_CURRENT('{}');",
-                    table_name
-                )
+                format!("SELECT IDENT_CURRENT('{}');", table_name)
             }
         }
     }
@@ -985,10 +982,22 @@ mod tests {
 
         #[test]
         fn test_last_insert_id() {
-            assert_eq!(ops::last_insert_id(DatabaseType::PostgreSQL), "SELECT lastval()");
-            assert_eq!(ops::last_insert_id(DatabaseType::MySQL), "SELECT LAST_INSERT_ID()");
-            assert_eq!(ops::last_insert_id(DatabaseType::SQLite), "SELECT last_insert_rowid()");
-            assert_eq!(ops::last_insert_id(DatabaseType::MSSQL), "SELECT SCOPE_IDENTITY()");
+            assert_eq!(
+                ops::last_insert_id(DatabaseType::PostgreSQL),
+                "SELECT lastval()"
+            );
+            assert_eq!(
+                ops::last_insert_id(DatabaseType::MySQL),
+                "SELECT LAST_INSERT_ID()"
+            );
+            assert_eq!(
+                ops::last_insert_id(DatabaseType::SQLite),
+                "SELECT last_insert_rowid()"
+            );
+            assert_eq!(
+                ops::last_insert_id(DatabaseType::MSSQL),
+                "SELECT SCOPE_IDENTITY()"
+            );
         }
 
         #[test]
@@ -1050,7 +1059,8 @@ mod tests {
             let pg = auto_increment::column_definition("id", DatabaseType::PostgreSQL, None);
             assert_eq!(pg, "id BIGSERIAL");
 
-            let pg_start = auto_increment::column_definition("id", DatabaseType::PostgreSQL, Some(1000));
+            let pg_start =
+                auto_increment::column_definition("id", DatabaseType::PostgreSQL, Some(1000));
             assert!(pg_start.contains("START WITH 1000"));
 
             let mysql = auto_increment::column_definition("id", DatabaseType::MySQL, None);
@@ -1065,10 +1075,12 @@ mod tests {
 
         #[test]
         fn test_set_start_value() {
-            let mysql = auto_increment::set_start_value("orders", 1000, DatabaseType::MySQL).unwrap();
+            let mysql =
+                auto_increment::set_start_value("orders", 1000, DatabaseType::MySQL).unwrap();
             assert_eq!(mysql, "ALTER TABLE orders AUTO_INCREMENT = 1000;");
 
-            let mssql = auto_increment::set_start_value("orders", 1000, DatabaseType::MSSQL).unwrap();
+            let mssql =
+                auto_increment::set_start_value("orders", 1000, DatabaseType::MSSQL).unwrap();
             assert!(mssql.contains("DBCC CHECKIDENT"));
         }
     }
@@ -1099,7 +1111,3 @@ mod tests {
         }
     }
 }
-
-
-
-

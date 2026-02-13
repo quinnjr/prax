@@ -1307,9 +1307,7 @@ where
     /// Subsequent calls return the cached value.
     pub fn get(&self, db_type: DatabaseType) -> &str {
         match db_type {
-            DatabaseType::PostgreSQL => {
-                self.postgres.get_or_init(|| (self.generator)(db_type))
-            }
+            DatabaseType::PostgreSQL => self.postgres.get_or_init(|| (self.generator)(db_type)),
             DatabaseType::MySQL => self.mysql.get_or_init(|| (self.generator)(db_type)),
             DatabaseType::SQLite => self.sqlite.get_or_init(|| (self.generator)(db_type)),
             DatabaseType::MSSQL => self.mssql.get_or_init(|| (self.generator)(db_type)),

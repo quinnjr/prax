@@ -464,7 +464,11 @@ impl ScyllaConfigBuilder {
             } else {
                 self.request_timeout_secs
             },
-            pool_size: if self.pool_size == 0 { 4 } else { self.pool_size },
+            pool_size: if self.pool_size == 0 {
+                4
+            } else {
+                self.pool_size
+            },
             local_datacenter: self.local_datacenter,
             ssl_enabled: self.ssl_enabled,
             application_name: self.application_name,
@@ -545,4 +549,3 @@ mod tests {
         assert_eq!(config.known_nodes(), &["localhost:9042"]);
     }
 }
-

@@ -55,12 +55,11 @@ pub mod leak_detector;
 pub mod snapshot;
 
 pub use allocation::{
-    AllocationRecord, AllocationTracker, AllocationStats, TrackedAllocator,
-    GLOBAL_TRACKER,
+    AllocationRecord, AllocationStats, AllocationTracker, GLOBAL_TRACKER, TrackedAllocator,
 };
-pub use heap::{HeapProfiler, HeapStats, HeapReport};
-pub use leak_detector::{LeakDetector, LeakReport, PotentialLeak, LeakSeverity};
-pub use snapshot::{MemorySnapshot, SnapshotDiff, PoolSnapshot};
+pub use heap::{HeapProfiler, HeapReport, HeapStats};
+pub use leak_detector::{LeakDetector, LeakReport, LeakSeverity, PotentialLeak};
+pub use snapshot::{MemorySnapshot, PoolSnapshot, SnapshotDiff};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -163,7 +162,7 @@ impl MemoryProfiler {
 
     /// Get pool statistics (string pool, buffer pool, etc.).
     pub fn pool_stats(&self) -> PoolStats {
-        use crate::memory::{GLOBAL_STRING_POOL, GLOBAL_BUFFER_POOL};
+        use crate::memory::{GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL};
 
         PoolStats {
             string_pool: GLOBAL_STRING_POOL.stats(),
@@ -212,13 +211,11 @@ impl MemoryReport {
         s.push_str("Allocations:\n");
         s.push_str(&format!(
             "  Total: {} ({} bytes)\n",
-            self.allocation_stats.total_allocations,
-            self.allocation_stats.total_bytes_allocated
+            self.allocation_stats.total_allocations, self.allocation_stats.total_bytes_allocated
         ));
         s.push_str(&format!(
             "  Current: {} ({} bytes)\n",
-            self.allocation_stats.current_allocations,
-            self.allocation_stats.current_bytes
+            self.allocation_stats.current_allocations, self.allocation_stats.current_bytes
         ));
         s.push_str(&format!(
             "  Peak: {} bytes\n",
@@ -226,14 +223,8 @@ impl MemoryReport {
         ));
 
         s.push_str("\nHeap:\n");
-        s.push_str(&format!(
-            "  Used: {} bytes\n",
-            self.heap_stats.used_bytes
-        ));
-        s.push_str(&format!(
-            "  RSS: {} bytes\n",
-            self.heap_stats.rss_bytes
-        ));
+        s.push_str(&format!("  Used: {} bytes\n", self.heap_stats.used_bytes));
+        s.push_str(&format!("  RSS: {} bytes\n", self.heap_stats.rss_bytes));
         s.push_str(&format!(
             "  Fragmentation: {:.1}%\n",
             self.heap_stats.fragmentation_ratio() * 100.0
@@ -242,8 +233,7 @@ impl MemoryReport {
         s.push_str("\nPools:\n");
         s.push_str(&format!(
             "  String pool: {} strings ({} bytes)\n",
-            self.pool_stats.string_pool.count,
-            self.pool_stats.string_pool.total_bytes
+            self.pool_stats.string_pool.count, self.pool_stats.string_pool.total_bytes
         ));
         s.push_str(&format!(
             "  Buffer pool: {} available\n",
@@ -322,4 +312,3 @@ mod tests {
         assert!(report.potential_leaks.is_empty() || !report.potential_leaks.is_empty());
     }
 }
-

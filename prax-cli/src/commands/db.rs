@@ -7,7 +7,7 @@ use crate::commands::introspect::{
     IntrospectionOptions, format_as_json, format_as_prax, format_as_sql, get_database_type,
 };
 use crate::commands::seed::{SeedRunner, find_seed_file, get_database_url};
-use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_NAME};
+use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_PATH};
 use crate::error::{CliError, CliResult};
 use crate::output::{self, success, warn};
 
@@ -27,7 +27,7 @@ async fn run_push(args: crate::cli::DbPushArgs) -> CliResult<()> {
 
     let cwd = std::env::current_dir()?;
     let config = load_config(&cwd)?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_NAME));
+    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
     output::kv("Schema", &schema_path.display().to_string());
     output::kv(
@@ -120,8 +120,8 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
 
     #[cfg(feature = "postgres")]
     let db_schema = {
-        use crate::commands::introspect::postgres::PostgresIntrospector;
         use crate::commands::introspect::Introspector;
+        use crate::commands::introspect::postgres::PostgresIntrospector;
 
         if config.database.provider.to_lowercase().contains("postgres") {
             let introspector = PostgresIntrospector::new(database_url.clone());
@@ -138,7 +138,8 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     #[cfg(not(feature = "postgres"))]
     let db_schema = {
         return Err(CliError::Config(
-            "No database driver enabled. Compile with --features postgres, mysql, sqlite, or mssql".to_string()
+            "No database driver enabled. Compile with --features postgres, mysql, sqlite, or mssql"
+                .to_string(),
         ));
     };
 
@@ -193,11 +194,7 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
         output::newline();
         output::section("Tables Introspected");
         for table in &db_schema.tables {
-            output::list_item(&format!(
-                "{} ({} columns)",
-                table.name,
-                table.columns.len()
-            ));
+            output::list_item(&format!("{} ({} columns)", table.name, table.columns.len()));
         }
     }
 
@@ -377,8 +374,10 @@ fn load_config(cwd: &PathBuf) -> CliResult<Config> {
 }
 
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    prax_schema::parse_schema(content)
-        .map_err(|e| CliError::Schema(format!("Failed to parse schema: {}", e)))
+    // Use validate_schema to ensure field types are properly resolved
+    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
+    prax_schema::validate_schema(content)
+        .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
 }
 
 fn calculate_schema_changes(_schema: &prax_schema::ast::Schema) -> CliResult<Vec<SchemaChange>> {
@@ -386,4 +385,3 @@ fn calculate_schema_changes(_schema: &prax_schema::ast::Schema) -> CliResult<Vec
     // For now, return empty changes
     Ok(Vec::new())
 }
-

@@ -17,11 +17,12 @@ members = [
     "prax-armature",
     "prax-axum",
     "prax-actix", "prax-import",
+    "prax-pgvector",
 ]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Pegasus Heavy Industries LLC <dev@pegasusheavy.com>"]
@@ -31,23 +32,24 @@ homepage = "https://github.com/pegasusheavy/prax-orm"
 
 [workspace.dependencies]
 # Internal crates
-prax-schema = { path = "prax-schema", version = "0.5.0" }
-prax-codegen = { path = "prax-codegen", version = "0.5.0" }
-prax-query = { path = "prax-query", version = "0.5.0" }
-prax-postgres = { path = "prax-postgres", version = "0.5.0" }
-prax-mysql = { path = "prax-mysql", version = "0.5.0" }
-prax-sqlite = { path = "prax-sqlite", version = "0.5.0" }
-prax-mssql = { path = "prax-mssql", version = "0.5.0" }
-prax-mongodb = { path = "prax-mongodb", version = "0.5.0" }
-prax-duckdb = { path = "prax-duckdb", version = "0.5.0" }
-prax-scylladb = { path = "prax-scylladb", version = "0.5.0" }
-prax-migrate = { path = "prax-migrate", version = "0.5.0" }
-prax-orm-cli = { path = "prax-cli", version = "0.5.0" }
-prax-sqlx = { path = "prax-sqlx", version = "0.5.0" }
-prax-armature = { path = "prax-armature", version = "0.5.0" }
-prax-axum = { path = "prax-axum", version = "0.5.0" }
-prax-actix = { path = "prax-actix", version = "0.5.0" }
-prax-import = { path = "prax-import", version = "0.5.0" }
+prax-schema = { path = "prax-schema", version = "0.6.0" }
+prax-codegen = { path = "prax-codegen", version = "0.6.0" }
+prax-query = { path = "prax-query", version = "0.6.0" }
+prax-postgres = { path = "prax-postgres", version = "0.6.0" }
+prax-mysql = { path = "prax-mysql", version = "0.6.0" }
+prax-sqlite = { path = "prax-sqlite", version = "0.6.0" }
+prax-mssql = { path = "prax-mssql", version = "0.6.0" }
+prax-mongodb = { path = "prax-mongodb", version = "0.6.0" }
+prax-duckdb = { path = "prax-duckdb", version = "0.6.0" }
+prax-scylladb = { path = "prax-scylladb", version = "0.6.0" }
+prax-migrate = { path = "prax-migrate", version = "0.6.0" }
+prax-orm-cli = { path = "prax-cli", version = "0.6.0" }
+prax-sqlx = { path = "prax-sqlx", version = "0.6.0" }
+prax-armature = { path = "prax-armature", version = "0.6.0" }
+prax-axum = { path = "prax-axum", version = "0.6.0" }
+prax-actix = { path = "prax-actix", version = "0.6.0" }
+prax-import = { path = "prax-import", version = "0.6.0" }
+prax-pgvector = { path = "prax-pgvector", version = "0.6.0" }
 
 # Code generation (proc-macros)
 proc-macro2 = "1.0"
@@ -95,6 +97,9 @@ bson = { version = "2.13", features = ["chrono-0_4", "uuid-1", "serde_with"] }
 
 # SQLx (alternative backend with compile-time checking)
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "macros", "json", "chrono", "uuid"] }
+
+# pgvector (vector similarity search)
+pgvector = { version = "0.4", features = ["postgres"] }
 
 # DuckDB (analytical database)
 duckdb = { version = "1.4", features = ["bundled", "json", "parquet", "chrono", "serde_json", "uuid"] }
@@ -177,6 +182,7 @@ insta = { workspace = true }
 criterion = { workspace = true }
 prax-schema = { workspace = true }
 prax-query = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -191,7 +197,11 @@ sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "runtime-t
 prax-postgres = { workspace = true }
 prax-mysql = { workspace = true }
 prax-sqlite = { workspace = true }
+prax-mssql = { workspace = true }
+prax-mongodb = { workspace = true }
 rusqlite = { workspace = true }
+bson = { workspace = true }
+futures = { workspace = true }
 
 [[bench]]
 name = "query_builder"

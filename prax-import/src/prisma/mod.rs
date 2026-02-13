@@ -6,5 +6,7 @@
 mod parser;
 pub mod types;
 
-pub use parser::{import_prisma_schema, import_prisma_schema_file, parse_prisma_file, parse_prisma_schema};
+pub use parser::{
+    import_prisma_schema, import_prisma_schema_file, parse_prisma_file, parse_prisma_schema,
+};
 pub use types::*;

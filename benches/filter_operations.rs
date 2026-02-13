@@ -2,12 +2,12 @@
 //! Benchmarks for filter operations and SQL generation.
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::raw::Sql;
 use prax_query::sql::DatabaseType;
 use prax_query::static_filter::{and2, and5, eq, fields, gt};
 use prax_query::typed_filter::{self as tf, AndN, TypedFilter};
+use std::hint::black_box;
 
 /// Create a sample equals filter.
 fn create_equals_filter() -> Filter {

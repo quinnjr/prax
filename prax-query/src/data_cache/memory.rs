@@ -245,8 +245,7 @@ impl MemoryCache {
             }
         }
 
-        self.entry_count
-            .store(entries.len(), Ordering::Relaxed);
+        self.entry_count.store(entries.len(), Ordering::Relaxed);
     }
 
     /// Add entry to tag index.
@@ -317,20 +316,15 @@ impl CacheBackend for MemoryCache {
         Ok(None)
     }
 
-    async fn set<T>(
-        &self,
-        key: &CacheKey,
-        value: &T,
-        ttl: Option<Duration>,
-    ) -> CacheResult<()>
+    async fn set<T>(&self, key: &CacheKey, value: &T, ttl: Option<Duration>) -> CacheResult<()>
     where
         T: serde::Serialize + Sync,
     {
         let key_str = key.as_str();
 
         // Serialize
-        let data = serde_json::to_vec(value)
-            .map_err(|e| CacheError::Serialization(e.to_string()))?;
+        let data =
+            serde_json::to_vec(value).map_err(|e| CacheError::Serialization(e.to_string()))?;
 
         let effective_ttl = ttl.or(self.config.time_to_live);
         let entry = CacheEntry::new(data, effective_ttl, Vec::new());
@@ -428,7 +422,8 @@ impl CacheBackend for MemoryCache {
             }
         }
 
-        self.entry_count.fetch_sub(removed as usize, Ordering::Relaxed);
+        self.entry_count
+            .fetch_sub(removed as usize, Ordering::Relaxed);
         Ok(removed)
     }
 
@@ -561,4 +556,3 @@ mod tests {
         assert_eq!(cache.config().time_to_live, Some(Duration::from_secs(60)));
     }
 }
-

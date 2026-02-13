@@ -32,8 +32,8 @@
 //! - `SKIP_DB_BENCHMARKS`: Set to "1" to skip database benchmarks
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use std::env;
+use std::hint::black_box;
 use std::time::Duration;
 
 // Connection URLs with defaults

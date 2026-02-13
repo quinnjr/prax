@@ -1,6 +1,6 @@
 [package]
 name = "prax-mongodb"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Pegasus Heavy Industries LLC <dev@pegasusheavy.com>"]
@@ -13,8 +13,8 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 # Internal crates
-prax-query = { path = "../prax-query", version = "0.5.0" }
-prax-schema = { path = "../prax-schema", version = "0.5.0" }
+prax-query = { path = "../prax-query", version = "0.6.0" }
+prax-schema = { path = "../prax-schema", version = "0.6.0" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

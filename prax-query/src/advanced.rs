@@ -205,10 +205,7 @@ pub mod mongodb_distinct {
     use serde_json::Value as JsonValue;
 
     /// Generate $group stage that mimics DISTINCT ON.
-    pub fn distinct_on_stage(
-        group_fields: &[&str],
-        first_fields: &[&str],
-    ) -> JsonValue {
+    pub fn distinct_on_stage(group_fields: &[&str], first_fields: &[&str]) -> JsonValue {
         let mut group_id = serde_json::Map::new();
         for field in group_fields {
             group_id.insert(field.to_string(), serde_json::json!(format!("${}", field)));
@@ -280,7 +277,10 @@ impl Returning {
         S: Into<String>,
     {
         Self {
-            columns: columns.into_iter().map(|c| ReturningColumn::Column(c.into())).collect(),
+            columns: columns
+                .into_iter()
+                .map(|c| ReturningColumn::Column(c.into()))
+                .collect(),
             operation,
         }
     }
@@ -702,7 +702,10 @@ pub mod random_sample {
             }
             DatabaseType::MySQL => format!("WHERE RAND() < {}", threshold),
             DatabaseType::MSSQL => {
-                format!("WHERE ABS(CHECKSUM(NEWID())) % 100 < {}", (threshold * 100.0) as i32)
+                format!(
+                    "WHERE ABS(CHECKSUM(NEWID())) % 100 < {}",
+                    (threshold * 100.0) as i32
+                )
             }
         }
     }
@@ -825,7 +828,11 @@ pub mod mongodb {
                 Self::InsertOne { document } => {
                     serde_json::json!({ "insertOne": { "document": document } })
                 }
-                Self::UpdateOne { filter, update, upsert } => {
+                Self::UpdateOne {
+                    filter,
+                    update,
+                    upsert,
+                } => {
                     serde_json::json!({
                         "updateOne": {
                             "filter": filter,
@@ -834,7 +841,11 @@ pub mod mongodb {
                         }
                     })
                 }
-                Self::UpdateMany { filter, update, upsert } => {
+                Self::UpdateMany {
+                    filter,
+                    update,
+                    upsert,
+                } => {
                     serde_json::json!({
                         "updateMany": {
                             "filter": filter,
@@ -843,7 +854,11 @@ pub mod mongodb {
                         }
                     })
                 }
-                Self::ReplaceOne { filter, replacement, upsert } => {
+                Self::ReplaceOne {
+                    filter,
+                    replacement,
+                    upsert,
+                } => {
                     serde_json::json!({
                         "replaceOne": {
                             "filter": filter,
@@ -1124,7 +1139,3 @@ mod tests {
         }
     }
 }
-
-
-
-

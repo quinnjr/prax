@@ -181,11 +181,7 @@ pub struct HeapReport {
 impl HeapReport {
     /// Get peak RSS from samples.
     pub fn peak_rss(&self) -> usize {
-        self.samples
-            .iter()
-            .map(|s| s.rss_bytes)
-            .max()
-            .unwrap_or(0)
+        self.samples.iter().map(|s| s.rss_bytes).max().unwrap_or(0)
     }
 
     /// Get average RSS from samples.
@@ -204,8 +200,11 @@ impl HeapReport {
 
         // Compare first third vs last third
         let third = self.samples.len() / 3;
-        let first_avg: usize =
-            self.samples[..third].iter().map(|s| s.rss_bytes).sum::<usize>() / third;
+        let first_avg: usize = self.samples[..third]
+            .iter()
+            .map(|s| s.rss_bytes)
+            .sum::<usize>()
+            / third;
         let last_avg: usize = self.samples[self.samples.len() - third..]
             .iter()
             .map(|s| s.rss_bytes)
@@ -219,10 +218,7 @@ impl HeapReport {
     /// Generate summary string.
     pub fn summary(&self) -> String {
         let mut s = String::new();
-        s.push_str(&format!(
-            "Heap Report (duration: {:?})\n",
-            self.duration
-        ));
+        s.push_str(&format!("Heap Report (duration: {:?})\n", self.duration));
         s.push_str(&format!(
             "  Current RSS: {} bytes ({:.2} MB)\n",
             self.current_stats.rss_bytes,
@@ -321,9 +317,7 @@ pub mod dhat_profiler {
 
     /// Start DHAT with custom options.
     pub fn start_dhat_with_file(path: &str) -> DhatGuard {
-        let profiler = dhat::Profiler::builder()
-            .file_name(path)
-            .build();
+        let profiler = dhat::Profiler::builder().file_name(path).build();
         DhatGuard { profiler }
     }
 }
@@ -407,4 +401,3 @@ mod tests {
         assert!(report.has_growth_trend());
     }
 }
-

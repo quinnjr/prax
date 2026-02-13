@@ -43,6 +43,6 @@ pub use find_unique::FindUniqueOperation;
 pub use update::{UpdateManyOperation, UpdateOperation};
 pub use upsert::UpsertOperation;
 pub use view::{
-    MaterializedViewAccessor, RefreshMaterializedViewOperation, ViewAccessor,
-    ViewCountOperation, ViewFindFirstOperation, ViewFindManyOperation, ViewQueryBuilder,
+    MaterializedViewAccessor, RefreshMaterializedViewOperation, ViewAccessor, ViewCountOperation,
+    ViewFindFirstOperation, ViewFindManyOperation, ViewQueryBuilder,
 };

@@ -457,4 +457,3 @@ mod tests {
         assert_eq!(pool.semaphore.available_permits(), initial_permits);
     }
 }
-

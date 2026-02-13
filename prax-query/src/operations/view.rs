@@ -459,11 +459,7 @@ mod tests {
             Box::pin(async { Ok(0) })
         }
 
-        fn count(
-            &self,
-            _sql: &str,
-            _params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<u64>> {
+        fn count(&self, _sql: &str, _params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
             Box::pin(async { Ok(42) })
         }
 
@@ -668,10 +664,7 @@ mod tests {
     fn test_view_trait_constants() {
         assert_eq!(TestView::VIEW_NAME, "TestView");
         assert_eq!(TestView::DB_VIEW_NAME, "test_view");
-        assert_eq!(
-            TestView::COLUMNS,
-            &["id", "user_id", "post_count"]
-        );
+        assert_eq!(TestView::COLUMNS, &["id", "user_id", "post_count"]);
         assert!(!TestView::IS_MATERIALIZED);
     }
 
@@ -682,5 +675,3 @@ mod tests {
         assert!(TestMaterializedView::SUPPORTS_CONCURRENT_REFRESH);
     }
 }
-
-

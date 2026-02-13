@@ -64,8 +64,8 @@ impl Default for TieredCacheConfig {
         Self {
             write_through_l1: true,
             write_through_l2: true,
-            l1_ttl: Some(Duration::from_secs(60)),   // 1 minute L1
-            l2_ttl: Some(Duration::from_secs(300)),  // 5 minutes L2
+            l1_ttl: Some(Duration::from_secs(60)), // 1 minute L1
+            l2_ttl: Some(Duration::from_secs(300)), // 5 minutes L2
             l1_required: false,
             l2_required: false,
         }
@@ -186,12 +186,7 @@ where
         }
     }
 
-    async fn set<T>(
-        &self,
-        key: &CacheKey,
-        value: &T,
-        ttl: Option<Duration>,
-    ) -> CacheResult<()>
+    async fn set<T>(&self, key: &CacheKey, value: &T, ttl: Option<Duration>) -> CacheResult<()>
     where
         T: serde::Serialize + Sync,
     {
@@ -292,9 +287,9 @@ where
         let l2_stats = self.l2.stats().await.unwrap_or_default();
 
         Ok(BackendStats {
-            entries: l2_stats.entries, // L2 is source of truth
+            entries: l2_stats.entries,           // L2 is source of truth
             memory_bytes: l1_stats.memory_bytes, // L1 memory usage
-            connections: l2_stats.connections, // L2 connections
+            connections: l2_stats.connections,   // L2 connections
             info: Some(format!(
                 "Tiered: L1={} entries, L2={} entries",
                 l1_stats.entries, l2_stats.entries
@@ -469,4 +464,3 @@ mod tests {
         assert_eq!(value, Some("hello".to_string()));
     }
 }
-

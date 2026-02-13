@@ -133,10 +133,7 @@ impl RlsManager {
 
     /// Create with simple defaults.
     pub fn simple(tenant_column: impl Into<String>, session_var: impl Into<String>) -> Self {
-        Self::new(
-            RlsConfig::new(tenant_column)
-                .with_session_variable(session_var),
-        )
+        Self::new(RlsConfig::new(tenant_column).with_session_variable(session_var))
     }
 
     /// Get the config.
@@ -146,7 +143,10 @@ impl RlsManager {
 
     /// Generate SQL to enable RLS on a table.
     pub fn enable_rls_sql(&self, table: &str) -> String {
-        format!("ALTER TABLE {} ENABLE ROW LEVEL SECURITY;", quote_ident(table))
+        format!(
+            "ALTER TABLE {} ENABLE ROW LEVEL SECURITY;",
+            quote_ident(table)
+        )
     }
 
     /// Generate SQL to force RLS even for table owners.
@@ -160,11 +160,7 @@ impl RlsManager {
     /// Generate SQL for the tenant isolation policy.
     pub fn create_policy_sql(&self, table: &str) -> String {
         let policy_name = format!("{}_{}", self.config.policy_prefix, table);
-        let role = self
-            .config
-            .application_role
-            .as_deref()
-            .unwrap_or("PUBLIC");
+        let role = self.config.application_role.as_deref().unwrap_or("PUBLIC");
 
         // Create policy that filters by tenant_id = current_setting('app.current_tenant')
         format!(
@@ -187,11 +183,7 @@ impl RlsManager {
     /// Generate SQL for UUID tenant columns.
     pub fn create_uuid_policy_sql(&self, table: &str) -> String {
         let policy_name = format!("{}_{}", self.config.policy_prefix, table);
-        let role = self
-            .config
-            .application_role
-            .as_deref()
-            .unwrap_or("PUBLIC");
+        let role = self.config.application_role.as_deref().unwrap_or("PUBLIC");
 
         format!(
             r#"CREATE POLICY {} ON {}
@@ -257,7 +249,12 @@ impl RlsManager {
 
         // Header
         writeln!(sql, "-- Prax Multi-Tenant RLS Setup").unwrap();
-        writeln!(sql, "-- Generated for column: {}", self.config.tenant_column).unwrap();
+        writeln!(
+            sql,
+            "-- Generated for column: {}",
+            self.config.tenant_column
+        )
+        .unwrap();
         writeln!(sql, "-- Session variable: {}", self.config.session_variable).unwrap();
         writeln!(sql).unwrap();
 
@@ -267,12 +264,7 @@ impl RlsManager {
                 writeln!(sql, "-- Admin role with BYPASSRLS").unwrap();
                 writeln!(sql, "DO $$").unwrap();
                 writeln!(sql, "BEGIN").unwrap();
-                writeln!(
-                    sql,
-                    "    CREATE ROLE {}_admin WITH BYPASSRLS;",
-                    role
-                )
-                .unwrap();
+                writeln!(sql, "    CREATE ROLE {}_admin WITH BYPASSRLS;", role).unwrap();
                 writeln!(sql, "EXCEPTION WHEN duplicate_object THEN NULL;").unwrap();
                 writeln!(sql, "END $$;").unwrap();
                 writeln!(sql).unwrap();
@@ -361,7 +353,9 @@ impl RlsManagerBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.config.tables.extend(tables.into_iter().map(Into::into));
+        self.config
+            .tables
+            .extend(tables.into_iter().map(Into::into));
         self
     }
 
@@ -643,5 +637,3 @@ mod tests {
         assert_eq!(quote_ident("table\"name"), "\"table\"\"name\"");
     }
 }
-
-

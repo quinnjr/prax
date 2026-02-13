@@ -49,11 +49,17 @@ TIER_1=(
 # Tier 2: Depends only on Tier 1
 TIER_2=(
     "prax-codegen"
+    "prax-import"
     "prax-migrate"
     "prax-postgres"
     "prax-mysql"
     "prax-sqlite"
+    "prax-mssql"
+    "prax-mongodb"
+    "prax-duckdb"
+    "prax-scylladb"
     "prax-sqlx"
+    "prax-pgvector"
 )
 
 # Tier 3: Depends on Tier 1 and/or Tier 2
@@ -61,7 +67,7 @@ TIER_3=(
     "prax-armature"
     "prax-axum"
     "prax-actix"
-    "prax-orm-cli"
+    "prax-cli"
 )
 
 # Tier 4: Main crate (depends on all)

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod};
+use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
@@ -36,11 +36,23 @@ impl PgPool {
 
         let mgr = Manager::from_config(pg_config, NoTls, mgr_config);
 
-        let pool = Pool::builder(mgr)
-            .max_size(pool_config.max_connections)
-            .wait_timeout(pool_config.connection_timeout)
-            .create_timeout(pool_config.connection_timeout)
-            .recycle_timeout(pool_config.idle_timeout)
+        // Build pool - set runtime to tokio for timeout support
+        let mut builder = Pool::builder(mgr).max_size(pool_config.max_connections);
+
+        // Only set timeouts if they are configured
+        if let Some(timeout) = pool_config.connection_timeout {
+            builder = builder
+                .wait_timeout(Some(timeout))
+                .create_timeout(Some(timeout));
+        }
+        if let Some(timeout) = pool_config.idle_timeout {
+            builder = builder.recycle_timeout(Some(timeout));
+        }
+
+        // Set runtime for timeout support
+        builder = builder.runtime(Runtime::Tokio1);
+
+        let pool = builder
             .build()
             .map_err(|e| PgError::config(format!("failed to create pool: {}", e)))?;
 

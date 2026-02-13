@@ -3,7 +3,7 @@
 //! Note: These benchmarks require a running ScyllaDB instance.
 //! Skip by default; run with: cargo bench --package prax-scylladb --features bench-scylla
 
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 /// Benchmark configuration parsing
@@ -18,16 +18,12 @@ fn bench_config_parsing(c: &mut Criterion) {
     ];
 
     for url in urls.iter() {
-        group.bench_with_input(
-            BenchmarkId::new("from_url", url.len()),
-            url,
-            |b, url| {
-                b.iter(|| {
-                    let config = prax_scylladb::ScyllaConfig::from_url(black_box(url));
-                    black_box(config)
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("from_url", url.len()), url, |b, url| {
+            b.iter(|| {
+                let config = prax_scylladb::ScyllaConfig::from_url(black_box(url));
+                black_box(config)
+            })
+        });
     }
 
     group.finish();
@@ -71,8 +67,8 @@ fn bench_config_builder(c: &mut Criterion) {
 
 /// Benchmark type conversions
 fn bench_type_conversions(c: &mut Criterion) {
-    use prax_scylladb::types::ToCqlValue;
     use prax_query::filter::FilterValue;
+    use prax_scylladb::types::ToCqlValue;
 
     let mut group = c.benchmark_group("scylladb_types");
 
@@ -117,4 +113,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-

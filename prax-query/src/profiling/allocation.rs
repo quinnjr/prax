@@ -113,7 +113,8 @@ impl AllocationTracker {
 
         // Update counters
         self.total_allocations.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_allocated.fetch_add(size, Ordering::Relaxed);
+        self.total_bytes_allocated
+            .fetch_add(size, Ordering::Relaxed);
 
         let current = self.current_bytes.fetch_add(size, Ordering::Relaxed) + size;
 
@@ -145,7 +146,8 @@ impl AllocationTracker {
         }
 
         self.total_deallocations.fetch_add(1, Ordering::Relaxed);
-        self.total_bytes_deallocated.fetch_add(size, Ordering::Relaxed);
+        self.total_bytes_deallocated
+            .fetch_add(size, Ordering::Relaxed);
         self.current_bytes.fetch_sub(size, Ordering::Relaxed);
 
         // Remove from active
@@ -301,7 +303,9 @@ impl SizeHistogram {
 
     /// Get bucket labels.
     pub fn bucket_labels() -> &'static [&'static str; 7] {
-        &["0-64B", "64-256B", "256B-1K", "1K-4K", "4K-16K", "16K-64K", "64K+"]
+        &[
+            "0-64B", "64-256B", "256B-1K", "1K-4K", "4K-16K", "16K-64K", "64K+",
+        ]
     }
 
     /// Get the most common bucket.
@@ -431,10 +435,10 @@ mod tests {
     fn test_size_histogram() {
         let mut hist = SizeHistogram::new();
 
-        hist.record(32);  // 0-64
+        hist.record(32); // 0-64
         hist.record(128); // 64-256
         hist.record(512); // 256-1K
-        hist.record(32);  // 0-64
+        hist.record(32); // 0-64
 
         assert_eq!(hist.buckets[0], 2); // 0-64
         assert_eq!(hist.buckets[1], 1); // 64-256
@@ -460,4 +464,3 @@ mod tests {
         assert!(stats.has_potential_leaks());
     }
 }
-

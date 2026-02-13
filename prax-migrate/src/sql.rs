@@ -721,9 +721,10 @@ impl SqliteGenerator {
         }
 
         // SQLite handles primary key in column definition for INTEGER PRIMARY KEY
-        let has_integer_pk = model.fields.iter().any(|f| {
-            f.is_primary_key && f.sql_type == "INTEGER" && f.is_auto_increment
-        });
+        let has_integer_pk = model
+            .fields
+            .iter()
+            .any(|f| f.is_primary_key && f.sql_type == "INTEGER" && f.is_auto_increment);
 
         // Add primary key constraint only if not using INTEGER PRIMARY KEY
         if !model.primary_key.is_empty() && !has_integer_pk {
@@ -801,7 +802,10 @@ impl SqliteGenerator {
         let cols: Vec<String> = index.columns.iter().map(|c| format!("\"{}\"", c)).collect();
         format!(
             "CREATE {}INDEX \"{}\" ON \"{}\"({});",
-            unique, index.name, index.table_name, cols.join(", ")
+            unique,
+            index.name,
+            index.table_name,
+            cols.join(", ")
         )
     }
 
@@ -900,16 +904,25 @@ impl MssqlGenerator {
                 .iter()
                 .map(|c| format!("[{}]", c))
                 .collect();
-            columns.push(format!("CONSTRAINT [PK_{}] PRIMARY KEY ({})", model.table_name, pk_cols.join(", ")));
+            columns.push(format!(
+                "CONSTRAINT [PK_{}] PRIMARY KEY ({})",
+                model.table_name,
+                pk_cols.join(", ")
+            ));
         }
 
         // Add unique constraints
         for uc in &model.unique_constraints {
             let cols: Vec<String> = uc.columns.iter().map(|c| format!("[{}]", c)).collect();
-            let name = uc.name.clone().unwrap_or_else(|| {
-                format!("UQ_{}_{}", model.table_name, uc.columns.join("_"))
-            });
-            columns.push(format!("CONSTRAINT [{}] UNIQUE ({})", name, cols.join(", ")));
+            let name = uc
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("UQ_{}_{}", model.table_name, uc.columns.join("_")));
+            columns.push(format!(
+                "CONSTRAINT [{}] UNIQUE ({})",
+                name,
+                cols.join(", ")
+            ));
         }
 
         format!(
@@ -1013,7 +1026,10 @@ impl MssqlGenerator {
         let cols: Vec<String> = index.columns.iter().map(|c| format!("[{}]", c)).collect();
         format!(
             "CREATE {}INDEX [{}] ON [{}]({});",
-            unique, index.name, index.table_name, cols.join(", ")
+            unique,
+            index.name,
+            index.table_name,
+            cols.join(", ")
         )
     }
 
@@ -1352,18 +1368,16 @@ mod tests {
         let model = ModelDiff {
             name: "User".to_string(),
             table_name: "users".to_string(),
-            fields: vec![
-                FieldDiff {
-                    name: "id".to_string(),
-                    column_name: "id".to_string(),
-                    sql_type: "INTEGER".to_string(),
-                    nullable: false,
-                    default: None,
-                    is_primary_key: true,
-                    is_auto_increment: true,
-                    is_unique: false,
-                },
-            ],
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+            }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
@@ -1431,18 +1445,16 @@ mod tests {
         let model = ModelDiff {
             name: "User".to_string(),
             table_name: "users".to_string(),
-            fields: vec![
-                FieldDiff {
-                    name: "id".to_string(),
-                    column_name: "id".to_string(),
-                    sql_type: "INTEGER".to_string(),
-                    nullable: false,
-                    default: None,
-                    is_primary_key: true,
-                    is_auto_increment: true,
-                    is_unique: false,
-                },
-            ],
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+            }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
@@ -1528,18 +1540,16 @@ mod tests {
         let model = ModelDiff {
             name: "User".to_string(),
             table_name: "users".to_string(),
-            fields: vec![
-                FieldDiff {
-                    name: "id".to_string(),
-                    column_name: "id".to_string(),
-                    sql_type: "INTEGER".to_string(),
-                    nullable: false,
-                    default: None,
-                    is_primary_key: true,
-                    is_auto_increment: true,
-                    is_unique: false,
-                },
-            ],
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+            }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),

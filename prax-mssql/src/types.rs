@@ -250,5 +250,3 @@ mod tests {
         assert_eq!(prax_type_to_mssql("Uuid"), "UNIQUEIDENTIFIER");
     }
 }
-
-

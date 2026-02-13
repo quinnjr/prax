@@ -80,7 +80,10 @@ impl LazySchema {
         let mut tables = HashMap::with_capacity(raw.tables.len());
         for table in raw.tables {
             let name = table.name.clone();
-            tables.insert(name, LazyTableEntry::Raw(serde_json::to_value(table).unwrap()));
+            tables.insert(
+                name,
+                LazyTableEntry::Raw(serde_json::to_value(table).unwrap()),
+            );
         }
 
         Self {
@@ -897,4 +900,3 @@ mod tests {
         assert_eq!(users1.column_count(), users2.column_count());
     }
 }
-

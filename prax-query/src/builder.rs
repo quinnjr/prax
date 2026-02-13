@@ -583,7 +583,8 @@ impl OptimizedWindowSpec {
         I: IntoIterator<Item = S>,
         S: Into<Identifier>,
     {
-        self.partition_by.extend(columns.into_iter().map(Into::into));
+        self.partition_by
+            .extend(columns.into_iter().map(Into::into));
         self
     }
 
@@ -819,6 +820,3 @@ mod tests {
         assert!(sql.contains("ROWS"));
     }
 }
-
-
-

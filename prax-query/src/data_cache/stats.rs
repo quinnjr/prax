@@ -245,4 +245,3 @@ mod tests {
         assert!((stats.ops_per_second() - 116.0).abs() < 0.1);
     }
 }
-

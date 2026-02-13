@@ -3,8 +3,8 @@
 use crate::converter::{FieldBuilder, ModelBuilder, SchemaBuilder, dummy_span};
 use crate::error::ImportResult;
 use crate::prisma::types::*;
-use prax_schema::ast::*;
 use once_cell::sync::Lazy;
+use prax_schema::ast::*;
 use regex_lite::Regex;
 use smol_str::SmolStr;
 use std::fs;
@@ -18,61 +18,37 @@ static DATASOURCE_RE: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
-static MODEL_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?s)model\s+(\w+)\s*\{([^}]+)\}").unwrap()
-});
+static MODEL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?s)model\s+(\w+)\s*\{([^}]+)\}").unwrap());
 
-static FIELD_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(\w+)\s+([\w\[\]?]+)(\s+@[\w\(\)]+)*").unwrap()
-});
+static FIELD_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\w+)\s+([\w\[\]?]+)(\s+@[\w\(\)]+)*").unwrap());
 
-static DEFAULT_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"@default\(([^)]+)\)"#).unwrap()
-});
+static DEFAULT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@default\(([^)]+)\)"#).unwrap());
 
-static MAP_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"@map\("([^"]+)"\)"#).unwrap()
-});
+static MAP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@map\("([^"]+)"\)"#).unwrap());
 
-static RELATION_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"@relation\(([^)]+)\)"#).unwrap()
-});
+static RELATION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@relation\(([^)]+)\)"#).unwrap());
 
-static RELATION_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"name:\s*"([^"]+)""#).unwrap()
-});
+static RELATION_NAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"name:\s*"([^"]+)""#).unwrap());
 
-static RELATION_FIELDS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"fields:\s*\[([^\]]+)\]").unwrap()
-});
+static RELATION_FIELDS_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"fields:\s*\[([^\]]+)\]").unwrap());
 
-static RELATION_REFS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"references:\s*\[([^\]]+)\]").unwrap()
-});
+static RELATION_REFS_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"references:\s*\[([^\]]+)\]").unwrap());
 
-static MODEL_ID_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@@id\(\[([^\]]+)\]\)").unwrap()
-});
+static MODEL_ID_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@id\(\[([^\]]+)\]\)").unwrap());
 
-static MODEL_UNIQUE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@@unique\(\[([^\]]+)\]").unwrap()
-});
+static MODEL_UNIQUE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@unique\(\[([^\]]+)\]").unwrap());
 
-static MODEL_INDEX_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"@@index\(\[([^\]]+)\]").unwrap()
-});
+static MODEL_INDEX_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@index\(\[([^\]]+)\]").unwrap());
 
-static MODEL_MAP_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"@@map\("([^"]+)"\)"#).unwrap()
-});
+static MODEL_MAP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@@map\("([^"]+)"\)"#).unwrap());
 
-static ATTR_NAME_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"name:\s*"([^"]+)""#).unwrap()
-});
+static ATTR_NAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"name:\s*"([^"]+)""#).unwrap());
 
-static ENUM_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?s)enum\s+(\w+)\s*\{([^}]+)\}").unwrap()
-});
+static ENUM_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)enum\s+(\w+)\s*\{([^}]+)\}").unwrap());
 
 /// Parse a Prisma schema from a string.
 ///
@@ -279,7 +255,8 @@ fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
 }
 
 fn extract_relation_name(args: &str) -> Option<String> {
-    RELATION_NAME_RE.captures(args)
+    RELATION_NAME_RE
+        .captures(args)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 

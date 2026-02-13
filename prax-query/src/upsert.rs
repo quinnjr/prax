@@ -432,7 +432,11 @@ impl Upsert {
                 sql.push_str(" WHEN NOT MATCHED THEN INSERT (");
                 sql.push_str(&self.columns.join(", "));
                 sql.push_str(") VALUES (");
-                let source_refs: Vec<String> = self.columns.iter().map(|c| format!("source.{}", c)).collect();
+                let source_refs: Vec<String> = self
+                    .columns
+                    .iter()
+                    .map(|c| format!("source.{}", c))
+                    .collect();
                 sql.push_str(&source_refs.join(", "));
                 sql.push(')');
             }
@@ -457,7 +461,10 @@ impl Upsert {
                     if let Some(col) = first_non_key {
                         sql.push_str(&format!("target.{} = source.{}", col, col));
                     } else {
-                        sql.push_str(&format!("target.{} = source.{}", self.columns[0], self.columns[0]));
+                        sql.push_str(&format!(
+                            "target.{} = source.{}",
+                            self.columns[0], self.columns[0]
+                        ));
                     }
                 } else {
                     sql.push_str(&assignments.join(", "));
@@ -466,7 +473,11 @@ impl Upsert {
                 sql.push_str(" WHEN NOT MATCHED THEN INSERT (");
                 sql.push_str(&self.columns.join(", "));
                 sql.push_str(") VALUES (");
-                let source_refs: Vec<String> = self.columns.iter().map(|c| format!("source.{}", c)).collect();
+                let source_refs: Vec<String> = self
+                    .columns
+                    .iter()
+                    .map(|c| format!("source.{}", c))
+                    .collect();
                 sql.push_str(&source_refs.join(", "));
                 sql.push(')');
             }
@@ -591,10 +602,16 @@ impl UpsertBuilder {
     /// Build the upsert.
     pub fn build(self) -> QueryResult<Upsert> {
         if self.columns.is_empty() {
-            return Err(QueryError::invalid_input("columns", "Upsert requires at least one column"));
+            return Err(QueryError::invalid_input(
+                "columns",
+                "Upsert requires at least one column",
+            ));
         }
         if self.values.is_empty() {
-            return Err(QueryError::invalid_input("values", "Upsert requires at least one value"));
+            return Err(QueryError::invalid_input(
+                "values",
+                "Upsert requires at least one value",
+            ));
         }
 
         Ok(Upsert {
@@ -639,7 +656,10 @@ pub mod mongodb {
             options.insert("upsert".to_string(), JsonValue::Bool(true));
 
             if let Some(ref filters) = self.array_filters {
-                options.insert("arrayFilters".to_string(), JsonValue::Array(filters.clone()));
+                options.insert(
+                    "arrayFilters".to_string(),
+                    JsonValue::Array(filters.clone()),
+                );
             }
 
             serde_json::json!({
@@ -659,7 +679,10 @@ pub mod mongodb {
             );
 
             if let Some(ref filters) = self.array_filters {
-                options.insert("arrayFilters".to_string(), JsonValue::Array(filters.clone()));
+                options.insert(
+                    "arrayFilters".to_string(),
+                    JsonValue::Array(filters.clone()),
+                );
             }
 
             serde_json::json!({
@@ -714,7 +737,11 @@ pub mod mongodb {
         }
 
         /// Add $setOnInsert field (only on insert).
-        pub fn set_on_insert(mut self, field: impl Into<String>, value: impl Into<JsonValue>) -> Self {
+        pub fn set_on_insert(
+            mut self,
+            field: impl Into<String>,
+            value: impl Into<JsonValue>,
+        ) -> Self {
             self.set_on_insert.insert(field.into(), value.into());
             self
         }
@@ -745,9 +772,7 @@ pub mod mongodb {
 
         /// Add array filters.
         pub fn array_filter(mut self, filter: JsonValue) -> Self {
-            self.array_filters
-                .get_or_insert_with(Vec::new)
-                .push(filter);
+            self.array_filters.get_or_insert_with(Vec::new).push(filter);
             self
         }
 
@@ -760,7 +785,10 @@ pub mod mongodb {
             }
 
             if !self.set_on_insert.is_empty() {
-                update.insert("$setOnInsert".to_string(), JsonValue::Object(self.set_on_insert.clone()));
+                update.insert(
+                    "$setOnInsert".to_string(),
+                    JsonValue::Object(self.set_on_insert.clone()),
+                );
             }
 
             if !self.inc.is_empty() {
@@ -828,7 +856,11 @@ pub mod mongodb {
         }
 
         /// Add an upsert operation.
-        pub fn add(mut self, filter: serde_json::Map<String, JsonValue>, update: JsonValue) -> Self {
+        pub fn add(
+            mut self,
+            filter: serde_json::Map<String, JsonValue>,
+            update: JsonValue,
+        ) -> Self {
             self.operations.push(BulkUpsertOp { filter, update });
             self
         }
@@ -1058,5 +1090,3 @@ mod tests {
         }
     }
 }
-
-

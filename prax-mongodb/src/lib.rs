@@ -81,10 +81,9 @@ pub mod prelude {
     pub use crate::error::{MongoError, MongoResult};
     pub use crate::filter::FilterBuilder;
     pub use crate::view::{
-        accumulators, stages, AggregationView, AggregationViewBuilder, MaterializedAggregationView,
-        MergeAction, MergeNotMatchedAction, MergeOptions,
+        AggregationView, AggregationViewBuilder, MaterializedAggregationView, MergeAction,
+        MergeNotMatchedAction, MergeOptions, accumulators, stages,
     };
     pub use bson::oid::ObjectId;
     pub use bson::{Bson, Document, doc};
 }
-

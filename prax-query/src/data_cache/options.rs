@@ -213,20 +213,17 @@ pub mod presets {
 
     /// For user profiles and settings.
     pub fn user_data() -> CacheOptions {
-        CacheOptions::ttl(Duration::from_secs(300))
-            .with_policy(CachePolicy::CacheFirst)
+        CacheOptions::ttl(Duration::from_secs(300)).with_policy(CachePolicy::CacheFirst)
     }
 
     /// For reference/lookup data that rarely changes.
     pub fn reference_data() -> CacheOptions {
-        CacheOptions::ttl(Duration::from_secs(3600))
-            .with_policy(CachePolicy::CacheFirst)
+        CacheOptions::ttl(Duration::from_secs(3600)).with_policy(CachePolicy::CacheFirst)
     }
 
     /// For static data that almost never changes.
     pub fn static_data() -> CacheOptions {
-        CacheOptions::ttl(Duration::from_secs(86400))
-            .with_policy(CachePolicy::CacheFirst)
+        CacheOptions::ttl(Duration::from_secs(86400)).with_policy(CachePolicy::CacheFirst)
     }
 
     /// For session data.
@@ -294,5 +291,3 @@ mod tests {
         assert!(realtime.bypass);
     }
 }
-
-

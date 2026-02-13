@@ -16,7 +16,7 @@ services:
   # ===========================================================================
 
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: prax-postgres
     environment:
       POSTGRES_USER: prax
@@ -32,8 +32,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-    networks:
-      - prax-network
+    network_mode: host
 
   mysql:
     image: mysql:8.0
@@ -43,19 +42,60 @@ services:
       MYSQL_USER: prax
       MYSQL_PASSWORD: prax_test_password
       MYSQL_DATABASE: prax_test
+      MYSQL_TCP_PORT: 3307
     ports:
-      - "3306:3306"
+      - "3307:3307"
     volumes:
       - mysql_data:/var/lib/mysql
       - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    command: --default-authentication-plugin=mysql_native_password
+    command: --default-authentication-plugin=mysql_native_password --port=3307
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "prax", "-pprax_test_password"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-P", "3307", "-u", "prax", "-pprax_test_password"]
       interval: 5s
       timeout: 5s
       retries: 10
-    networks:
-      - prax-network
+    network_mode: host
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: prax-mssql
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Prax_Test_Password123!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "1433:1433"
+    volumes:
+      - mssql_data:/var/opt/mssql
+      - ./docker/mssql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./docker/mssql/setup.sh:/docker-entrypoint-initdb.d/setup.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'Prax_Test_Password123!' -C -Q 'SELECT 1' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    network_mode: host
+
+  mongodb:
+    image: mongo:7.0
+    container_name: prax-mongodb
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: prax
+      MONGO_INITDB_ROOT_PASSWORD: prax_test_password
+      MONGO_INITDB_DATABASE: prax_test
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+      - ./docker/mongodb/init.js:/docker-entrypoint-initdb.d/init.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "-u", "prax", "-p", "prax_test_password", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    network_mode: host
 
   # ===========================================================================
   # Test Runner Services
@@ -68,8 +108,10 @@ services:
       target: test-runner
     container_name: prax-test
     environment:
-      POSTGRES_URL: postgres://prax:prax_test_password@postgres:5432/prax_test
-      MYSQL_URL: mysql://prax:prax_test_password@mysql:3306/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
+      MSSQL_URL: "mssql://sa:Prax_Test_Password123!@localhost:1433/prax_test?TrustServerCertificate=true"
+      MONGODB_URL: "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
       SQLITE_URL: file:./test.db
       RUST_BACKTRACE: 1
       RUST_LOG: info
@@ -78,11 +120,14 @@ services:
         condition: service_healthy
       mysql:
         condition: service_healthy
+      mssql:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
-    networks:
-      - prax-network
+    network_mode: host
     command: cargo test --workspace --all-features
 
   # Run PostgreSQL tests only
@@ -92,7 +137,7 @@ services:
       target: test-runner
     container_name: prax-test-postgres
     environment:
-      DATABASE_URL: postgres://prax:prax_test_password@postgres:5432/prax_test
+      DATABASE_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
       RUST_BACKTRACE: 1
     depends_on:
       postgres:
@@ -100,8 +145,7 @@ services:
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
-    networks:
-      - prax-network
+    network_mode: host
     command: cargo test -p prax-postgres --all-features
 
   # Run MySQL tests only
@@ -111,7 +155,7 @@ services:
       target: test-runner
     container_name: prax-test-mysql
     environment:
-      DATABASE_URL: mysql://prax:prax_test_password@mysql:3306/prax_test
+      DATABASE_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
       RUST_BACKTRACE: 1
     depends_on:
       mysql:
@@ -119,8 +163,7 @@ services:
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
-    networks:
-      - prax-network
+    network_mode: host
     command: cargo test -p prax-mysql --all-features
 
   # Run SQLite tests only (no external dependencies)
@@ -135,9 +178,62 @@ services:
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
-    networks:
-      - prax-network
+    network_mode: host
     command: cargo test -p prax-sqlite --all-features
+
+  # Run MSSQL tests only
+  test-mssql:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-mssql
+    environment:
+      DATABASE_URL: "mssql://sa:Prax_Test_Password123!@localhost:1433/prax_test?TrustServerCertificate=true"
+      RUST_BACKTRACE: 1
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-mssql --all-features
+
+  # Run pgvector tests only
+  test-pgvector:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-pgvector
+    environment:
+      DATABASE_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      RUST_BACKTRACE: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-pgvector --all-features -- --ignored
+
+  # Run MongoDB tests only
+  test-mongodb:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-mongodb
+    environment:
+      DATABASE_URL: "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
+      RUST_BACKTRACE: 1
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-mongodb --all-features
 
   # ===========================================================================
   # Development Service
@@ -149,8 +245,8 @@ services:
       target: development
     container_name: prax-dev
     environment:
-      POSTGRES_URL: postgres://prax:prax_test_password@postgres:5432/prax_test
-      MYSQL_URL: mysql://prax:prax_test_password@mysql:3306/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
       SQLITE_URL: file:./dev.db
       RUST_BACKTRACE: 1
       RUST_LOG: debug
@@ -161,8 +257,7 @@ services:
       - .:/app
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
-    networks:
-      - prax-network
+    network_mode: host
     stdin_open: true
     tty: true
     command: bash
@@ -177,8 +272,8 @@ services:
       target: test-runner
     container_name: prax-bench
     environment:
-      POSTGRES_URL: postgres://prax:prax_test_password@postgres:5432/prax_test
-      MYSQL_URL: mysql://prax:prax_test_password@mysql:3306/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
       SQLITE_URL: file:./bench.db
     depends_on:
       postgres:
@@ -189,8 +284,7 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
       - ./target/criterion:/app/target/criterion
-    networks:
-      - prax-network
+    network_mode: host
     command: cargo bench --workspace
 
   # ===========================================================================
@@ -203,8 +297,8 @@ services:
       target: test-runner
     container_name: prax-coverage
     environment:
-      POSTGRES_URL: postgres://prax:prax_test_password@postgres:5432/prax_test
-      MYSQL_URL: mysql://prax:prax_test_password@mysql:3306/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
       SQLITE_URL: file:./coverage.db
       RUST_BACKTRACE: 1
     depends_on:
@@ -216,18 +310,9 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
       - ./coverage:/app/coverage
-    networks:
-      - prax-network
+    network_mode: host
     command: >
       sh -c "cargo llvm-cov --workspace --all-features --html --output-dir /app/coverage"
-
-# =============================================================================
-# Networks
-# =============================================================================
-
-networks:
-  prax-network:
-    driver: bridge
 
 # =============================================================================
 # Volumes
@@ -238,8 +323,11 @@ volumes:
     name: prax-postgres-data
   mysql_data:
     name: prax-mysql-data
+  mssql_data:
+    name: prax-mssql-data
+  mongodb_data:
+    name: prax-mongodb-data
   cargo_cache:
     name: prax-cargo-cache
   target_cache:
     name: prax-target-cache
-

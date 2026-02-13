@@ -2,17 +2,17 @@
 //!
 //! Run with: cargo bench --package prax-query --bench tenant_bench
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 use std::time::Duration;
 
 use prax_query::tenant::{
+    TenantContext, TenantId,
     cache::{CacheConfig, CacheLookup, ShardedTenantCache, TenantCache},
     pool::{PoolConfig, TenantPoolManager},
     prepared::{StatementCache, StatementKey},
     rls::RlsManager,
     task_local::{current_tenant_id, has_tenant, with_tenant},
-    TenantContext, TenantId,
 };
 
 fn bench_tenant_context(c: &mut Criterion) {
@@ -47,44 +47,31 @@ fn bench_task_local(c: &mut Criterion) {
     let mut group = c.benchmark_group("tenant/task_local");
 
     group.bench_function("with_tenant_overhead", |b| {
-        b.to_async(&rt).iter(|| async {
-            with_tenant("tenant-123", async {
-                black_box(())
-            })
-            .await
-        })
+        b.to_async(&rt)
+            .iter(|| async { with_tenant("tenant-123", async { black_box(()) }).await })
     });
 
     group.bench_function("current_tenant_id_hit", |b| {
         b.to_async(&rt).iter(|| async {
-            with_tenant("tenant-123", async {
-                black_box(current_tenant_id())
-            })
-            .await
+            with_tenant("tenant-123", async { black_box(current_tenant_id()) }).await
         })
     });
 
     group.bench_function("current_tenant_id_miss", |b| {
-        b.to_async(&rt).iter(|| async { black_box(current_tenant_id()) })
+        b.to_async(&rt)
+            .iter(|| async { black_box(current_tenant_id()) })
     });
 
     group.bench_function("has_tenant_check", |b| {
-        b.to_async(&rt).iter(|| async {
-            with_tenant("tenant-123", async {
-                black_box(has_tenant())
-            })
-            .await
-        })
+        b.to_async(&rt)
+            .iter(|| async { with_tenant("tenant-123", async { black_box(has_tenant()) }).await })
     });
 
     group.bench_function("nested_context_3_levels", |b| {
         b.to_async(&rt).iter(|| async {
             with_tenant("level-1", async {
                 with_tenant("level-2", async {
-                    with_tenant("level-3", async {
-                        black_box(current_tenant_id())
-                    })
-                    .await
+                    with_tenant("level-3", async { black_box(current_tenant_id()) }).await
                 })
                 .await
             })
@@ -161,14 +148,10 @@ fn bench_sharded_cache(c: &mut Criterion) {
             cache.insert(id.clone(), TenantContext::new(id));
         }
 
-        group.bench_with_input(
-            BenchmarkId::new("lookup_shards", shards),
-            shards,
-            |b, _| {
-                let id = TenantId::new("tenant-500");
-                b.iter(|| black_box(cache.lookup(&id)))
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lookup_shards", shards), shards, |b, _| {
+            let id = TenantId::new("tenant-500");
+            b.iter(|| black_box(cache.lookup(&id)))
+        });
     }
 
     group.finish();
@@ -259,9 +242,7 @@ fn bench_rls_sql_generation(c: &mut Criterion) {
 fn bench_pool_manager(c: &mut Criterion) {
     let mut group = c.benchmark_group("tenant/pool");
 
-    let manager = TenantPoolManager::builder()
-        .per_tenant(1000, 5)
-        .build();
+    let manager = TenantPoolManager::builder().per_tenant(1000, 5).build();
 
     group.bench_function("get_or_create_new", |b| {
         let mut i = 0u64;
@@ -337,5 +318,3 @@ criterion_group!(
 );
 
 criterion_main!(benches);
-
-

@@ -1,6 +1,6 @@
 [package]
 name = "prax-migrate"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Migration engine for the Prax ORM - schema diffing, SQL generation, and history tracking"
@@ -11,7 +11,7 @@ keywords = ["orm", "database", "migrations", "postgresql", "async"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-prax-schema = { path = "../prax-schema", version = "0.5.0" }
+prax-schema = { path = "../prax-schema", version = "0.6.0" }
 
 tokio = { version = "1.49", features = ["full", "fs"] }
 thiserror = "2.0"

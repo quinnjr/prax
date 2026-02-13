@@ -9,7 +9,7 @@ use tracing::{debug, instrument};
 
 use crate::config::DuckDbConfig;
 use crate::error::{DuckDbError, DuckDbResult};
-use crate::types::{duckdb_value_ref_to_json, DuckDbParam};
+use crate::types::{DuckDbParam, duckdb_value_ref_to_json};
 use prax_query::filter::FilterValue;
 
 /// A DuckDB connection wrapper.
@@ -379,15 +379,15 @@ mod tests {
             .unwrap();
         conn.execute(
             "INSERT INTO users VALUES (?, ?)",
-            &[FilterValue::Int(1), FilterValue::String("Alice".to_string())],
+            &[
+                FilterValue::Int(1),
+                FilterValue::String("Alice".to_string()),
+            ],
         )
         .unwrap();
 
         let results = conn
-            .query(
-                "SELECT * FROM users WHERE id = ?",
-                &[FilterValue::Int(1)],
-            )
+            .query("SELECT * FROM users WHERE id = ?", &[FilterValue::Int(1)])
             .unwrap();
         assert_eq!(results.len(), 1);
     }

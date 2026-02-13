@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use prax_import::prelude::*;
 
 // Sample schemas for benchmarking
@@ -266,23 +266,29 @@ pub enum Relation {
 fn bench_prisma_import(c: &mut Criterion) {
     let mut group = c.benchmark_group("prisma_import");
 
-    group.bench_with_input(BenchmarkId::from_parameter("small"), &SMALL_PRISMA_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_prisma_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("small"),
+        &SMALL_PRISMA_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_prisma_schema(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("medium"), &MEDIUM_PRISMA_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_prisma_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("medium"),
+        &MEDIUM_PRISMA_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_prisma_schema(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("large"), &LARGE_PRISMA_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_prisma_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("large"),
+        &LARGE_PRISMA_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_prisma_schema(black_box(*schema)).unwrap());
+        },
+    );
 
     group.finish();
 }
@@ -290,23 +296,29 @@ fn bench_prisma_import(c: &mut Criterion) {
 fn bench_diesel_import(c: &mut Criterion) {
     let mut group = c.benchmark_group("diesel_import");
 
-    group.bench_with_input(BenchmarkId::from_parameter("small"), &SMALL_DIESEL_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_diesel_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("small"),
+        &SMALL_DIESEL_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_diesel_schema(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("medium"), &MEDIUM_DIESEL_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_diesel_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("medium"),
+        &MEDIUM_DIESEL_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_diesel_schema(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("large"), &LARGE_DIESEL_SCHEMA, |b, schema| {
-        b.iter(|| {
-            import_diesel_schema(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("large"),
+        &LARGE_DIESEL_SCHEMA,
+        |b, schema| {
+            b.iter(|| import_diesel_schema(black_box(*schema)).unwrap());
+        },
+    );
 
     group.finish();
 }
@@ -317,23 +329,29 @@ fn bench_seaorm_import(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("seaorm_import");
 
-    group.bench_with_input(BenchmarkId::from_parameter("small"), &SMALL_SEAORM_ENTITY, |b, schema| {
-        b.iter(|| {
-            import_seaorm_entity(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("small"),
+        &SMALL_SEAORM_ENTITY,
+        |b, schema| {
+            b.iter(|| import_seaorm_entity(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("medium"), &MEDIUM_SEAORM_ENTITY, |b, schema| {
-        b.iter(|| {
-            import_seaorm_entity(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("medium"),
+        &MEDIUM_SEAORM_ENTITY,
+        |b, schema| {
+            b.iter(|| import_seaorm_entity(black_box(*schema)).unwrap());
+        },
+    );
 
-    group.bench_with_input(BenchmarkId::from_parameter("large"), &LARGE_SEAORM_ENTITY, |b, schema| {
-        b.iter(|| {
-            import_seaorm_entity(black_box(*schema)).unwrap()
-        });
-    });
+    group.bench_with_input(
+        BenchmarkId::from_parameter("large"),
+        &LARGE_SEAORM_ENTITY,
+        |b, schema| {
+            b.iter(|| import_seaorm_entity(black_box(*schema)).unwrap());
+        },
+    );
 
     group.finish();
 }
@@ -343,5 +361,10 @@ fn bench_seaorm_import(_c: &mut Criterion) {
     // Skip SeaORM benchmarks if feature is not enabled
 }
 
-criterion_group!(benches, bench_prisma_import, bench_diesel_import, bench_seaorm_import);
+criterion_group!(
+    benches,
+    bench_prisma_import,
+    bench_diesel_import,
+    bench_seaorm_import
+);
 criterion_main!(benches);

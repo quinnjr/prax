@@ -18,6 +18,7 @@ prax/
 ├── prax-mongodb/        # MongoDB driver
 ├── prax-duckdb/         # DuckDB analytical driver
 ├── prax-scylladb/       # ScyllaDB driver
+├── prax-pgvector/       # pgvector integration (embeddings, vector search)
 ├── prax-migrate/        # Migration engine
 ├── prax-import/         # Import from Prisma/Diesel/SeaORM
 ├── prax-cli/            # CLI tool
@@ -95,6 +96,19 @@ prax/
 | Tiered L1/L2 caching | `tiered.rs` |
 | Pattern/tag invalidation | `invalidation.rs` |
 | Cache metrics | `stats.rs` |
+
+### pgvector (`prax-pgvector/`)
+
+| Feature | Module |
+|---------|--------|
+| Dense embeddings (`Embedding`) | `types.rs` |
+| Sparse embeddings (`SparseEmbedding`) | `types.rs` |
+| Binary vectors (`BinaryVector`) | `types.rs` |
+| Distance metrics (L2, cosine, IP, L1) | `ops.rs` |
+| IVFFlat/HNSW index management | `index.rs` |
+| Vector similarity search builder | `query.rs` |
+| Hybrid vector + full-text search (RRF) | `query.rs` |
+| Vector filter integration | `filter.rs` |
 
 ### DuckDB Analytics (`prax-duckdb/`)
 

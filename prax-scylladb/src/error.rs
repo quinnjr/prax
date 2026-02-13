@@ -254,4 +254,3 @@ mod tests {
         assert!(!ScyllaError::Connection("test".into()).is_auth_error());
     }
 }
-
