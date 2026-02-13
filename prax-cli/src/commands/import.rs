@@ -6,6 +6,7 @@ use std::path::Path;
 use prax_import::prelude::*;
 
 use crate::cli::{ImportArgs, ImportSource};
+use crate::config::SCHEMA_FILE_PATH;
 use crate::error::{CliError, CliResult};
 use crate::output;
 
@@ -55,8 +56,8 @@ pub async fn run(args: ImportArgs) -> CliResult<()> {
     } else {
         // Determine output path
         let output_path = args.output.unwrap_or_else(|| {
-            // Default to schema.prax in current directory
-            std::path::PathBuf::from("schema.prax")
+            // Default to prax/schema.prax
+            std::path::PathBuf::from(SCHEMA_FILE_PATH)
         });
 
         // Check if file exists and prompt if not forcing

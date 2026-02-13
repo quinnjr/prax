@@ -65,6 +65,7 @@ pub use error::{MssqlError, MssqlResult};
 pub use pool::{MssqlPool, MssqlPoolBuilder, PoolConfig, PoolStatus};
 pub use rls::{BlockOperation, SecurityPolicy, SecurityPolicyGenerator};
 pub use row::MssqlRow;
+pub use tiberius::Row;
 
 /// Prelude for convenient imports.
 pub mod prelude {

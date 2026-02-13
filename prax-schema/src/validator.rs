@@ -35,6 +35,9 @@ impl Validator {
         // Check for duplicate definitions
         self.check_duplicates(&schema);
 
+        // Resolve field types (convert Model references to Enum or Composite where appropriate)
+        self.resolve_field_types(&mut schema);
+
         // Validate each model
         for model in schema.models.values() {
             self.validate_model(model, &schema);
@@ -116,6 +119,60 @@ impl Validator {
         }
     }
 
+    /// Resolve field types to their correct types (Enum or Composite) instead of Model.
+    ///
+    /// The parser initially treats all non-scalar type references as Model references.
+    /// This pass corrects them to Enum or Composite where appropriate.
+    fn resolve_field_types(&self, schema: &mut Schema) {
+        // Collect enum and composite type names into owned strings to avoid borrow conflicts
+        let enum_names: std::collections::HashSet<String> =
+            schema.enums.keys().map(|s| s.to_string()).collect();
+        let composite_names: std::collections::HashSet<String> =
+            schema.types.keys().map(|s| s.to_string()).collect();
+
+        // Update field types in models
+        for model in schema.models.values_mut() {
+            for field in model.fields.values_mut() {
+                if let FieldType::Model(ref type_name) = field.field_type {
+                    let name = type_name.as_str();
+                    if enum_names.contains(name) {
+                        field.field_type = FieldType::Enum(type_name.clone());
+                    } else if composite_names.contains(name) {
+                        field.field_type = FieldType::Composite(type_name.clone());
+                    }
+                }
+            }
+        }
+
+        // Also update field types in composite types
+        for composite in schema.types.values_mut() {
+            for field in composite.fields.values_mut() {
+                if let FieldType::Model(ref type_name) = field.field_type {
+                    let name = type_name.as_str();
+                    if enum_names.contains(name) {
+                        field.field_type = FieldType::Enum(type_name.clone());
+                    } else if composite_names.contains(name) {
+                        field.field_type = FieldType::Composite(type_name.clone());
+                    }
+                }
+            }
+        }
+
+        // Also update field types in views
+        for view in schema.views.values_mut() {
+            for field in view.fields.values_mut() {
+                if let FieldType::Model(ref type_name) = field.field_type {
+                    let name = type_name.as_str();
+                    if enum_names.contains(name) {
+                        field.field_type = FieldType::Enum(type_name.clone());
+                    } else if composite_names.contains(name) {
+                        field.field_type = FieldType::Composite(type_name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     /// Validate a model definition.
     fn validate_model(&mut self, model: &Model, schema: &Schema) {
         // Check for @id field
@@ -190,24 +247,32 @@ impl Validator {
         }
 
         // Validate relation fields have @relation or are back-references
-        if field.field_type.is_relation() && !field.is_list() {
-            // One-side of relation should have foreign key fields
-            let attrs = field.extract_attributes();
-            if attrs.relation.is_some() {
-                let rel = attrs.relation.as_ref().unwrap();
-                // Validate foreign key fields exist
-                for fk_field in &rel.fields {
-                    if !schema
-                        .models
-                        .get(model_name)
-                        .map(|m| m.fields.contains_key(fk_field.as_str()))
-                        .unwrap_or(false)
-                    {
-                        self.errors.push(SchemaError::invalid_relation(
-                            model_name,
-                            field.name(),
-                            format!("foreign key field '{}' does not exist", fk_field),
-                        ));
+        // Only check actual model relations (not enums or composite types parsed as Model)
+        if let FieldType::Model(ref target_name) = field.field_type {
+            // Skip validation for enum and composite type references
+            let is_actual_relation = schema.models.contains_key(target_name.as_str())
+                && !schema.enums.contains_key(target_name.as_str())
+                && !schema.types.contains_key(target_name.as_str());
+
+            if is_actual_relation && !field.is_list() {
+                // One-side of relation should have foreign key fields
+                let attrs = field.extract_attributes();
+                if attrs.relation.is_some() {
+                    let rel = attrs.relation.as_ref().unwrap();
+                    // Validate foreign key fields exist
+                    for fk_field in &rel.fields {
+                        if !schema
+                            .models
+                            .get(model_name)
+                            .map(|m| m.fields.contains_key(fk_field.as_str()))
+                            .unwrap_or(false)
+                        {
+                            self.errors.push(SchemaError::invalid_relation(
+                                model_name,
+                                field.name(),
+                                format!("foreign key field '{}' does not exist", fk_field),
+                            ));
+                        }
                     }
                 }
             }
@@ -259,8 +324,10 @@ impl Validator {
                 }
             }
             "relation" => {
-                // Validate relation attribute
-                if !field.field_type.is_relation() {
+                // Validate relation attribute - should only be on actual model references
+                let is_model_ref = matches!(&field.field_type, FieldType::Model(name)
+                    if schema.models.contains_key(name.as_str()));
+                if !is_model_ref {
                     self.errors.push(SchemaError::InvalidAttribute {
                         attribute: "relation".to_string(),
                         message: format!(
@@ -647,6 +714,21 @@ impl Validator {
         for model in schema.models.values() {
             for field in model.fields.values() {
                 if let FieldType::Model(ref target_model) = field.field_type {
+                    // Skip if this is actually an enum reference (parser treats non-scalar as Model initially)
+                    if schema.enums.contains_key(target_model.as_str()) {
+                        continue;
+                    }
+
+                    // Skip if this is actually a composite type reference
+                    if schema.types.contains_key(target_model.as_str()) {
+                        continue;
+                    }
+
+                    // Skip if the target model doesn't exist (error was already reported)
+                    if !schema.models.contains_key(target_model.as_str()) {
+                        continue;
+                    }
+
                     let attrs = field.extract_attributes();
 
                     let relation_type = if field.is_list() {

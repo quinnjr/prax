@@ -59,6 +59,7 @@ TIER_2=(
     "prax-duckdb"
     "prax-scylladb"
     "prax-sqlx"
+    "prax-pgvector"
 )
 
 # Tier 3: Depends on Tier 1 and/or Tier 2

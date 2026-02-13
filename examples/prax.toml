@@ -6,7 +6,7 @@
 provider = "postgresql"
 
 # Connection URL - supports environment variable interpolation
-url = "${DATABASE_URL}"
+url = "postgresql://prax:prax_test_password@localhost:5432/prax_test"
 
 # Connection pool settings
 [database.pool]
@@ -47,12 +47,15 @@ table_name = "_prax_migrations"
 
 # Seeding configuration
 [seed]
+# Seeds directory (inside prax/ directory)
+directory = "./prax/seeds"
+
 # Seed script path - supports multiple formats:
 # - .rs   - Rust seed script (compiled and executed)
 # - .sql  - Raw SQL file (executed directly)
 # - .json - JSON data file (declarative seeding)
 # - .toml - TOML data file (declarative seeding)
-script = "./seed.rs"
+script = "./prax/seeds/seed.rs"
 
 # Run seed automatically after migrations in development
 auto_seed = false

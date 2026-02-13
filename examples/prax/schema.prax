@@ -1,0 +1,65 @@
+// Prax Schema Definition Language
+// Schema with enums for testing
+
+/// User roles for authorization
+enum Role {
+    User
+    Admin
+    Moderator
+}
+
+/// Status of a post
+enum PostStatus {
+    Draft
+    Published
+    Archived
+}
+
+/// User accounts in the system
+model User {
+    id          Int         @id @auto
+    email       String      @unique
+    name        String?
+    role        Role        @default(User)
+    active      Boolean     @default(true)
+    created_at  DateTime    @default(now())
+    updated_at  DateTime    @updated_at
+    posts       Post[]
+
+    @@map("users")
+    @@index([email])
+}
+
+/// Blog posts
+model Post {
+    id          Int         @id @auto
+    title       String
+    content     String?
+    status      PostStatus  @default(Draft)
+    published   Boolean     @default(false)
+    views       Int         @default(0)
+    created_at  DateTime    @default(now())
+    updated_at  DateTime    @updated_at
+    author_id   Int
+    author      User        @relation(fields: [author_id], references: [id], onDelete: Cascade)
+
+    @@map("posts")
+    @@index([author_id])
+    @@index([status])
+}
+
+/// Comments on posts
+model Comment {
+    id          Int         @id @auto
+    content     String
+    created_at  DateTime    @default(now())
+    updated_at  DateTime    @updated_at
+    author_id   Int?
+    author      User?       @relation(fields: [author_id], references: [id], onDelete: SetNull)
+    post_id     Int
+    post        Post        @relation(fields: [post_id], references: [id], onDelete: Cascade)
+
+    @@map("comments")
+    @@index([post_id])
+    @@index([author_id])
+}

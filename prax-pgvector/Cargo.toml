@@ -1,0 +1,45 @@
+[package]
+name = "prax-pgvector"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "pgvector integration for the Prax ORM — vector similarity search, embeddings, and index management"
+documentation = "https://docs.rs/prax-pgvector"
+keywords = ["orm", "pgvector", "embeddings", "vector-search", "ai"]
+categories = ["database", "asynchronous"]
+
+[dependencies]
+# Internal crates
+prax-query = { workspace = true }
+prax-postgres = { workspace = true }
+
+# pgvector types
+pgvector = { workspace = true }
+
+# PostgreSQL driver (for ToSql/FromSql implementations)
+tokio-postgres = { workspace = true }
+postgres-types = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Tracing
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+pretty_assertions = { workspace = true }
+
+[features]
+default = []
+halfvec = ["pgvector/halfvec"]

@@ -1,7 +1,7 @@
 //! `prax validate` command - Validate Prax schema file.
 
 use crate::cli::ValidateArgs;
-use crate::config::SCHEMA_FILE_NAME;
+use crate::config::SCHEMA_FILE_PATH;
 use crate::error::{CliError, CliResult};
 use crate::output::{self, success, warn};
 
@@ -10,7 +10,7 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
     output::header("Validate Schema");
 
     let cwd = std::env::current_dir()?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_NAME));
+    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
     if !schema_path.exists() {
         return Err(
@@ -80,11 +80,22 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
 
     // Count fields and relations
     let total_fields: usize = schema.models.values().map(|m| m.fields.len()).sum();
+
+    // Count actual relations (exclude enum and composite type references)
     let relations: usize = schema
         .models
         .values()
         .flat_map(|m| m.fields.values())
-        .filter(|f| f.is_relation())
+        .filter(|f| {
+            if let prax_schema::ast::FieldType::Model(ref name) = f.field_type {
+                // Only count as relation if it's an actual model reference
+                schema.models.contains_key(name.as_str())
+                    && !schema.enums.contains_key(name.as_str())
+                    && !schema.types.contains_key(name.as_str())
+            } else {
+                false
+            }
+        })
         .count();
 
     output::kv("Total Fields", &total_fields.to_string());
@@ -94,7 +105,10 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
 }
 
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    prax_schema::parse_schema(content).map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
+    // Use validate_schema to ensure field types are properly resolved
+    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
+    prax_schema::validate_schema(content)
+        .map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
 }
 
 fn validate_schema(schema: &prax_schema::ast::Schema) -> Result<(), Vec<String>> {
@@ -191,6 +205,16 @@ fn validate_relation(
         FieldType::Model(name) => name.as_str(),
         _ => return,
     };
+
+    // Skip if this is actually an enum reference (parser treats non-scalar as Model initially)
+    if schema.enums.contains_key(target_type) {
+        return;
+    }
+
+    // Skip if this is a composite type reference
+    if schema.types.contains_key(target_type) {
+        return;
+    }
 
     // Check if target model exists
     let target_model = schema.models.get(target_type);

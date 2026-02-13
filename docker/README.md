@@ -1,233 +1,219 @@
-# Docker Setup for Prax ORM
+# Prax ORM Docker Setup
 
-This directory contains Docker configuration for testing Prax against real databases.
+This directory contains Docker configurations for all supported databases used in development and testing.
 
 ## Quick Start
 
 ```bash
 # Start all databases
-docker compose up -d postgres mysql
+docker compose up -d postgres mysql mssql mongodb
 
-# Run all tests
-docker compose run --rm test
-
-# Run specific database tests
-docker compose run --rm test-postgres
-docker compose run --rm test-mysql
-docker compose run --rm test-sqlite
-```
-
-## Services
-
-| Service | Description | Port |
-|---------|-------------|------|
-| `postgres` | PostgreSQL 16 | 5432 |
-| `mysql` | MySQL 8.0 | 3306 |
-| `test` | Run all tests | - |
-| `test-postgres` | PostgreSQL tests only | - |
-| `test-mysql` | MySQL tests only | - |
-| `test-sqlite` | SQLite tests only | - |
-| `dev` | Development shell | - |
-| `bench` | Run benchmarks | - |
-| `coverage` | Generate coverage report | - |
-
-## Connection Strings
-
-### PostgreSQL
-```
-postgres://prax:prax_test_password@localhost:5432/prax_test
-```
-
-### MySQL
-```
-mysql://prax:prax_test_password@localhost:3306/prax_test
-```
-
-### SQLite
-```
-file:./test.db
-```
-
-## Common Commands
-
-### Start Databases
-
-```bash
-# Start all databases in background
-docker compose up -d
-
-# Start specific database
+# Start a specific database
 docker compose up -d postgres
-docker compose up -d mysql
 
-# View logs
-docker compose logs -f postgres
-```
-
-### Run Tests
-
-```bash
-# All tests against all databases
-docker compose run --rm test
-
-# Specific database
-docker compose run --rm test-postgres
-docker compose run --rm test-mysql
-docker compose run --rm test-sqlite
-
-# With specific test filter
-docker compose run --rm test cargo test query_builder
-
-# With verbose output
-docker compose run --rm -e RUST_LOG=debug test
-```
-
-### Development
-
-```bash
-# Open interactive development shell
-docker compose run --rm dev
-
-# Inside the container:
-cargo test -p prax-postgres
-cargo bench
-```
-
-### Benchmarks
-
-```bash
-# Run all benchmarks
-docker compose run --rm bench
-
-# Results are saved to ./target/criterion/
-```
-
-### Coverage
-
-```bash
-# Generate HTML coverage report
-docker compose run --rm coverage
-
-# Report is saved to ./coverage/
-open coverage/html/index.html
-```
-
-### Cleanup
-
-```bash
 # Stop all services
 docker compose down
 
 # Stop and remove volumes (clean slate)
 docker compose down -v
-
-# Remove built images
-docker compose down --rmi local
 ```
 
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `POSTGRES_URL` | PostgreSQL connection string | See above |
-| `MYSQL_URL` | MySQL connection string | See above |
-| `SQLITE_URL` | SQLite file path | `file:./test.db` |
-| `RUST_BACKTRACE` | Enable backtraces | `1` |
-| `RUST_LOG` | Log level | `info` |
-
-## Database Initialization
+## Supported Databases
 
 ### PostgreSQL
 
-The `postgres/init.sql` script:
-- Enables `uuid-ossp` and `pgcrypto` extensions
-- Creates additional test databases
-- Sets up migration tracking table
+- **Port**: 5432 (host network)
+- **User**: `prax`
+- **Password**: `prax_test_password`
+- **Database**: `prax_test`
+
+```bash
+# Start PostgreSQL
+docker compose up -d postgres
+
+# Connect
+psql -h localhost -U prax -d prax_test
+# Password: prax_test_password
+
+# Run demo
+cargo run --example postgres_demo
+```
 
 ### MySQL
 
-The `mysql/init.sql` script:
-- Creates additional test databases
-- Grants permissions to test user
-- Sets up migration tracking table
+- **Port**: 3307 (host network)
+- **User**: `prax`
+- **Password**: `prax_test_password`
+- **Database**: `prax_test`
+
+```bash
+# Start MySQL
+docker compose up -d mysql
+
+# Connect
+mysql -h localhost -P 3307 -u prax -pprax_test_password prax_test
+
+# Run demo
+cargo run --example mysql_demo
+```
+
+### Microsoft SQL Server
+
+- **Port**: 1433 (host network)
+- **User**: `sa`
+- **Password**: `Prax_Test_Password123!`
+- **Database**: `prax_test`
+
+```bash
+# Start SQL Server
+docker compose up -d mssql
+
+# Wait for startup (about 30 seconds), then create database
+docker exec prax-mssql /opt/mssql-tools/bin/sqlcmd \
+  -S 127.0.0.1 -U sa -P 'Prax_Test_Password123!' -C \
+  -Q "CREATE DATABASE prax_test"
+
+# Create tables
+docker exec prax-mssql /opt/mssql-tools/bin/sqlcmd \
+  -S 127.0.0.1 -U sa -P 'Prax_Test_Password123!' -C -d prax_test \
+  -i /docker-entrypoint-initdb.d/init.sql
+
+# Run demo
+cargo run --example mssql_demo
+```
+
+### MongoDB
+
+- **Port**: 27017 (host network)
+- **User**: `prax`
+- **Password**: `prax_test_password`
+- **Database**: `prax_test`
+
+```bash
+# Start MongoDB
+docker compose up -d mongodb
+
+# Connect
+mongosh "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
+
+# Run demo
+cargo run --example mongodb_demo
+```
+
+## Connection Strings
+
+Use these connection strings in your applications:
+
+```rust
+// PostgreSQL
+const PG_URL: &str = "postgresql://prax:prax_test_password@localhost:5432/prax_test";
+
+// MySQL
+const MYSQL_URL: &str = "mysql://prax:prax_test_password@localhost:3307/prax_test";
+
+// SQL Server
+const MSSQL_URL: &str = "server=localhost,1433;database=prax_test;user=sa;password=Prax_Test_Password123!;trust_server_certificate=true";
+
+// MongoDB
+const MONGO_URL: &str = "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin";
+```
+
+## Running Examples
+
+Each database has a corresponding demo example:
+
+```bash
+# PostgreSQL demo
+cargo run --example postgres_demo
+
+# MySQL demo
+cargo run --example mysql_demo
+
+# SQL Server demo
+cargo run --example mssql_demo
+
+# MongoDB demo
+cargo run --example mongodb_demo
+```
+
+## Host Network Mode
+
+This configuration uses `network_mode: host` due to Docker networking limitations on some systems. This means:
+
+- Containers share the host's network namespace
+- Port mappings in `docker-compose.yml` are for documentation only
+- Services bind to `localhost` on their native ports (except MySQL which uses 3307)
+
+## Volumes
+
+Each database stores data in named volumes:
+
+- `prax-postgres-data`
+- `prax-mysql-data`
+- `prax-mssql-data`
+- `prax-mongodb-data`
+
+To completely reset a database:
+
+```bash
+# Stop and remove the specific container and volume
+docker rm -f prax-postgres
+docker volume rm prax-postgres-data
+
+# Restart
+docker compose up -d postgres
+```
+
+## Health Checks
+
+All services include health checks. Check status with:
+
+```bash
+docker compose ps
+```
+
+Expected output when healthy:
+
+```
+NAME            IMAGE                                        SERVICE    STATUS
+prax-postgres   postgres:16-alpine                           postgres   Up (healthy)
+prax-mysql      mysql:8.0                                    mysql      Up (healthy)
+prax-mssql      mcr.microsoft.com/mssql/server:2022-latest   mssql      Up (healthy)
+prax-mongodb    mongo:7.0                                    mongodb    Up (healthy)
+```
+
+## Initialization Scripts
+
+Each database has initialization scripts in this directory:
+
+- `postgres/init.sql` - PostgreSQL schema and seed data
+- `mysql/init.sql` - MySQL schema and seed data
+- `mssql/init.sql` - SQL Server schema (manual execution required)
+- `mongodb/init.js` - MongoDB initialization script
 
 ## Troubleshooting
 
-### Container won't start
+### SQL Server takes long to start
+
+SQL Server requires more time to initialize. Wait about 30 seconds after starting:
 
 ```bash
 # Check logs
-docker compose logs postgres
-docker compose logs mysql
+docker logs prax-mssql
 
-# Rebuild from scratch
+# Wait for "Recovery is complete" message
+docker logs -f prax-mssql | grep -m1 "Recovery is complete"
+```
+
+### Can't connect to a database
+
+1. Check if the container is running: `docker compose ps`
+2. Check logs: `docker logs prax-<database>`
+3. Ensure no port conflicts on your host
+
+### Reset everything
+
+```bash
 docker compose down -v
-docker compose build --no-cache
-docker compose up -d
+docker compose up -d postgres mysql mssql mongodb
 ```
-
-### Tests can't connect to database
-
-```bash
-# Ensure database is healthy
-docker compose ps
-
-# Wait for healthy status
-docker compose up -d postgres
-docker compose exec postgres pg_isready -U prax
-```
-
-### Permission denied errors
-
-```bash
-# Fix ownership of mounted volumes
-sudo chown -R $USER:$USER target/ coverage/
-```
-
-### Out of disk space
-
-```bash
-# Clean up Docker resources
-docker system prune -a --volumes
-```
-
-## CI Integration
-
-Example GitHub Actions workflow:
-
-```yaml
-name: Integration Tests
-
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: prax
-          POSTGRES_PASSWORD: prax_test_password
-          POSTGRES_DB: prax_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Run tests
-        env:
-          DATABASE_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
-        run: cargo test -p prax-postgres --all-features
-```
-

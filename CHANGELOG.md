@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-02-13
+
+### Added
+
+- **pgvector Support** (`prax-pgvector`) - New crate for vector similarity search
+  - Dense vector embeddings via `Embedding` type wrapping `pgvector::Vector`
+  - Sparse vector support via `SparseEmbedding` wrapping `pgvector::SparseVector`
+  - Binary vector support via `BinaryVector` wrapping `pgvector::Bit`
+  - Half-precision vectors via `HalfEmbedding` (feature-gated `halfvec`)
+  - Distance metrics: L2, inner product, cosine, L1, Hamming, Jaccard
+  - IVFFlat and HNSW index management with tuning parameters
+  - Fluent `VectorSearchBuilder` for nearest-neighbor queries
+  - `HybridSearchBuilder` for combined vector + full-text search (RRF scoring)
+  - Vector filter integration for prax-query WHERE/ORDER BY clauses
+  - Extension management SQL helpers (CREATE/DROP/CHECK pgvector)
+  - Client-side vector math: L2 norm, normalization, dot product, cosine similarity
+  - 99 unit tests + 10 doc tests + 36 integration tests
+
 ## [0.5.0] - 2026-01-07
 
 ### Added
@@ -366,7 +384,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - N/A
 -->
 
-[Unreleased]: https://github.com/pegasusheavy/prax-orm/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/pegasusheavy/prax-orm/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pegasusheavy/prax-orm/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/pegasusheavy/prax-orm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pegasusheavy/prax-orm/compare/v0.3.3...v0.4.0
 [0.3.3]: https://github.com/pegasusheavy/prax-orm/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/pegasusheavy/prax-orm/compare/v0.3.1...v0.3.2
