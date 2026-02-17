@@ -86,7 +86,7 @@ regex-lite = "0.1"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
 deadpool-postgres = { version = "0.14", features = ["serde"] }
 postgres-types = { version = "0.2", features = ["derive"] }
-mysql_async = { version = "0.34", default-features = false, features = ["default-rustls"] }
+mysql_async = { version = "0.36", default-features = false, features = ["default-rustls"] }
 tokio-rusqlite = "0.6"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
