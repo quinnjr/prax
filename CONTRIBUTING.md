@@ -89,7 +89,7 @@ Then create a Pull Request on GitHub targeting `develop`.
 
 ### Prerequisites
 
-- Rust 1.85+ (2024 edition)
+- Rust 1.89+ (2024 edition)
 - Docker (for database testing)
 - PostgreSQL, MySQL, or SQLite (for local testing)
 

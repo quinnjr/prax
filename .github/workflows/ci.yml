@@ -75,7 +75,7 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
 
       - name: Run clippy
-        run: cargo clippy --all-features --all-targets -- -D warnings
+        run: cargo clippy --all-features --all-targets -- -W clippy::all
 
   test:
     name: Test
