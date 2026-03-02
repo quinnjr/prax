@@ -90,7 +90,7 @@ jobs:
           cargo bench --package prax-query -- --save-baseline ${{ github.ref_name }}
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results-${{ github.sha }}
           path: |
