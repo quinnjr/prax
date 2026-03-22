@@ -154,6 +154,7 @@ pub mod cache;
 pub mod connection;
 pub mod cte;
 pub mod data;
+#[allow(dead_code, unused_imports)]
 pub mod data_cache;
 pub mod db_optimize;
 pub mod error;

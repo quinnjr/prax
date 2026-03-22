@@ -74,7 +74,7 @@ impl LazySchema {
     }
 
     /// Create from parsed raw schema.
-    pub fn from_raw(raw: RawSchema) -> Self {
+    fn from_raw(raw: RawSchema) -> Self {
         let table_names: Vec<String> = raw.tables.iter().map(|t| t.name.clone()).collect();
 
         let mut tables = HashMap::with_capacity(raw.tables.len());

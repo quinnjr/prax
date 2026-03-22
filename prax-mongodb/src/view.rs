@@ -82,7 +82,7 @@ impl AggregationView {
     }
 
     /// Generate the MongoDB command to create this view.
-    pub fn to_create_command(&self, database: &str) -> Document {
+    pub fn to_create_command(&self, _database: &str) -> Document {
         let mut cmd = doc! {
             "create": &self.name,
             "viewOn": &self.source_collection,

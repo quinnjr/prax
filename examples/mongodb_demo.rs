@@ -16,7 +16,7 @@
 //! cargo run --example mongodb_demo
 //! ```
 
-use prax_mongodb::{Document, MongoClient, ObjectId, doc};
+use prax_mongodb::{MongoClient, ObjectId, doc};
 use serde::{Deserialize, Serialize};
 
 const MONGODB_URI: &str =
