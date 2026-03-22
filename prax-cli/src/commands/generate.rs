@@ -237,12 +237,12 @@ fn generate_client_module(
     code.push_str("\n");
 
     // Re-exports
-    code.push_str("pub use types::*;\n");
-    code.push_str("pub use filters::*;\n\n");
+    code.push_str("#[allow(unused_imports)]\npub use types::*;\n");
+    code.push_str("#[allow(unused_imports)]\npub use filters::*;\n\n");
 
     for model in schema.models.values() {
         code.push_str(&format!(
-            "pub use {}::{};\n",
+            "#[allow(unused_imports)]\npub use {}::{};\n",
             to_snake_case(model.name()),
             model.name()
         ));
@@ -250,7 +250,7 @@ fn generate_client_module(
 
     for enum_def in schema.enums.values() {
         code.push_str(&format!(
-            "pub use {}::{};\n",
+            "#[allow(unused_imports)]\npub use {}::{};\n",
             to_snake_case(enum_def.name()),
             enum_def.name()
         ));
@@ -259,6 +259,7 @@ fn generate_client_module(
     code.push_str("\n");
 
     // Client struct with Clone bound and derive
+    code.push_str("#[allow(dead_code)]\n");
     code.push_str("/// The Prax database client\n");
     code.push_str("#[derive(Clone)]\n");
     code.push_str("pub struct PraxClient<E: prax_query::QueryEngine> {\n");
@@ -307,7 +308,9 @@ fn generate_model_module(
     ));
 
     // Import sibling types for relation fields
+    code.push_str("#[allow(unused_imports)]\n");
     code.push_str("use super::*;\n");
+    code.push_str("#[allow(unused_imports)]\n");
     code.push_str("use prax_query::traits::Model;\n\n");
 
     // Derive macros based on features
@@ -318,6 +321,7 @@ fn generate_model_module(
     }
 
     // Model struct
+    code.push_str("#[allow(dead_code)]\n");
     code.push_str(&format!("#[derive({})]\n", derives.join(", ")));
     code.push_str(&format!("pub struct {} {{\n", model.name()));
 
@@ -388,6 +392,7 @@ fn generate_model_module(
     code.push_str("}\n\n");
 
     // Operations struct (owned engine, no lifetime)
+    code.push_str("#[allow(dead_code)]\n");
     code.push_str(&format!("/// Operations for the {} model\n", model.name()));
     code.push_str(&format!(
         "pub struct {}Operations<E: prax_query::QueryEngine> {{\n",
@@ -475,6 +480,7 @@ fn generate_enum_module(enum_def: &prax_schema::ast::Enum) -> CliResult<String> 
         enum_def.name()
     ));
 
+    code.push_str("#[allow(dead_code)]\n");
     code.push_str(
         "#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]\n",
     );
@@ -538,13 +544,14 @@ fn generate_types_module(schema: &prax_schema::ast::Schema) -> CliResult<String>
     let mut code = String::new();
 
     code.push_str("//! Common type definitions\n\n");
-    code.push_str("pub use chrono::{DateTime, Utc};\n");
-    code.push_str("pub use uuid::Uuid;\n");
-    code.push_str("pub use serde_json::Value as Json;\n");
+    code.push_str("#[allow(unused_imports)]\npub use chrono::{DateTime, Utc};\n");
+    code.push_str("#[allow(unused_imports)]\npub use uuid::Uuid;\n");
+    code.push_str("#[allow(unused_imports)]\npub use serde_json::Value as Json;\n");
     code.push_str("\n");
 
     // Add any custom types from composite types
     for composite in schema.types.values() {
+        code.push_str("#[allow(dead_code)]\n");
         code.push_str("#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\n");
         code.push_str(&format!("pub struct {} {{\n", composite.name()));
         for field in composite.fields.values() {
@@ -563,6 +570,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
     let mut code = String::new();
 
     code.push_str("//! Filter types for queries\n\n");
+    code.push_str("#[allow(unused_imports)]\n");
     code.push_str("use prax_query::filter::{Filter, ScalarFilter};\n");
 
     // Collect all enum types referenced by model scalar fields
@@ -580,7 +588,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
     // Import enum types
     for enum_name in &referenced_enums {
         code.push_str(&format!(
-            "use super::{}::{};\n",
+            "#[allow(unused_imports)]\nuse super::{}::{};\n",
             to_snake_case(enum_name),
             enum_name
         ));
@@ -590,6 +598,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
 
     for model in schema.models.values() {
         // Where input
+        code.push_str("#[allow(dead_code)]\n");
         code.push_str(&format!("/// Filter input for {} queries\n", model.name()));
         code.push_str("#[derive(Debug, Default, Clone)]\n");
         code.push_str(&format!("pub struct {}WhereInput {{\n", model.name()));
@@ -611,6 +620,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
         code.push_str("}\n\n");
 
         // OrderBy input
+        code.push_str("#[allow(dead_code)]\n");
         code.push_str(&format!(
             "/// Order by input for {} queries\n",
             model.name()

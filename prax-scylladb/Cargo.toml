@@ -1,6 +1,6 @@
 [package]
 name = "prax-scylladb"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = ["Pegasus Heavy Industries LLC <dev@pegasusheavy.com>"]
 description = "ScyllaDB database driver for Prax ORM - high-performance Cassandra-compatible database"
@@ -13,7 +13,7 @@ rust-version = "1.85"
 
 [dependencies]
 # Internal crates
-prax-query = { path = "../prax-query", version = "0.6.1" }
+prax-query = { path = "../prax-query", version = "0.6.2" }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "sync"] }
