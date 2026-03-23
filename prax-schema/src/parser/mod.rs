@@ -96,8 +96,8 @@ pub fn parse_schema(input: &str) -> SchemaResult<Schema> {
                 current_doc = None;
             }
             Rule::generator_def => {
-                // Generator blocks are handled separately by the codegen crate
-                // We just skip them here for now
+                let generator = parse_generator(pair)?;
+                schema.add_generator(generator);
                 current_doc = None;
             }
             Rule::EOI => {}
@@ -110,6 +110,7 @@ pub fn parse_schema(input: &str) -> SchemaResult<Schema> {
         enums = schema.enums.len(),
         types = schema.types.len(),
         views = schema.views.len(),
+        generators = schema.generators.len(),
         policies = schema.policies.len(),
         "Schema parsed successfully"
     );
@@ -600,6 +601,107 @@ fn parse_server_property(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<
         value,
         Span::new(span.start(), span.end()),
     ))
+}
+
+/// Parse a generator definition.
+fn parse_generator(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Generator> {
+    let span = pair.as_span();
+    let mut inner = pair.into_inner();
+
+    let name = inner.next().unwrap().as_str();
+    let mut generator = Generator::new(name, Span::new(span.start(), span.end()));
+
+    for prop in inner {
+        if prop.as_rule() == Rule::datasource_property {
+            let mut prop_inner = prop.into_inner();
+            let key = prop_inner.next().unwrap().as_str();
+            let value_pair = prop_inner.next().unwrap();
+
+            match key {
+                "provider" => {
+                    let s = extract_datasource_string(&value_pair);
+                    generator.provider = Some(SmolStr::new(s));
+                }
+                "output" => {
+                    let s = extract_datasource_string(&value_pair);
+                    generator.output = Some(SmolStr::new(s));
+                }
+                "generate" => {
+                    generator.generate = parse_generator_toggle(&value_pair);
+                }
+                _ => {
+                    let val = parse_generator_value(&value_pair);
+                    generator.properties.insert(SmolStr::new(key), val);
+                }
+            }
+        }
+    }
+
+    Ok(generator)
+}
+
+/// Parse a generator toggle value (bool literal or env() call).
+fn parse_generator_toggle(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorToggle {
+    match pair.as_rule() {
+        Rule::env_function => {
+            let env_var = pair
+                .clone()
+                .into_inner()
+                .next()
+                .map(|p| {
+                    let s = p.as_str();
+                    SmolStr::new(&s[1..s.len() - 1])
+                })
+                .unwrap_or_default();
+            GeneratorToggle::Env(env_var)
+        }
+        Rule::datasource_value => {
+            let inner = pair.clone().into_inner().next().unwrap();
+            parse_generator_toggle(&inner)
+        }
+        _ => {
+            let s = pair.as_str().trim().trim_matches('"');
+            match s {
+                "true" => GeneratorToggle::Literal(true),
+                "false" => GeneratorToggle::Literal(false),
+                _ => GeneratorToggle::Literal(false),
+            }
+        }
+    }
+}
+
+/// Parse an arbitrary generator property value.
+fn parse_generator_value(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorValue {
+    match pair.as_rule() {
+        Rule::env_function => {
+            let env_var = pair
+                .clone()
+                .into_inner()
+                .next()
+                .map(|p| {
+                    let s = p.as_str();
+                    SmolStr::new(&s[1..s.len() - 1])
+                })
+                .unwrap_or_default();
+            GeneratorValue::Env(env_var)
+        }
+        Rule::datasource_value => {
+            let inner = pair.clone().into_inner().next().unwrap();
+            parse_generator_value(&inner)
+        }
+        Rule::string_literal => {
+            let s = pair.as_str();
+            GeneratorValue::String(SmolStr::new(&s[1..s.len() - 1]))
+        }
+        _ => {
+            let s = pair.as_str().trim().trim_matches('"');
+            match s {
+                "true" => GeneratorValue::Bool(true),
+                "false" => GeneratorValue::Bool(false),
+                _ => GeneratorValue::Ident(SmolStr::new(s)),
+            }
+        }
+    }
 }
 
 /// Parse a datasource definition.

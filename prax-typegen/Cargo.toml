@@ -1,0 +1,31 @@
+[package]
+name = "prax-typegen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Pegasus Heavy Industries LLC <pegasusheavyindustries@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pegasusheavy/prax"
+homepage = "https://github.com/pegasusheavy/prax"
+description = "Generate TypeScript interfaces and Zod schemas from Prax ORM schema files"
+documentation = "https://docs.rs/prax-typegen"
+keywords = ["typescript", "codegen", "orm", "zod", "prax"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "prax-typegen"
+path = "src/main.rs"
+
+[lib]
+name = "prax_typegen"
+path = "src/lib.rs"
+
+[dependencies]
+prax-schema = { path = "../prax-schema" }
+clap = { version = "4", features = ["derive"] }
+convert_case = "0.6"
+thiserror = "2.0"
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+tempfile = "3.10"

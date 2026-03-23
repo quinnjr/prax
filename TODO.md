@@ -19,6 +19,7 @@ prax/
 ├── prax-duckdb/         # DuckDB analytical driver
 ├── prax-scylladb/       # ScyllaDB driver
 ├── prax-pgvector/       # pgvector integration (embeddings, vector search)
+├── prax-typegen/        # TypeScript interface + Zod schema generator
 ├── prax-migrate/        # Migration engine
 ├── prax-import/         # Import from Prisma/Diesel/SeaORM
 ├── prax-cli/            # CLI tool

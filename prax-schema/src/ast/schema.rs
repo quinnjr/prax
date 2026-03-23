@@ -4,13 +4,17 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use super::{CompositeType, Datasource, Enum, Model, Policy, Relation, ServerGroup, View};
+use super::{
+    CompositeType, Datasource, Enum, Generator, Model, Policy, Relation, ServerGroup, View,
+};
 
 /// A complete Prax schema.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
     /// Datasource configuration (database connection and extensions).
     pub datasource: Option<Datasource>,
+    /// Generator configurations.
+    pub generators: IndexMap<SmolStr, Generator>,
     /// All models in the schema.
     pub models: IndexMap<SmolStr, Model>,
     /// All enums in the schema.
@@ -58,6 +62,24 @@ impl Schema {
             .as_ref()
             .map(|ds| ds.extensions.iter().collect())
             .unwrap_or_default()
+    }
+
+    /// Add a generator to the schema.
+    pub fn add_generator(&mut self, generator: Generator) {
+        self.generators.insert(generator.name.clone(), generator);
+    }
+
+    /// Get a generator by name.
+    pub fn get_generator(&self, name: &str) -> Option<&Generator> {
+        self.generators.get(name)
+    }
+
+    /// Get all enabled generators.
+    pub fn enabled_generators(&self) -> Vec<&Generator> {
+        self.generators
+            .values()
+            .filter(|g| g.is_enabled())
+            .collect()
     }
 
     /// Add a model to the schema.
