@@ -4335,7 +4335,7 @@ dependencies = [
 
 [[package]]
 name = "prax-schema"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "criterion 0.8.1",
  "indexmap",

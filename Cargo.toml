@@ -33,7 +33,7 @@ homepage = "https://github.com/pegasusheavy/prax-orm"
 
 [workspace.dependencies]
 # Internal crates
-prax-schema = { path = "prax-schema", version = "0.6.3" }
+prax-schema = { path = "prax-schema", version = "0.6.4" }
 prax-codegen = { path = "prax-codegen", version = "0.6.3" }
 prax-query = { path = "prax-query", version = "0.6.3" }
 prax-postgres = { path = "prax-postgres", version = "0.6.3" }
