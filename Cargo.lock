@@ -4419,6 +4419,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "prax-typegen"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "convert_case 0.6.0",
+ "prax-schema",
+ "pretty_assertions",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "predicates"
 version = "3.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

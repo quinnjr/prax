@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TypeScript Generator** (`prax-typegen` v0.1.0) - Standalone crate for generating TypeScript from Prax schemas
+  - TypeScript interface generation for models, enums, composite types, and views
+  - Zod schema generation with runtime validation and inferred types
+  - `CreateInput` and `UpdateInput` variants for each model
+  - Lazy `z.lazy()` references for relation fields
+  - CLI binary installable via `cargo install prax-typegen`
+- **Schema Generator Blocks** (`prax-schema`) - First-class `generator` block support in `.prax` files
+  - `generate = env("VAR")` toggle: enable/disable generators via environment variables
+  - `generate = true/false` literal toggle
+  - Parsed into `Generator` AST with `provider`, `output`, `generate`, and arbitrary properties
+  - `Schema::enabled_generators()` for runtime filtering
+
 ## [0.6.0] - 2026-02-13
 
 ### Added

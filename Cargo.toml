@@ -18,6 +18,7 @@ members = [
     "prax-axum",
     "prax-actix", "prax-import",
     "prax-pgvector",
+    "prax-typegen",
 ]
 exclude = ["fuzz"]
 
