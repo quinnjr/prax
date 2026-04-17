@@ -23,19 +23,19 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.6.3"
+version = "0.6.4"
 edition = "2024"
 rust-version = "1.89"
-authors = ["Pegasus Heavy Industries LLC <dev@pegasusheavy.com>"]
+authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pegasusheavy/prax-orm"
-homepage = "https://github.com/pegasusheavy/prax-orm"
+repository = "https://github.com/quinnjr/prax"
+homepage = "https://github.com/quinnjr/prax"
 
 [workspace.dependencies]
 # Internal crates
-prax-schema = { path = "prax-schema", version = "0.6.4" }
+prax-schema = { path = "prax-schema", version = "0.6.5" }
 prax-codegen = { path = "prax-codegen", version = "0.6.3" }
-prax-query = { path = "prax-query", version = "0.6.3" }
+prax-query = { path = "prax-query", version = "0.6.4" }
 prax-postgres = { path = "prax-postgres", version = "0.6.3" }
 prax-mysql = { path = "prax-mysql", version = "0.6.3" }
 prax-sqlite = { path = "prax-sqlite", version = "0.6.3" }
@@ -43,13 +43,13 @@ prax-mssql = { path = "prax-mssql", version = "0.6.3" }
 prax-mongodb = { path = "prax-mongodb", version = "0.6.3" }
 prax-duckdb = { path = "prax-duckdb", version = "0.6.3" }
 prax-scylladb = { path = "prax-scylladb", version = "0.6.3" }
-prax-migrate = { path = "prax-migrate", version = "0.6.3" }
+prax-migrate = { path = "prax-migrate", version = "0.6.4" }
 prax-orm-cli = { path = "prax-cli", version = "0.6.3" }
 prax-sqlx = { path = "prax-sqlx", version = "0.6.3" }
 prax-armature = { path = "prax-armature", version = "0.6.3" }
 prax-axum = { path = "prax-axum", version = "0.6.3" }
 prax-actix = { path = "prax-actix", version = "0.6.3" }
-prax-import = { path = "prax-import", version = "0.6.3" }
+prax-import = { path = "prax-import", version = "0.6.4" }
 prax-pgvector = { path = "prax-pgvector", version = "0.6.3" }
 
 # Code generation (proc-macros)

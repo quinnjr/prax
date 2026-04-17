@@ -2,10 +2,10 @@
 name = "prax-sqlite"
 version = "0.6.3"
 edition = "2024"
-authors = ["Pegasus Heavy Industries LLC"]
+authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
 description = "SQLite database driver for Prax ORM"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pegasusheavy/prax-orm"
+repository = "https://github.com/quinnjr/prax"
 keywords = ["orm", "sqlite", "database", "async"]
 categories = ["database", "asynchronous"]
 rust-version = "1.85"

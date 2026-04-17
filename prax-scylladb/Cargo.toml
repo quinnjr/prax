@@ -2,10 +2,10 @@
 name = "prax-scylladb"
 version = "0.6.3"
 edition = "2024"
-authors = ["Pegasus Heavy Industries LLC <dev@pegasusheavy.com>"]
+authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
 description = "ScyllaDB database driver for Prax ORM - high-performance Cassandra-compatible database"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pegasusheavy/prax-orm"
+repository = "https://github.com/quinnjr/prax"
 documentation = "https://docs.rs/prax-scylladb"
 keywords = ["orm", "scylladb", "cassandra", "database", "async"]
 categories = ["database", "asynchronous"]
