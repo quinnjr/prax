@@ -307,6 +307,7 @@ impl FieldBuilder {
         fields: Vec<String>,
         references: Vec<String>,
         on_delete: Option<String>,
+        map: Option<String>,
     ) -> Self {
         let mut args = vec![];
 
@@ -331,6 +332,15 @@ impl FieldBuilder {
             args.push(AttributeArg::named(
                 Ident::new("onDelete", dummy_span()),
                 AttributeValue::Ident(SmolStr::from(action)),
+                dummy_span(),
+            ));
+        }
+
+        // Add map if specified (custom FK constraint name)
+        if let Some(name) = map {
+            args.push(AttributeArg::named(
+                Ident::new("map", dummy_span()),
+                AttributeValue::String(name),
                 dummy_span(),
             ));
         }

@@ -1,8 +1,8 @@
 //! SQL generation for migrations.
 
 use crate::diff::{
-    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, IndexDiff, ModelAlterDiff,
-    ModelDiff, SchemaDiff, ViewDiff,
+    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
+    ModelAlterDiff, ModelDiff, SchemaDiff, ViewDiff,
 };
 
 /// SQL generator for PostgreSQL.
@@ -182,11 +182,43 @@ impl PostgresSqlGenerator {
             columns.push(constraint);
         }
 
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            columns.push(self.foreign_key_constraint(fk));
+        }
+
         format!(
             "CREATE TABLE \"{}\" (\n    {}\n);",
             model.table_name,
             columns.join(",\n    ")
         )
+    }
+
+    /// Generate a FOREIGN KEY constraint clause.
+    fn foreign_key_constraint(&self, fk: &ForeignKeyDiff) -> String {
+        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let ref_cols: Vec<String> = fk
+            .referenced_columns
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect();
+
+        let mut clause = format!(
+            "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+            fk.constraint_name,
+            cols.join(", "),
+            fk.referenced_table,
+            ref_cols.join(", ")
+        );
+
+        if let Some(action) = &fk.on_delete {
+            clause.push_str(&format!(" ON DELETE {}", action));
+        }
+        if let Some(action) = &fk.on_update {
+            clause.push_str(&format!(" ON UPDATE {}", action));
+        }
+
+        clause
     }
 
     /// Generate column definition.
@@ -256,6 +288,23 @@ impl PostgresSqlGenerator {
         // Drop indexes
         for name in &alter.drop_indexes {
             stmts.push(format!("DROP INDEX IF EXISTS \"{}\";", name));
+        }
+
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" DROP CONSTRAINT IF EXISTS \"{}\";",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ADD {};",
+                alter.table_name,
+                self.foreign_key_constraint(fk)
+            ));
         }
 
         stmts
@@ -527,6 +576,26 @@ impl MySqlGenerator {
             columns.push(constraint);
         }
 
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
+        }
+
         format!(
             "CREATE TABLE `{}` (\n    {}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;",
             model.table_name,
@@ -597,6 +666,36 @@ impl MySqlGenerator {
         // Alter columns
         for field in &alter.alter_fields {
             stmts.extend(self.alter_column(&alter.table_name, field));
+        }
+
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE `{}` DROP FOREIGN KEY `{}`;",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let mut clause = format!(
+                "ALTER TABLE `{}` ADD CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
+                alter.table_name,
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            clause.push(';');
+            stmts.push(clause);
         }
 
         stmts
@@ -745,6 +844,26 @@ impl SqliteGenerator {
                 format!("UNIQUE ({})", cols.join(", "))
             };
             columns.push(constraint);
+        }
+
+        // Add foreign key constraints (SQLite supports inline FK in CREATE TABLE)
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
         }
 
         format!(
@@ -925,6 +1044,26 @@ impl MssqlGenerator {
             ));
         }
 
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
+        }
+
         format!(
             "CREATE TABLE [{}] (\n    {}\n);",
             model.table_name,
@@ -1000,6 +1139,36 @@ impl MssqlGenerator {
         // Alter columns
         for field in &alter.alter_fields {
             stmts.extend(self.alter_column(&alter.table_name, field));
+        }
+
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE [{}] DROP CONSTRAINT [{}];",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let mut clause = format!(
+                "ALTER TABLE [{}] ADD CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
+                alter.table_name,
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            clause.push(';');
+            stmts.push(clause);
         }
 
         stmts
@@ -1122,6 +1291,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
@@ -1218,6 +1388,8 @@ mod tests {
             alter_fields: Vec::new(),
             add_indexes: Vec::new(),
             drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
         };
 
         let stmts = generator.alter_table(&alter);
@@ -1381,6 +1553,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
@@ -1458,6 +1631,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
@@ -1553,6 +1727,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);

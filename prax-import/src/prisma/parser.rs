@@ -235,6 +235,7 @@ fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
         let references = extract_relation_references(args);
         let on_delete = extract_relation_action(args, "onDelete");
         let on_update = extract_relation_action(args, "onUpdate");
+        let map = extract_relation_map(args);
 
         Ok(PrismaFieldAttribute::Relation {
             name,
@@ -242,6 +243,7 @@ fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
             references,
             on_delete,
             on_update,
+            map,
         })
     } else {
         Ok(PrismaFieldAttribute::Relation {
@@ -250,6 +252,7 @@ fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
             references: None,
             on_delete: None,
             on_update: None,
+            map: None,
         })
     }
 }
@@ -285,6 +288,12 @@ fn extract_relation_references(args: &str) -> Option<Vec<String>> {
 fn extract_relation_action(args: &str, action: &str) -> Option<String> {
     let pattern = format!(r"{}:\s*(\w+)", action);
     let re = Regex::new(&pattern).unwrap();
+    re.captures(args)
+        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+}
+
+fn extract_relation_map(args: &str) -> Option<String> {
+    let re = Regex::new(r#"map:\s*"([^"]+)""#).unwrap();
     re.captures(args)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
@@ -479,10 +488,11 @@ fn convert_field(field: PrismaField) -> ImportResult<Field> {
                 fields,
                 references,
                 on_delete,
+                map,
                 ..
             } => {
                 if let (Some(fields), Some(references)) = (fields, references) {
-                    field_builder = field_builder.with_relation(fields, references, on_delete);
+                    field_builder = field_builder.with_relation(fields, references, on_delete, map);
                 }
             }
         }

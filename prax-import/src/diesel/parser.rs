@@ -187,6 +187,7 @@ fn convert_table(table: DieselTable, joinables: &[DieselJoinable]) -> ImportResu
                 vec![column_name_to_field_name(&joinable.foreign_key)],
                 vec!["id".to_string()],
                 None,
+                None,
             )
             .build();
 

@@ -69,6 +69,8 @@ pub struct Relation {
     pub on_delete: Option<ReferentialAction>,
     /// On update action.
     pub on_update: Option<ReferentialAction>,
+    /// Custom foreign key constraint name in the database.
+    pub map: Option<SmolStr>,
 }
 
 impl Relation {
@@ -90,6 +92,7 @@ impl Relation {
             relation_type,
             on_delete: None,
             on_update: None,
+            map: None,
         }
     }
 
@@ -126,6 +129,12 @@ impl Relation {
     /// Set the on update action.
     pub fn with_on_update(mut self, action: ReferentialAction) -> Self {
         self.on_update = Some(action);
+        self
+    }
+
+    /// Set the custom foreign key constraint name.
+    pub fn with_map(mut self, name: impl Into<SmolStr>) -> Self {
+        self.map = Some(name.into());
         self
     }
 
