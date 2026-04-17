@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use prax_schema::Schema;
-use prax_schema::ast::{Field, FieldType, IndexType, Model, ReferentialAction, VectorOps, View};
+use prax_schema::ast::{Field, FieldType, IndexType, Model, VectorOps, View};
 
 use crate::error::MigrateResult;
 
