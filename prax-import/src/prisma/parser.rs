@@ -1,14 +1,18 @@
 //! Prisma schema parser and converter.
 
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+
+use convert_case::{Case, Casing};
+use once_cell::sync::Lazy;
+use regex_lite::Regex;
+use smol_str::SmolStr;
+
 use crate::converter::{FieldBuilder, ModelBuilder, SchemaBuilder, dummy_span};
 use crate::error::ImportResult;
 use crate::prisma::types::*;
-use once_cell::sync::Lazy;
 use prax_schema::ast::*;
-use regex_lite::Regex;
-use smol_str::SmolStr;
-use std::fs;
-use std::path::Path;
 
 // Pre-compiled regex patterns for better performance
 static DATASOURCE_RE: Lazy<Regex> = Lazy::new(|| {
@@ -18,17 +22,15 @@ static DATASOURCE_RE: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
-static MODEL_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?s)model\s+(\w+)\s*\{([^}]+)\}").unwrap());
+static MODEL_START_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"model\s+(\w+)\s*\{").unwrap());
 
-static FIELD_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(\w+)\s+([\w\[\]?]+)(\s+@[\w\(\)]+)*").unwrap());
+// FIELD_RE removed — field parsing now uses split_field_line() for robust handling
+// of complex types like Unsupported("vector(1024)")
 
-static DEFAULT_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@default\(([^)]+)\)"#).unwrap());
+// DEFAULT_RE and RELATION_RE removed — use extract_paren_content() for nested parens
 
 static MAP_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@map\("([^"]+)"\)"#).unwrap());
-
-static RELATION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"@relation\(([^)]+)\)"#).unwrap());
 
 static RELATION_NAME_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r#"name:\s*"([^"]+)""#).unwrap());
 
@@ -108,14 +110,36 @@ fn parse_datasource(input: &str) -> ImportResult<Option<PrismaDatasource>> {
     }
 }
 
-/// Parse all models from the schema.
+/// Parse all models from the schema using brace-counting to handle nested braces
+/// (e.g. `@default(dbgenerated("..."))` contains `}` chars that break simple regex).
 fn parse_models(input: &str) -> ImportResult<Vec<PrismaModel>> {
     let mut models = vec![];
+    let mut search_from = 0;
 
-    for caps in MODEL_RE.captures_iter(input) {
+    while let Some(caps) = MODEL_START_RE.captures(&input[search_from..]) {
+        let m = caps.get(0).unwrap();
         let name = caps.get(1).unwrap().as_str().to_string();
-        let body = caps.get(2).unwrap().as_str();
+        let brace_start = search_from + m.end(); // position right after '{'
 
+        // Count braces to find the matching close brace
+        let mut depth = 1;
+        let mut end = brace_start;
+        let bytes = input.as_bytes();
+        let mut in_string = false;
+        while end < bytes.len() && depth > 0 {
+            match bytes[end] {
+                b'"' if !in_string => in_string = true,
+                b'"' if in_string => in_string = false,
+                b'{' if !in_string => depth += 1,
+                b'}' if !in_string => depth -= 1,
+                _ => {}
+            }
+            if depth > 0 {
+                end += 1;
+            }
+        }
+
+        let body = &input[brace_start..end];
         let fields = parse_fields(body)?;
         let attributes = parse_model_attributes(body)?;
 
@@ -125,6 +149,8 @@ fn parse_models(input: &str) -> ImportResult<Vec<PrismaModel>> {
             attributes,
             documentation: None,
         });
+
+        search_from = end + 1;
     }
 
     Ok(models)
@@ -140,11 +166,8 @@ fn parse_fields(body: &str) -> ImportResult<Vec<PrismaField>> {
             continue;
         }
 
-        if let Some(caps) = FIELD_RE.captures(line) {
-            let name = caps.get(1).unwrap().as_str().to_string();
-            let type_str = caps.get(2).unwrap().as_str();
-
-            let (field_type, is_optional, is_list) = parse_field_type(type_str)?;
+        if let Some((name, type_str)) = split_field_line(line) {
+            let (field_type, is_optional, is_list) = parse_field_type(&type_str)?;
             let attributes = parse_field_attributes(line)?;
 
             fields.push(PrismaField {
@@ -161,23 +184,119 @@ fn parse_fields(body: &str) -> ImportResult<Vec<PrismaField>> {
     Ok(fields)
 }
 
+/// Extract the content inside balanced parentheses after a given prefix.
+///
+/// Given `line = "... @default(dbgenerated(\"...\")) @map..."` and `prefix = "@default"`,
+/// returns `Some("dbgenerated(\"...\")")`.
+fn extract_paren_content<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
+    let start = line.find(prefix)?;
+    let after_prefix = &line[start + prefix.len()..];
+    if !after_prefix.starts_with('(') {
+        return None;
+    }
+    let mut depth = 0;
+    let mut in_string = false;
+    for (i, c) in after_prefix.char_indices() {
+        match c {
+            '"' => in_string = !in_string,
+            '(' if !in_string => depth += 1,
+            ')' if !in_string => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after_prefix[1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a Prisma field line into (field_name, type_string).
+///
+/// Handles standard types (`String`, `Int?`, `Post[]`) and complex types
+/// like `Unsupported("vector(1024)")`.
+fn split_field_line(line: &str) -> Option<(String, String)> {
+    let trimmed = line.trim();
+
+    // Skip lines that start with @ (model-level attributes) or /// (docs)
+    if trimmed.starts_with('@') || trimmed.starts_with("///") {
+        return None;
+    }
+
+    // First token is the field name (must be a word char)
+    let mut chars = trimmed.chars().peekable();
+    let name: String = chars.by_ref().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    if name.is_empty() {
+        return None;
+    }
+
+    // Skip whitespace
+    let rest: String = chars.collect();
+    let rest = rest.trim_start();
+
+    // Second token is the type. Handle Unsupported("...") specially.
+    let type_str = if rest.starts_with("Unsupported(") {
+        // Consume until matching close paren, accounting for nested parens and quotes
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut end = 0;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '"' => in_string = !in_string,
+                '(' if !in_string => depth += 1,
+                ')' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = i + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[..end]
+    } else {
+        // Standard type: word chars, [], ?
+        let end = rest
+            .find(|c: char| c.is_whitespace() || c == '@')
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+
+    if type_str.is_empty() {
+        return None;
+    }
+
+    Some((name, type_str.to_string()))
+}
+
 /// Parse field type and modifiers.
 fn parse_field_type(type_str: &str) -> ImportResult<(PrismaFieldType, bool, bool)> {
     let is_optional = type_str.contains('?');
     let is_list = type_str.contains("[]");
     let base_type = type_str.replace('?', "").replace("[]", "");
 
-    let field_type = match base_type.as_str() {
-        "String" => PrismaFieldType::String,
-        "Boolean" => PrismaFieldType::Boolean,
-        "Int" => PrismaFieldType::Int,
-        "BigInt" => PrismaFieldType::BigInt,
-        "Float" => PrismaFieldType::Float,
-        "Decimal" => PrismaFieldType::Decimal,
-        "DateTime" => PrismaFieldType::DateTime,
-        "Json" => PrismaFieldType::Json,
-        "Bytes" => PrismaFieldType::Bytes,
-        custom => PrismaFieldType::Custom(custom.to_string()),
+    let field_type = if base_type.starts_with("Unsupported(") {
+        // Extract the inner type string: Unsupported("vector(1024)") → "vector(1024)"
+        let inner = base_type
+            .strip_prefix("Unsupported(\"")
+            .and_then(|s| s.strip_suffix("\")"))
+            .unwrap_or(&base_type);
+        PrismaFieldType::Custom(format!("Unsupported:{}", inner))
+    } else {
+        match base_type.as_str() {
+            "String" => PrismaFieldType::String,
+            "Boolean" => PrismaFieldType::Boolean,
+            "Int" => PrismaFieldType::Int,
+            "BigInt" => PrismaFieldType::BigInt,
+            "Float" => PrismaFieldType::Float,
+            "Decimal" => PrismaFieldType::Decimal,
+            "DateTime" => PrismaFieldType::DateTime,
+            "Json" => PrismaFieldType::Json,
+            "Bytes" => PrismaFieldType::Bytes,
+            custom => PrismaFieldType::Custom(custom.to_string()),
+        }
     };
 
     Ok((field_type, is_optional, is_list))
@@ -199,11 +318,12 @@ fn parse_field_attributes(line: &str) -> ImportResult<Vec<PrismaFieldAttribute>>
         attributes.push(PrismaFieldAttribute::UpdatedAt);
     }
 
-    // Parse @default
-    if let Some(caps) = DEFAULT_RE.captures(line) {
-        let default_val = caps.get(1).unwrap().as_str();
+    // Parse @default — use paren-aware extraction for nested calls like dbgenerated("...")
+    if let Some(default_val) = extract_paren_content(line, "@default") {
         let default = if default_val.contains('(') {
-            PrismaDefaultValue::Function(default_val.trim_end_matches("()").to_string())
+            // Function call: now(), uuid(), dbgenerated("..."), autoincrement()
+            // Store the full expression including args for dbgenerated
+            PrismaDefaultValue::Function(default_val.to_string())
         } else {
             PrismaDefaultValue::Literal(default_val.to_string())
         };
@@ -227,9 +347,7 @@ fn parse_field_attributes(line: &str) -> ImportResult<Vec<PrismaFieldAttribute>>
 
 /// Parse @relation attribute.
 fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
-    if let Some(caps) = RELATION_RE.captures(line) {
-        let args = caps.get(1).unwrap().as_str();
-
+    if let Some(args) = extract_paren_content(line, "@relation") {
         let name = extract_relation_name(args);
         let fields = extract_relation_fields(args);
         let references = extract_relation_references(args);
@@ -258,9 +376,18 @@ fn parse_relation_attribute(line: &str) -> ImportResult<PrismaFieldAttribute> {
 }
 
 fn extract_relation_name(args: &str) -> Option<String> {
-    RELATION_NAME_RE
-        .captures(args)
-        .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+    // Try named syntax first: name: "RelationName"
+    if let Some(caps) = RELATION_NAME_RE.captures(args) {
+        return caps.get(1).map(|m| m.as_str().to_string());
+    }
+    // Try positional syntax: first arg is a quoted string before any named args
+    // e.g. @relation("batch_file", fields: [...])
+    let trimmed = args.trim();
+    if trimmed.starts_with('"') {
+        let end = trimmed[1..].find('"').map(|i| i + 1)?;
+        return Some(trimmed[1..end].to_string());
+    }
+    None
 }
 
 fn extract_relation_fields(args: &str) -> Option<Vec<String>> {
@@ -429,27 +556,58 @@ fn convert_model(model: PrismaModel) -> ImportResult<Model> {
         }
     }
 
+    // Build field name mapping: prisma_name → prax_name (snake_case / @map col)
+    let field_name_map: HashMap<String, String> = model
+        .fields
+        .iter()
+        .map(|f| {
+            let prax_name = f
+                .attributes
+                .iter()
+                .find_map(|a| {
+                    if let PrismaFieldAttribute::Map(col) = a {
+                        Some(col.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| f.name.to_case(Case::Snake));
+            (f.name.clone(), prax_name)
+        })
+        .collect();
+
     // Convert fields
     for field in model.fields {
-        let prax_field = convert_field(field)?;
+        let prax_field = convert_field(field, &field_name_map)?;
         model_builder.add_field(prax_field);
     }
 
-    // Convert model attributes
+    // Convert model attributes, remapping field references to snake_case
     for attr in model.attributes {
         match attr {
             PrismaModelAttribute::Unique { fields, name } => {
-                model_builder.add_unique(fields, name);
+                let mapped: Vec<String> = fields
+                    .into_iter()
+                    .map(|f| remap_field_name(&f, &field_name_map))
+                    .collect();
+                model_builder.add_unique(mapped, name);
             }
             PrismaModelAttribute::Index { fields, name } => {
-                model_builder.add_index(fields, name);
+                let mapped: Vec<String> = fields
+                    .into_iter()
+                    .map(|f| remap_field_name(&f, &field_name_map))
+                    .collect();
+                model_builder.add_index(mapped, name);
             }
             PrismaModelAttribute::Map(_) => {
                 // Already handled above
             }
             PrismaModelAttribute::Id(fields) => {
-                // Composite primary key - add as @@id attribute
-                model_builder.add_unique(fields, Some("PRIMARY".to_string()));
+                let mapped: Vec<String> = fields
+                    .into_iter()
+                    .map(|f| remap_field_name(&f, &field_name_map))
+                    .collect();
+                model_builder.add_unique(mapped, Some("PRIMARY".to_string()));
             }
         }
     }
@@ -457,11 +615,28 @@ fn convert_model(model: PrismaModel) -> ImportResult<Model> {
     Ok(model_builder.build())
 }
 
+/// Remap a Prisma field name to its Prax equivalent using the field name map.
+fn remap_field_name(prisma_name: &str, map: &HashMap<String, String>) -> String {
+    map.get(prisma_name)
+        .cloned()
+        .unwrap_or_else(|| prisma_name.to_case(Case::Snake))
+}
+
 /// Convert a Prisma field to a Prax field.
-fn convert_field(field: PrismaField) -> ImportResult<Field> {
+fn convert_field(
+    field: PrismaField,
+    field_name_map: &HashMap<String, String>,
+) -> ImportResult<Field> {
     let (prax_type, modifier) =
         convert_field_type(&field.field_type, field.is_optional, field.is_list)?;
-    let mut field_builder = FieldBuilder::new(&field.name, prax_type, modifier);
+
+    // Determine the Prax field name: use @map column name if present, else snake_case
+    let prax_name = field_name_map
+        .get(&field.name)
+        .cloned()
+        .unwrap_or_else(|| field.name.to_case(Case::Snake));
+
+    let mut field_builder = FieldBuilder::new(&prax_name, prax_type, modifier);
 
     // Convert field attributes
     for attr in field.attributes {
@@ -472,27 +647,51 @@ fn convert_field(field: PrismaField) -> ImportResult<Field> {
             PrismaFieldAttribute::Unique => {
                 field_builder = field_builder.with_unique();
             }
-            PrismaFieldAttribute::Default(default_val) => {
-                let prax_default = convert_default_value(default_val);
-                field_builder = field_builder.with_default(prax_default);
-            }
-            PrismaFieldAttribute::Map(col_name) => {
-                field_builder = field_builder.with_map(col_name);
+            PrismaFieldAttribute::Default(default_val) => match default_val {
+                PrismaDefaultValue::Function(ref func)
+                    if func == "autoincrement()" || func == "autoincrement" =>
+                {
+                    // Prisma @default(autoincrement()) → Prax @auto
+                    field_builder = field_builder.with_auto();
+                }
+                _ => {
+                    let prax_default = convert_default_value(default_val);
+                    field_builder = field_builder.with_default(prax_default);
+                }
+            },
+            PrismaFieldAttribute::Map(_) => {
+                // Prax field name is already the column name — no @map needed
             }
             PrismaFieldAttribute::UpdatedAt => {
-                // Convert to @default(now())
-                field_builder = field_builder
-                    .with_default(AttributeValue::Function(SmolStr::from("now"), vec![]));
+                // Prisma @updatedAt → Prax @updated_at
+                field_builder = field_builder.with_updated_at();
             }
             PrismaFieldAttribute::Relation {
+                name,
                 fields,
                 references,
                 on_delete,
+                on_update,
                 map,
-                ..
             } => {
-                if let (Some(fields), Some(references)) = (fields, references) {
-                    field_builder = field_builder.with_relation(fields, references, on_delete, map);
+                if let (Some(fk_fields), Some(ref_fields)) = (fields, references) {
+                    // Remap field references from camelCase to snake_case
+                    let mapped_fields: Vec<String> = fk_fields
+                        .into_iter()
+                        .map(|f| remap_field_name(&f, field_name_map))
+                        .collect();
+                    let mapped_refs: Vec<String> = ref_fields
+                        .into_iter()
+                        .map(|f| remap_field_name(&f, field_name_map))
+                        .collect();
+                    field_builder = field_builder.with_relation(
+                        name,
+                        mapped_fields,
+                        mapped_refs,
+                        on_delete,
+                        on_update,
+                        map,
+                    );
                 }
             }
         }
@@ -518,8 +717,13 @@ fn convert_field_type(
         PrismaFieldType::Json => FieldType::Scalar(ScalarType::Json),
         PrismaFieldType::Bytes => FieldType::Scalar(ScalarType::Bytes),
         PrismaFieldType::Custom(name) => {
-            // Could be an enum or a relation
-            FieldType::Model(SmolStr::from(name.as_str()))
+            if let Some(inner) = name.strip_prefix("Unsupported:") {
+                // Unsupported types become FieldType::Unsupported
+                FieldType::Unsupported(SmolStr::from(inner))
+            } else {
+                // Could be an enum or a relation
+                FieldType::Model(SmolStr::from(name.as_str()))
+            }
         }
     };
 
@@ -551,12 +755,19 @@ fn convert_default_value(default: PrismaDefaultValue) -> AttributeValue {
             }
         }
         PrismaDefaultValue::Function(func) => {
-            let func_name = if func == "autoincrement" {
-                "auto"
+            // Parse "funcName(args)" into name and arguments
+            if let Some(paren_pos) = func.find('(') {
+                let name = &func[..paren_pos];
+                let args_str = func[paren_pos + 1..].trim_end_matches(')');
+                let args = if args_str.is_empty() {
+                    vec![]
+                } else {
+                    vec![AttributeValue::String(args_str.to_string())]
+                };
+                AttributeValue::Function(SmolStr::from(name), args)
             } else {
-                &func
-            };
-            AttributeValue::Function(SmolStr::from(func_name), vec![])
+                AttributeValue::Function(SmolStr::from(func.as_str()), vec![])
+            }
         }
     }
 }

@@ -265,6 +265,17 @@ impl FieldBuilder {
         self
     }
 
+    /// Mark this field as updated_at (auto-updating timestamp).
+    pub fn with_updated_at(mut self) -> Self {
+        let attr = Attribute {
+            name: Ident::new("updated_at", dummy_span()),
+            args: vec![],
+            span: dummy_span(),
+        };
+        self.attributes.push(attr);
+        self
+    }
+
     /// Mark this field as unique.
     pub fn with_unique(mut self) -> Self {
         let attr = Attribute {
@@ -304,12 +315,22 @@ impl FieldBuilder {
     /// Add a @relation attribute.
     pub fn with_relation(
         mut self,
+        name: Option<String>,
         fields: Vec<String>,
         references: Vec<String>,
         on_delete: Option<String>,
+        on_update: Option<String>,
         map: Option<String>,
     ) -> Self {
         let mut args = vec![];
+
+        // First positional arg: relation name (for disambiguation)
+        if let Some(rel_name) = name {
+            args.push(AttributeArg::positional(
+                AttributeValue::String(rel_name),
+                dummy_span(),
+            ));
+        }
 
         // Add fields argument
         let field_refs: Vec<SmolStr> = fields.into_iter().map(SmolStr::from).collect();
@@ -336,11 +357,20 @@ impl FieldBuilder {
             ));
         }
 
+        // Add onUpdate if specified
+        if let Some(action) = on_update {
+            args.push(AttributeArg::named(
+                Ident::new("onUpdate", dummy_span()),
+                AttributeValue::Ident(SmolStr::from(action)),
+                dummy_span(),
+            ));
+        }
+
         // Add map if specified (custom FK constraint name)
-        if let Some(name) = map {
+        if let Some(constraint_name) = map {
             args.push(AttributeArg::named(
                 Ident::new("map", dummy_span()),
-                AttributeValue::String(name),
+                AttributeValue::String(constraint_name),
                 dummy_span(),
             ));
         }
