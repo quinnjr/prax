@@ -88,7 +88,7 @@ jobs:
 
       - name: Upload corpus
         if: steps.check.outputs.should_run == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-${{ matrix.target }}
           path: fuzz/corpus/${{ matrix.target }}/
@@ -108,7 +108,7 @@ jobs:
 
       - name: Upload crashes
         if: steps.crashes.outputs.has_crashes == 'true'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: crashes-${{ matrix.target }}
           path: fuzz/artifacts/${{ matrix.target }}/

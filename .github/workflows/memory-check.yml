@@ -106,7 +106,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Valgrind output
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: valgrind-output
@@ -229,7 +229,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload DHAT output
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: dhat-heap-profile
