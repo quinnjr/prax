@@ -75,7 +75,7 @@ pest = "2.7"
 pest_derive = "2.7"
 
 # Utilities
-indexmap = { version = "2.0", features = ["serde"] }
+indexmap = { version = "2.14", features = ["serde"] }
 smol_str = { version = "0.3", features = ["serde"] }
 smallvec = { version = "1.13", features = ["serde"] }
 bumpalo = { version = "3.16", features = ["collections"] }
