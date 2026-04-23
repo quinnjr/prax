@@ -133,7 +133,7 @@ jobs:
         run: cargo install cargo-fuzz
 
       - name: Download all corpus artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: corpus-*
           path: fuzz/corpus/
