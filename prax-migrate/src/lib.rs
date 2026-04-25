@@ -128,6 +128,7 @@
 pub mod diff;
 pub mod engine;
 pub mod error;
+pub mod event;
 pub mod file;
 pub mod history;
 pub mod introspect;
@@ -145,6 +146,7 @@ pub use engine::{
     MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
 };
 pub use error::{MigrateResult, MigrationError};
+pub use event::{EventData, EventType, MigrationEvent};
 pub use file::{MigrationFile, MigrationFileManager};
 pub use history::{MigrationHistoryRepository, MigrationLock, MigrationRecord};
 pub use introspect::{
