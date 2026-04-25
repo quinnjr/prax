@@ -136,6 +136,7 @@ pub mod procedure;
 pub mod resolution;
 pub mod shadow;
 pub mod sql;
+pub mod state;
 
 // Re-exports
 pub use diff::{
@@ -208,3 +209,6 @@ pub use shadow::{
     ShadowDiffResult, ShadowState, detect_drift,
 };
 pub use sql::{MigrationSql, PostgresSqlGenerator};
+pub use state::MigrationState;
+// Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
+// Access via prax_migrate::state::MigrationStatus if needed
