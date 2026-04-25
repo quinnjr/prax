@@ -125,6 +125,7 @@ impl Field {
                         references: vec![],
                         on_delete: None,
                         on_update: None,
+                        map: None,
                     };
 
                     // First positional arg is the relation name
@@ -152,6 +153,9 @@ impl Field {
                         if let Some(action) = val.as_ident() {
                             rel.on_update = super::ReferentialAction::from_str(action);
                         }
+                    }
+                    if let Some(val) = attr.get_arg("map") {
+                        rel.map = val.as_string().map(String::from);
                     }
 
                     attrs.relation = Some(rel);

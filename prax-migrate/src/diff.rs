@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use prax_schema::Schema;
-use prax_schema::ast::{Field, IndexType, Model, VectorOps, View};
+use prax_schema::ast::{Field, FieldType, IndexType, Model, VectorOps, View};
 
 use crate::error::MigrateResult;
 
@@ -134,6 +134,8 @@ pub struct ModelDiff {
     pub indexes: Vec<IndexDiff>,
     /// Unique constraints.
     pub unique_constraints: Vec<UniqueConstraint>,
+    /// Foreign key constraints.
+    pub foreign_keys: Vec<ForeignKeyDiff>,
 }
 
 /// Diff for altering a model.
@@ -153,6 +155,27 @@ pub struct ModelAlterDiff {
     pub add_indexes: Vec<IndexDiff>,
     /// Indexes to drop.
     pub drop_indexes: Vec<String>,
+    /// Foreign keys to add.
+    pub add_foreign_keys: Vec<ForeignKeyDiff>,
+    /// Foreign keys to drop (by constraint name).
+    pub drop_foreign_keys: Vec<String>,
+}
+
+/// A foreign key constraint diff.
+#[derive(Debug, Clone)]
+pub struct ForeignKeyDiff {
+    /// Constraint name (from `map` or auto-generated).
+    pub constraint_name: String,
+    /// Columns on this table.
+    pub columns: Vec<String>,
+    /// Referenced table name.
+    pub referenced_table: String,
+    /// Referenced columns.
+    pub referenced_columns: Vec<String>,
+    /// On delete action.
+    pub on_delete: Option<String>,
+    /// On update action.
+    pub on_update: Option<String>,
 }
 
 /// Diff for a field.
@@ -497,6 +520,8 @@ fn model_to_diff(model: &Model) -> ModelDiff {
         .map(|f| f.name().to_string())
         .collect();
 
+    let foreign_keys = extract_foreign_keys(model);
+
     ModelDiff {
         name: model.name().to_string(),
         table_name: model.table_name().to_string(),
@@ -504,7 +529,58 @@ fn model_to_diff(model: &Model) -> ModelDiff {
         primary_key,
         indexes: Vec::new(),
         unique_constraints: Vec::new(),
+        foreign_keys,
     }
+}
+
+/// Extract foreign key constraints from a model's relation fields.
+fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
+    let mut fks = Vec::new();
+
+    for field in model.fields.values() {
+        if !field.is_relation() {
+            continue;
+        }
+
+        let attrs = field.extract_attributes();
+        let Some(rel) = &attrs.relation else {
+            continue;
+        };
+
+        // Only the side that holds the FK columns generates a constraint
+        if rel.fields.is_empty() || rel.references.is_empty() {
+            continue;
+        }
+
+        // Resolve the referenced table name from the field's model type
+        let referenced_table = match &field.field_type {
+            FieldType::Model(name) => name.to_string(),
+            _ => continue,
+        };
+
+        let columns: Vec<String> = rel.fields.iter().map(|f| f.to_string()).collect();
+        let referenced_columns: Vec<String> = rel.references.iter().map(|r| r.to_string()).collect();
+
+        let constraint_name = rel.map.clone().unwrap_or_else(|| {
+            format!(
+                "fk_{}_{}_{}",
+                model.table_name(),
+                columns.join("_"),
+                referenced_table
+            )
+        });
+
+        fks.push(ForeignKeyDiff {
+            constraint_name,
+            columns,
+            referenced_table,
+            referenced_columns,
+            on_delete: rel.on_delete.map(|a| a.as_str().to_string()),
+            on_update: rel.on_update.map(|a| a.as_str().to_string()),
+        });
+    }
+
+    fks
 }
 
 /// Convert a field to a diff.
@@ -630,7 +706,35 @@ fn diff_models(source: &Model, target: &Model) -> Option<ModelAlterDiff> {
         }
     }
 
-    if add_fields.is_empty() && drop_fields.is_empty() && alter_fields.is_empty() {
+    // Diff foreign keys
+    let source_fks = extract_foreign_keys(source);
+    let target_fks = extract_foreign_keys(target);
+
+    let source_fk_names: std::collections::HashSet<&str> = source_fks
+        .iter()
+        .map(|fk| fk.constraint_name.as_str())
+        .collect();
+    let target_fk_names: std::collections::HashSet<&str> = target_fks
+        .iter()
+        .map(|fk| fk.constraint_name.as_str())
+        .collect();
+
+    let drop_foreign_keys: Vec<String> = source_fks
+        .iter()
+        .filter(|fk| !target_fk_names.contains(fk.constraint_name.as_str()))
+        .map(|fk| fk.constraint_name.clone())
+        .collect();
+    let add_foreign_keys: Vec<ForeignKeyDiff> = target_fks
+        .into_iter()
+        .filter(|fk| !source_fk_names.contains(fk.constraint_name.as_str()))
+        .collect();
+
+    if add_fields.is_empty()
+        && drop_fields.is_empty()
+        && alter_fields.is_empty()
+        && add_foreign_keys.is_empty()
+        && drop_foreign_keys.is_empty()
+    {
         None
     } else {
         Some(ModelAlterDiff {
@@ -641,6 +745,8 @@ fn diff_models(source: &Model, target: &Model) -> Option<ModelAlterDiff> {
             alter_fields,
             add_indexes: Vec::new(),
             drop_indexes: Vec::new(),
+            add_foreign_keys,
+            drop_foreign_keys,
         })
     }
 }
@@ -751,6 +857,7 @@ mod tests {
             primary_key: Vec::new(),
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         });
 
         let summary = diff.summary();

@@ -89,6 +89,8 @@ pub enum PrismaFieldAttribute {
         on_delete: Option<String>,
         /// On update action.
         on_update: Option<String>,
+        /// Custom foreign key constraint name.
+        map: Option<String>,
     },
     /// @updatedAt attribute.
     UpdatedAt,

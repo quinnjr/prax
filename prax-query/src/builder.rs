@@ -26,9 +26,9 @@
 //!
 //! // Column list optimized for typical use (1-8 columns)
 //! let mut cols = ColumnList::new();
-//! cols.push("id");
-//! cols.push("name");
-//! cols.push("email"); // Still on stack!
+//! cols.push(Identifier::new("id"));
+//! cols.push(Identifier::new("name"));
+//! cols.push(Identifier::new("email")); // Still on stack!
 //!
 //! // Reusable builder pattern
 //! let mut builder = ReusableBuilder::new();

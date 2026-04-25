@@ -1,8 +1,8 @@
 //! SQL generation for migrations.
 
 use crate::diff::{
-    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, IndexDiff, ModelAlterDiff,
-    ModelDiff, SchemaDiff, ViewDiff,
+    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
+    ModelAlterDiff, ModelDiff, SchemaDiff, ViewDiff,
 };
 
 /// SQL generator for PostgreSQL.
@@ -13,6 +13,7 @@ impl PostgresSqlGenerator {
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
         let mut up = Vec::new();
         let mut down = Vec::new();
+        let mut warnings = Vec::new();
 
         // Create extensions first (they provide types used by tables)
         for ext in &diff.create_extensions {
@@ -53,11 +54,35 @@ impl PostgresSqlGenerator {
         // Drop models
         for name in &diff.drop_models {
             up.push(self.drop_table(name));
+            warnings.push(format!(
+                "Dropping table '{}' - all data will be lost and cannot be recovered",
+                name
+            ));
             // Can't easily recreate dropped tables
         }
 
         // Alter models
         for alter in &diff.alter_models {
+            // Warn about dropped columns
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.table_name
+                ));
+            }
+
+            // Warn about column type changes
+            for field in &alter.alter_fields {
+                if let Some(_new_type) = &field.new_type {
+                    if field.old_type.is_some() {
+                        warnings.push(format!(
+                            "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
+                            field.name, alter.table_name
+                        ));
+                    }
+                }
+            }
+
             up.extend(self.alter_table(alter));
             // Reverse alterations could be generated but complex
         }
@@ -96,6 +121,7 @@ impl PostgresSqlGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings,
         }
     }
 
@@ -182,11 +208,43 @@ impl PostgresSqlGenerator {
             columns.push(constraint);
         }
 
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            columns.push(self.foreign_key_constraint(fk));
+        }
+
         format!(
             "CREATE TABLE \"{}\" (\n    {}\n);",
             model.table_name,
             columns.join(",\n    ")
         )
+    }
+
+    /// Generate a FOREIGN KEY constraint clause.
+    fn foreign_key_constraint(&self, fk: &ForeignKeyDiff) -> String {
+        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let ref_cols: Vec<String> = fk
+            .referenced_columns
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect();
+
+        let mut clause = format!(
+            "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+            fk.constraint_name,
+            cols.join(", "),
+            fk.referenced_table,
+            ref_cols.join(", ")
+        );
+
+        if let Some(action) = &fk.on_delete {
+            clause.push_str(&format!(" ON DELETE {}", action));
+        }
+        if let Some(action) = &fk.on_update {
+            clause.push_str(&format!(" ON UPDATE {}", action));
+        }
+
+        clause
     }
 
     /// Generate column definition.
@@ -256,6 +314,23 @@ impl PostgresSqlGenerator {
         // Drop indexes
         for name in &alter.drop_indexes {
             stmts.push(format!("DROP INDEX IF EXISTS \"{}\";", name));
+        }
+
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" DROP CONSTRAINT IF EXISTS \"{}\";",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ADD {};",
+                alter.table_name,
+                self.foreign_key_constraint(fk)
+            ));
         }
 
         stmts
@@ -427,6 +502,8 @@ pub struct MigrationSql {
     pub up: String,
     /// SQL to rollback the migration.
     pub down: String,
+    /// Warnings about data loss or irreversible operations.
+    pub warnings: Vec<String>,
 }
 
 impl MigrationSql {
@@ -444,6 +521,7 @@ impl MySqlGenerator {
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
         let mut up = Vec::new();
         let mut down = Vec::new();
+        let mut warnings = Vec::new();
 
         // Create enums (MySQL uses ENUM type in column definitions)
         // Enums in MySQL are defined per-column, not as separate types
@@ -457,10 +535,34 @@ impl MySqlGenerator {
         // Drop models
         for name in &diff.drop_models {
             up.push(self.drop_table(name));
+            warnings.push(format!(
+                "Dropping table '{}' - all data will be lost and cannot be recovered",
+                name
+            ));
         }
 
         // Alter models
         for alter in &diff.alter_models {
+            // Warn about dropped columns
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.table_name
+                ));
+            }
+
+            // Warn about column type changes
+            for field in &alter.alter_fields {
+                if let Some(_new_type) = &field.new_type {
+                    if field.old_type.is_some() {
+                        warnings.push(format!(
+                            "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
+                            field.name, alter.table_name
+                        ));
+                    }
+                }
+            }
+
             up.extend(self.alter_table(alter));
         }
 
@@ -495,6 +597,7 @@ impl MySqlGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings,
         }
     }
 
@@ -525,6 +628,26 @@ impl MySqlGenerator {
                 format!("UNIQUE ({})", cols.join(", "))
             };
             columns.push(constraint);
+        }
+
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
         }
 
         format!(
@@ -599,6 +722,36 @@ impl MySqlGenerator {
             stmts.extend(self.alter_column(&alter.table_name, field));
         }
 
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE `{}` DROP FOREIGN KEY `{}`;",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let mut clause = format!(
+                "ALTER TABLE `{}` ADD CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
+                alter.table_name,
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            clause.push(';');
+            stmts.push(clause);
+        }
+
         stmts
     }
 
@@ -666,6 +819,7 @@ impl SqliteGenerator {
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
         let mut up = Vec::new();
         let mut down = Vec::new();
+        let mut warnings = Vec::new();
 
         // Create models
         for model in &diff.create_models {
@@ -676,6 +830,33 @@ impl SqliteGenerator {
         // Drop models
         for name in &diff.drop_models {
             up.push(self.drop_table(name));
+            warnings.push(format!(
+                "Dropping table '{}' - all data will be lost and cannot be recovered",
+                name
+            ));
+        }
+
+        // Alter models
+        for alter in &diff.alter_models {
+            // Warn about dropped columns
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.table_name
+                ));
+            }
+
+            // Warn about column type changes
+            for field in &alter.alter_fields {
+                if let Some(_new_type) = &field.new_type {
+                    if field.old_type.is_some() {
+                        warnings.push(format!(
+                            "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
+                            field.name, alter.table_name
+                        ));
+                    }
+                }
+            }
         }
 
         // Create indexes
@@ -709,6 +890,7 @@ impl SqliteGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings,
         }
     }
 
@@ -745,6 +927,26 @@ impl SqliteGenerator {
                 format!("UNIQUE ({})", cols.join(", "))
             };
             columns.push(constraint);
+        }
+
+        // Add foreign key constraints (SQLite supports inline FK in CREATE TABLE)
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
         }
 
         format!(
@@ -838,6 +1040,7 @@ impl MssqlGenerator {
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
         let mut up = Vec::new();
         let mut down = Vec::new();
+        let mut warnings = Vec::new();
 
         // Create models
         for model in &diff.create_models {
@@ -848,10 +1051,34 @@ impl MssqlGenerator {
         // Drop models
         for name in &diff.drop_models {
             up.push(self.drop_table(name));
+            warnings.push(format!(
+                "Dropping table '{}' - all data will be lost and cannot be recovered",
+                name
+            ));
         }
 
         // Alter models
         for alter in &diff.alter_models {
+            // Warn about dropped columns
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.table_name
+                ));
+            }
+
+            // Warn about column type changes
+            for field in &alter.alter_fields {
+                if let Some(_new_type) = &field.new_type {
+                    if field.old_type.is_some() {
+                        warnings.push(format!(
+                            "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
+                            field.name, alter.table_name
+                        ));
+                    }
+                }
+            }
+
             up.extend(self.alter_table(alter));
         }
 
@@ -886,6 +1113,7 @@ impl MssqlGenerator {
         MigrationSql {
             up: up.join("\n\nGO\n\n"),
             down: down.join("\n\nGO\n\n"),
+            warnings,
         }
     }
 
@@ -923,6 +1151,26 @@ impl MssqlGenerator {
                 name,
                 cols.join(", ")
             ));
+        }
+
+        // Add foreign key constraints
+        for fk in &model.foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let mut clause = format!(
+                "CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            columns.push(clause);
         }
 
         format!(
@@ -1000,6 +1248,36 @@ impl MssqlGenerator {
         // Alter columns
         for field in &alter.alter_fields {
             stmts.extend(self.alter_column(&alter.table_name, field));
+        }
+
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE [{}] DROP CONSTRAINT [{}];",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let mut clause = format!(
+                "ALTER TABLE [{}] ADD CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
+                alter.table_name,
+                fk.constraint_name,
+                cols.join(", "),
+                fk.referenced_table,
+                ref_cols.join(", ")
+            );
+            if let Some(action) = &fk.on_delete {
+                clause.push_str(&format!(" ON DELETE {}", action));
+            }
+            if let Some(action) = &fk.on_update {
+                clause.push_str(&format!(" ON UPDATE {}", action));
+            }
+            clause.push(';');
+            stmts.push(clause);
         }
 
         stmts
@@ -1122,6 +1400,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
@@ -1218,6 +1497,8 @@ mod tests {
             alter_fields: Vec::new(),
             add_indexes: Vec::new(),
             drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
         };
 
         let stmts = generator.alter_table(&alter);
@@ -1381,6 +1662,7 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
@@ -1458,11 +1740,140 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
         assert!(sql.contains("CREATE TABLE \"users\""));
         assert!(sql.contains("INTEGER PRIMARY KEY"));
+    }
+
+    #[test]
+    fn test_sqlite_drop_table_generates_warning() {
+        let generator = SqliteGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_models.push("users".to_string());
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[0].to_lowercase().contains("data"));
+    }
+
+    #[test]
+    fn test_sqlite_drop_column_generates_warning() {
+        let generator = SqliteGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["email".to_string(), "phone".to_string()],
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 2);
+        assert!(sql.warnings[0].contains("email"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[1].contains("phone"));
+        assert!(sql.warnings[1].contains("users"));
+    }
+
+    #[test]
+    fn test_sqlite_alter_column_type_generates_warning() {
+        let generator = SqliteGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: vec![
+                FieldAlterDiff {
+                    name: "age".to_string(),
+                    column_name: "age".to_string(),
+                    old_type: Some("INTEGER".to_string()),
+                    new_type: Some("TEXT".to_string()),
+                    old_nullable: None,
+                    new_nullable: None,
+                    old_default: None,
+                    new_default: None,
+                },
+                FieldAlterDiff {
+                    name: "email".to_string(),
+                    column_name: "email".to_string(),
+                    old_type: None,
+                    new_type: None,
+                    old_nullable: Some(true),
+                    new_nullable: Some(false),
+                    old_default: None,
+                    new_default: None,
+                },
+            ],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should only warn about the type change, not nullable change
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("age"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].contains("reverse migration"));
+        assert!(sql.warnings[0].contains("incompatible"));
+    }
+
+    #[test]
+    fn test_sqlite_multiple_warnings() {
+        let generator = SqliteGenerator;
+        let mut diff = SchemaDiff::default();
+
+        // Drop a table
+        diff.drop_models.push("old_table".to_string());
+
+        // Alter a table with drop column and type change
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["deprecated_field".to_string()],
+            alter_fields: vec![FieldAlterDiff {
+                name: "status".to_string(),
+                column_name: "status".to_string(),
+                old_type: Some("INTEGER".to_string()),
+                new_type: Some("TEXT".to_string()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should have 3 warnings: 1 drop table, 1 drop column, 1 type change
+        assert_eq!(sql.warnings.len(), 3);
+
+        // Find each warning type
+        let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
+        let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
+        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+
+        assert!(drop_table_warning.is_some());
+        assert!(drop_column_warning.is_some());
+        assert!(type_change_warning.is_some());
     }
 
     // ==================== MSSQL Generator Tests ====================
@@ -1553,11 +1964,421 @@ mod tests {
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
             unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
         };
 
         let sql = generator.create_table(&model);
         assert!(sql.contains("CREATE TABLE [users]"));
         assert!(sql.contains("IDENTITY(1,1)"));
         assert!(sql.contains("[PK_users]"));
+    }
+
+    #[test]
+    fn test_migration_sql_with_warnings() {
+        let sql = MigrationSql {
+            up: "CREATE TABLE users (id INT);".to_string(),
+            down: "DROP TABLE users;".to_string(),
+            warnings: vec![
+                "Dropping table 'users' - all data will be lost".to_string(),
+            ],
+        };
+
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("data will be lost"));
+    }
+
+    #[test]
+    fn test_mssql_drop_table_generates_warning() {
+        let generator = MssqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_models.push("users".to_string());
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[0].to_lowercase().contains("data"));
+    }
+
+    #[test]
+    fn test_mssql_drop_column_generates_warning() {
+        let generator = MssqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["email".to_string(), "phone".to_string()],
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 2);
+        assert!(sql.warnings[0].contains("email"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[1].contains("phone"));
+        assert!(sql.warnings[1].contains("users"));
+    }
+
+    #[test]
+    fn test_mssql_alter_column_type_generates_warning() {
+        let generator = MssqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: vec![
+                FieldAlterDiff {
+                    name: "age".to_string(),
+                    column_name: "age".to_string(),
+                    old_type: Some("INTEGER".to_string()),
+                    new_type: Some("TEXT".to_string()),
+                    old_nullable: None,
+                    new_nullable: None,
+                    old_default: None,
+                    new_default: None,
+                },
+                FieldAlterDiff {
+                    name: "email".to_string(),
+                    column_name: "email".to_string(),
+                    old_type: None,
+                    new_type: None,
+                    old_nullable: Some(true),
+                    new_nullable: Some(false),
+                    old_default: None,
+                    new_default: None,
+                },
+            ],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should only warn about the type change, not nullable change
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("age"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].contains("reverse migration"));
+        assert!(sql.warnings[0].contains("incompatible"));
+    }
+
+    #[test]
+    fn test_mssql_multiple_warnings() {
+        let generator = MssqlGenerator;
+        let mut diff = SchemaDiff::default();
+
+        // Drop a table
+        diff.drop_models.push("old_table".to_string());
+
+        // Alter a table with drop column and type change
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["deprecated_field".to_string()],
+            alter_fields: vec![FieldAlterDiff {
+                name: "status".to_string(),
+                column_name: "status".to_string(),
+                old_type: Some("INTEGER".to_string()),
+                new_type: Some("TEXT".to_string()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should have 3 warnings: 1 drop table, 1 drop column, 1 type change
+        assert_eq!(sql.warnings.len(), 3);
+
+        // Find each warning type
+        let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
+        let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
+        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+
+        assert!(drop_table_warning.is_some());
+        assert!(drop_column_warning.is_some());
+        assert!(type_change_warning.is_some());
+    }
+
+    #[test]
+    fn test_migration_sql_no_warnings() {
+        let sql = MigrationSql {
+            up: "CREATE INDEX idx_email ON users(email);".to_string(),
+            down: "DROP INDEX idx_email;".to_string(),
+            warnings: Vec::new(),
+        };
+
+        assert!(sql.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_postgres_drop_table_generates_warning() {
+        let generator = PostgresSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_models.push("users".to_string());
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[0].to_lowercase().contains("data"));
+    }
+
+    #[test]
+    fn test_postgres_drop_column_generates_warning() {
+        let generator = PostgresSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["email".to_string(), "phone".to_string()],
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 2);
+        assert!(sql.warnings[0].contains("email"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[1].contains("phone"));
+        assert!(sql.warnings[1].contains("users"));
+    }
+
+    #[test]
+    fn test_postgres_alter_column_type_generates_warning() {
+        let generator = PostgresSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: vec![
+                FieldAlterDiff {
+                    name: "age".to_string(),
+                    column_name: "age".to_string(),
+                    old_type: Some("INTEGER".to_string()),
+                    new_type: Some("TEXT".to_string()),
+                    old_nullable: None,
+                    new_nullable: None,
+                    old_default: None,
+                    new_default: None,
+                },
+                FieldAlterDiff {
+                    name: "email".to_string(),
+                    column_name: "email".to_string(),
+                    old_type: None,
+                    new_type: None,
+                    old_nullable: Some(true),
+                    new_nullable: Some(false),
+                    old_default: None,
+                    new_default: None,
+                },
+            ],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should only warn about the type change, not nullable change
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("age"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].contains("reverse migration"));
+        assert!(sql.warnings[0].contains("incompatible"));
+    }
+
+    #[test]
+    fn test_postgres_multiple_warnings() {
+        let generator = PostgresSqlGenerator;
+        let mut diff = SchemaDiff::default();
+
+        // Drop a table
+        diff.drop_models.push("old_table".to_string());
+
+        // Alter a table with drop column and type change
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["deprecated_field".to_string()],
+            alter_fields: vec![FieldAlterDiff {
+                name: "status".to_string(),
+                column_name: "status".to_string(),
+                old_type: Some("INTEGER".to_string()),
+                new_type: Some("TEXT".to_string()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should have 3 warnings: 1 drop table, 1 drop column, 1 type change
+        assert_eq!(sql.warnings.len(), 3);
+
+        // Find each warning type
+        let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
+        let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
+        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+
+        assert!(drop_table_warning.is_some());
+        assert!(drop_column_warning.is_some());
+        assert!(type_change_warning.is_some());
+    }
+
+    #[test]
+    fn test_mysql_drop_table_generates_warning() {
+        let generator = MySqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_models.push("users".to_string());
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[0].to_lowercase().contains("data"));
+    }
+
+    #[test]
+    fn test_mysql_drop_column_generates_warning() {
+        let generator = MySqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["email".to_string(), "phone".to_string()],
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        assert_eq!(sql.warnings.len(), 2);
+        assert!(sql.warnings[0].contains("email"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].to_lowercase().contains("drop"));
+        assert!(sql.warnings[1].contains("phone"));
+        assert!(sql.warnings[1].contains("users"));
+    }
+
+    #[test]
+    fn test_mysql_alter_column_type_generates_warning() {
+        let generator = MySqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: vec![
+                FieldAlterDiff {
+                    name: "age".to_string(),
+                    column_name: "age".to_string(),
+                    old_type: Some("INTEGER".to_string()),
+                    new_type: Some("TEXT".to_string()),
+                    old_nullable: None,
+                    new_nullable: None,
+                    old_default: None,
+                    new_default: None,
+                },
+                FieldAlterDiff {
+                    name: "email".to_string(),
+                    column_name: "email".to_string(),
+                    old_type: None,
+                    new_type: None,
+                    old_nullable: Some(true),
+                    new_nullable: Some(false),
+                    old_default: None,
+                    new_default: None,
+                },
+            ],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should only warn about the type change, not nullable change
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("age"));
+        assert!(sql.warnings[0].contains("users"));
+        assert!(sql.warnings[0].contains("reverse migration"));
+        assert!(sql.warnings[0].contains("incompatible"));
+    }
+
+    #[test]
+    fn test_mysql_multiple_warnings() {
+        let generator = MySqlGenerator;
+        let mut diff = SchemaDiff::default();
+
+        // Drop a table
+        diff.drop_models.push("old_table".to_string());
+
+        // Alter a table with drop column and type change
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["deprecated_field".to_string()],
+            alter_fields: vec![FieldAlterDiff {
+                name: "status".to_string(),
+                column_name: "status".to_string(),
+                old_type: Some("INTEGER".to_string()),
+                new_type: Some("TEXT".to_string()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let sql = generator.generate(&diff);
+        // Should have 3 warnings: 1 drop table, 1 drop column, 1 type change
+        assert_eq!(sql.warnings.len(), 3);
+
+        // Find each warning type
+        let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
+        let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
+        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+
+        assert!(drop_table_warning.is_some());
+        assert!(drop_column_warning.is_some());
+        assert!(type_change_warning.is_some());
     }
 }

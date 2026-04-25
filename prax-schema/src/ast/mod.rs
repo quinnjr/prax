@@ -5,6 +5,7 @@
 mod attribute;
 mod datasource;
 mod field;
+mod generator;
 mod graphql;
 mod model;
 mod policy;
@@ -17,6 +18,7 @@ mod validation;
 pub use attribute::*;
 pub use datasource::*;
 pub use field::*;
+pub use generator::*;
 pub use graphql::*;
 pub use model::*;
 pub use policy::*;

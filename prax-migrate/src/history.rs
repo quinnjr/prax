@@ -93,6 +93,27 @@ CREATE INDEX IF NOT EXISTS "_prax_migrations_applied_at_idx"
 pub const POSTGRES_LOCK_SQL: &str = "SELECT pg_advisory_lock(42424242)";
 pub const POSTGRES_UNLOCK_SQL: &str = "SELECT pg_advisory_unlock(42424242)";
 
+/// SQL for initializing the event log table (PostgreSQL V2).
+pub const POSTGRES_EVENT_LOG_INIT_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS "_prax_migrations" (
+    event_id BIGSERIAL PRIMARY KEY,
+    migration_id VARCHAR(255) NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    event_data JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    CONSTRAINT valid_event_type CHECK (event_type IN ('applied', 'rolled_back', 'failed', 'resolved'))
+);
+
+CREATE INDEX IF NOT EXISTS "_prax_migrations_migration_id_created_at_idx"
+    ON "_prax_migrations" (migration_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS "_prax_migrations_event_type_idx"
+    ON "_prax_migrations" (event_type);
+
+CREATE INDEX IF NOT EXISTS "_prax_migrations_created_at_idx"
+    ON "_prax_migrations" (created_at DESC);
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;

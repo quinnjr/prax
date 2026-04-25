@@ -174,6 +174,12 @@ pub enum MigrateSubcommand {
 
     /// Generate migration diff without applying
     Diff(MigrateDiffArgs),
+
+    /// Rollback the last applied migration
+    Rollback(MigrateRollbackArgs),
+
+    /// View migration history
+    History(MigrateHistoryArgs),
 }
 
 /// Arguments for `migrate dev`
@@ -241,6 +247,30 @@ pub struct MigrateDiffArgs {
     /// Compare against a specific migration
     #[arg(long)]
     pub from_migration: Option<String>,
+}
+
+/// Arguments for `migrate rollback`
+#[derive(Args, Debug)]
+pub struct MigrateRollbackArgs {
+    /// Reason for rollback
+    #[arg(long)]
+    pub reason: Option<String>,
+
+    /// User performing the rollback
+    #[arg(long)]
+    pub user: Option<String>,
+
+    /// Rollback to a specific migration
+    #[arg(long)]
+    pub to: Option<String>,
+}
+
+/// Arguments for `migrate history`
+#[derive(Args, Debug)]
+pub struct MigrateHistoryArgs {
+    /// Show history for a specific migration
+    #[arg(long)]
+    pub migration: Option<String>,
 }
 
 // =============================================================================

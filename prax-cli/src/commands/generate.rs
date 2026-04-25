@@ -872,3 +872,4 @@ mod tests {
         assert!(needs_boxing("C", "A", &graph));
     }
 }
+

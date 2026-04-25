@@ -238,6 +238,8 @@ pub struct RelationAttribute {
     pub on_delete: Option<ReferentialAction>,
     /// On update action.
     pub on_update: Option<ReferentialAction>,
+    /// Custom foreign key constraint name in the database.
+    pub map: Option<String>,
 }
 
 /// Referential actions for relations.
@@ -672,12 +674,14 @@ mod tests {
             references: vec!["id".into()],
             on_delete: Some(ReferentialAction::Cascade),
             on_update: Some(ReferentialAction::Cascade),
+            map: Some("fk_post_author".to_string()),
         };
 
         assert_eq!(rel.name, Some("UserPosts".to_string()));
         assert_eq!(rel.fields[0].as_str(), "author_id");
         assert_eq!(rel.references[0].as_str(), "id");
         assert_eq!(rel.on_delete, Some(ReferentialAction::Cascade));
+        assert_eq!(rel.map, Some("fk_post_author".to_string()));
     }
 
     #[test]
@@ -688,10 +692,12 @@ mod tests {
             references: vec![],
             on_delete: None,
             on_update: None,
+            map: None,
         };
 
         assert!(rel.name.is_none());
         assert!(rel.fields.is_empty());
+        assert!(rel.map.is_none());
     }
 
     // ==================== ReferentialAction Tests ====================

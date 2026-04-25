@@ -48,6 +48,8 @@ pub struct RelationSpec {
     pub on_delete: Option<ReferentialAction>,
     /// On update action.
     pub on_update: Option<ReferentialAction>,
+    /// Custom foreign key constraint name in the database.
+    pub map: Option<String>,
 }
 
 impl RelationSpec {
@@ -67,6 +69,7 @@ impl RelationSpec {
             join_table: None,
             on_delete: None,
             on_update: None,
+            map: None,
         }
     }
 
@@ -86,6 +89,7 @@ impl RelationSpec {
             join_table: None,
             on_delete: None,
             on_update: None,
+            map: None,
         }
     }
 
@@ -105,6 +109,7 @@ impl RelationSpec {
             join_table: None,
             on_delete: None,
             on_update: None,
+            map: None,
         }
     }
 
@@ -125,6 +130,7 @@ impl RelationSpec {
             join_table: Some(join_table),
             on_delete: None,
             on_update: None,
+            map: None,
         }
     }
 
@@ -149,6 +155,12 @@ impl RelationSpec {
     /// Set the on update action.
     pub fn on_update(mut self, action: ReferentialAction) -> Self {
         self.on_update = Some(action);
+        self
+    }
+
+    /// Set the custom foreign key constraint name.
+    pub fn map(mut self, name: impl Into<String>) -> Self {
+        self.map = Some(name.into());
         self
     }
 

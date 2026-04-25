@@ -762,6 +762,9 @@ impl Validator {
                         if let Some(action) = rel_attr.on_update {
                             relation = relation.with_on_update(action);
                         }
+                        if let Some(map) = &rel_attr.map {
+                            relation = relation.with_map(map.as_str());
+                        }
                     }
 
                     relations.push(relation);
