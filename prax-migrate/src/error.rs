@@ -75,6 +75,26 @@ pub enum MigrationError {
     #[error("Migration conflict: migrations '{0}' and '{1}' conflict")]
     MigrationConflict(String, String),
 
+    /// Bootstrap migration failed.
+    #[error("Bootstrap migration failed: {0}")]
+    BootstrapFailed(String),
+
+    /// No migrations to rollback.
+    #[error("No migrations to rollback")]
+    NoMigrationsToRollback,
+
+    /// Parent event not found for rollback.
+    #[error("Parent event not found for rollback")]
+    ParentEventNotFound,
+
+    /// Migration file not found.
+    #[error("Migration file not found: {0}")]
+    MigrationFileNotFound(String),
+
+    /// No down migration available.
+    #[error("No down migration available for: {0}")]
+    NoDownMigration(String),
+
     /// General migration error.
     #[error("Migration error: {0}")]
     Other(String),
