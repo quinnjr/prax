@@ -6,7 +6,8 @@
 //! - Schema diffing between Prax schema definitions and database state
 //! - SQL migration generation for PostgreSQL (with MySQL/SQLite planned)
 //! - Migration file management on the filesystem
-//! - Migration history tracking in the database
+//! - **Event sourcing** for complete migration audit trails
+//! - Migration history tracking with immutable event log
 //! - Safe, transactional migration application and rollback
 //! - **Resolution system** for handling migration conflicts and checksums
 //!
@@ -14,7 +15,7 @@
 //!
 //! The migration engine compares your Prax schema definition with the current
 //! database state and generates SQL scripts to bring the database up to date.
-//! It tracks applied migrations in a `_prax_migrations` table.
+//! It tracks applied migrations using event sourcing in a `_prax_migrations` table.
 //!
 //! ```text
 //! ┌──────────────┐     ┌────────────────┐     ┌─────────────┐
@@ -28,9 +29,31 @@
 //!                                                    │
 //!                                                    ▼
 //!                                            ┌─────────────┐
-//!                                            │ History Tbl │
+//!                                            │ Event Store │
+//!                                            │  (append)   │
+//!                                            └─────────────┘
+//!                                                    │
+//!                                                    ▼
+//!                                            ┌─────────────┐
+//!                                            │   Rebuild   │
+//!                                            │    State    │
 //!                                            └─────────────┘
 //! ```
+//!
+//! ## Event Sourcing
+//!
+//! All migration operations are recorded as immutable events in an append-only log:
+//!
+//! - **Applied**: Migration successfully applied
+//! - **RolledBack**: Migration rolled back with reason
+//! - **Failed**: Migration attempt failed with error details
+//! - **Resolved**: Conflict or checksum issue resolved
+//!
+//! Current state is derived by replaying all events. This provides:
+//! - Complete audit trail of all operations
+//! - Ability to reconstruct state at any point in time
+//! - Support for conflict resolution and migration editing
+//! - Failed attempts recorded without affecting migration state
 //!
 //! ## Example
 //!
@@ -216,4 +239,4 @@ pub use shadow::{
 pub use sql::{MigrationSql, PostgresSqlGenerator};
 pub use state::MigrationState;
 // Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
-// Access via prax_migrate::state::MigrationStatus if needed
+// Access via prax_migrate::state::MigrationStatus if needed for event sourcing state projection
