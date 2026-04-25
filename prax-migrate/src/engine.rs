@@ -655,6 +655,26 @@ impl<H: MigrationHistoryRepository, S: MigrationEventStore> MigrationEngine<H, S
         // For now, return NoChanges as a placeholder
         Err(MigrationError::NoChanges)
     }
+
+    /// Rollback a migration with event sourcing support.
+    ///
+    /// This is a skeleton implementation that will be fully implemented later.
+    /// Currently returns NoMigrationsToRollback error as a placeholder.
+    ///
+    /// # Arguments
+    /// * `migration_id` - Optional specific migration to rollback (defaults to last applied)
+    /// * `reason` - Optional reason for the rollback
+    /// * `rolled_back_by` - Optional identifier of who performed the rollback
+    pub async fn rollback_with_event(
+        &self,
+        _migration_id: Option<String>,
+        _reason: Option<String>,
+        _rolled_back_by: Option<String>,
+    ) -> MigrateResult<RollbackResult> {
+        // Stub: This will be fully implemented in a later task
+        // For now, return NoMigrationsToRollback as a placeholder
+        Err(MigrationError::NoMigrationsToRollback)
+    }
 }
 
 /// Migration status information.
@@ -683,6 +703,17 @@ pub struct DevResult {
     pub duration_ms: i64,
     /// Warnings generated during the operation.
     pub warnings: Vec<String>,
+}
+
+/// Result of a rollback operation.
+#[derive(Debug)]
+pub struct RollbackResult {
+    /// ID of the rolled back migration.
+    pub migration_id: String,
+    /// Event ID from the event store.
+    pub event_id: i64,
+    /// Duration in milliseconds.
+    pub duration_ms: i64,
 }
 
 #[cfg(test)]

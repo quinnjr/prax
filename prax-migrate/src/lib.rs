@@ -148,6 +148,7 @@ pub use diff::{
 };
 pub use engine::{
     DevResult, MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
+    RollbackResult,
 };
 pub use error::{MigrateResult, MigrationError};
 pub use event::{EventData, EventType, MigrationEvent};
