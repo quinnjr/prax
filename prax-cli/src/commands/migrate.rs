@@ -17,6 +17,8 @@ pub async fn run(args: MigrateArgs) -> CliResult<()> {
         crate::cli::MigrateSubcommand::Status => run_status().await,
         crate::cli::MigrateSubcommand::Resolve(resolve_args) => run_resolve(resolve_args).await,
         crate::cli::MigrateSubcommand::Diff(diff_args) => run_diff(diff_args).await,
+        crate::cli::MigrateSubcommand::Rollback(rollback_args) => run_rollback(rollback_args).await,
+        crate::cli::MigrateSubcommand::History(history_args) => run_history(history_args).await,
     }
 }
 
@@ -347,6 +349,79 @@ async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
             success(&format!("Diff written to {}", output_path.display()));
         }
     }
+
+    Ok(())
+}
+
+/// Run `prax migrate rollback` - rollback the last applied migration
+async fn run_rollback(args: crate::cli::MigrateRollbackArgs) -> CliResult<()> {
+    output::header("Migrate Rollback");
+
+    output::newline();
+
+    if let Some(to_migration) = &args.to {
+        output::info(&format!("Rolling back to migration: {}", to_migration));
+    } else {
+        output::info("Rolling back last applied migration...");
+    }
+
+    if let Some(reason) = &args.reason {
+        output::kv("Reason", reason);
+    }
+
+    if let Some(user) = &args.user {
+        output::kv("User", user);
+    }
+
+    output::newline();
+
+    // TODO: Implement actual rollback logic using event sourcing
+    // This is a STUB - the real implementation would:
+    // 1. Load the event store
+    // 2. Find the last applied migration (or specified migration)
+    // 3. Append a RolledBack event
+    // 4. Execute the down migration SQL
+    // 5. Update migration state
+
+    success("Migration rollback complete! (STUB)");
+
+    output::newline();
+    output::section("Note");
+    output::list_item("This is a placeholder implementation");
+    output::list_item("Full event sourcing integration coming soon");
+
+    Ok(())
+}
+
+/// Run `prax migrate history` - view migration history
+async fn run_history(args: crate::cli::MigrateHistoryArgs) -> CliResult<()> {
+    output::header("Migration History");
+
+    output::newline();
+
+    if let Some(migration) = &args.migration {
+        output::section(&format!("History for migration: {}", migration));
+    } else {
+        output::section("All migrations");
+    }
+
+    output::newline();
+
+    // TODO: Implement actual history viewing using event sourcing
+    // This is a STUB - the real implementation would:
+    // 1. Load the event store
+    // 2. Query events for the specified migration (or all)
+    // 3. Display events in chronological order
+    // 4. Show event type, timestamp, and event-specific data
+
+    output::list_item("Event 1: Applied (2026-04-25 12:00:00) - STUB");
+    output::list_item("Event 2: RolledBack (2026-04-25 12:05:00) - STUB");
+    output::list_item("Event 3: Applied (2026-04-25 12:10:00) - STUB");
+
+    output::newline();
+    output::section("Note");
+    output::list_item("This is a placeholder implementation");
+    output::list_item("Full event sourcing integration coming soon");
 
     Ok(())
 }
