@@ -125,6 +125,7 @@
 //! resolutions.save("migrations/resolutions.toml").await?;
 //! ```
 
+pub mod bootstrap;
 pub mod diff;
 pub mod engine;
 pub mod error;
@@ -140,6 +141,7 @@ pub mod sql;
 pub mod state;
 
 // Re-exports
+pub use bootstrap::Bootstrap;
 pub use diff::{
     EnumAlterDiff, EnumDiff, FieldAlterDiff, FieldDiff, IndexDiff, ModelAlterDiff, ModelDiff,
     SchemaDiff, SchemaDiffer, UniqueConstraint,
