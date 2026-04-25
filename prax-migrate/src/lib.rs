@@ -147,7 +147,7 @@ pub use diff::{
     SchemaDiff, SchemaDiffer, UniqueConstraint,
 };
 pub use engine::{
-    MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
+    DevResult, MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
 };
 pub use error::{MigrateResult, MigrationError};
 pub use event::{EventData, EventType, MigrationEvent};

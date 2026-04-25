@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::diff::{SchemaDiff, SchemaDiffer};
 use crate::error::{MigrateResult, MigrationError};
+use crate::event_store::MigrationEventStore;
 use crate::file::{MigrationFile, MigrationFileManager};
 use crate::history::{MigrationHistoryRepository, MigrationRecord};
 use crate::resolution::{Resolution, ResolutionConfig};
@@ -250,21 +251,23 @@ impl MigrationPlan {
 }
 
 /// The main migration engine.
-pub struct MigrationEngine<H: MigrationHistoryRepository> {
+pub struct MigrationEngine<H: MigrationHistoryRepository, S: MigrationEventStore> {
     config: MigrationConfig,
     history: H,
+    event_store: S,
     file_manager: MigrationFileManager,
     sql_generator: PostgresSqlGenerator,
     resolutions: ResolutionConfig,
 }
 
-impl<H: MigrationHistoryRepository> MigrationEngine<H> {
+impl<H: MigrationHistoryRepository, S: MigrationEventStore> MigrationEngine<H, S> {
     /// Create a new migration engine.
-    pub fn new(config: MigrationConfig, history: H) -> Self {
+    pub fn new(config: MigrationConfig, history: H, event_store: S) -> Self {
         let file_manager = MigrationFileManager::new(&config.migrations_dir);
         Self {
             config,
             history,
+            event_store,
             file_manager,
             sql_generator: PostgresSqlGenerator,
             resolutions: ResolutionConfig::new(),
@@ -275,12 +278,14 @@ impl<H: MigrationHistoryRepository> MigrationEngine<H> {
     pub fn with_resolutions(
         config: MigrationConfig,
         history: H,
+        event_store: S,
         resolutions: ResolutionConfig,
     ) -> Self {
         let file_manager = MigrationFileManager::new(&config.migrations_dir);
         Self {
             config,
             history,
+            event_store,
             file_manager,
             sql_generator: PostgresSqlGenerator,
             resolutions,
@@ -635,6 +640,21 @@ impl<H: MigrationHistoryRepository> MigrationEngine<H> {
             total_pending,
         })
     }
+
+    /// Create and apply a new migration in development mode.
+    ///
+    /// This is a skeleton implementation that will be fully implemented later.
+    /// Currently returns NoChanges error as a placeholder.
+    pub async fn dev(
+        &self,
+        _name: &str,
+        _schema: &prax_schema::Schema,
+        _applied_by: Option<String>,
+    ) -> MigrateResult<DevResult> {
+        // Stub: This will be fully implemented in a later task
+        // For now, return NoChanges as a placeholder
+        Err(MigrationError::NoChanges)
+    }
 }
 
 /// Migration status information.
@@ -648,6 +668,21 @@ pub struct MigrationStatus {
     pub total_applied: usize,
     /// Total number of pending migrations.
     pub total_pending: usize,
+}
+
+/// Result of a dev migration operation.
+#[derive(Debug)]
+pub struct DevResult {
+    /// ID of the created/applied migration.
+    pub migration_id: String,
+    /// Path to the migration file.
+    pub migration_path: PathBuf,
+    /// Event ID from the event store.
+    pub event_id: i64,
+    /// Duration in milliseconds.
+    pub duration_ms: i64,
+    /// Warnings generated during the operation.
+    pub warnings: Vec<String>,
 }
 
 #[cfg(test)]
