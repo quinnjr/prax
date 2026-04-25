@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::diff::{SchemaDiff, SchemaDiffer};
 use crate::error::{MigrateResult, MigrationError};
+use crate::event::MigrationEvent;
 use crate::event_store::MigrationEventStore;
 use crate::file::{MigrationFile, MigrationFileManager};
 use crate::history::{MigrationHistoryRepository, MigrationRecord};
@@ -674,6 +675,20 @@ impl<H: MigrationHistoryRepository, S: MigrationEventStore> MigrationEngine<H, S
         // Stub: This will be fully implemented in a later task
         // For now, return NoMigrationsToRollback as a placeholder
         Err(MigrationError::NoMigrationsToRollback)
+    }
+
+    /// Get complete migration history from the event store.
+    ///
+    /// Returns all migration events in chronological order. This includes:
+    /// - Applied events: migrations that were successfully applied
+    /// - RolledBack events: migrations that were rolled back
+    /// - Failed events: migration attempts that failed
+    /// - Resolved events: conflict resolutions and checksum updates
+    ///
+    /// # Returns
+    /// Vector of all migration events, ordered by event_id (chronological)
+    pub async fn get_migration_history(&self) -> MigrateResult<Vec<MigrationEvent>> {
+        self.event_store.get_all_events().await
     }
 }
 
