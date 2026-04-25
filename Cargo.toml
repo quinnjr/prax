@@ -43,7 +43,7 @@ prax-mssql = { path = "prax-mssql", version = "0.6.3" }
 prax-mongodb = { path = "prax-mongodb", version = "0.6.3" }
 prax-duckdb = { path = "prax-duckdb", version = "0.6.3" }
 prax-scylladb = { path = "prax-scylladb", version = "0.6.3" }
-prax-migrate = { path = "prax-migrate", version = "0.6.4" }
+prax-migrate = { path = "prax-migrate", version = "0.7.0" }
 prax-orm-cli = { path = "prax-cli", version = "0.6.3" }
 prax-sqlx = { path = "prax-sqlx", version = "0.6.3" }
 prax-armature = { path = "prax-armature", version = "0.6.3" }

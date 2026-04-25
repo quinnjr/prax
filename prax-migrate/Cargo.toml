@@ -1,6 +1,6 @@
 [package]
 name = "prax-migrate"
-version = "0.6.4"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Migration engine for the Prax ORM - schema diffing, SQL generation, and history tracking"
