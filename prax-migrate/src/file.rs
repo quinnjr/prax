@@ -256,6 +256,7 @@ mod tests {
         let sql = MigrationSql {
             up: "CREATE TABLE users();".to_string(),
             down: "DROP TABLE users;".to_string(),
+            warnings: Vec::new(),
         };
 
         let migration = MigrationFile::new("20231215120000", "create_users", sql);

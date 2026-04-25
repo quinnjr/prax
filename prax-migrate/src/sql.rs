@@ -96,6 +96,7 @@ impl PostgresSqlGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings: Vec::new(),
         }
     }
 
@@ -476,6 +477,8 @@ pub struct MigrationSql {
     pub up: String,
     /// SQL to rollback the migration.
     pub down: String,
+    /// Warnings about data loss or irreversible operations.
+    pub warnings: Vec<String>,
 }
 
 impl MigrationSql {
@@ -544,6 +547,7 @@ impl MySqlGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings: Vec::new(),
         }
     }
 
@@ -808,6 +812,7 @@ impl SqliteGenerator {
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
+            warnings: Vec::new(),
         }
     }
 
@@ -1005,6 +1010,7 @@ impl MssqlGenerator {
         MigrationSql {
             up: up.join("\n\nGO\n\n"),
             down: down.join("\n\nGO\n\n"),
+            warnings: Vec::new(),
         }
     }
 
@@ -1734,5 +1740,30 @@ mod tests {
         assert!(sql.contains("CREATE TABLE [users]"));
         assert!(sql.contains("IDENTITY(1,1)"));
         assert!(sql.contains("[PK_users]"));
+    }
+
+    #[test]
+    fn test_migration_sql_with_warnings() {
+        let sql = MigrationSql {
+            up: "CREATE TABLE users (id INT);".to_string(),
+            down: "DROP TABLE users;".to_string(),
+            warnings: vec![
+                "Dropping table 'users' - all data will be lost".to_string(),
+            ],
+        };
+
+        assert_eq!(sql.warnings.len(), 1);
+        assert!(sql.warnings[0].contains("data will be lost"));
+    }
+
+    #[test]
+    fn test_migration_sql_no_warnings() {
+        let sql = MigrationSql {
+            up: "CREATE INDEX idx_email ON users(email);".to_string(),
+            down: "DROP INDEX idx_email;".to_string(),
+            warnings: Vec::new(),
+        };
+
+        assert!(sql.warnings.is_empty());
     }
 }
