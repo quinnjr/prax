@@ -103,9 +103,13 @@ impl VectorSearchBuilder {
     }
 }
 
+// NOTE: Keep this in sync with the singularize helper in
+// prax-migrate/src/sql.rs (SqliteGenerator::singularize). The search-time
+// default rowid column name must match the migration-time name, otherwise
+// VectorSearchBuilder's default JOIN will point at a column that does not
+// exist. Users with irregular plurals should call .rowid_column() manually
+// on both the migration-side schema and this builder.
 fn singularize(name: &str) -> String {
-    // Extremely small helper: strips one trailing 's' if present.
-    // Users with irregular plurals should call rowid_column() manually.
     if name.ends_with('s') && !name.ends_with("ss") {
         name[..name.len() - 1].to_string()
     } else {

@@ -3,6 +3,22 @@
 use crate::vector::error::{VectorError, VectorResult};
 use crate::vector::metric::VectorElementType;
 
+/// Format a slice as a JSON array string suitable for `vector_from_json(...)`.
+///
+/// Elements are written via the provided `append` callback so both numeric
+/// primitives and trait-object elements can share the same loop.
+fn format_json_array<T, F: FnMut(&T, &mut String)>(data: &[T], mut append: F) -> String {
+    let mut s = String::from("[");
+    for (i, v) in data.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        append(v, &mut s);
+    }
+    s.push(']');
+    s
+}
+
 /// 32-bit float vector (element type float4) — the most common form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Embedding {
@@ -38,15 +54,7 @@ impl Embedding {
 
     /// Serialize to a JSON array string suitable for `vector_from_json`.
     pub fn to_json(&self) -> String {
-        let mut s = String::from("[");
-        for (i, v) in self.data.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&v.to_string());
-        }
-        s.push(']');
-        s
+        format_json_array(&self.data, |v, out| out.push_str(&v.to_string()))
     }
 }
 
@@ -85,15 +93,7 @@ impl DoubleEmbedding {
 
     /// Serialize to a JSON array string.
     pub fn to_json(&self) -> String {
-        let mut s = String::from("[");
-        for (i, v) in self.data.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&v.to_string());
-        }
-        s.push(']');
-        s
+        format_json_array(&self.data, |v, out| out.push_str(&v.to_string()))
     }
 }
 
@@ -168,15 +168,7 @@ impl<T: IntVectorElement> IntVector<T> {
 
     /// Serialize to a JSON array string.
     pub fn to_json(&self) -> String {
-        let mut s = String::from("[");
-        for (i, v) in self.data.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            v.write_json(&mut s);
-        }
-        s.push(']');
-        s
+        format_json_array(&self.data, |v, out| v.write_json(out))
     }
 }
 

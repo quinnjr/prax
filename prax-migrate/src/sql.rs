@@ -1024,6 +1024,11 @@ impl SqliteGenerator {
 
     /// Strip a single trailing 's' for rowid column naming ("documents" -> "document").
     /// Irregular plurals require users to override the default outside migrations.
+    ///
+    /// NOTE: Keep in sync with the singularize fn in
+    /// prax-sqlite/src/vector/search.rs — the search-time default rowid column
+    /// name must match what the migration generator emits, or the default
+    /// JOIN in VectorSearchBuilder will miss the real column.
     fn singularize(name: &str) -> String {
         if name.ends_with('s') && !name.ends_with("ss") {
             name[..name.len() - 1].to_string()
