@@ -4,7 +4,7 @@
 //!
 //! This crate provides functionality for:
 //! - Schema diffing between Prax schema definitions and database state
-//! - SQL migration generation for PostgreSQL (with MySQL/SQLite planned)
+//! - SQL migration generation for PostgreSQL, MySQL, SQLite, MSSQL, and DuckDB
 //! - Migration file management on the filesystem
 //! - **Event sourcing** for complete migration audit trails
 //! - Migration history tracking with immutable event log
