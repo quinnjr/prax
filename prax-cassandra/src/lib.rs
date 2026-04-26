@@ -28,6 +28,8 @@
 //! Schema migrations use `prax_migrate::CqlDialect`, which works identically
 //! for Cassandra and ScyllaDB since both use CQL.
 
+pub mod auth;
 pub mod error;
 
+pub use auth::{PlainSasl, SaslMechanism};
 pub use error::{CassandraError, CassandraResult};
