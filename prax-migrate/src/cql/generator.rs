@@ -2,8 +2,8 @@
 
 use crate::cql::diff::{
     ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlIndexDiff, CqlIndexType,
-    CqlSchemaDiff, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy,
-    UdtAlterDiff, UdtDiff,
+    CqlSchemaDiff, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, MaterializedViewDiff,
+    ReplicationStrategy, UdtAlterDiff, UdtDiff,
 };
 use crate::cql::migration::MigrationCql;
 
@@ -86,6 +86,15 @@ impl CqlMigrationGenerator {
 
         for name in &diff.drop_indexes {
             up.push(self.drop_index_statement(name, ks_context));
+        }
+
+        for view in &diff.create_materialized_views {
+            up.push(self.create_materialized_view_statement(view, ks_context));
+            down.push(self.drop_materialized_view_statement(&view.name, ks_context));
+        }
+
+        for name in &diff.drop_materialized_views {
+            up.push(self.drop_materialized_view_statement(name, ks_context));
         }
 
         for name in &diff.drop_tables {
@@ -352,6 +361,43 @@ impl CqlMigrationGenerator {
     fn drop_index_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
         format!("DROP INDEX IF EXISTS {};", self.qualify(name, keyspace_context))
     }
+
+    fn create_materialized_view_statement(
+        &self,
+        view: &MaterializedViewDiff,
+        keyspace_context: Option<&str>,
+    ) -> String {
+        let qualified_view = self.qualify(&view.name, keyspace_context);
+        let qualified_base = self.qualify(&view.base_table, keyspace_context);
+        let columns = view.select_columns.join(", ");
+        let pk = self.format_primary_key(&view.partition_keys, &view.clustering_keys);
+
+        let mut stmt = format!(
+            "CREATE MATERIALIZED VIEW {} AS\nSELECT {} FROM {}\nWHERE {}\n{}",
+            qualified_view, columns, qualified_base, view.where_clause, pk
+        );
+
+        if !view.clustering_keys.is_empty() {
+            stmt.push_str(&format!(
+                " WITH {}",
+                self.format_clustering_order(&view.clustering_keys)
+            ));
+        }
+
+        stmt.push(';');
+        stmt
+    }
+
+    fn drop_materialized_view_statement(
+        &self,
+        name: &str,
+        keyspace_context: Option<&str>,
+    ) -> String {
+        format!(
+            "DROP MATERIALIZED VIEW IF EXISTS {};",
+            self.qualify(name, keyspace_context)
+        )
+    }
 }
 
 impl Default for CqlMigrationGenerator {
@@ -366,7 +412,7 @@ mod tests {
     use crate::cql::diff::{
         ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldAlterDiff, CqlFieldDiff,
         CqlIndexDiff, CqlIndexType, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig,
-        ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
+        MaterializedViewDiff, ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
     };
 
     fn simple_field(name: &str, cql_type: &str) -> CqlFieldDiff {
@@ -798,5 +844,46 @@ mod tests {
 
         let migration = generator.generate(&diff);
         assert!(migration.up.contains("DROP INDEX IF EXISTS \"old_idx\""));
+    }
+
+    #[test]
+    fn test_create_materialized_view() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.create_materialized_views.push(MaterializedViewDiff {
+            name: "events_by_status".into(),
+            base_table: "events".into(),
+            select_columns: vec!["*".into()],
+            where_clause: "status IS NOT NULL AND tenant_id IS NOT NULL AND event_time IS NOT NULL".into(),
+            partition_keys: vec!["status".into()],
+            clustering_keys: vec![
+                ClusteringKey {
+                    name: "tenant_id".into(),
+                    order: ClusteringOrder::Asc,
+                },
+                ClusteringKey {
+                    name: "event_time".into(),
+                    order: ClusteringOrder::Desc,
+                },
+            ],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("CREATE MATERIALIZED VIEW \"events_by_status\""));
+        assert!(migration.up.contains("FROM \"events\""));
+        assert!(migration.up.contains("WHERE status IS NOT NULL"));
+        assert!(migration.up.contains("PRIMARY KEY ((status), tenant_id, event_time)"));
+        assert!(migration.up.contains("CLUSTERING ORDER BY (tenant_id ASC, event_time DESC)"));
+        assert!(migration.down.contains("DROP MATERIALIZED VIEW IF EXISTS \"events_by_status\""));
+    }
+
+    #[test]
+    fn test_drop_materialized_view() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.drop_materialized_views.push("old_view".into());
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("DROP MATERIALIZED VIEW IF EXISTS \"old_view\""));
     }
 }
