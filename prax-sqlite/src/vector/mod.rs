@@ -5,6 +5,8 @@
 
 pub mod error;
 pub mod metric;
+pub mod types;
 
 pub use error::{VectorError, VectorResult};
 pub use metric::{DistanceMetric, VectorElementType, VectorIndexKind};
+pub use types::{DoubleEmbedding, Embedding, IntVector, IntVectorElement};
