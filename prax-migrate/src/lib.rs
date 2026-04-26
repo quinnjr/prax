@@ -149,6 +149,7 @@
 //! ```
 
 pub mod bootstrap;
+pub mod cql;
 pub mod dialect;
 pub mod diff;
 pub mod engine;
@@ -166,6 +167,7 @@ pub mod state;
 
 // Re-exports
 pub use bootstrap::Bootstrap;
+pub use cql::MigrationCql;
 pub use dialect::{MigrationDialect, SqlDialect};
 pub use diff::{
     EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
