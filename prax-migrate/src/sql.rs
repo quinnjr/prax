@@ -1404,6 +1404,31 @@ impl DuckDbSqlGenerator {
             ));
         }
 
+        // Alter models
+        for alter in &diff.alter_models {
+            // Warn about dropped columns
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.table_name
+                ));
+            }
+
+            // Warn about column type changes
+            for field in &alter.alter_fields {
+                if let Some(_new_type) = &field.new_type {
+                    if field.old_type.is_some() {
+                        warnings.push(format!(
+                            "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
+                            field.name, alter.table_name
+                        ));
+                    }
+                }
+            }
+
+            up.extend(self.alter_table(alter));
+        }
+
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
@@ -1523,6 +1548,92 @@ impl DuckDbSqlGenerator {
     /// Generate DROP TABLE statement.
     fn drop_table(&self, name: &str) -> String {
         format!("DROP TABLE IF EXISTS \"{}\";", name)
+    }
+
+    /// Generate ALTER TABLE statements for model changes.
+    fn alter_table(&self, alter: &ModelAlterDiff) -> Vec<String> {
+        let mut stmts = Vec::new();
+
+        // Add columns
+        for field in &alter.add_fields {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ADD COLUMN {};",
+                alter.table_name,
+                self.column_definition(field)
+            ));
+        }
+
+        // Drop columns
+        for name in &alter.drop_fields {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" DROP COLUMN \"{}\";",
+                alter.table_name, name
+            ));
+        }
+
+        // Alter columns
+        for field in &alter.alter_fields {
+            stmts.extend(self.alter_column(&alter.table_name, field));
+        }
+
+        stmts
+    }
+
+    /// Generate column definition string for CREATE/ALTER TABLE.
+    fn column_definition(&self, field: &FieldDiff) -> String {
+        let mut parts = vec![
+            format!("\"{}\"", field.column_name),
+            self.map_field_type(&field.sql_type),
+        ];
+
+        if !field.nullable && !field.is_primary_key {
+            parts.push("NOT NULL".to_string());
+        }
+
+        if field.is_unique && !field.is_primary_key {
+            parts.push("UNIQUE".to_string());
+        }
+
+        if let Some(default) = &field.default {
+            parts.push(format!("DEFAULT {}", default));
+        }
+
+        parts.join(" ")
+    }
+
+    /// Generate ALTER COLUMN statements.
+    fn alter_column(&self, table: &str, field: &FieldAlterDiff) -> Vec<String> {
+        let mut stmts = Vec::new();
+
+        if let Some(new_type) = &field.new_type {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" TYPE {};",
+                table, field.column_name, new_type
+            ));
+        }
+
+        if let Some(new_nullable) = field.new_nullable {
+            if new_nullable {
+                stmts.push(format!(
+                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" DROP NOT NULL;",
+                    table, field.column_name
+                ));
+            } else {
+                stmts.push(format!(
+                    "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET NOT NULL;",
+                    table, field.column_name
+                ));
+            }
+        }
+
+        if let Some(new_default) = &field.new_default {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ALTER COLUMN \"{}\" SET DEFAULT {};",
+                table, field.column_name, new_default
+            ));
+        }
+
+        stmts
     }
 }
 
@@ -2805,5 +2916,89 @@ mod duckdb_tests {
         assert_eq!(migration.warnings.len(), 1);
         assert!(migration.warnings[0].contains("Dropping table 'users'"));
         assert!(migration.warnings[0].contains("all data will be lost"));
+    }
+
+    #[test]
+    fn test_duckdb_alter_table_add_column() {
+        let generator = DuckDbSqlGenerator;
+        let alter = ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: vec![FieldDiff {
+                name: "age".to_string(),
+                column_name: "age".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: true,
+                default: None,
+                is_primary_key: false,
+                is_auto_increment: false,
+                is_unique: false,
+            }],
+            drop_fields: Vec::new(),
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        };
+
+        let statements = generator.alter_table(&alter);
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("ALTER TABLE \"users\" ADD COLUMN \"age\" INTEGER"));
+    }
+
+    #[test]
+    fn test_duckdb_drop_column_generates_warning() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: vec!["old_field".to_string()],
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let migration = generator.generate(&diff);
+        assert_eq!(migration.warnings.len(), 1);
+        assert!(migration.warnings[0].contains("Dropping column 'old_field'"));
+        assert!(migration.warnings[0].contains("users"));
+        assert!(migration.warnings[0].contains("data in this column will be lost"));
+    }
+
+    #[test]
+    fn test_duckdb_type_change_generates_warning() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: vec![FieldAlterDiff {
+                name: "age".to_string(),
+                column_name: "age".to_string(),
+                old_type: Some("INTEGER".to_string()),
+                new_type: Some("VARCHAR".to_string()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }],
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: Vec::new(),
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let migration = generator.generate(&diff);
+        assert_eq!(migration.warnings.len(), 1);
+        assert!(migration.warnings[0].contains("Changing column 'age'"));
+        assert!(migration.warnings[0].contains("users"));
+        assert!(migration.warnings[0].contains("reverse migration may fail"));
     }
 }
