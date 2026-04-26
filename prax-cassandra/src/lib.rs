@@ -36,6 +36,7 @@ pub mod error;
 pub mod pool;
 pub mod row;
 pub mod types;
+pub mod udf;
 pub mod virtual_tables;
 
 pub use auth::{PlainSasl, SaslMechanism};
@@ -48,4 +49,5 @@ pub use engine::{BatchBuilder, QueryResult};
 pub use error::{CassandraError, CassandraResult};
 pub use pool::CassandraPool;
 pub use row::{FromRow, Row};
+pub use udf::{UdaDefinition, UdfDefinition, UdfLanguage};
 pub use virtual_tables::{ClusterInfo, PeerInfo, VirtualTables};
