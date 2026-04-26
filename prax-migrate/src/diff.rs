@@ -559,7 +559,8 @@ fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
         };
 
         let columns: Vec<String> = rel.fields.iter().map(|f| f.to_string()).collect();
-        let referenced_columns: Vec<String> = rel.references.iter().map(|r| r.to_string()).collect();
+        let referenced_columns: Vec<String> =
+            rel.references.iter().map(|r| r.to_string()).collect();
 
         let constraint_name = rel.map.clone().unwrap_or_else(|| {
             format!(

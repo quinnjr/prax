@@ -633,7 +633,11 @@ impl MySqlGenerator {
         // Add foreign key constraints
         for fk in &model.foreign_keys {
             let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|c| format!("`{}`", c))
+                .collect();
             let mut clause = format!(
                 "CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
                 fk.constraint_name,
@@ -733,7 +737,11 @@ impl MySqlGenerator {
         // Add foreign keys
         for fk in &alter.add_foreign_keys {
             let cols: Vec<String> = fk.columns.iter().map(|c| format!("`{}`", c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("`{}`", c)).collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|c| format!("`{}`", c))
+                .collect();
             let mut clause = format!(
                 "ALTER TABLE `{}` ADD CONSTRAINT `{}` FOREIGN KEY ({}) REFERENCES `{}` ({})",
                 alter.table_name,
@@ -932,7 +940,11 @@ impl SqliteGenerator {
         // Add foreign key constraints (SQLite supports inline FK in CREATE TABLE)
         for fk in &model.foreign_keys {
             let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("\"{}\"", c)).collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect();
             let mut clause = format!(
                 "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
                 fk.constraint_name,
@@ -1156,7 +1168,11 @@ impl MssqlGenerator {
         // Add foreign key constraints
         for fk in &model.foreign_keys {
             let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|c| format!("[{}]", c))
+                .collect();
             let mut clause = format!(
                 "CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
                 fk.constraint_name,
@@ -1261,7 +1277,11 @@ impl MssqlGenerator {
         // Add foreign keys
         for fk in &alter.add_foreign_keys {
             let cols: Vec<String> = fk.columns.iter().map(|c| format!("[{}]", c)).collect();
-            let ref_cols: Vec<String> = fk.referenced_columns.iter().map(|c| format!("[{}]", c)).collect();
+            let ref_cols: Vec<String> = fk
+                .referenced_columns
+                .iter()
+                .map(|c| format!("[{}]", c))
+                .collect();
             let mut clause = format!(
                 "ALTER TABLE [{}] ADD CONSTRAINT [{}] FOREIGN KEY ({}) REFERENCES [{}] ({})",
                 alter.table_name,
@@ -1363,7 +1383,10 @@ impl DuckDbSqlGenerator {
         // Install and load extensions first
         for ext in &diff.create_extensions {
             up.push(self.install_extension(&ext.name));
-            down.push(format!("-- Extension {} cannot be uninstalled (DuckDB limitation)", ext.name));
+            down.push(format!(
+                "-- Extension {} cannot be uninstalled (DuckDB limitation)",
+                ext.name
+            ));
         }
 
         // Drop extensions (best-effort comment)
@@ -2311,7 +2334,10 @@ mod tests {
         // Find each warning type
         let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
         let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
-        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+        let type_change_warning = sql
+            .warnings
+            .iter()
+            .find(|w| w.contains("reverse migration"));
 
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
@@ -2420,9 +2446,7 @@ mod tests {
         let sql = MigrationSql {
             up: "CREATE TABLE users (id INT);".to_string(),
             down: "DROP TABLE users;".to_string(),
-            warnings: vec![
-                "Dropping table 'users' - all data will be lost".to_string(),
-            ],
+            warnings: vec!["Dropping table 'users' - all data will be lost".to_string()],
         };
 
         assert_eq!(sql.warnings.len(), 1);
@@ -2550,7 +2574,10 @@ mod tests {
         // Find each warning type
         let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
         let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
-        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+        let type_change_warning = sql
+            .warnings
+            .iter()
+            .find(|w| w.contains("reverse migration"));
 
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
@@ -2689,7 +2716,10 @@ mod tests {
         // Find each warning type
         let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
         let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
-        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+        let type_change_warning = sql
+            .warnings
+            .iter()
+            .find(|w| w.contains("reverse migration"));
 
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
@@ -2817,7 +2847,10 @@ mod tests {
         // Find each warning type
         let drop_table_warning = sql.warnings.iter().find(|w| w.contains("old_table"));
         let drop_column_warning = sql.warnings.iter().find(|w| w.contains("deprecated_field"));
-        let type_change_warning = sql.warnings.iter().find(|w| w.contains("reverse migration"));
+        let type_change_warning = sql
+            .warnings
+            .iter()
+            .find(|w| w.contains("reverse migration"));
 
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
@@ -2892,7 +2925,11 @@ mod duckdb_tests {
         let generator = DuckDbSqlGenerator;
         let enum_diff = EnumDiff {
             name: "order_status".to_string(),
-            values: vec!["pending".to_string(), "active".to_string(), "archived".to_string()],
+            values: vec![
+                "pending".to_string(),
+                "active".to_string(),
+                "archived".to_string(),
+            ],
         };
 
         let sql = generator.create_enum(&enum_diff);
@@ -3186,16 +3223,23 @@ mod duckdb_tests {
     fn test_duckdb_create_index_in_generate() {
         let generator = DuckDbSqlGenerator;
         let mut diff = SchemaDiff::default();
-        diff.create_indexes
-            .push(IndexDiff::new("idx_posts_user", "posts", vec!["user_id".to_string()]));
+        diff.create_indexes.push(IndexDiff::new(
+            "idx_posts_user",
+            "posts",
+            vec!["user_id".to_string()],
+        ));
 
         let migration = generator.generate(&diff);
-        assert!(migration
-            .up
-            .contains("CREATE INDEX \"idx_posts_user\" ON \"posts\"(\"user_id\")"));
-        assert!(migration
-            .down
-            .contains("DROP INDEX IF EXISTS \"idx_posts_user\""));
+        assert!(
+            migration
+                .up
+                .contains("CREATE INDEX \"idx_posts_user\" ON \"posts\"(\"user_id\")")
+        );
+        assert!(
+            migration
+                .down
+                .contains("DROP INDEX IF EXISTS \"idx_posts_user\"")
+        );
     }
 
     #[test]

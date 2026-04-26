@@ -68,10 +68,7 @@ fn test_duckdb_generate_create_table_sql() {
     diff.create_models.push(make_model(
         "User",
         "users",
-        vec![
-            make_bigint_pk("id"),
-            make_varchar_field("email", false),
-        ],
+        vec![make_bigint_pk("id"), make_varchar_field("email", false)],
     ));
     diff.create_indexes
         .push(IndexDiff::new("idx_users_email", "users", vec!["email".to_string()]).unique());
@@ -126,7 +123,10 @@ fn test_duckdb_generate_drop_operations_with_warnings() {
     assert_eq!(migration.warnings.len(), 3);
 
     assert!(
-        migration.warnings.iter().any(|w| w.contains("legacy_table")),
+        migration
+            .warnings
+            .iter()
+            .any(|w| w.contains("legacy_table")),
         "Expected a drop-table warning for legacy_table"
     );
     assert!(
@@ -303,10 +303,7 @@ fn test_duckdb_generate_extensions() {
         migration.up.contains("INSTALL 'json'"),
         "Expected INSTALL json"
     );
-    assert!(
-        migration.up.contains("LOAD 'json'"),
-        "Expected LOAD json"
-    );
+    assert!(migration.up.contains("LOAD 'json'"), "Expected LOAD json");
 }
 
 #[test]

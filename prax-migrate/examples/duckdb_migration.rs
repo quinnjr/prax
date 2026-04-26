@@ -79,12 +79,7 @@ fn example_basic_table(generator: &DuckDbSqlGenerator) {
     });
 
     diff.create_indexes.push(
-        IndexDiff::new(
-            "idx_users_email_unique",
-            "users",
-            vec!["email".to_string()],
-        )
-        .unique(),
+        IndexDiff::new("idx_users_email_unique", "users", vec!["email".to_string()]).unique(),
     );
 
     let migration = generator.generate(&diff);
