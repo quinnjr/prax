@@ -30,6 +30,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod connection;
 pub mod error;
 
 pub use auth::{PlainSasl, SaslMechanism};
@@ -37,4 +38,5 @@ pub use config::{
     CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind,
     TlsConfig,
 };
+pub use connection::CassandraConnection;
 pub use error::{CassandraError, CassandraResult};
