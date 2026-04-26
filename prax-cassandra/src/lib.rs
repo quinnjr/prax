@@ -31,6 +31,7 @@
 pub mod auth;
 pub mod config;
 pub mod connection;
+pub mod engine;
 pub mod error;
 pub mod pool;
 pub mod row;
@@ -42,6 +43,7 @@ pub use config::{
     TlsConfig,
 };
 pub use connection::CassandraConnection;
+pub use engine::{BatchBuilder, QueryResult};
 pub use error::{CassandraError, CassandraResult};
 pub use pool::CassandraPool;
 pub use row::{FromRow, Row};
