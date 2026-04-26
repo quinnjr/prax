@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 # SQLite driver
 tokio-rusqlite = { workspace = true }
 rusqlite = { workspace = true }
+sqlite-vector-rs = { workspace = true, optional = true, features = ["library"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -53,3 +54,4 @@ harness = false
 [features]
 default = []
 bundled = ["rusqlite/bundled"]
+vector = ["dep:sqlite-vector-rs"]
