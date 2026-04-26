@@ -51,6 +51,10 @@ tempfile = { workspace = true }
 name = "sqlite_operations"
 harness = false
 
+[[example]]
+name = "vector_rag"
+required-features = ["vector"]
+
 [features]
 default = []
 bundled = ["rusqlite/bundled"]
