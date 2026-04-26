@@ -4,5 +4,7 @@
 //! vector columns, HNSW indexing, and similarity search.
 
 pub mod error;
+pub mod metric;
 
 pub use error::{VectorError, VectorResult};
+pub use metric::{DistanceMetric, VectorElementType, VectorIndexKind};
