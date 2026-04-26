@@ -1,0 +1,54 @@
+[package]
+name = "prax-cassandra"
+version.workspace = true
+edition = "2024"
+authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
+description = "Apache Cassandra database driver for Prax ORM - pure Rust async driver via cdrs-tokio"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/quinnjr/prax"
+documentation = "https://docs.rs/prax-cassandra"
+keywords = ["orm", "cassandra", "cql", "database", "async"]
+categories = ["database", "asynchronous"]
+rust-version = "1.85"
+
+[dependencies]
+# Internal crates
+prax-query.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "sync"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Cassandra driver
+cdrs-tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Date/time
+chrono = { workspace = true, features = ["serde"] }
+
+# UUID
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Logging
+tracing = { workspace = true }
+
+# String utilities
+smol_str = { workspace = true }
+
+# Concurrency
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+pretty_assertions = { workspace = true }
+
+[features]
+default = []
+cassandra-live = []
