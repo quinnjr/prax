@@ -1035,11 +1035,8 @@ impl SqliteGenerator {
     /// Generate CREATE VIRTUAL TABLE for every vector column on this model.
     /// Returns None if no fields are vector columns.
     fn create_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
-        let vector_fields: Vec<&FieldDiff> = model
-            .fields
-            .iter()
-            .filter(|f| f.vector.is_some())
-            .collect();
+        let vector_fields: Vec<&FieldDiff> =
+            model.fields.iter().filter(|f| f.vector.is_some()).collect();
         if vector_fields.is_empty() {
             return None;
         }
@@ -1924,7 +1921,7 @@ mod tests {
                     is_primary_key: true,
                     is_auto_increment: true,
                     is_unique: false,
-                vector: None,
+                    vector: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -1935,7 +1932,7 @@ mod tests {
                     is_primary_key: false,
                     is_auto_increment: false,
                     is_unique: true,
-                vector: None,
+                    vector: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2476,12 +2473,18 @@ mod tests {
         assert!(!sql.up.contains("\"embedding\" BLOB"));
 
         // A companion virtual table should appear.
-        assert!(sql.up.contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector"));
+        assert!(
+            sql.up
+                .contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector")
+        );
         assert!(sql.up.contains("rowid_column='document_id'"));
         assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
 
         // Down migration drops the virtual table before the main table.
-        let vt_pos = sql.down.find("DROP TABLE IF EXISTS \"documents_vectors\"").unwrap();
+        let vt_pos = sql
+            .down
+            .find("DROP TABLE IF EXISTS \"documents_vectors\"")
+            .unwrap();
         let mt_pos = sql.down.find("DROP TABLE IF EXISTS \"documents\"").unwrap();
         assert!(vt_pos < mt_pos);
     }
@@ -2551,7 +2554,10 @@ mod tests {
         let sql = SqliteGenerator.generate(&diff);
 
         // Exactly one virtual table with both columns listed.
-        let count = sql.up.matches("CREATE VIRTUAL TABLE \"documents_vectors\"").count();
+        let count = sql
+            .up
+            .matches("CREATE VIRTUAL TABLE \"documents_vectors\"")
+            .count();
         assert_eq!(count, 1);
         assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
         assert!(sql.up.contains("summary_vec='float4[384] cosine hnsw'"));
@@ -3278,7 +3284,7 @@ mod duckdb_tests {
                     is_primary_key: true,
                     is_auto_increment: true,
                     is_unique: false,
-                vector: None,
+                    vector: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -3289,7 +3295,7 @@ mod duckdb_tests {
                     is_primary_key: false,
                     is_auto_increment: false,
                     is_unique: false,
-                vector: None,
+                    vector: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3320,7 +3326,7 @@ mod duckdb_tests {
                     is_primary_key: true,
                     is_auto_increment: true,
                     is_unique: false,
-                vector: None,
+                    vector: None,
                 },
                 FieldDiff {
                     name: "tags".to_string(),
@@ -3331,7 +3337,7 @@ mod duckdb_tests {
                     is_primary_key: false,
                     is_auto_increment: false,
                     is_unique: false,
-                vector: None,
+                    vector: None,
                 },
             ],
             primary_key: vec!["id".to_string()],

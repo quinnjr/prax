@@ -110,7 +110,9 @@ pub enum SchemaError {
     },
 
     /// A Vector field has an invalid @vectorType value.
-    #[error("invalid vector element type '{value}' (expected one of: float2, float4, float8, int1, int2, int4)")]
+    #[error(
+        "invalid vector element type '{value}' (expected one of: float2, float4, float8, int1, int2, int4)"
+    )]
     #[diagnostic(code(prax::schema::invalid_vector_type))]
     InvalidVectorType {
         /// Supplied type value.

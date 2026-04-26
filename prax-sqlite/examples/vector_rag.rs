@@ -29,10 +29,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Insert a few documents and their (fake) embeddings.
     let corpus: Vec<(&str, &str, Vec<f32>)> = vec![
-        ("cat", "A cat is a small furry mammal.", vec![1.0, 0.0, 0.0, 0.0]),
+        (
+            "cat",
+            "A cat is a small furry mammal.",
+            vec![1.0, 0.0, 0.0, 0.0],
+        ),
         ("dog", "A dog is a loyal canine.", vec![0.9, 0.1, 0.0, 0.0]),
-        ("car", "A car is a wheeled motor vehicle.", vec![0.0, 0.0, 1.0, 0.0]),
-        ("lion", "A lion is a large wild cat.", vec![0.95, 0.0, 0.0, 0.05]),
+        (
+            "car",
+            "A car is a wheeled motor vehicle.",
+            vec![0.0, 0.0, 1.0, 0.0],
+        ),
+        (
+            "lion",
+            "A lion is a large wild cat.",
+            vec![0.95, 0.0, 0.0, 0.05],
+        ),
     ];
 
     for (i, (title, content, emb)) in corpus.into_iter().enumerate() {

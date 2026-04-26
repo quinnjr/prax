@@ -90,11 +90,9 @@ async fn test_insert_and_topk_search() {
     .await
     .unwrap();
 
-    conn.execute(
-        "INSERT INTO documents (id, title) VALUES (1, 'A'), (2, 'B'), (3, 'C')",
-    )
-    .await
-    .unwrap();
+    conn.execute("INSERT INTO documents (id, title) VALUES (1, 'A'), (2, 'B'), (3, 'C')")
+        .await
+        .unwrap();
 
     conn.execute_batch(
         "INSERT INTO documents_vectors (document_id, embedding) \
