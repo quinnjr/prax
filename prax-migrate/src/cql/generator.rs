@@ -1,8 +1,9 @@
 //! CQL migration SQL generator for ScyllaDB.
 
 use crate::cql::diff::{
-    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlSchemaDiff,
-    CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff,
+    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlIndexDiff, CqlIndexType,
+    CqlSchemaDiff, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy,
+    UdtAlterDiff, UdtDiff,
 };
 use crate::cql::migration::MigrationCql;
 
@@ -76,6 +77,15 @@ impl CqlMigrationGenerator {
             }
 
             up.extend(self.alter_table_statements(alter, ks_context));
+        }
+
+        for index in &diff.create_indexes {
+            up.push(self.create_index_statement(index, ks_context));
+            down.push(self.drop_index_statement(&index.name, ks_context));
+        }
+
+        for name in &diff.drop_indexes {
+            up.push(self.drop_index_statement(name, ks_context));
         }
 
         for name in &diff.drop_tables {
@@ -318,6 +328,30 @@ impl CqlMigrationGenerator {
 
         stmts
     }
+
+    fn create_index_statement(&self, index: &CqlIndexDiff, keyspace_context: Option<&str>) -> String {
+        let qualified_index = self.qualify(&index.name, keyspace_context);
+        let qualified_table = self.qualify(&index.table_name, keyspace_context);
+
+        match &index.index_type {
+            CqlIndexType::Secondary => format!(
+                "CREATE INDEX IF NOT EXISTS {} ON {} ({});",
+                qualified_index, qualified_table, index.column
+            ),
+            CqlIndexType::SasiPrefixed => format!(
+                "CREATE CUSTOM INDEX IF NOT EXISTS {} ON {} ({}) USING 'org.apache.cassandra.index.sasi.SASIIndex';",
+                qualified_index, qualified_table, index.column
+            ),
+            CqlIndexType::Custom(class) => format!(
+                "CREATE CUSTOM INDEX IF NOT EXISTS {} ON {} ({}) USING '{}';",
+                qualified_index, qualified_table, index.column, class
+            ),
+        }
+    }
+
+    fn drop_index_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
+        format!("DROP INDEX IF EXISTS {};", self.qualify(name, keyspace_context))
+    }
 }
 
 impl Default for CqlMigrationGenerator {
@@ -331,8 +365,8 @@ mod tests {
     use super::*;
     use crate::cql::diff::{
         ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldAlterDiff, CqlFieldDiff,
-        CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy, UdtAlterDiff,
-        UdtDiff, UdtField,
+        CqlIndexDiff, CqlIndexType, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig,
+        ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
     };
 
     fn simple_field(name: &str, cql_type: &str) -> CqlFieldDiff {
@@ -707,5 +741,62 @@ mod tests {
             migration.warnings.iter().any(|w| w.contains("Clustering key") && w.contains("events")),
             "expected clustering-key-change warning"
         );
+    }
+
+    #[test]
+    fn test_create_secondary_index() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.create_indexes.push(CqlIndexDiff {
+            name: "users_email_idx".into(),
+            table_name: "users".into(),
+            column: "email".into(),
+            index_type: CqlIndexType::Secondary,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("CREATE INDEX IF NOT EXISTS \"users_email_idx\""));
+        assert!(migration.up.contains("ON \"users\" (email)"));
+        assert!(migration.down.contains("DROP INDEX IF EXISTS \"users_email_idx\""));
+    }
+
+    #[test]
+    fn test_create_sasi_index() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.create_indexes.push(CqlIndexDiff {
+            name: "users_name_sasi".into(),
+            table_name: "users".into(),
+            column: "name".into(),
+            index_type: CqlIndexType::SasiPrefixed,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("USING 'org.apache.cassandra.index.sasi.SASIIndex'"));
+    }
+
+    #[test]
+    fn test_create_custom_index() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.create_indexes.push(CqlIndexDiff {
+            name: "custom_idx".into(),
+            table_name: "users".into(),
+            column: "data".into(),
+            index_type: CqlIndexType::Custom("my.custom.IndexClass".into()),
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("USING 'my.custom.IndexClass'"));
+    }
+
+    #[test]
+    fn test_drop_index() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.drop_indexes.push("old_idx".into());
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("DROP INDEX IF EXISTS \"old_idx\""));
     }
 }
