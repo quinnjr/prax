@@ -82,4 +82,36 @@ mod tests {
         let migration = CqlDialect::generate(&diff);
         assert!(migration.is_empty());
     }
+
+    #[test]
+    fn test_sql_dialect_matches_postgres_generator_directly() {
+        use crate::diff::{FieldDiff, ModelDiff};
+
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(ModelDiff {
+            name: "User".to_string(),
+            table_name: "users".to_string(),
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "BIGINT".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+            }],
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+
+        let via_trait = SqlDialect::generate(&diff);
+        let via_direct = PostgresSqlGenerator.generate(&diff);
+
+        assert_eq!(via_trait.up, via_direct.up);
+        assert_eq!(via_trait.down, via_direct.down);
+        assert_eq!(via_trait.warnings, via_direct.warnings);
+    }
 }
