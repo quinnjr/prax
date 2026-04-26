@@ -5,6 +5,7 @@
 //! This crate provides functionality for:
 //! - Schema diffing between Prax schema definitions and database state
 //! - SQL migration generation for PostgreSQL, MySQL, SQLite, MSSQL, and DuckDB
+//! - CQL migration generation for ScyllaDB (via MigrationDialect trait)
 //! - Migration file management on the filesystem
 //! - **Event sourcing** for complete migration audit trails
 //! - Migration history tracking with immutable event log
@@ -149,6 +150,8 @@
 //! ```
 
 pub mod bootstrap;
+pub mod cql;
+pub mod dialect;
 pub mod diff;
 pub mod engine;
 pub mod error;
@@ -165,6 +168,13 @@ pub mod state;
 
 // Re-exports
 pub use bootstrap::Bootstrap;
+pub use cql::{
+    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlDialect, CqlFieldAlterDiff,
+    CqlFieldDiff, CqlIndexDiff, CqlIndexType, CqlMigrationGenerator, CqlSchemaDiff,
+    CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, MaterializedViewDiff, MigrationCql,
+    ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
+};
+pub use dialect::{MigrationDialect, SqlDialect};
 pub use diff::{
     EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
     ModelAlterDiff, ModelDiff, SchemaDiff, SchemaDiffer, UniqueConstraint, ViewDiff,
