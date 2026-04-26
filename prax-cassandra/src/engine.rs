@@ -35,20 +35,18 @@ impl CassandraPool {
     /// Query a single row, deserialized into T.
     pub async fn query_one<T: FromRow>(&self, cql: &str) -> CassandraResult<T> {
         let result = self.query(cql).await?;
-        let row = result.rows.into_iter().next().ok_or_else(|| {
-            CassandraError::Query("query_one: no rows returned".into())
-        })?;
+        let row = result
+            .rows
+            .into_iter()
+            .next()
+            .ok_or_else(|| CassandraError::Query("query_one: no rows returned".into()))?;
         T::from_row(&row)
     }
 
     /// Query many rows.
     pub async fn query_many<T: FromRow>(&self, cql: &str) -> CassandraResult<Vec<T>> {
         let result = self.query(cql).await?;
-        result
-            .rows
-            .iter()
-            .map(|row| T::from_row(row))
-            .collect()
+        result.rows.iter().map(|row| T::from_row(row)).collect()
     }
 
     /// Execute a lightweight transaction. Returns whether the CAS succeeded.
@@ -74,7 +72,7 @@ pub struct BatchBuilder<'a> {
 
 impl<'a> BatchBuilder<'a> {
     /// Add a statement to the batch.
-    pub fn add(mut self, cql: impl Into<String>) -> Self {
+    pub fn add_statement(mut self, cql: impl Into<String>) -> Self {
         self.statements.push(cql.into());
         self
     }
@@ -88,9 +86,7 @@ impl<'a> BatchBuilder<'a> {
     pub async fn execute_logged(self) -> CassandraResult<()> {
         let _ = self.pool;
         if self.statements.is_empty() {
-            return Err(CassandraError::Query(
-                "cannot execute empty batch".into(),
-            ));
+            return Err(CassandraError::Query("cannot execute empty batch".into()));
         }
         Err(CassandraError::Query(
             "batch.execute_logged not yet wired to cdrs-tokio".into(),
@@ -101,9 +97,7 @@ impl<'a> BatchBuilder<'a> {
     pub async fn execute_unlogged(self) -> CassandraResult<()> {
         let _ = self.pool;
         if self.statements.is_empty() {
-            return Err(CassandraError::Query(
-                "cannot execute empty batch".into(),
-            ));
+            return Err(CassandraError::Query("cannot execute empty batch".into()));
         }
         Err(CassandraError::Query(
             "batch.execute_unlogged not yet wired to cdrs-tokio".into(),
@@ -114,9 +108,7 @@ impl<'a> BatchBuilder<'a> {
     pub async fn execute_counter(self) -> CassandraResult<()> {
         let _ = self.pool;
         if self.statements.is_empty() {
-            return Err(CassandraError::Query(
-                "cannot execute empty batch".into(),
-            ));
+            return Err(CassandraError::Query("cannot execute empty batch".into()));
         }
         Err(CassandraError::Query(
             "batch.execute_counter not yet wired to cdrs-tokio".into(),

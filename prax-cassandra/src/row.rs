@@ -57,7 +57,10 @@ mod tests {
     #[test]
     fn test_column_bytes_lookup() {
         let row = Row {
-            columns: vec![("id".into(), vec![1, 2, 3]), ("name".into(), b"alice".to_vec())],
+            columns: vec![
+                ("id".into(), vec![1, 2, 3]),
+                ("name".into(), b"alice".to_vec()),
+            ],
         };
         assert_eq!(row.column_bytes("id"), Some(&[1u8, 2, 3][..]));
         assert_eq!(row.column_bytes("name"), Some(&b"alice"[..]));

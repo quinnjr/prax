@@ -41,8 +41,7 @@ pub mod virtual_tables;
 
 pub use auth::{PlainSasl, SaslMechanism};
 pub use config::{
-    CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind,
-    TlsConfig,
+    CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind, TlsConfig,
 };
 pub use connection::CassandraConnection;
 pub use engine::{BatchBuilder, QueryResult};

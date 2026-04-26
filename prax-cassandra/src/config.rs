@@ -52,10 +52,7 @@ pub struct CassandraConfigBuilder {
 
 impl CassandraConfigBuilder {
     /// Set contact points.
-    pub fn known_nodes(
-        mut self,
-        nodes: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn known_nodes(mut self, nodes: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.known_nodes = nodes.into_iter().map(Into::into).collect();
         self
     }
