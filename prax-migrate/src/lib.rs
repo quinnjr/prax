@@ -149,6 +149,7 @@
 //! ```
 
 pub mod bootstrap;
+pub mod dialect;
 pub mod diff;
 pub mod engine;
 pub mod error;
@@ -165,6 +166,7 @@ pub mod state;
 
 // Re-exports
 pub use bootstrap::Bootstrap;
+pub use dialect::{MigrationDialect, SqlDialect};
 pub use diff::{
     EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
     ModelAlterDiff, ModelDiff, SchemaDiff, SchemaDiffer, UniqueConstraint, ViewDiff,
