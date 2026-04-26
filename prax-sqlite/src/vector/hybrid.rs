@@ -132,66 +132,88 @@ impl HybridSearchBuilder {
 
     /// Render the SELECT statement.
     ///
-    /// Panics if any of vector_table, rowid_column, vector_column,
-    /// fts_table, query_vector_json, or query_text is unset.
-    pub fn to_sql(&self) -> String {
+    /// Returns [`VectorError::BuilderIncomplete`] if any of `vector_table`,
+    /// `rowid_column`, `vector_column`, `fts_table`, `query_vector_json`,
+    /// or `query_text` is unset. All identifiers are safely quoted with
+    /// doubled-double-quote escaping; the FTS query text is escaped with
+    /// doubled-single-quote.
+    pub fn to_sql(&self) -> crate::vector::error::VectorResult<String> {
+        use crate::vector::error::VectorError;
+        use crate::vector::{escape_sql_literal, quote_ident};
+
         let vtable = self
             .vector_table
             .as_deref()
-            .expect("vector_table must be set");
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "vector_table",
+            })?;
         let rowid = self
             .rowid_column
             .as_deref()
-            .expect("rowid_column must be set");
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "rowid_column",
+            })?;
         let vcol = self
             .vector_column
             .as_deref()
-            .expect("vector_column must be set");
-        let ftab = self.fts_table.as_deref().expect("fts_table must be set");
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "vector_column",
+            })?;
+        let ftab = self
+            .fts_table
+            .as_deref()
+            .ok_or(VectorError::BuilderIncomplete { field: "fts_table" })?;
         let qv = self
             .query_vector_json
             .as_deref()
-            .expect("query_vector_json must be set");
-        let qt = self.query_text.as_deref().expect("query_text must be set");
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "query_vector_json",
+            })?;
+        let qt = self
+            .query_text
+            .as_deref()
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "query_text",
+            })?;
 
         let limit_clause = match self.limit {
             Some(n) => format!("\nLIMIT {}", n),
             None => String::new(),
         };
 
-        format!(
+        Ok(format!(
             "WITH vec_ranked AS (\n    \
-             SELECT \"{rowid}\" AS match_id, \
-             ROW_NUMBER() OVER (ORDER BY vector_distance(\"{vcol}\", vector_from_json('{qv}', '{et}'), '{metric}', '{et}')) AS rank\n    \
-             FROM \"{vtable}\"\n\
+             SELECT {rowid} AS match_id, \
+             ROW_NUMBER() OVER (ORDER BY vector_distance({vcol}, vector_from_json('{qv}', '{et}'), '{metric}', '{et}')) AS rank\n    \
+             FROM {vtable}\n\
              ),\n\
              fts_ranked AS (\n    \
              SELECT rowid AS match_id, \
-             ROW_NUMBER() OVER (ORDER BY bm25(\"{ftab}\")) AS rank\n    \
-             FROM \"{ftab}\" WHERE \"{ftab}\" MATCH '{qt}'\n\
+             ROW_NUMBER() OVER (ORDER BY bm25({ftab})) AS rank\n    \
+             FROM {ftab} WHERE {ftab} MATCH '{qt}'\n\
              )\n\
-             SELECT \"{main}\".*, \
+             SELECT {main}.*, \
              COALESCE({vw} / ({k} + v.rank), 0) + COALESCE({tw} / ({k} + f.rank), 0) AS score\n\
-             FROM \"{main}\"\n\
-             LEFT JOIN vec_ranked v ON \"{main}\".\"{id}\" = v.match_id\n\
-             LEFT JOIN fts_ranked f ON \"{main}\".\"{id}\" = f.match_id\n\
+             FROM {main}\n\
+             LEFT JOIN vec_ranked v ON {main}.{id} = v.match_id\n\
+             LEFT JOIN fts_ranked f ON {main}.{id} = f.match_id\n\
              WHERE v.match_id IS NOT NULL OR f.match_id IS NOT NULL\n\
              ORDER BY score DESC{limit}",
-            rowid = rowid,
-            vcol = vcol,
-            qv = qv,
+            rowid = quote_ident(rowid),
+            vcol = quote_ident(vcol),
+            qv = escape_sql_literal(qv),
             et = self.element_type.as_sql(),
             metric = self.metric.as_sql(),
-            vtable = vtable,
-            ftab = ftab,
-            qt = qt.replace('\'', "''"),
-            main = self.main_table,
-            id = self.id_column,
+            vtable = quote_ident(vtable),
+            ftab = quote_ident(ftab),
+            qt = escape_sql_literal(qt),
+            main = quote_ident(&self.main_table),
+            id = quote_ident(&self.id_column),
             vw = self.vector_weight,
             tw = self.text_weight,
             k = self.rrf_k,
             limit = limit_clause,
-        )
+        ))
     }
 }
 
@@ -211,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_default_weights_and_rrf_k() {
-        let sql = base().to_sql();
+        let sql = base().to_sql().unwrap();
         assert!(sql.contains("COALESCE(0.5 / (60 + v.rank), 0)"));
         assert!(sql.contains("COALESCE(0.5 / (60 + f.rank), 0)"));
     }
@@ -222,40 +244,53 @@ mod tests {
             .vector_weight(0.7)
             .text_weight(0.3)
             .rrf_k(80)
-            .to_sql();
+            .to_sql()
+            .unwrap();
         assert!(sql.contains("COALESCE(0.7 / (80 + v.rank), 0)"));
         assert!(sql.contains("COALESCE(0.3 / (80 + f.rank), 0)"));
     }
 
     #[test]
     fn test_limit() {
-        let sql = base().limit(25).to_sql();
+        let sql = base().limit(25).to_sql().unwrap();
         assert!(sql.contains("LIMIT 25"));
     }
 
     #[test]
     fn test_fts_query_quote_escaping() {
-        let sql = base().query_text("it's a test").to_sql();
+        let sql = base().query_text("it's a test").to_sql().unwrap();
         assert!(sql.contains("MATCH 'it''s a test'"));
     }
 
     #[test]
     fn test_vector_table_and_fts_table_appear() {
-        let sql = base().to_sql();
+        let sql = base().to_sql().unwrap();
         assert!(sql.contains("FROM \"documents_vectors\""));
         assert!(sql.contains("FROM \"documents_fts\""));
         assert!(sql.contains("FROM \"documents\""));
     }
 
     #[test]
-    #[should_panic(expected = "vector_table must be set")]
-    fn test_missing_vector_table_panics() {
-        HybridSearchBuilder::new("docs")
+    fn test_missing_vector_table_returns_error() {
+        let result = HybridSearchBuilder::new("docs")
             .rowid_column("id")
             .vector_column("v")
             .fts_table("docs_fts")
             .query_vector_json("[0.1]")
             .query_text("q")
             .to_sql();
+        match result {
+            Err(crate::vector::error::VectorError::BuilderIncomplete { field }) => {
+                assert_eq!(field, "vector_table");
+            }
+            other => panic!("expected BuilderIncomplete error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_identifier_with_embedded_double_quote_is_escaped() {
+        let sql = base().vector_table("tbl\"evil").to_sql().unwrap();
+        // The double quote should be doubled ("") inside the SQL identifier.
+        assert!(sql.contains("\"tbl\"\"evil\""));
     }
 }

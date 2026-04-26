@@ -87,7 +87,7 @@ let sql = VectorSearchBuilder::new("documents", "embedding")
     .query_embedding(&embedding)
     .metric(DistanceMetric::Cosine)
     .limit(10)
-    .to_sql();
+    .to_sql()?;
 ```
 
 ### Hybrid (vector + fts5) search via RRF
@@ -103,7 +103,7 @@ let sql = HybridSearchBuilder::new("documents")
     .vector_weight(0.7)
     .text_weight(0.3)
     .limit(10)
-    .to_sql();
+    .to_sql()?;
 ```
 
 See `examples/vector_rag.rs` for an end-to-end sample.

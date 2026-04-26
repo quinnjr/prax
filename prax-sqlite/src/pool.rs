@@ -129,22 +129,36 @@ impl SqlitePool {
         .await?;
 
         // Register the vector extension on every connection when the `vector`
-        // feature is enabled. Soft-fails with a warning if the
-        // sqlite-vector-rs shared library is not on disk — pool creation
-        // still succeeds, but later calls to vector SQL functions will fail
-        // with a clear error at query time.
+        // feature is enabled. Registration is idempotent and per-connection
+        // (every rusqlite Connection is a separate SQLite handle; for
+        // in-memory databases the handle has its own isolated database).
+        //
+        // Soft-fails: if the shared library cannot be located, pool creation
+        // still succeeds. Vector SQL functions will then be unavailable on
+        // that connection and fail at query time with a clear SQLite error.
+        //
+        // To avoid log spam on every new connection once the library is
+        // known to be missing, the warning is emitted at most once per
+        // process via a Once guard. Re-running with the library on disk
+        // will still produce functional connections.
         #[cfg(feature = "vector")]
         {
+            use std::sync::Once;
+            static WARN_ONCE: Once = Once::new();
+
             let _ = conn
                 .call(|conn| {
                     if let Err(e) = crate::vector::register_vector_extension(conn) {
-                        tracing::warn!(
-                            error = %e,
-                            "sqlite-vector-rs extension could not be registered; \
-                             vector SQL functions will be unavailable on this connection. \
-                             Build libsqlite_vector_rs.so and set SQLITE_VECTOR_RS_LIB \
-                             or place it alongside the test/binary."
-                        );
+                        WARN_ONCE.call_once(|| {
+                            tracing::warn!(
+                                error = %e,
+                                "sqlite-vector-rs extension could not be registered; \
+                                 vector SQL functions will be unavailable on this connection. \
+                                 Build libsqlite_vector_rs.so and set SQLITE_VECTOR_RS_LIB \
+                                 or place it alongside the test/binary. \
+                                 (This warning is emitted once per process.)"
+                            );
+                        });
                     }
                     Ok(())
                 })

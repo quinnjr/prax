@@ -76,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .query_embedding(&query)
         .metric(DistanceMetric::Cosine)
         .limit(3)
-        .to_sql();
+        .to_sql()?;
 
     let rows = conn.query(&search).await?;
 

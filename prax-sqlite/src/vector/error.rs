@@ -30,6 +30,13 @@ pub enum VectorError {
     /// Wrapped driver-level error from sqlite-vector-rs.
     #[error("sqlite-vector-rs error: {0}")]
     Driver(String),
+
+    /// A builder was called without setting a required field.
+    #[error("builder incomplete: required field '{field}' was not set")]
+    BuilderIncomplete {
+        /// Name of the missing builder field (e.g. "vector_table", "query_text").
+        field: &'static str,
+    },
 }
 
 /// Convenience alias for `Result<T, VectorError>`.

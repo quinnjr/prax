@@ -78,28 +78,40 @@ impl VectorSearchBuilder {
     }
 
     /// Render the full SELECT statement.
-    pub fn to_sql(&self) -> String {
-        let query = self.query_json.clone().unwrap_or_else(|| "?".to_string());
+    ///
+    /// Returns [`VectorError::BuilderIncomplete`] if `query_json` /
+    /// `query_embedding` was not set. All identifiers are safely quoted.
+    pub fn to_sql(&self) -> crate::vector::error::VectorResult<String> {
+        use crate::vector::error::VectorError;
+        use crate::vector::{escape_sql_literal, quote_ident};
+
+        let q = self
+            .query_json
+            .as_deref()
+            .ok_or(VectorError::BuilderIncomplete {
+                field: "query_json",
+            })?;
+
         let limit_clause = match self.limit {
             Some(n) => format!("\nLIMIT {}", n),
             None => String::new(),
         };
 
-        format!(
-            "SELECT \"{main}\".*, \
-             vector_distance(v.\"{vector_column}\", vector_from_json('{q}', '{et}'), '{metric}', '{et}') AS distance\n\
-             FROM \"{vtable}\" v\n\
-             JOIN \"{main}\" ON \"{main}\".\"id\" = v.\"{rowid}\"\n\
+        Ok(format!(
+            "SELECT {main}.*, \
+             vector_distance(v.{vector_column}, vector_from_json('{q}', '{et}'), '{metric}', '{et}') AS distance\n\
+             FROM {vtable} v\n\
+             JOIN {main} ON {main}.\"id\" = v.{rowid}\n\
              ORDER BY distance{limit}",
-            main = self.main_table,
-            vector_column = self.vector_column,
-            q = query,
+            main = quote_ident(&self.main_table),
+            vector_column = quote_ident(&self.vector_column),
+            q = escape_sql_literal(q),
             et = self.element_type.as_sql(),
             metric = self.metric.as_sql(),
-            vtable = self.vector_table,
-            rowid = self.rowid_column,
+            vtable = quote_ident(&self.vector_table),
+            rowid = quote_ident(&self.rowid_column),
             limit = limit_clause,
-        )
+        ))
     }
 }
 
@@ -127,7 +139,8 @@ mod tests {
         let sql = VectorSearchBuilder::new("documents", "embedding")
             .query_json("[0.1,0.2,0.3]")
             .limit(10)
-            .to_sql();
+            .to_sql()
+            .unwrap();
 
         assert!(sql.contains("FROM \"documents_vectors\" v"));
         assert!(sql.contains("JOIN \"documents\" ON \"documents\".\"id\" = v.\"document_id\""));
@@ -141,7 +154,8 @@ mod tests {
             .vector_table("docs_vec_tbl")
             .rowid_column("doc_ref")
             .query_json("[0.1]")
-            .to_sql();
+            .to_sql()
+            .unwrap();
         assert!(sql.contains("FROM \"docs_vec_tbl\" v"));
         assert!(sql.contains("v.\"doc_ref\""));
     }
@@ -152,7 +166,8 @@ mod tests {
             .metric(DistanceMetric::L2)
             .element_type(VectorElementType::Float8)
             .query_json("[1.0]")
-            .to_sql();
+            .to_sql()
+            .unwrap();
         assert!(sql.contains("'l2'"));
         assert!(sql.contains("'float8'"));
     }
@@ -162,8 +177,30 @@ mod tests {
         let emb = Embedding::new(vec![0.5, 1.5]).unwrap();
         let sql = VectorSearchBuilder::new("items", "embedding")
             .query_embedding(&emb)
-            .to_sql();
+            .to_sql()
+            .unwrap();
         assert!(sql.contains("'float4'"));
         assert!(sql.contains("[0.5,1.5]"));
+    }
+
+    #[test]
+    fn test_missing_query_returns_error() {
+        let result = VectorSearchBuilder::new("documents", "embedding").to_sql();
+        match result {
+            Err(crate::vector::error::VectorError::BuilderIncomplete { field }) => {
+                assert_eq!(field, "query_json");
+            }
+            other => panic!("expected BuilderIncomplete error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_identifier_with_embedded_double_quote_is_escaped() {
+        let sql = VectorSearchBuilder::new("tbl\"evil", "emb")
+            .query_json("[0.1]")
+            .to_sql()
+            .unwrap();
+        // Embedded " in the table name should be doubled inside the SQL ident.
+        assert!(sql.contains("\"tbl\"\"evil\""));
     }
 }

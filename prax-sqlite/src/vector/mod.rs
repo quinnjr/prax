@@ -3,6 +3,21 @@
 //! Gated behind the `vector` feature. Integrates sqlite-vector-rs for typed
 //! vector columns, HNSW indexing, and similarity search.
 
+/// Quote a SQL identifier (table or column name) safely.
+///
+/// SQLite identifiers are wrapped in double quotes; an embedded double quote
+/// is escaped by doubling it. Used by the vector search builders to render
+/// user-supplied table/column names without SQL injection.
+pub(crate) fn quote_ident(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{}\"", escaped)
+}
+
+/// Escape a single-quoted SQL string literal by doubling embedded quotes.
+pub(crate) fn escape_sql_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 pub mod error;
 pub mod hybrid;
 pub mod index;
