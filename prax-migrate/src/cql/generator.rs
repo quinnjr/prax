@@ -99,10 +99,7 @@ impl CqlMigrationGenerator {
 
         for name in &diff.drop_tables {
             up.push(self.drop_table_statement(name, ks_context));
-            warnings.push(format!(
-                "Dropping table '{}' - all rows will be lost",
-                name
-            ));
+            warnings.push(format!("Dropping table '{}' - all rows will be lost", name));
         }
 
         for name in &diff.drop_udts {
@@ -179,7 +176,10 @@ impl CqlMigrationGenerator {
     }
 
     fn drop_udt_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
-        format!("DROP TYPE IF EXISTS {};", self.qualify(name, keyspace_context))
+        format!(
+            "DROP TYPE IF EXISTS {};",
+            self.qualify(name, keyspace_context)
+        )
     }
 
     fn alter_udt_statements(
@@ -204,7 +204,11 @@ impl CqlMigrationGenerator {
         stmts
     }
 
-    fn create_table_statement(&self, table: &CqlTableDiff, keyspace_context: Option<&str>) -> String {
+    fn create_table_statement(
+        &self,
+        table: &CqlTableDiff,
+        keyspace_context: Option<&str>,
+    ) -> String {
         let qualified = self.qualify(&table.name, keyspace_context);
         let columns = table
             .fields
@@ -224,7 +228,10 @@ impl CqlMigrationGenerator {
             options.push(self.format_clustering_order(&table.clustering_keys));
         }
         if let Some(compaction) = &table.compaction {
-            options.push(format!("compaction = {}", self.format_compaction(compaction)));
+            options.push(format!(
+                "compaction = {}",
+                self.format_compaction(compaction)
+            ));
         }
         if let Some(ttl) = table.default_ttl {
             options.push(format!("default_time_to_live = {}", ttl));
@@ -240,7 +247,10 @@ impl CqlMigrationGenerator {
     }
 
     fn drop_table_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
-        format!("DROP TABLE IF EXISTS {};", self.qualify(name, keyspace_context))
+        format!(
+            "DROP TABLE IF EXISTS {};",
+            self.qualify(name, keyspace_context)
+        )
     }
 
     fn format_column(&self, field: &CqlFieldDiff) -> String {
@@ -294,9 +304,7 @@ impl CqlMigrationGenerator {
             CompactionStrategy::SizeTiered => {
                 "{'class': 'SizeTieredCompactionStrategy'}".to_string()
             }
-            CompactionStrategy::Leveled => {
-                "{'class': 'LeveledCompactionStrategy'}".to_string()
-            }
+            CompactionStrategy::Leveled => "{'class': 'LeveledCompactionStrategy'}".to_string(),
             CompactionStrategy::TimeWindow {
                 window_unit,
                 window_size,
@@ -338,7 +346,11 @@ impl CqlMigrationGenerator {
         stmts
     }
 
-    fn create_index_statement(&self, index: &CqlIndexDiff, keyspace_context: Option<&str>) -> String {
+    fn create_index_statement(
+        &self,
+        index: &CqlIndexDiff,
+        keyspace_context: Option<&str>,
+    ) -> String {
         let qualified_index = self.qualify(&index.name, keyspace_context);
         let qualified_table = self.qualify(&index.table_name, keyspace_context);
 
@@ -359,7 +371,10 @@ impl CqlMigrationGenerator {
     }
 
     fn drop_index_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
-        format!("DROP INDEX IF EXISTS {};", self.qualify(name, keyspace_context))
+        format!(
+            "DROP INDEX IF EXISTS {};",
+            self.qualify(name, keyspace_context)
+        )
     }
 
     fn create_materialized_view_statement(
@@ -443,7 +458,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("CREATE KEYSPACE IF NOT EXISTS \"myapp\""));
+        assert!(
+            migration
+                .up
+                .contains("CREATE KEYSPACE IF NOT EXISTS \"myapp\"")
+        );
         assert!(migration.up.contains("'class': 'SimpleStrategy'"));
         assert!(migration.up.contains("'replication_factor': 3"));
         assert!(migration.up.contains("durable_writes = true"));
@@ -478,7 +497,10 @@ mod tests {
         let migration = generator.generate(&diff);
         assert!(migration.up.contains("DROP KEYSPACE IF EXISTS \"legacy\""));
         assert!(
-            migration.warnings.iter().any(|w| w.contains("legacy") && w.contains("ALL data")),
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("legacy") && w.contains("ALL data")),
             "expected drop-keyspace warning"
         );
     }
@@ -498,7 +520,11 @@ mod tests {
         let migration = generator.generate(&diff);
         assert!(migration.up.contains("CREATE TYPE \"order_status\" ("));
         assert!(migration.up.contains("value text"));
-        assert!(migration.down.contains("DROP TYPE IF EXISTS \"order_status\""));
+        assert!(
+            migration
+                .down
+                .contains("DROP TYPE IF EXISTS \"order_status\"")
+        );
     }
 
     #[test]
@@ -517,7 +543,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("CREATE TYPE \"myapp\".\"order_status\" ("));
+        assert!(
+            migration
+                .up
+                .contains("CREATE TYPE \"myapp\".\"order_status\" (")
+        );
     }
 
     #[test]
@@ -534,7 +564,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("ALTER TYPE \"order_status\" ADD description text"));
+        assert!(
+            migration
+                .up
+                .contains("ALTER TYPE \"order_status\" ADD description text")
+        );
     }
 
     #[test]
@@ -548,7 +582,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("ALTER TYPE \"order_status\" RENAME old_name TO new_name"));
+        assert!(
+            migration
+                .up
+                .contains("ALTER TYPE \"order_status\" RENAME old_name TO new_name")
+        );
     }
 
     #[test]
@@ -568,10 +606,7 @@ mod tests {
         let mut diff = CqlSchemaDiff::default();
         diff.create_tables.push(CqlTableDiff {
             name: "users".into(),
-            fields: vec![
-                simple_field("id", "uuid"),
-                simple_field("name", "text"),
-            ],
+            fields: vec![simple_field("id", "uuid"), simple_field("name", "text")],
             partition_keys: vec!["id".into()],
             clustering_keys: vec![],
             compaction: None,
@@ -615,8 +650,16 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("PRIMARY KEY ((tenant_id, region), event_time, event_id)"));
-        assert!(migration.up.contains("CLUSTERING ORDER BY (event_time DESC, event_id ASC)"));
+        assert!(
+            migration
+                .up
+                .contains("PRIMARY KEY ((tenant_id, region), event_time, event_id)")
+        );
+        assert!(
+            migration
+                .up
+                .contains("CLUSTERING ORDER BY (event_time DESC, event_id ASC)")
+        );
     }
 
     #[test]
@@ -636,7 +679,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("'class': 'TimeWindowCompactionStrategy'"));
+        assert!(
+            migration
+                .up
+                .contains("'class': 'TimeWindowCompactionStrategy'")
+        );
         assert!(migration.up.contains("'compaction_window_unit': 'DAYS'"));
         assert!(migration.up.contains("'compaction_window_size': 1"));
         assert!(migration.up.contains("default_time_to_live = 2592000"));
@@ -675,9 +722,16 @@ mod tests {
         diff.drop_tables.push("legacy_table".into());
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("DROP TABLE IF EXISTS \"legacy_table\""));
         assert!(
-            migration.warnings.iter().any(|w| w.contains("legacy_table") && w.contains("all rows")),
+            migration
+                .up
+                .contains("DROP TABLE IF EXISTS \"legacy_table\"")
+        );
+        assert!(
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("legacy_table") && w.contains("all rows")),
             "expected drop-table warning"
         );
     }
@@ -696,7 +750,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("ALTER TABLE \"users\" ADD email text"));
+        assert!(
+            migration
+                .up
+                .contains("ALTER TABLE \"users\" ADD email text")
+        );
     }
 
     #[test]
@@ -713,9 +771,16 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("ALTER TABLE \"users\" DROP legacy_field"));
         assert!(
-            migration.warnings.iter().any(|w| w.contains("legacy_field") && w.contains("users")),
+            migration
+                .up
+                .contains("ALTER TABLE \"users\" DROP legacy_field")
+        );
+        assert!(
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("legacy_field") && w.contains("users")),
             "expected drop-column warning"
         );
     }
@@ -738,9 +803,16 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("ALTER TABLE \"users\" ALTER age TYPE bigint"));
         assert!(
-            migration.warnings.iter().any(|w| w.contains("age") && w.contains("data is incompatible")),
+            migration
+                .up
+                .contains("ALTER TABLE \"users\" ALTER age TYPE bigint")
+        );
+        assert!(
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("age") && w.contains("data is incompatible")),
             "expected type-change warning"
         );
     }
@@ -760,7 +832,10 @@ mod tests {
 
         let migration = generator.generate(&diff);
         assert!(
-            migration.warnings.iter().any(|w| w.contains("Partition key") && w.contains("users")),
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("Partition key") && w.contains("users")),
             "expected partition-key-change warning"
         );
         assert!(
@@ -784,7 +859,10 @@ mod tests {
 
         let migration = generator.generate(&diff);
         assert!(
-            migration.warnings.iter().any(|w| w.contains("Clustering key") && w.contains("events")),
+            migration
+                .warnings
+                .iter()
+                .any(|w| w.contains("Clustering key") && w.contains("events")),
             "expected clustering-key-change warning"
         );
     }
@@ -801,9 +879,17 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("CREATE INDEX IF NOT EXISTS \"users_email_idx\""));
+        assert!(
+            migration
+                .up
+                .contains("CREATE INDEX IF NOT EXISTS \"users_email_idx\"")
+        );
         assert!(migration.up.contains("ON \"users\" (email)"));
-        assert!(migration.down.contains("DROP INDEX IF EXISTS \"users_email_idx\""));
+        assert!(
+            migration
+                .down
+                .contains("DROP INDEX IF EXISTS \"users_email_idx\"")
+        );
     }
 
     #[test]
@@ -818,7 +904,11 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("USING 'org.apache.cassandra.index.sasi.SASIIndex'"));
+        assert!(
+            migration
+                .up
+                .contains("USING 'org.apache.cassandra.index.sasi.SASIIndex'")
+        );
     }
 
     #[test]
@@ -854,7 +944,8 @@ mod tests {
             name: "events_by_status".into(),
             base_table: "events".into(),
             select_columns: vec!["*".into()],
-            where_clause: "status IS NOT NULL AND tenant_id IS NOT NULL AND event_time IS NOT NULL".into(),
+            where_clause: "status IS NOT NULL AND tenant_id IS NOT NULL AND event_time IS NOT NULL"
+                .into(),
             partition_keys: vec!["status".into()],
             clustering_keys: vec![
                 ClusteringKey {
@@ -869,12 +960,28 @@ mod tests {
         });
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("CREATE MATERIALIZED VIEW \"events_by_status\""));
+        assert!(
+            migration
+                .up
+                .contains("CREATE MATERIALIZED VIEW \"events_by_status\"")
+        );
         assert!(migration.up.contains("FROM \"events\""));
         assert!(migration.up.contains("WHERE status IS NOT NULL"));
-        assert!(migration.up.contains("PRIMARY KEY ((status), tenant_id, event_time)"));
-        assert!(migration.up.contains("CLUSTERING ORDER BY (tenant_id ASC, event_time DESC)"));
-        assert!(migration.down.contains("DROP MATERIALIZED VIEW IF EXISTS \"events_by_status\""));
+        assert!(
+            migration
+                .up
+                .contains("PRIMARY KEY ((status), tenant_id, event_time)")
+        );
+        assert!(
+            migration
+                .up
+                .contains("CLUSTERING ORDER BY (tenant_id ASC, event_time DESC)")
+        );
+        assert!(
+            migration
+                .down
+                .contains("DROP MATERIALIZED VIEW IF EXISTS \"events_by_status\"")
+        );
     }
 
     #[test]
@@ -884,6 +991,10 @@ mod tests {
         diff.drop_materialized_views.push("old_view".into());
 
         let migration = generator.generate(&diff);
-        assert!(migration.up.contains("DROP MATERIALIZED VIEW IF EXISTS \"old_view\""));
+        assert!(
+            migration
+                .up
+                .contains("DROP MATERIALIZED VIEW IF EXISTS \"old_view\"")
+        );
     }
 }

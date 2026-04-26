@@ -112,7 +112,10 @@ pub enum ClusteringOrder {
 pub enum CompactionStrategy {
     SizeTiered,
     Leveled,
-    TimeWindow { window_unit: String, window_size: u32 },
+    TimeWindow {
+        window_unit: String,
+        window_size: u32,
+    },
 }
 
 /// Table alteration (add/drop/alter columns).

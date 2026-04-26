@@ -25,10 +25,7 @@ fn main() {
     diff.create_keyspace = Some(KeyspaceConfig {
         name: "myapp".into(),
         replication: ReplicationStrategy::NetworkTopology {
-            dc_factors: vec![
-                ("us-east".into(), 3),
-                ("us-west".into(), 2),
-            ],
+            dc_factors: vec![("us-east".into(), 3), ("us-west".into(), 2)],
         },
         durable_writes: true,
     });

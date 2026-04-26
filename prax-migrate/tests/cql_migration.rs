@@ -94,7 +94,10 @@ fn test_cql_full_workflow_keyspace_udt_table_index_view() {
     let migration = CqlMigrationGenerator::new().generate(&diff);
 
     // Ordering check: keyspace first, then UDT, then table, then index, then view
-    let ks_pos = migration.up.find("CREATE KEYSPACE").expect("keyspace missing");
+    let ks_pos = migration
+        .up
+        .find("CREATE KEYSPACE")
+        .expect("keyspace missing");
     let udt_pos = migration.up.find("CREATE TYPE").expect("UDT missing");
     let tbl_pos = migration.up.find("CREATE TABLE").expect("table missing");
     let idx_pos = migration.up.find("CREATE INDEX").expect("index missing");
@@ -110,7 +113,11 @@ fn test_cql_full_workflow_keyspace_udt_table_index_view() {
 
     // Keyspace context applied to names
     assert!(migration.up.contains("CREATE TABLE \"myapp\".\"events\""));
-    assert!(migration.up.contains("CREATE TYPE \"myapp\".\"order_status\""));
+    assert!(
+        migration
+            .up
+            .contains("CREATE TYPE \"myapp\".\"order_status\"")
+    );
 
     // No warnings for pure creation
     assert!(migration.warnings.is_empty());
@@ -143,7 +150,10 @@ fn test_cql_down_reverses_dependency_order() {
     let migration = CqlMigrationGenerator::new().generate(&diff);
 
     // Down order should be: DROP TABLE, DROP TYPE, DROP KEYSPACE
-    let drop_tbl = migration.down.find("DROP TABLE").expect("DROP TABLE missing");
+    let drop_tbl = migration
+        .down
+        .find("DROP TABLE")
+        .expect("DROP TABLE missing");
     let drop_type = migration.down.find("DROP TYPE").expect("DROP TYPE missing");
     let drop_ks = migration
         .down
