@@ -32,6 +32,7 @@ pub mod auth;
 pub mod config;
 pub mod connection;
 pub mod error;
+pub mod pool;
 
 pub use auth::{PlainSasl, SaslMechanism};
 pub use config::{
@@ -40,3 +41,4 @@ pub use config::{
 };
 pub use connection::CassandraConnection;
 pub use error::{CassandraError, CassandraResult};
+pub use pool::CassandraPool;
