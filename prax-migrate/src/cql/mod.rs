@@ -1,6 +1,7 @@
 //! CQL (Cassandra Query Language) migration support for ScyllaDB.
 
 pub mod diff;
+pub mod generator;
 pub mod migration;
 
 pub use diff::{
@@ -8,4 +9,5 @@ pub use diff::{
     CqlIndexDiff, CqlIndexType, CqlSchemaDiff, CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig,
     MaterializedViewDiff, ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
 };
+pub use generator::CqlMigrationGenerator;
 pub use migration::MigrationCql;
