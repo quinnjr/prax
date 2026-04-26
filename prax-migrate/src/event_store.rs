@@ -26,7 +26,8 @@ pub trait MigrationEventStore: Send + Sync {
     async fn get_all_events(&self) -> MigrateResult<Vec<MigrationEvent>>;
 
     /// Get all events of a specific type.
-    async fn get_events_by_type(&self, event_type: EventType) -> MigrateResult<Vec<MigrationEvent>>;
+    async fn get_events_by_type(&self, event_type: EventType)
+    -> MigrateResult<Vec<MigrationEvent>>;
 
     /// Get all events since a specific timestamp.
     async fn get_events_since(&self, since: DateTime<Utc>) -> MigrateResult<Vec<MigrationEvent>>;
@@ -102,7 +103,10 @@ impl MigrationEventStore for InMemoryEventStore {
         Ok(self.events.lock().unwrap().clone())
     }
 
-    async fn get_events_by_type(&self, event_type: EventType) -> MigrateResult<Vec<MigrationEvent>> {
+    async fn get_events_by_type(
+        &self,
+        event_type: EventType,
+    ) -> MigrateResult<Vec<MigrationEvent>> {
         let events = self.events.lock().unwrap();
         Ok(events
             .iter()

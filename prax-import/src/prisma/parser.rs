@@ -22,8 +22,7 @@ static DATASOURCE_RE: Lazy<Regex> = Lazy::new(|| {
     .unwrap()
 });
 
-static MODEL_START_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"model\s+(\w+)\s*\{").unwrap());
+static MODEL_START_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"model\s+(\w+)\s*\{").unwrap());
 
 // FIELD_RE removed — field parsing now uses split_field_line() for robust handling
 // of complex types like Unsupported("vector(1024)")
@@ -226,7 +225,10 @@ fn split_field_line(line: &str) -> Option<(String, String)> {
 
     // First token is the field name (must be a word char)
     let mut chars = trimmed.chars().peekable();
-    let name: String = chars.by_ref().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+    let name: String = chars
+        .by_ref()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
     if name.is_empty() {
         return None;
     }

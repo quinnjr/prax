@@ -164,9 +164,7 @@ fn generate_code(
 /// Build a graph of model relations for cycle detection.
 /// Returns a map from model name to the set of model names it references
 /// (non-list relations only, since Vec<T> doesn't cause infinite size).
-fn build_relation_graph(
-    schema: &prax_schema::ast::Schema,
-) -> HashMap<String, HashSet<String>> {
+fn build_relation_graph(schema: &prax_schema::ast::Schema) -> HashMap<String, HashSet<String>> {
     let mut graph: HashMap<String, HashSet<String>> = HashMap::new();
 
     for model in schema.models.values() {
@@ -509,7 +507,10 @@ fn generate_enum_module(enum_def: &prax_schema::ast::Enum) -> CliResult<String> 
     code.push_str("}\n\n");
 
     // Display implementation for SQL serialization
-    code.push_str(&format!("impl std::fmt::Display for {} {{\n", enum_def.name()));
+    code.push_str(&format!(
+        "impl std::fmt::Display for {} {{\n",
+        enum_def.name()
+    ));
     code.push_str("    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n");
     code.push_str("        match self {\n");
     for variant in &enum_def.variants {
@@ -872,4 +873,3 @@ mod tests {
         assert!(needs_boxing("C", "A", &graph));
     }
 }
-

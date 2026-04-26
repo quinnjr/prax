@@ -201,7 +201,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("       - {}", status.migration_id);
         println!("         Checksum: {}", status.checksum);
         if let Some(timestamp) = status.last_applied_at {
-            println!("         Applied at: {}", timestamp.format("%Y-%m-%d %H:%M:%S"));
+            println!(
+                "         Applied at: {}",
+                timestamp.format("%Y-%m-%d %H:%M:%S")
+            );
         }
     }
 
@@ -238,10 +241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cutoff = Utc::now() - chrono::Duration::seconds(5);
     let recent = store.get_events_since(cutoff).await?;
-    println!(
-        "   {} events occurred in the last 5 seconds",
-        recent.len()
-    );
+    println!("   {} events occurred in the last 5 seconds", recent.len());
 
     println!("\n=== Example Complete ===");
     println!("\nKey takeaways:");

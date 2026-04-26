@@ -138,9 +138,7 @@ async fn test_multiple_migrations_workflow() {
     assert_eq!(applied.len(), 2);
 
     // Verify rollback count
-    let status = state
-        .get_status("20260425120100_create_posts")
-        .unwrap();
+    let status = state.get_status("20260425120100_create_posts").unwrap();
     assert_eq!(status.apply_count, 1);
     assert_eq!(status.rollback_count, 1);
 }

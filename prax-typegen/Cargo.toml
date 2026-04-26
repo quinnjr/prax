@@ -1,6 +1,6 @@
 [package]
 name = "prax-typegen"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 rust-version = "1.85"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
@@ -21,7 +21,7 @@ name = "prax_typegen"
 path = "src/lib.rs"
 
 [dependencies]
-prax-schema = { path = "../prax-schema", version = "0.6.4" }
+prax-schema.workspace = true
 clap = { version = "4", features = ["derive"] }
 convert_case = "0.6"
 thiserror = "2.0"

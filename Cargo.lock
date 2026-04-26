@@ -3523,9 +3523,9 @@ dependencies = [
 
 [[package]]
 name = "num-conv"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51d515d32fb182ee37cda2ccdcb92950d6a3c2893aa280e540671c2cd0f3b1d9"
+checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
 
 [[package]]
 name = "num-format"
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "prax-actix"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -4059,7 +4059,7 @@ dependencies = [
 
 [[package]]
 name = "prax-armature"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -4074,7 +4074,7 @@ dependencies = [
 
 [[package]]
 name = "prax-axum"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4093,7 +4093,7 @@ dependencies = [
 
 [[package]]
 name = "prax-codegen"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "convert_case 0.6.0",
  "prax-schema",
@@ -4108,7 +4108,7 @@ dependencies = [
 
 [[package]]
 name = "prax-duckdb"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4130,7 +4130,7 @@ dependencies = [
 
 [[package]]
 name = "prax-import"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "convert_case 0.6.0",
  "criterion 0.5.1",
@@ -4156,7 +4156,7 @@ dependencies = [
 
 [[package]]
 name = "prax-migrate"
-version = "0.6.4"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4175,7 +4175,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mongodb"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bson",
@@ -4197,7 +4197,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mssql"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bb8",
@@ -4222,7 +4222,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mysql"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4241,7 +4241,7 @@ dependencies = [
 
 [[package]]
 name = "prax-orm"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "bson",
  "cargo-husky",
@@ -4277,7 +4277,7 @@ dependencies = [
 
 [[package]]
 name = "prax-orm-cli"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -4304,7 +4304,7 @@ dependencies = [
 
 [[package]]
 name = "prax-pgvector"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "pgvector",
  "postgres-types",
@@ -4321,7 +4321,7 @@ dependencies = [
 
 [[package]]
 name = "prax-postgres"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "chrono",
  "deadpool-postgres",
@@ -4341,7 +4341,7 @@ dependencies = [
 
 [[package]]
 name = "prax-query"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "bson",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "prax-schema"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "criterion 0.8.1",
  "indexmap",
@@ -4389,7 +4389,7 @@ dependencies = [
 
 [[package]]
 name = "prax-scylladb"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4412,7 +4412,7 @@ dependencies = [
 
 [[package]]
 name = "prax-sqlite"
-version = "0.6.3"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4434,7 +4434,7 @@ dependencies = [
 
 [[package]]
 name = "prax-sqlx"
-version = "0.6.5"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4454,7 +4454,7 @@ dependencies = [
 
 [[package]]
 name = "prax-typegen"
-version = "0.1.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "convert_case 0.6.0",
@@ -6356,30 +6356,30 @@ dependencies = [
 
 [[package]]
 name = "time"
-version = "0.3.44"
+version = "0.3.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e7d9e3bb61134e77bde20dd4825b97c010155709965fedf0f49bb138e52a9d"
+checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
  "num-conv",
  "powerfmt",
- "serde",
+ "serde_core",
  "time-core",
  "time-macros",
 ]
 
 [[package]]
 name = "time-core"
-version = "0.1.6"
+version = "0.1.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40868e7c1d2f0b8d73e4a8c7f0ff63af4f6d19be117e90bd73eb1d62cf831c6b"
+checksum = "7694e1cfe791f8d31026952abf09c69ca6f6fa4e1a1229e18988f06a04a12dca"
 
 [[package]]
 name = "time-macros"
-version = "0.2.24"
+version = "0.2.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30cfb0125f12d9c277f35663a0a33f8c30190f4e4574868a330595412d34ebf3"
+checksum = "2e70e4c5a0e0a8a4823ad65dfe1a6930e4f4d756dcd9dd7939022b5e8c501215"
 dependencies = [
  "num-conv",
  "time-core",

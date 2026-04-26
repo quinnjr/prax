@@ -4,7 +4,7 @@
 //!
 //! This crate provides functionality for:
 //! - Schema diffing between Prax schema definitions and database state
-//! - SQL migration generation for PostgreSQL (with MySQL/SQLite planned)
+//! - SQL migration generation for PostgreSQL, MySQL, SQLite, MSSQL, and DuckDB
 //! - Migration file management on the filesystem
 //! - **Event sourcing** for complete migration audit trails
 //! - Migration history tracking with immutable event log
@@ -166,8 +166,8 @@ pub mod state;
 // Re-exports
 pub use bootstrap::Bootstrap;
 pub use diff::{
-    EnumAlterDiff, EnumDiff, FieldAlterDiff, FieldDiff, IndexDiff, ModelAlterDiff, ModelDiff,
-    SchemaDiff, SchemaDiffer, UniqueConstraint,
+    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
+    ModelAlterDiff, ModelDiff, SchemaDiff, SchemaDiffer, UniqueConstraint, ViewDiff,
 };
 pub use engine::{
     DevResult, MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
@@ -236,7 +236,7 @@ pub use shadow::{
     FieldDrift, IndexDrift, SchemaDrift, ShadowConfig, ShadowDatabase, ShadowDatabaseManager,
     ShadowDiffResult, ShadowState, detect_drift,
 };
-pub use sql::{MigrationSql, PostgresSqlGenerator};
+pub use sql::{DuckDbSqlGenerator, MigrationSql, PostgresSqlGenerator};
 pub use state::MigrationState;
 // Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
 // Access via prax_migrate::state::MigrationStatus if needed for event sourcing state projection
