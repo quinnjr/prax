@@ -832,6 +832,16 @@ impl SqliteGenerator {
         // Create models
         for model in &diff.create_models {
             up.push(self.create_table(model));
+            if let Some(vt) = self.create_vector_virtual_table(model) {
+                up.push(vt);
+            }
+        }
+
+        // For down migrations, we need to drop virtual tables before main tables
+        for model in &diff.create_models {
+            if let Some(dvt) = self.drop_vector_virtual_table(model) {
+                down.push(dvt);
+            }
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -907,6 +917,9 @@ impl SqliteGenerator {
         let mut columns = Vec::new();
 
         for field in &model.fields {
+            if field.vector.is_some() {
+                continue; // Vector fields live in a companion virtual table.
+            }
             columns.push(self.column_definition(field));
         }
 
@@ -1007,6 +1020,67 @@ impl SqliteGenerator {
     /// Generate DROP TABLE statement.
     fn drop_table(&self, name: &str) -> String {
         format!("DROP TABLE IF EXISTS \"{}\";", name)
+    }
+
+    /// Strip a single trailing 's' for rowid column naming ("documents" -> "document").
+    /// Irregular plurals require users to override the default outside migrations.
+    fn singularize(name: &str) -> String {
+        if name.ends_with('s') && !name.ends_with("ss") {
+            name[..name.len() - 1].to_string()
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// Generate CREATE VIRTUAL TABLE for every vector column on this model.
+    /// Returns None if no fields are vector columns.
+    fn create_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
+        let vector_fields: Vec<&FieldDiff> = model
+            .fields
+            .iter()
+            .filter(|f| f.vector.is_some())
+            .collect();
+        if vector_fields.is_empty() {
+            return None;
+        }
+
+        let rowid = format!("{}_id", Self::singularize(&model.table_name));
+        let vtable = format!("{}_vectors", model.table_name);
+
+        let mut clauses = vec![format!("rowid_column='{}'", rowid)];
+        for f in vector_fields {
+            let v = f.vector.as_ref().unwrap();
+            let idx_part = match v.index {
+                Some(k) => format!(" {}", k.as_sql()),
+                None => String::new(),
+            };
+            clauses.push(format!(
+                "{}='{}[{}] {}{}'",
+                f.column_name,
+                v.element_type.as_sql(),
+                v.dimensions,
+                v.metric.as_sql(),
+                idx_part
+            ));
+        }
+
+        Some(format!(
+            "CREATE VIRTUAL TABLE \"{}\" USING vector(\n    {}\n);",
+            vtable,
+            clauses.join(",\n    ")
+        ))
+    }
+
+    /// Generate DROP VIRTUAL TABLE for the vector companion of a model, if any.
+    fn drop_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
+        if model.fields.iter().any(|f| f.vector.is_some()) {
+            Some(format!(
+                "DROP TABLE IF EXISTS \"{}_vectors\";",
+                model.table_name
+            ))
+        } else {
+            None
+        }
     }
 
     /// Generate CREATE INDEX statement.
@@ -2347,6 +2421,169 @@ mod tests {
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
         assert!(type_change_warning.is_some());
+    }
+
+    #[test]
+    fn test_sqlite_generator_emits_virtual_table_for_single_vector_field() {
+        use crate::diff::{
+            FieldDiff, ModelDiff, SchemaDiff, VectorColumnInfo, VectorDistanceMetric,
+            VectorElementType, VectorIndexKind,
+        };
+
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(ModelDiff {
+            name: "Document".to_string(),
+            table_name: "documents".to_string(),
+            fields: vec![
+                FieldDiff {
+                    name: "id".to_string(),
+                    column_name: "id".to_string(),
+                    sql_type: "INTEGER".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_primary_key: true,
+                    is_auto_increment: true,
+                    is_unique: false,
+                    vector: None,
+                },
+                FieldDiff {
+                    name: "embedding".to_string(),
+                    column_name: "embedding".to_string(),
+                    sql_type: "BLOB".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_primary_key: false,
+                    is_auto_increment: false,
+                    is_unique: false,
+                    vector: Some(VectorColumnInfo {
+                        dimensions: 1536,
+                        element_type: VectorElementType::Float4,
+                        metric: VectorDistanceMetric::Cosine,
+                        index: Some(VectorIndexKind::Hnsw),
+                    }),
+                },
+            ],
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+
+        let sql = SqliteGenerator.generate(&diff);
+
+        // Main table should NOT contain the vector column.
+        assert!(sql.up.contains("CREATE TABLE \"documents\""));
+        assert!(!sql.up.contains("\"embedding\" BLOB"));
+
+        // A companion virtual table should appear.
+        assert!(sql.up.contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector"));
+        assert!(sql.up.contains("rowid_column='document_id'"));
+        assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
+
+        // Down migration drops the virtual table before the main table.
+        let vt_pos = sql.down.find("DROP TABLE IF EXISTS \"documents_vectors\"").unwrap();
+        let mt_pos = sql.down.find("DROP TABLE IF EXISTS \"documents\"").unwrap();
+        assert!(vt_pos < mt_pos);
+    }
+
+    #[test]
+    fn test_sqlite_generator_combines_multiple_vector_columns_into_one_virtual_table() {
+        use crate::diff::{
+            FieldDiff, ModelDiff, SchemaDiff, VectorColumnInfo, VectorDistanceMetric,
+            VectorElementType, VectorIndexKind,
+        };
+
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(ModelDiff {
+            name: "Document".to_string(),
+            table_name: "documents".to_string(),
+            fields: vec![
+                FieldDiff {
+                    name: "id".to_string(),
+                    column_name: "id".to_string(),
+                    sql_type: "INTEGER".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_primary_key: true,
+                    is_auto_increment: true,
+                    is_unique: false,
+                    vector: None,
+                },
+                FieldDiff {
+                    name: "embedding".to_string(),
+                    column_name: "embedding".to_string(),
+                    sql_type: "BLOB".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_primary_key: false,
+                    is_auto_increment: false,
+                    is_unique: false,
+                    vector: Some(VectorColumnInfo {
+                        dimensions: 1536,
+                        element_type: VectorElementType::Float4,
+                        metric: VectorDistanceMetric::Cosine,
+                        index: Some(VectorIndexKind::Hnsw),
+                    }),
+                },
+                FieldDiff {
+                    name: "summary_vec".to_string(),
+                    column_name: "summary_vec".to_string(),
+                    sql_type: "BLOB".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_primary_key: false,
+                    is_auto_increment: false,
+                    is_unique: false,
+                    vector: Some(VectorColumnInfo {
+                        dimensions: 384,
+                        element_type: VectorElementType::Float4,
+                        metric: VectorDistanceMetric::Cosine,
+                        index: Some(VectorIndexKind::Hnsw),
+                    }),
+                },
+            ],
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+
+        let sql = SqliteGenerator.generate(&diff);
+
+        // Exactly one virtual table with both columns listed.
+        let count = sql.up.matches("CREATE VIRTUAL TABLE \"documents_vectors\"").count();
+        assert_eq!(count, 1);
+        assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
+        assert!(sql.up.contains("summary_vec='float4[384] cosine hnsw'"));
+    }
+
+    #[test]
+    fn test_sqlite_generator_without_vector_fields_produces_no_virtual_table() {
+        use crate::diff::{FieldDiff, ModelDiff, SchemaDiff};
+
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(ModelDiff {
+            name: "Document".to_string(),
+            table_name: "documents".to_string(),
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+                vector: None,
+            }],
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: Vec::new(),
+        });
+
+        let sql = SqliteGenerator.generate(&diff);
+        assert!(!sql.up.contains("USING vector"));
     }
 
     // ==================== MSSQL Generator Tests ====================
