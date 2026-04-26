@@ -1,6 +1,8 @@
 //! CQL migration SQL generator for ScyllaDB.
 
-use crate::cql::diff::{CqlSchemaDiff, KeyspaceConfig, ReplicationStrategy};
+use crate::cql::diff::{
+    CqlSchemaDiff, KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff,
+};
 use crate::cql::migration::MigrationCql;
 
 /// Generates CQL migration scripts from a CqlSchemaDiff.
@@ -21,6 +23,25 @@ impl CqlMigrationGenerator {
         if let Some(keyspace) = &diff.create_keyspace {
             up.push(self.create_keyspace_statement(keyspace));
             down.push(self.drop_keyspace_statement(&keyspace.name));
+        }
+
+        let ks_context = diff.keyspace_context.as_deref();
+
+        for udt in &diff.create_udts {
+            up.push(self.create_udt_statement(udt, ks_context));
+            down.push(self.drop_udt_statement(&udt.name, ks_context));
+        }
+
+        for alter in &diff.alter_udts {
+            up.extend(self.alter_udt_statements(alter, ks_context));
+        }
+
+        for name in &diff.drop_udts {
+            up.push(self.drop_udt_statement(name, ks_context));
+            warnings.push(format!(
+                "Dropping UDT '{}' - ensure no tables reference this type",
+                name
+            ));
         }
 
         if let Some(name) = &diff.drop_keyspace {
@@ -69,6 +90,50 @@ impl CqlMigrationGenerator {
             }
         }
     }
+
+    fn qualify(&self, name: &str, keyspace_context: Option<&str>) -> String {
+        match keyspace_context {
+            Some(ks) => format!("\"{}\".\"{}\"", ks, name),
+            None => format!("\"{}\"", name),
+        }
+    }
+
+    fn create_udt_statement(&self, udt: &UdtDiff, keyspace_context: Option<&str>) -> String {
+        let qualified = self.qualify(&udt.name, keyspace_context);
+        let fields = udt
+            .fields
+            .iter()
+            .map(|f| format!("    {} {}", f.name, f.cql_type))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("CREATE TYPE {} (\n{}\n);", qualified, fields)
+    }
+
+    fn drop_udt_statement(&self, name: &str, keyspace_context: Option<&str>) -> String {
+        format!("DROP TYPE IF EXISTS {};", self.qualify(name, keyspace_context))
+    }
+
+    fn alter_udt_statements(
+        &self,
+        alter: &UdtAlterDiff,
+        keyspace_context: Option<&str>,
+    ) -> Vec<String> {
+        let qualified = self.qualify(&alter.name, keyspace_context);
+        let mut stmts = Vec::new();
+        for field in &alter.add_fields {
+            stmts.push(format!(
+                "ALTER TYPE {} ADD {} {};",
+                qualified, field.name, field.cql_type
+            ));
+        }
+        for (old, new) in &alter.rename_fields {
+            stmts.push(format!(
+                "ALTER TYPE {} RENAME {} TO {};",
+                qualified, old, new
+            ));
+        }
+        stmts
+    }
 }
 
 impl Default for CqlMigrationGenerator {
@@ -80,7 +145,7 @@ impl Default for CqlMigrationGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cql::diff::{KeyspaceConfig, ReplicationStrategy};
+    use crate::cql::diff::{KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField};
 
     #[test]
     fn test_empty_diff_produces_empty_migration() {
@@ -140,5 +205,84 @@ mod tests {
             migration.warnings.iter().any(|w| w.contains("legacy") && w.contains("ALL data")),
             "expected drop-keyspace warning"
         );
+    }
+
+    #[test]
+    fn test_create_udt_without_keyspace_context() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.create_udts.push(UdtDiff {
+            name: "order_status".into(),
+            fields: vec![UdtField {
+                name: "value".into(),
+                cql_type: "text".into(),
+            }],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("CREATE TYPE \"order_status\" ("));
+        assert!(migration.up.contains("value text"));
+        assert!(migration.down.contains("DROP TYPE IF EXISTS \"order_status\""));
+    }
+
+    #[test]
+    fn test_create_udt_with_keyspace_context() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff {
+            keyspace_context: Some("myapp".into()),
+            ..Default::default()
+        };
+        diff.create_udts.push(UdtDiff {
+            name: "order_status".into(),
+            fields: vec![UdtField {
+                name: "value".into(),
+                cql_type: "text".into(),
+            }],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("CREATE TYPE \"myapp\".\"order_status\" ("));
+    }
+
+    #[test]
+    fn test_alter_udt_add_field() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_udts.push(UdtAlterDiff {
+            name: "order_status".into(),
+            add_fields: vec![UdtField {
+                name: "description".into(),
+                cql_type: "text".into(),
+            }],
+            rename_fields: vec![],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("ALTER TYPE \"order_status\" ADD description text"));
+    }
+
+    #[test]
+    fn test_alter_udt_rename_field() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_udts.push(UdtAlterDiff {
+            name: "order_status".into(),
+            add_fields: vec![],
+            rename_fields: vec![("old_name".into(), "new_name".into())],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("ALTER TYPE \"order_status\" RENAME old_name TO new_name"));
+    }
+
+    #[test]
+    fn test_drop_udt_generates_warning() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.drop_udts.push("legacy_type".into());
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("DROP TYPE IF EXISTS \"legacy_type\""));
+        assert!(migration.warnings.iter().any(|w| w.contains("legacy_type")));
     }
 }
