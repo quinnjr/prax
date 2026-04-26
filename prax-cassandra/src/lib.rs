@@ -29,7 +29,12 @@
 //! for Cassandra and ScyllaDB since both use CQL.
 
 pub mod auth;
+pub mod config;
 pub mod error;
 
 pub use auth::{PlainSasl, SaslMechanism};
+pub use config::{
+    CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind,
+    TlsConfig,
+};
 pub use error::{CassandraError, CassandraResult};
