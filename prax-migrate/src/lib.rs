@@ -168,10 +168,10 @@ pub mod state;
 // Re-exports
 pub use bootstrap::Bootstrap;
 pub use cql::{
-    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldAlterDiff, CqlFieldDiff,
-    CqlIndexDiff, CqlIndexType, CqlMigrationGenerator, CqlSchemaDiff, CqlTableAlterDiff,
-    CqlTableDiff, KeyspaceConfig, MaterializedViewDiff, MigrationCql, ReplicationStrategy,
-    UdtAlterDiff, UdtDiff, UdtField,
+    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlDialect, CqlFieldAlterDiff,
+    CqlFieldDiff, CqlIndexDiff, CqlIndexType, CqlMigrationGenerator, CqlSchemaDiff,
+    CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, MaterializedViewDiff, MigrationCql,
+    ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
 };
 pub use dialect::{MigrationDialect, SqlDialect};
 pub use diff::{

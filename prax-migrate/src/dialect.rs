@@ -62,4 +62,24 @@ mod tests {
         let migration = SqlDialect::generate(&diff);
         assert!(migration.is_empty());
     }
+
+    #[test]
+    fn test_cql_dialect_name() {
+        use crate::cql::CqlDialect;
+        assert_eq!(CqlDialect::name(), "cql");
+    }
+
+    #[test]
+    fn test_cql_dialect_event_log_table() {
+        use crate::cql::CqlDialect;
+        assert_eq!(CqlDialect::event_log_table(), "_prax_cql_migrations");
+    }
+
+    #[test]
+    fn test_cql_dialect_generates_empty_migration_from_empty_diff() {
+        use crate::cql::{CqlDialect, CqlSchemaDiff};
+        let diff = CqlSchemaDiff::default();
+        let migration = CqlDialect::generate(&diff);
+        assert!(migration.is_empty());
+    }
 }
