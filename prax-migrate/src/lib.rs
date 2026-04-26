@@ -166,8 +166,8 @@ pub mod state;
 // Re-exports
 pub use bootstrap::Bootstrap;
 pub use diff::{
-    EnumAlterDiff, EnumDiff, FieldAlterDiff, FieldDiff, IndexDiff, ModelAlterDiff, ModelDiff,
-    SchemaDiff, SchemaDiffer, UniqueConstraint,
+    EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
+    ModelAlterDiff, ModelDiff, SchemaDiff, SchemaDiffer, UniqueConstraint, ViewDiff,
 };
 pub use engine::{
     DevResult, MigrationConfig, MigrationEngine, MigrationPlan, MigrationResult, MigrationStatus,
