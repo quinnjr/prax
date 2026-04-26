@@ -1355,12 +1355,38 @@ pub struct DuckDbSqlGenerator;
 
 impl DuckDbSqlGenerator {
     /// Generate SQL for a schema diff.
-    pub fn generate(&self, _diff: &SchemaDiff) -> MigrationSql {
-        MigrationSql {
-            up: String::new(),
-            down: String::new(),
-            warnings: Vec::new(),
+    pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
+        let mut up = Vec::new();
+        let mut down = Vec::new();
+        let warnings = Vec::new();
+
+        // Install and load extensions first
+        for ext in &diff.create_extensions {
+            up.push(self.install_extension(&ext.name));
+            down.push(format!("-- Extension {} cannot be uninstalled (DuckDB limitation)", ext.name));
         }
+
+        // Drop extensions (best-effort comment)
+        for name in &diff.drop_extensions {
+            up.push(self.drop_extension(name));
+        }
+
+        MigrationSql {
+            up: up.join("\n\n"),
+            down: down.join("\n\n"),
+            warnings,
+        }
+    }
+
+    /// Generate INSTALL and LOAD statements for an extension.
+    fn install_extension(&self, name: &str) -> String {
+        format!("INSTALL '{}';\nLOAD '{}';", name, name)
+    }
+
+    /// Generate a comment noting that an extension cannot be uninstalled.
+    fn drop_extension(&self, name: &str) -> String {
+        // DuckDB doesn't have UNINSTALL, extensions persist
+        format!("-- Extension {} cannot be uninstalled", name)
     }
 }
 
@@ -2403,5 +2429,59 @@ mod tests {
         let result = generator.generate(&diff);
         assert!(result.is_empty());
         assert!(result.warnings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod duckdb_tests {
+    use super::*;
+
+    #[test]
+    fn test_duckdb_install_extension_generates_sql() {
+        let generator = DuckDbSqlGenerator;
+        let sql = generator.install_extension("parquet");
+        assert_eq!(sql, "INSTALL 'parquet';\nLOAD 'parquet';");
+    }
+
+    #[test]
+    fn test_duckdb_generate_with_extensions() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.create_extensions.push(ExtensionDiff {
+            name: "parquet".to_string(),
+            schema: None,
+            version: None,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(!migration.up.is_empty());
+        assert!(migration.up.contains("INSTALL 'parquet'"));
+        assert!(migration.up.contains("LOAD 'parquet'"));
+
+        // Verify down migration comment added
+        assert!(!migration.down.is_empty());
+        assert!(migration.down.contains("cannot be uninstalled"));
+    }
+
+    #[test]
+    fn test_duckdb_drop_extension_generates_comment() {
+        let generator = DuckDbSqlGenerator;
+        let comment = generator.drop_extension("parquet");
+        assert!(comment.starts_with("-- Extension"));
+        assert!(comment.contains("parquet"));
+        assert!(comment.contains("cannot be uninstalled"));
+    }
+
+    #[test]
+    fn test_duckdb_generate_with_drop_extensions() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_extensions.push("parquet".to_string());
+
+        let migration = generator.generate(&diff);
+        assert!(!migration.up.is_empty());
+        assert!(migration.up.starts_with("-- Extension"));
+        assert!(migration.up.contains("parquet"));
+        assert!(migration.up.contains("cannot be uninstalled"));
     }
 }
