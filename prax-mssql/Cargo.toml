@@ -1,6 +1,6 @@
 [package]
 name = "prax-mssql"
-version = "0.6.3"
+version.workspace = true
 edition = "2024"
 rust-version = "1.85"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
@@ -13,8 +13,8 @@ categories = ["database", "asynchronous"]
 
 [dependencies]
 # Internal crates
-prax-query = { path = "../prax-query", version = "0.6.3" }
-prax-schema = { path = "../prax-schema", version = "0.6.3" }
+prax-query.workspace = true
+prax-schema.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

@@ -1,6 +1,6 @@
 [package]
 name = "prax-mysql"
-version = "0.6.3"
+version.workspace = true
 edition = "2024"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
 description = "MySQL database driver for Prax ORM"
@@ -11,7 +11,7 @@ categories = ["database", "asynchronous"]
 rust-version = "1.85"
 
 [dependencies]
-prax-query = { path = "../prax-query", version = "0.6.3" }
+prax-query.workspace = true
 
 # Async runtime
 tokio = { workspace = true, features = ["full"] }

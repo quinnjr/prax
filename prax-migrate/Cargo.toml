@@ -11,7 +11,7 @@ keywords = ["orm", "database", "migrations", "postgresql", "async"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-prax-schema = { path = "../prax-schema", version = "0.6.5" }
+prax-schema.workspace = true
 
 tokio = { version = "1.49", features = ["full", "fs"] }
 thiserror = "2.0"
