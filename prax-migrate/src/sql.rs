@@ -1429,6 +1429,17 @@ impl DuckDbSqlGenerator {
             up.extend(self.alter_table(alter));
         }
 
+        // Create indexes
+        for index in &diff.create_indexes {
+            up.push(self.create_index(index));
+            down.push(self.drop_index(&index.name));
+        }
+
+        // Drop indexes
+        for index in &diff.drop_indexes {
+            up.push(self.drop_index(&index.name));
+        }
+
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
@@ -1576,6 +1587,16 @@ impl DuckDbSqlGenerator {
             stmts.extend(self.alter_column(&alter.table_name, field));
         }
 
+        // Add indexes inline on the table
+        for index in &alter.add_indexes {
+            stmts.push(self.create_index(index));
+        }
+
+        // Drop indexes
+        for name in &alter.drop_indexes {
+            stmts.push(self.drop_index(name));
+        }
+
         stmts
     }
 
@@ -1634,6 +1655,25 @@ impl DuckDbSqlGenerator {
         }
 
         stmts
+    }
+
+    /// Generate CREATE INDEX statement.
+    fn create_index(&self, index: &IndexDiff) -> String {
+        let unique = if index.unique { "UNIQUE " } else { "" };
+        let cols: Vec<String> = index.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+
+        format!(
+            "CREATE {}INDEX \"{}\" ON \"{}\"({});",
+            unique,
+            index.name,
+            index.table_name,
+            cols.join(", ")
+        )
+    }
+
+    /// Generate DROP INDEX statement.
+    fn drop_index(&self, name: &str) -> String {
+        format!("DROP INDEX IF EXISTS \"{}\";", name)
     }
 }
 
@@ -3000,5 +3040,48 @@ mod duckdb_tests {
         assert!(migration.warnings[0].contains("Changing column 'age'"));
         assert!(migration.warnings[0].contains("users"));
         assert!(migration.warnings[0].contains("reverse migration may fail"));
+    }
+
+    // --- Task 6: index creation ---
+
+    #[test]
+    fn test_duckdb_create_index() {
+        let generator = DuckDbSqlGenerator;
+        let index = IndexDiff::new("idx_users_email", "users", vec!["email".to_string()]);
+
+        let sql = generator.create_index(&index);
+        assert_eq!(
+            sql,
+            "CREATE INDEX \"idx_users_email\" ON \"users\"(\"email\");"
+        );
+    }
+
+    #[test]
+    fn test_duckdb_create_unique_index() {
+        let generator = DuckDbSqlGenerator;
+        let index =
+            IndexDiff::new("idx_users_email_unique", "users", vec!["email".to_string()]).unique();
+
+        let sql = generator.create_index(&index);
+        assert_eq!(
+            sql,
+            "CREATE UNIQUE INDEX \"idx_users_email_unique\" ON \"users\"(\"email\");"
+        );
+    }
+
+    #[test]
+    fn test_duckdb_create_index_in_generate() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.create_indexes
+            .push(IndexDiff::new("idx_posts_user", "posts", vec!["user_id".to_string()]));
+
+        let migration = generator.generate(&diff);
+        assert!(migration
+            .up
+            .contains("CREATE INDEX \"idx_posts_user\" ON \"posts\"(\"user_id\")"));
+        assert!(migration
+            .down
+            .contains("DROP INDEX IF EXISTS \"idx_posts_user\""));
     }
 }
