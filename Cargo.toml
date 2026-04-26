@@ -11,6 +11,7 @@ members = [
     "prax-mongodb",
     "prax-duckdb",
     "prax-scylladb",
+    "prax-cassandra",
     "prax-sqlx",
     "prax-migrate",
     "prax-cli",
@@ -43,6 +44,7 @@ prax-mssql = { path = "prax-mssql", version = "0.7.2" }
 prax-mongodb = { path = "prax-mongodb", version = "0.7.2" }
 prax-duckdb = { path = "prax-duckdb", version = "0.7.2" }
 prax-scylladb = { path = "prax-scylladb", version = "0.7.2" }
+prax-cassandra = { path = "prax-cassandra", version = "0.7.2" }
 prax-migrate = { path = "prax-migrate", version = "0.7.2" }
 prax-orm-cli = { path = "prax-cli", version = "0.7.2" }
 prax-sqlx = { path = "prax-sqlx", version = "0.7.2" }
@@ -107,6 +109,9 @@ duckdb = { version = "1.4", features = ["bundled", "json", "parquet", "chrono", 
 
 # ScyllaDB (high-performance Cassandra-compatible)
 scylla = "0.14"
+
+# Apache Cassandra driver (pure Rust)
+cdrs-tokio = "9.0"
 
 # Decimal type
 rust_decimal = { version = "1.37", features = ["serde"] }
