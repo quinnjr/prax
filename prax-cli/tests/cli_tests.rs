@@ -32,7 +32,7 @@ fn test_version_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Version"))
-        .stdout(predicate::str::contains("0.7.1"));
+        .stdout(predicate::str::contains("0.7.2"));
 }
 
 #[test]
@@ -252,5 +252,5 @@ fn test_global_options() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.7.1"));
+        .stdout(predicate::str::contains("0.7.2"));
 }
