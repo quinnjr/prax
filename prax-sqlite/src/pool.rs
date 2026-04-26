@@ -129,14 +129,27 @@ impl SqlitePool {
         .await?;
 
         // Register the vector extension on every connection when the `vector`
-        // feature is enabled. This runs once per connection.
+        // feature is enabled. Soft-fails with a warning if the
+        // sqlite-vector-rs shared library is not on disk — pool creation
+        // still succeeds, but later calls to vector SQL functions will fail
+        // with a clear error at query time.
         #[cfg(feature = "vector")]
-        conn.call(|conn| {
-            crate::vector::register_vector_extension(conn).map_err(|e| {
-                tokio_rusqlite::Error::Other(Box::new(e))
-            })
-        })
-        .await?;
+        {
+            let _ = conn
+                .call(|conn| {
+                    if let Err(e) = crate::vector::register_vector_extension(conn) {
+                        tracing::warn!(
+                            error = %e,
+                            "sqlite-vector-rs extension could not be registered; \
+                             vector SQL functions will be unavailable on this connection. \
+                             Build libsqlite_vector_rs.so and set SQLITE_VECTOR_RS_LIB \
+                             or place it alongside the test/binary."
+                        );
+                    }
+                    Ok(())
+                })
+                .await;
+        }
 
         Ok(conn)
     }

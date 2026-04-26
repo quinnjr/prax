@@ -15,7 +15,17 @@ pub fn register_vector_extension(conn: &rusqlite::Connection) -> VectorResult<()
 mod tests {
     use super::*;
 
+    // These tests require the sqlite-vector-rs cdylib (libsqlite_vector_rs.so/
+    // .dylib/.dll) to be available on disk — the extension is loaded via
+    // dlopen at runtime, not compiled in. When prax-sqlite depends on
+    // sqlite-vector-rs as a library, only the rlib is built; the cdylib must
+    // be produced separately (e.g. `cargo build -p sqlite-vector-rs`) and
+    // made discoverable via SQLITE_VECTOR_RS_LIB or placed next to the test
+    // binary. These tests are marked `#[ignore]` so they run only when the
+    // environment is set up, via `cargo test -- --ignored`.
+
     #[test]
+    #[ignore = "requires libsqlite_vector_rs.so on disk or SQLITE_VECTOR_RS_LIB set"]
     fn test_register_on_fresh_connection() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         let result = register_vector_extension(&conn);
@@ -23,6 +33,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires libsqlite_vector_rs.so on disk or SQLITE_VECTOR_RS_LIB set"]
     fn test_vector_from_json_available_after_register() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         register_vector_extension(&conn).unwrap();
