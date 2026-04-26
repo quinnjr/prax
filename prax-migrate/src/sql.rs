@@ -1475,6 +1475,11 @@ impl DuckDbSqlGenerator {
             up.push(self.create_view(view));
         }
 
+        // Reverse the down statements so that teardown order is the inverse of
+        // creation order: views first, then tables, then enums, then extensions.
+        // This ensures referential dependencies are satisfied during rollback.
+        down.reverse();
+
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
