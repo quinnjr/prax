@@ -128,6 +128,16 @@ impl SqlitePool {
         })
         .await?;
 
+        // Register the vector extension on every connection when the `vector`
+        // feature is enabled. This runs once per connection.
+        #[cfg(feature = "vector")]
+        conn.call(|conn| {
+            crate::vector::register_vector_extension(conn).map_err(|e| {
+                tokio_rusqlite::Error::Other(Box::new(e))
+            })
+        })
+        .await?;
+
         Ok(conn)
     }
 
