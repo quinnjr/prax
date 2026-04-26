@@ -51,22 +51,14 @@ fn make_model(name: &str, table_name: &str, fields: Vec<FieldDiff>) -> ModelDiff
     }
 }
 
-// ---------------------------------------------------------------------------
-// Task 10 placeholder (compile check)
-// ---------------------------------------------------------------------------
-
 #[test]
-fn test_integration_placeholder() {
+fn test_duckdb_empty_diff_produces_empty_migration() {
     let generator = DuckDbSqlGenerator;
     let diff = SchemaDiff::default();
     let result = generator.generate(&diff);
     assert!(result.is_empty());
     assert!(result.warnings.is_empty());
 }
-
-// ---------------------------------------------------------------------------
-// Task 11 – basic SQL generation
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_duckdb_generate_create_table_sql() {
@@ -152,10 +144,6 @@ fn test_duckdb_generate_drop_operations_with_warnings() {
         "Expected a type-change warning mentioning reverse migration"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Task 12 – analytical types
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_duckdb_generate_list_type() {
@@ -284,10 +272,6 @@ fn test_duckdb_generate_enum_with_table() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Task 13 – extensions and views
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_duckdb_generate_extensions() {
     let generator = DuckDbSqlGenerator;
@@ -377,10 +361,6 @@ fn test_duckdb_generate_view_with_materialized_warning() {
         "Warning should name the view"
     );
 }
-
-// ---------------------------------------------------------------------------
-// Bonus: foreign key warning (exercises Task 8 path via integration test)
-// ---------------------------------------------------------------------------
 
 #[test]
 fn test_duckdb_foreign_key_unenforced_warning() {
