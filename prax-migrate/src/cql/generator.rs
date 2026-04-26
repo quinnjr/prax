@@ -1,8 +1,8 @@
 //! CQL migration SQL generator for ScyllaDB.
 
 use crate::cql::diff::{
-    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlSchemaDiff, CqlTableDiff,
-    KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff,
+    ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlSchemaDiff,
+    CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff,
 };
 use crate::cql::migration::MigrationCql;
 
@@ -40,6 +40,42 @@ impl CqlMigrationGenerator {
         for table in &diff.create_tables {
             up.push(self.create_table_statement(table, ks_context));
             down.push(self.drop_table_statement(&table.name, ks_context));
+        }
+
+        for alter in &diff.alter_tables {
+            if alter.partition_key_changed {
+                warnings.push(format!(
+                    "Partition key change detected for table '{}' - not supported in-place; requires manual DROP/CREATE migration",
+                    alter.name
+                ));
+            }
+            if alter.clustering_key_changed {
+                warnings.push(format!(
+                    "Clustering key change detected for table '{}' - not supported in-place; requires manual DROP/CREATE migration",
+                    alter.name
+                ));
+            }
+
+            for field_name in &alter.drop_fields {
+                warnings.push(format!(
+                    "Dropping column '{}' from table '{}' - data in this column will be lost",
+                    field_name, alter.name
+                ));
+            }
+
+            for field in &alter.alter_fields {
+                if field.new_type.is_some() && field.old_type.is_some() {
+                    warnings.push(format!(
+                        "Type change from '{}' to '{}' for column '{}' on table '{}' - CQL may reject this if data is incompatible",
+                        field.old_type.as_deref().unwrap_or(""),
+                        field.new_type.as_deref().unwrap_or(""),
+                        field.name,
+                        alter.name
+                    ));
+                }
+            }
+
+            up.extend(self.alter_table_statements(alter, ks_context));
         }
 
         for name in &diff.drop_tables {
@@ -251,6 +287,37 @@ impl CqlMigrationGenerator {
             ),
         }
     }
+
+    fn alter_table_statements(
+        &self,
+        alter: &CqlTableAlterDiff,
+        keyspace_context: Option<&str>,
+    ) -> Vec<String> {
+        let qualified = self.qualify(&alter.name, keyspace_context);
+        let mut stmts = Vec::new();
+
+        for field in &alter.add_fields {
+            stmts.push(format!(
+                "ALTER TABLE {} ADD {} {};",
+                qualified, field.name, field.cql_type
+            ));
+        }
+
+        for field_name in &alter.drop_fields {
+            stmts.push(format!("ALTER TABLE {} DROP {};", qualified, field_name));
+        }
+
+        for field in &alter.alter_fields {
+            if let Some(new_type) = &field.new_type {
+                stmts.push(format!(
+                    "ALTER TABLE {} ALTER {} TYPE {};",
+                    qualified, field.name, new_type
+                ));
+            }
+        }
+
+        stmts
+    }
 }
 
 impl Default for CqlMigrationGenerator {
@@ -263,8 +330,9 @@ impl Default for CqlMigrationGenerator {
 mod tests {
     use super::*;
     use crate::cql::diff::{
-        ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldDiff, CqlTableDiff,
-        KeyspaceConfig, ReplicationStrategy, UdtAlterDiff, UdtDiff, UdtField,
+        ClusteringKey, ClusteringOrder, CompactionStrategy, CqlFieldAlterDiff, CqlFieldDiff,
+        CqlTableAlterDiff, CqlTableDiff, KeyspaceConfig, ReplicationStrategy, UdtAlterDiff,
+        UdtDiff, UdtField,
     };
 
     fn simple_field(name: &str, cql_type: &str) -> CqlFieldDiff {
@@ -531,6 +599,113 @@ mod tests {
         assert!(
             migration.warnings.iter().any(|w| w.contains("legacy_table") && w.contains("all rows")),
             "expected drop-table warning"
+        );
+    }
+
+    #[test]
+    fn test_alter_table_add_column() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_tables.push(CqlTableAlterDiff {
+            name: "users".into(),
+            add_fields: vec![simple_field("email", "text")],
+            drop_fields: vec![],
+            alter_fields: vec![],
+            partition_key_changed: false,
+            clustering_key_changed: false,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("ALTER TABLE \"users\" ADD email text"));
+    }
+
+    #[test]
+    fn test_alter_table_drop_column_generates_warning() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_tables.push(CqlTableAlterDiff {
+            name: "users".into(),
+            add_fields: vec![],
+            drop_fields: vec!["legacy_field".into()],
+            alter_fields: vec![],
+            partition_key_changed: false,
+            clustering_key_changed: false,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("ALTER TABLE \"users\" DROP legacy_field"));
+        assert!(
+            migration.warnings.iter().any(|w| w.contains("legacy_field") && w.contains("users")),
+            "expected drop-column warning"
+        );
+    }
+
+    #[test]
+    fn test_alter_table_type_change_generates_warning() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_tables.push(CqlTableAlterDiff {
+            name: "users".into(),
+            add_fields: vec![],
+            drop_fields: vec![],
+            alter_fields: vec![CqlFieldAlterDiff {
+                name: "age".into(),
+                old_type: Some("int".into()),
+                new_type: Some("bigint".into()),
+            }],
+            partition_key_changed: false,
+            clustering_key_changed: false,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(migration.up.contains("ALTER TABLE \"users\" ALTER age TYPE bigint"));
+        assert!(
+            migration.warnings.iter().any(|w| w.contains("age") && w.contains("data is incompatible")),
+            "expected type-change warning"
+        );
+    }
+
+    #[test]
+    fn test_partition_key_change_warns_without_alter() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_tables.push(CqlTableAlterDiff {
+            name: "users".into(),
+            add_fields: vec![],
+            drop_fields: vec![],
+            alter_fields: vec![],
+            partition_key_changed: true,
+            clustering_key_changed: false,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(
+            migration.warnings.iter().any(|w| w.contains("Partition key") && w.contains("users")),
+            "expected partition-key-change warning"
+        );
+        assert!(
+            !migration.up.contains("ALTER TABLE"),
+            "partition key change should not emit ALTER TABLE"
+        );
+    }
+
+    #[test]
+    fn test_clustering_key_change_warns_without_alter() {
+        let generator = CqlMigrationGenerator::new();
+        let mut diff = CqlSchemaDiff::default();
+        diff.alter_tables.push(CqlTableAlterDiff {
+            name: "events".into(),
+            add_fields: vec![],
+            drop_fields: vec![],
+            alter_fields: vec![],
+            partition_key_changed: false,
+            clustering_key_changed: true,
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(
+            migration.warnings.iter().any(|w| w.contains("Clustering key") && w.contains("events")),
+            "expected clustering-key-change warning"
         );
     }
 }
