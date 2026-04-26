@@ -1429,6 +1429,18 @@ impl DuckDbSqlGenerator {
             up.extend(self.alter_table(alter));
         }
 
+        // Warn about foreign keys being unenforced by default
+        let has_foreign_keys = diff
+            .alter_models
+            .iter()
+            .any(|a| !a.add_foreign_keys.is_empty());
+        if has_foreign_keys {
+            warnings.push(
+                "Foreign keys defined but not enforced unless SET check_fk_violation = 'error'"
+                    .to_string(),
+            );
+        }
+
         // Create indexes
         for index in &diff.create_indexes {
             up.push(self.create_index(index));
@@ -1620,7 +1632,51 @@ impl DuckDbSqlGenerator {
             stmts.push(self.drop_index(name));
         }
 
+        // Drop foreign keys
+        for name in &alter.drop_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" DROP CONSTRAINT \"{}\";",
+                alter.table_name, name
+            ));
+        }
+
+        // Add foreign keys
+        for fk in &alter.add_foreign_keys {
+            stmts.push(format!(
+                "ALTER TABLE \"{}\" ADD {};",
+                alter.table_name,
+                self.foreign_key_constraint(fk)
+            ));
+        }
+
         stmts
+    }
+
+    /// Generate a foreign key CONSTRAINT clause.
+    fn foreign_key_constraint(&self, fk: &ForeignKeyDiff) -> String {
+        let cols: Vec<String> = fk.columns.iter().map(|c| format!("\"{}\"", c)).collect();
+        let ref_cols: Vec<String> = fk
+            .referenced_columns
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect();
+
+        let mut clause = format!(
+            "CONSTRAINT \"{}\" FOREIGN KEY ({}) REFERENCES \"{}\" ({})",
+            fk.constraint_name,
+            cols.join(", "),
+            fk.referenced_table,
+            ref_cols.join(", ")
+        );
+
+        if let Some(action) = &fk.on_delete {
+            clause.push_str(&format!(" ON DELETE {}", action));
+        }
+        if let Some(action) = &fk.on_update {
+            clause.push_str(&format!(" ON UPDATE {}", action));
+        }
+
+        clause
     }
 
     /// Generate column definition string for CREATE/ALTER TABLE.
@@ -3165,5 +3221,73 @@ mod duckdb_tests {
         );
         // The view SQL should still be generated as a regular view
         assert!(migration.up.contains("CREATE VIEW \"user_stats\" AS"));
+    }
+
+    // --- Task 8: foreign key support with warning ---
+
+    #[test]
+    fn test_duckdb_foreign_key_generates_warning() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_models.push(ModelAlterDiff {
+            name: "Post".to_string(),
+            table_name: "posts".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: vec![ForeignKeyDiff {
+                constraint_name: "fk_posts_user".to_string(),
+                columns: vec!["user_id".to_string()],
+                referenced_table: "users".to_string(),
+                referenced_columns: vec!["id".to_string()],
+                on_delete: None,
+                on_update: None,
+            }],
+            drop_foreign_keys: Vec::new(),
+        });
+
+        let migration = generator.generate(&diff);
+        let has_fk_warning = migration
+            .warnings
+            .iter()
+            .any(|w| w.contains("Foreign keys") && w.contains("not enforced"));
+        assert!(
+            has_fk_warning,
+            "Should warn about foreign key enforcement, got: {:?}",
+            migration.warnings
+        );
+    }
+
+    #[test]
+    fn test_duckdb_foreign_key_sql_generated() {
+        let generator = DuckDbSqlGenerator;
+        let alter = ModelAlterDiff {
+            name: "Post".to_string(),
+            table_name: "posts".to_string(),
+            add_fields: Vec::new(),
+            drop_fields: Vec::new(),
+            alter_fields: Vec::new(),
+            add_indexes: Vec::new(),
+            drop_indexes: Vec::new(),
+            add_foreign_keys: vec![ForeignKeyDiff {
+                constraint_name: "fk_posts_user".to_string(),
+                columns: vec!["user_id".to_string()],
+                referenced_table: "users".to_string(),
+                referenced_columns: vec!["id".to_string()],
+                on_delete: Some("CASCADE".to_string()),
+                on_update: None,
+            }],
+            drop_foreign_keys: Vec::new(),
+        };
+
+        let stmts = generator.alter_table(&alter);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("ALTER TABLE \"posts\" ADD"));
+        assert!(stmts[0].contains("CONSTRAINT \"fk_posts_user\""));
+        assert!(stmts[0].contains("FOREIGN KEY (\"user_id\")"));
+        assert!(stmts[0].contains("REFERENCES \"users\" (\"id\")"));
+        assert!(stmts[0].contains("ON DELETE CASCADE"));
     }
 }
