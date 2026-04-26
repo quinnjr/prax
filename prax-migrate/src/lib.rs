@@ -236,7 +236,7 @@ pub use shadow::{
     FieldDrift, IndexDrift, SchemaDrift, ShadowConfig, ShadowDatabase, ShadowDatabaseManager,
     ShadowDiffResult, ShadowState, detect_drift,
 };
-pub use sql::{MigrationSql, PostgresSqlGenerator};
+pub use sql::{DuckDbSqlGenerator, MigrationSql, PostgresSqlGenerator};
 pub use state::MigrationState;
 // Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
 // Access via prax_migrate::state::MigrationStatus if needed for event sourcing state projection

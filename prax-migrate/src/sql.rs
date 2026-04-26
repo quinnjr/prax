@@ -1350,6 +1350,20 @@ impl MssqlGenerator {
     }
 }
 
+/// SQL generator for DuckDB.
+pub struct DuckDbSqlGenerator;
+
+impl DuckDbSqlGenerator {
+    /// Generate SQL for a schema diff.
+    pub fn generate(&self, _diff: &SchemaDiff) -> MigrationSql {
+        MigrationSql {
+            up: String::new(),
+            down: String::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2380,5 +2394,14 @@ mod tests {
         assert!(drop_table_warning.is_some());
         assert!(drop_column_warning.is_some());
         assert!(type_change_warning.is_some());
+    }
+
+    #[test]
+    fn test_duckdb_generator_exists() {
+        let generator = DuckDbSqlGenerator;
+        let diff = SchemaDiff::default();
+        let result = generator.generate(&diff);
+        assert!(result.is_empty());
+        assert!(result.warnings.is_empty());
     }
 }
