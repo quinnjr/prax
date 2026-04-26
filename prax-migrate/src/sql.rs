@@ -1371,6 +1371,24 @@ impl DuckDbSqlGenerator {
             up.push(self.drop_extension(name));
         }
 
+        // Create enums (they might be used in tables)
+        for enum_diff in &diff.create_enums {
+            up.push(self.create_enum(enum_diff));
+            down.push(self.drop_enum(&enum_diff.name));
+        }
+
+        // Drop enums (in reverse order)
+        for name in &diff.drop_enums {
+            up.push(self.drop_enum(name));
+            // Can't easily recreate dropped enums without knowing values
+        }
+
+        // Alter enums
+        for alter in &diff.alter_enums {
+            up.extend(self.alter_enum(alter));
+            // Reversing enum alterations is complex
+        }
+
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
@@ -1387,6 +1405,42 @@ impl DuckDbSqlGenerator {
     fn drop_extension(&self, name: &str) -> String {
         // DuckDB doesn't have UNINSTALL, extensions persist
         format!("-- Extension {} cannot be uninstalled", name)
+    }
+
+    /// Generate CREATE TYPE for enum.
+    fn create_enum(&self, enum_diff: &EnumDiff) -> String {
+        let values: Vec<String> = enum_diff
+            .values
+            .iter()
+            .map(|v| format!("'{}'", v))
+            .collect();
+        format!(
+            "CREATE TYPE \"{}\" AS ENUM ({});",
+            enum_diff.name,
+            values.join(", ")
+        )
+    }
+
+    /// Generate DROP TYPE.
+    fn drop_enum(&self, name: &str) -> String {
+        format!("DROP TYPE IF EXISTS \"{}\";", name)
+    }
+
+    /// Generate ALTER TYPE statements.
+    fn alter_enum(&self, alter: &EnumAlterDiff) -> Vec<String> {
+        let mut stmts = Vec::new();
+
+        for value in &alter.add_values {
+            stmts.push(format!(
+                "ALTER TYPE \"{}\" ADD VALUE '{}';",
+                alter.name, value
+            ));
+        }
+
+        // Note: DuckDB doesn't support removing enum values directly
+        // This would require recreating the type
+
+        stmts
     }
 }
 
@@ -2483,5 +2537,100 @@ mod duckdb_tests {
         assert!(migration.up.starts_with("-- Extension"));
         assert!(migration.up.contains("parquet"));
         assert!(migration.up.contains("cannot be uninstalled"));
+    }
+
+    #[test]
+    fn test_duckdb_create_enum() {
+        let generator = DuckDbSqlGenerator;
+        let enum_diff = EnumDiff {
+            name: "order_status".to_string(),
+            values: vec!["pending".to_string(), "active".to_string(), "archived".to_string()],
+        };
+
+        let sql = generator.create_enum(&enum_diff);
+        assert!(sql.contains("CREATE TYPE"));
+        assert!(sql.contains("\"order_status\""));
+        assert!(sql.contains("ENUM"));
+        assert!(sql.contains("'pending'"));
+        assert!(sql.contains("'active'"));
+        assert!(sql.contains("'archived'"));
+    }
+
+    #[test]
+    fn test_duckdb_drop_enum() {
+        let generator = DuckDbSqlGenerator;
+        let sql = generator.drop_enum("order_status");
+        assert!(sql.contains("DROP TYPE"));
+        assert!(sql.contains("\"order_status\""));
+    }
+
+    #[test]
+    fn test_duckdb_generate_with_enums() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.create_enums.push(EnumDiff {
+            name: "status".to_string(),
+            values: vec!["pending".to_string(), "active".to_string()],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(!migration.up.is_empty());
+        assert!(migration.up.contains("CREATE TYPE"));
+        assert!(migration.up.contains("\"status\""));
+        assert!(migration.up.contains("'pending'"));
+        assert!(migration.up.contains("'active'"));
+
+        // Check down migration
+        assert!(migration.down.contains("DROP TYPE"));
+        assert!(migration.down.contains("\"status\""));
+    }
+
+    #[test]
+    fn test_duckdb_alter_enum() {
+        let generator = DuckDbSqlGenerator;
+        let alter = EnumAlterDiff {
+            name: "order_status".to_string(),
+            add_values: vec!["cancelled".to_string(), "refunded".to_string()],
+            remove_values: vec![],
+        };
+
+        let stmts = generator.alter_enum(&alter);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains("ALTER TYPE"));
+        assert!(stmts[0].contains("\"order_status\""));
+        assert!(stmts[0].contains("ADD VALUE"));
+        assert!(stmts[0].contains("'cancelled'"));
+        assert!(!stmts[0].contains("IF NOT EXISTS"));
+        assert!(stmts[1].contains("'refunded'"));
+    }
+
+    #[test]
+    fn test_duckdb_generate_with_alter_enums() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.alter_enums.push(EnumAlterDiff {
+            name: "status".to_string(),
+            add_values: vec!["new_status".to_string()],
+            remove_values: vec![],
+        });
+
+        let migration = generator.generate(&diff);
+        assert!(!migration.up.is_empty());
+        assert!(migration.up.contains("ALTER TYPE"));
+        assert!(migration.up.contains("\"status\""));
+        assert!(migration.up.contains("ADD VALUE"));
+        assert!(migration.up.contains("'new_status'"));
+    }
+
+    #[test]
+    fn test_duckdb_generate_with_drop_enums() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.drop_enums.push("old_status".to_string());
+
+        let migration = generator.generate(&diff);
+        assert!(!migration.up.is_empty());
+        assert!(migration.up.contains("DROP TYPE"));
+        assert!(migration.up.contains("old_status"));
     }
 }
