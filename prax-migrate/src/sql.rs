@@ -1440,6 +1440,29 @@ impl DuckDbSqlGenerator {
             up.push(self.drop_index(&index.name));
         }
 
+        // Create views (after tables they depend on)
+        for view in &diff.create_views {
+            if view.is_materialized {
+                warnings.push(format!(
+                    "DuckDB does not support materialized views - generating regular view '{}' instead",
+                    view.view_name
+                ));
+            }
+            up.push(self.create_view(view));
+            down.push(self.drop_view(&view.view_name));
+        }
+
+        // Drop views
+        for name in &diff.drop_views {
+            up.push(self.drop_view(name));
+        }
+
+        // Alter views (drop and recreate)
+        for view in &diff.alter_views {
+            up.push(self.drop_view(&view.view_name));
+            up.push(self.create_view(view));
+        }
+
         MigrationSql {
             up: up.join("\n\n"),
             down: down.join("\n\n"),
@@ -1674,6 +1697,17 @@ impl DuckDbSqlGenerator {
     /// Generate DROP INDEX statement.
     fn drop_index(&self, name: &str) -> String {
         format!("DROP INDEX IF EXISTS \"{}\";", name)
+    }
+
+    /// Generate CREATE VIEW statement.
+    /// DuckDB does not support materialized views; always emits a regular view.
+    fn create_view(&self, view: &ViewDiff) -> String {
+        format!("CREATE VIEW \"{}\" AS\n{};", view.view_name, view.sql_query)
+    }
+
+    /// Generate DROP VIEW statement.
+    fn drop_view(&self, name: &str) -> String {
+        format!("DROP VIEW IF EXISTS \"{}\";", name)
     }
 }
 
@@ -3083,5 +3117,53 @@ mod duckdb_tests {
         assert!(migration
             .down
             .contains("DROP INDEX IF EXISTS \"idx_posts_user\""));
+    }
+
+    // --- Task 7: view creation ---
+
+    #[test]
+    fn test_duckdb_create_view() {
+        let generator = DuckDbSqlGenerator;
+        let view = ViewDiff {
+            name: "ActiveUsers".to_string(),
+            view_name: "active_users".to_string(),
+            sql_query: "SELECT * FROM users WHERE active = true".to_string(),
+            is_materialized: false,
+            refresh_interval: None,
+            fields: vec![],
+        };
+
+        let sql = generator.create_view(&view);
+        assert_eq!(
+            sql,
+            "CREATE VIEW \"active_users\" AS\nSELECT * FROM users WHERE active = true;"
+        );
+    }
+
+    #[test]
+    fn test_duckdb_materialized_view_generates_warning() {
+        let generator = DuckDbSqlGenerator;
+        let mut diff = SchemaDiff::default();
+        diff.create_views.push(ViewDiff {
+            name: "UserStats".to_string(),
+            view_name: "user_stats".to_string(),
+            sql_query: "SELECT COUNT(*) FROM users".to_string(),
+            is_materialized: true,
+            refresh_interval: None,
+            fields: vec![],
+        });
+
+        let migration = generator.generate(&diff);
+        let has_mat_warning = migration
+            .warnings
+            .iter()
+            .any(|w| w.contains("materialized views") && w.contains("user_stats"));
+        assert!(
+            has_mat_warning,
+            "Expected materialized view warning, got: {:?}",
+            migration.warnings
+        );
+        // The view SQL should still be generated as a regular view
+        assert!(migration.up.contains("CREATE VIEW \"user_stats\" AS"));
     }
 }
