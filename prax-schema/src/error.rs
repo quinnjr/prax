@@ -100,6 +100,38 @@ pub enum SchemaError {
         #[related]
         errors: Vec<SchemaError>,
     },
+
+    /// A Vector field is missing a required @dim(N) attribute.
+    #[error("field '{field}' of type Vector is missing required @dim attribute")]
+    #[diagnostic(code(prax::schema::missing_vector_dimension))]
+    MissingVectorDimension {
+        /// Field name.
+        field: String,
+    },
+
+    /// A Vector field has an invalid @vectorType value.
+    #[error("invalid vector element type '{value}' (expected one of: float2, float4, float8, int1, int2, int4)")]
+    #[diagnostic(code(prax::schema::invalid_vector_type))]
+    InvalidVectorType {
+        /// Supplied type value.
+        value: String,
+    },
+
+    /// A Vector field has an invalid @metric value.
+    #[error("invalid vector metric '{value}' (expected one of: cosine, l2, inner)")]
+    #[diagnostic(code(prax::schema::invalid_vector_metric))]
+    InvalidVectorMetric {
+        /// Supplied metric value.
+        value: String,
+    },
+
+    /// A Vector field has an invalid @index value.
+    #[error("invalid vector index '{value}' (expected: hnsw)")]
+    #[diagnostic(code(prax::schema::invalid_vector_index))]
+    InvalidVectorIndex {
+        /// Supplied index value.
+        value: String,
+    },
 }
 
 impl SchemaError {
