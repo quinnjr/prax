@@ -197,6 +197,10 @@ pub struct FieldDiff {
     pub is_auto_increment: bool,
     /// Whether this is unique.
     pub is_unique: bool,
+    /// Optional vector column metadata. Only used by SQLite backends; other
+    /// generators ignore this field. Populated by the schema parser when a
+    /// field declares `Vector @dim(N)`.
+    pub vector: Option<VectorColumnInfo>,
 }
 
 /// Diff for altering a field.
@@ -614,6 +618,7 @@ fn field_to_diff(field: &Field) -> FieldDiff {
         is_primary_key,
         is_auto_increment,
         is_unique,
+        vector: None,
     }
 }
 
@@ -838,6 +843,84 @@ fn diff_fields(source: &Field, target: &Field) -> Option<FieldAlterDiff> {
     })
 }
 
+/// Metadata describing a vector column.
+///
+/// Populated by the schema parser when a field is declared with the
+/// `Vector` type and the `@dim(...)`, `@vectorType(...)`, `@metric(...)`,
+/// and `@index(...)` attributes. Only consumed by the SQLite generator;
+/// Postgres/MySQL/MSSQL/DuckDB generators treat fields with `vector = Some(_)`
+/// as an error (reported by the schema differ).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorColumnInfo {
+    /// Vector dimensionality (required).
+    pub dimensions: u32,
+    /// Element type (default: Float4).
+    pub element_type: VectorElementType,
+    /// Distance metric (default: Cosine).
+    pub metric: VectorDistanceMetric,
+    /// Optional HNSW index.
+    pub index: Option<VectorIndexKind>,
+}
+
+/// Vector element types supported by sqlite-vector-rs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorElementType {
+    Float2,
+    Float4,
+    Float8,
+    Int1,
+    Int2,
+    Int4,
+}
+
+impl VectorElementType {
+    /// Lowercase string identifier used in sqlite-vector-rs DDL.
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            VectorElementType::Float2 => "float2",
+            VectorElementType::Float4 => "float4",
+            VectorElementType::Float8 => "float8",
+            VectorElementType::Int1 => "int1",
+            VectorElementType::Int2 => "int2",
+            VectorElementType::Int4 => "int4",
+        }
+    }
+}
+
+/// Vector distance metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorDistanceMetric {
+    Cosine,
+    L2,
+    InnerProduct,
+}
+
+impl VectorDistanceMetric {
+    /// Lowercase string identifier used in sqlite-vector-rs DDL.
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            VectorDistanceMetric::Cosine => "cosine",
+            VectorDistanceMetric::L2 => "l2",
+            VectorDistanceMetric::InnerProduct => "inner",
+        }
+    }
+}
+
+/// Vector index kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorIndexKind {
+    Hnsw,
+}
+
+impl VectorIndexKind {
+    /// Lowercase string identifier used in sqlite-vector-rs DDL.
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            VectorIndexKind::Hnsw => "hnsw",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,5 +1019,58 @@ mod tests {
         assert_eq!(view_diff.fields.len(), 2);
         assert_eq!(view_diff.fields[0].name, "id");
         assert_eq!(view_diff.fields[1].column_name, "user_name");
+    }
+
+    #[test]
+    fn test_field_diff_defaults_vector_to_none() {
+        // Fields created the old way still compile after the new field is added.
+        let f = FieldDiff {
+            name: "id".to_string(),
+            column_name: "id".to_string(),
+            sql_type: "INTEGER".to_string(),
+            nullable: false,
+            default: None,
+            is_primary_key: true,
+            is_auto_increment: true,
+            is_unique: false,
+            vector: None,
+        };
+        assert!(f.vector.is_none());
+    }
+
+    #[test]
+    fn test_vector_column_info_populated() {
+        let v = VectorColumnInfo {
+            dimensions: 1536,
+            element_type: VectorElementType::Float4,
+            metric: VectorDistanceMetric::Cosine,
+            index: Some(VectorIndexKind::Hnsw),
+        };
+        assert_eq!(v.dimensions, 1536);
+        assert_eq!(v.element_type, VectorElementType::Float4);
+        assert_eq!(v.metric, VectorDistanceMetric::Cosine);
+        assert_eq!(v.index, Some(VectorIndexKind::Hnsw));
+    }
+
+    #[test]
+    fn test_element_type_sql_strings() {
+        assert_eq!(VectorElementType::Float2.as_sql(), "float2");
+        assert_eq!(VectorElementType::Float4.as_sql(), "float4");
+        assert_eq!(VectorElementType::Float8.as_sql(), "float8");
+        assert_eq!(VectorElementType::Int1.as_sql(), "int1");
+        assert_eq!(VectorElementType::Int2.as_sql(), "int2");
+        assert_eq!(VectorElementType::Int4.as_sql(), "int4");
+    }
+
+    #[test]
+    fn test_metric_sql_strings() {
+        assert_eq!(VectorDistanceMetric::Cosine.as_sql(), "cosine");
+        assert_eq!(VectorDistanceMetric::L2.as_sql(), "l2");
+        assert_eq!(VectorDistanceMetric::InnerProduct.as_sql(), "inner");
+    }
+
+    #[test]
+    fn test_index_kind_sql_strings() {
+        assert_eq!(VectorIndexKind::Hnsw.as_sql(), "hnsw");
     }
 }
