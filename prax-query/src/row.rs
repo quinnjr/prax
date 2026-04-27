@@ -122,6 +122,49 @@ pub trait RowRef {
     fn get_cow_str(&self, column: &str) -> Result<Cow<'_, str>, RowError> {
         self.get_str(column).map(Cow::Borrowed)
     }
+
+    fn get_datetime_utc(&self, column: &str) -> Result<chrono::DateTime<chrono::Utc>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "datetime_utc not supported by this row type".into() })
+    }
+    fn get_datetime_utc_opt(&self, column: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "datetime_utc_opt not supported by this row type".into() })
+    }
+    fn get_naive_datetime(&self, column: &str) -> Result<chrono::NaiveDateTime, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_datetime not supported".into() })
+    }
+    fn get_naive_datetime_opt(&self, column: &str) -> Result<Option<chrono::NaiveDateTime>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_datetime_opt not supported".into() })
+    }
+    fn get_naive_date(&self, column: &str) -> Result<chrono::NaiveDate, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_date not supported".into() })
+    }
+    fn get_naive_date_opt(&self, column: &str) -> Result<Option<chrono::NaiveDate>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_date_opt not supported".into() })
+    }
+    fn get_naive_time(&self, column: &str) -> Result<chrono::NaiveTime, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_time not supported".into() })
+    }
+    fn get_naive_time_opt(&self, column: &str) -> Result<Option<chrono::NaiveTime>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "naive_time_opt not supported".into() })
+    }
+    fn get_uuid(&self, column: &str) -> Result<uuid::Uuid, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "uuid not supported".into() })
+    }
+    fn get_uuid_opt(&self, column: &str) -> Result<Option<uuid::Uuid>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "uuid_opt not supported".into() })
+    }
+    fn get_json(&self, column: &str) -> Result<serde_json::Value, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "json not supported".into() })
+    }
+    fn get_json_opt(&self, column: &str) -> Result<Option<serde_json::Value>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "json_opt not supported".into() })
+    }
+    fn get_decimal(&self, column: &str) -> Result<rust_decimal::Decimal, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "decimal not supported".into() })
+    }
+    fn get_decimal_opt(&self, column: &str) -> Result<Option<rust_decimal::Decimal>, RowError> {
+        Err(RowError::TypeConversion { column: column.into(), message: "decimal_opt not supported".into() })
+    }
 }
 
 /// Trait for types that can be deserialized from a row reference (zero-copy).
@@ -368,6 +411,49 @@ impl FromColumn for Option<Vec<u8>> {
     }
 }
 
+impl FromColumn for chrono::DateTime<chrono::Utc> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_datetime_utc(column) }
+}
+impl FromColumn for Option<chrono::DateTime<chrono::Utc>> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_datetime_utc_opt(column) }
+}
+impl FromColumn for chrono::NaiveDateTime {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_datetime(column) }
+}
+impl FromColumn for Option<chrono::NaiveDateTime> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_datetime_opt(column) }
+}
+impl FromColumn for chrono::NaiveDate {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_date(column) }
+}
+impl FromColumn for Option<chrono::NaiveDate> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_date_opt(column) }
+}
+impl FromColumn for chrono::NaiveTime {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_time(column) }
+}
+impl FromColumn for Option<chrono::NaiveTime> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_naive_time_opt(column) }
+}
+impl FromColumn for uuid::Uuid {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_uuid(column) }
+}
+impl FromColumn for Option<uuid::Uuid> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_uuid_opt(column) }
+}
+impl FromColumn for serde_json::Value {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_json(column) }
+}
+impl FromColumn for Option<serde_json::Value> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_json_opt(column) }
+}
+impl FromColumn for rust_decimal::Decimal {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_decimal(column) }
+}
+impl FromColumn for Option<rust_decimal::Decimal> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> { row.get_decimal_opt(column) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,5 +619,13 @@ mod tests {
 
         let owned: RowData = RowData::owned("world".to_string());
         assert_eq!(owned.as_str(), "world");
+    }
+
+    #[test]
+    fn default_datetime_method_errors() {
+        let mut data = std::collections::HashMap::new();
+        data.insert("created_at".into(), "2026-04-27T00:00:00Z".into());
+        let row = MockRow { data };
+        assert!(matches!(row.get_datetime_utc("created_at"), Err(RowError::TypeConversion { .. })));
     }
 }
