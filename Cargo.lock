@@ -4733,6 +4733,7 @@ dependencies = [
  "parking_lot",
  "prax-query",
  "rusqlite",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tempfile",

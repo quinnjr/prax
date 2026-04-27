@@ -54,6 +54,10 @@ impl MssqlEngine {
 }
 
 impl QueryEngine for MssqlEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Mssql
+    }
+
     fn query_many<T: Model + Send + 'static>(
         &self,
         sql: &str,

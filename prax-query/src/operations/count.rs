@@ -124,6 +124,10 @@ mod tests {
     }
 
     impl QueryEngine for MockEngine {
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
         fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,

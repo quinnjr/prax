@@ -81,6 +81,11 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Different implementations can be provided for different databases
 /// (PostgreSQL, MySQL, SQLite, etc.).
 pub trait QueryEngine: Send + Sync + Clone + 'static {
+    /// The SQL dialect this engine targets. Non-SQL engines (e.g., MongoDB)
+    /// return `&NotSql`, which produces inert placeholders — any attempt to
+    /// build SQL through them is meaningless and surfaces as empty strings.
+    fn dialect(&self) -> &dyn crate::dialect::SqlDialect;
+
     /// Execute a SELECT query and return rows.
     fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
         &self,

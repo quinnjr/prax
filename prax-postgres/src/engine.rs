@@ -43,6 +43,10 @@ impl PgEngine {
 }
 
 impl QueryEngine for PgEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Postgres
+    }
+
     fn query_many<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,

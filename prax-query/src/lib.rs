@@ -157,6 +157,7 @@ pub mod data;
 #[allow(dead_code, unused_imports)]
 pub mod data_cache;
 pub mod db_optimize;
+pub mod dialect;
 pub mod error;
 pub mod extension;
 pub mod filter;
@@ -281,6 +282,9 @@ pub use middleware::{
     MiddlewareStack, QueryContext, QueryMetadata, QueryMetrics, QueryType, RetryMiddleware,
     TimingMiddleware,
 };
+
+// Re-export dialect types
+pub use dialect::{Mssql, Mysql, NotSql, Postgres, SqlDialect, Sqlite};
 
 // Re-export connection types
 pub use connection::{

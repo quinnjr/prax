@@ -302,6 +302,14 @@ fn bind_sqlite_param<'q>(
 // ==================== QueryEngine Trait Implementation ====================
 
 impl QueryEngine for SqlxEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        match self.backend {
+            DatabaseBackend::Postgres => &prax_query::dialect::Postgres,
+            DatabaseBackend::MySql => &prax_query::dialect::Mysql,
+            DatabaseBackend::Sqlite => &prax_query::dialect::Sqlite,
+        }
+    }
+
     fn query_many<T: Model + Send + 'static>(
         &self,
         sql: &str,
