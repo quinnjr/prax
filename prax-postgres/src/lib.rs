@@ -35,6 +35,7 @@ pub mod engine;
 pub mod error;
 pub mod pool;
 pub mod row;
+pub mod row_ref;
 pub mod statement;
 pub mod types;
 
