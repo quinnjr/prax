@@ -119,8 +119,8 @@ Expected: `Finished 'dev' profile ...` with zero compile errors.
 
 - [ ] **Step 2: Run unit test suite (no DB required)**
 
-Run: `cargo test --workspace --lib --no-default-features`
-Expected: all tests pass. Any pre-existing failure MUST be fixed before continuing per the project rule "the PR that finds a failure is the PR that fixes it."
+Run: `cargo test --workspace --lib`
+Expected: all tests pass. Do NOT use `--no-default-features` at the workspace level — `prax-sqlx`'s `SqlxRow` / `SqlxPool` / `SqlxConnection` / `SqlxTransaction` enums have every variant gated by a backend feature, so stripping defaults leaves them uninhabited and `match` on them triggers E0004. Any pre-existing failure MUST be fixed before continuing per the project rule "the PR that finds a failure is the PR that fixes it."
 
 - [ ] **Step 3: Start Dockerised databases**
 
