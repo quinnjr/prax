@@ -54,8 +54,11 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          # Run all prax-query benchmarks with JSON output
-          cargo bench --package prax-query -- --save-baseline pr-${{ github.sha }}
+          # Run all prax-query benchmarks with JSON output.
+          # `--benches` excludes lib/bin unittest targets compiled in bench
+          # profile — they use the libtest harness which doesn't understand
+          # criterion's `--save-baseline` flag and fails the whole job.
+          cargo bench --package prax-query --benches -- --save-baseline pr-${{ github.sha }}
 
       - name: Compare with baseline (on PR)
         if: github.event_name == 'pull_request'
@@ -69,7 +72,7 @@ jobs:
             echo "Comparing against cached baseline..." >> $GITHUB_STEP_SUMMARY
 
             # Run comparison and capture regressions
-            cargo bench --package prax-query -- --load-baseline main --save-baseline pr-${{ github.sha }} 2>&1 | tee bench_output.txt || true
+            cargo bench --package prax-query --benches -- --load-baseline main --save-baseline pr-${{ github.sha }} 2>&1 | tee bench_output.txt || true
 
             # Check for significant regressions (>10%)
             if grep -q "Performance has regressed" bench_output.txt; then
@@ -87,7 +90,7 @@ jobs:
         if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
         run: |
           # Update the baseline for future comparisons
-          cargo bench --package prax-query -- --save-baseline ${{ github.ref_name }}
+          cargo bench --package prax-query --benches -- --save-baseline ${{ github.ref_name }}
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
