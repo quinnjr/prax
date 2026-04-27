@@ -56,4 +56,3 @@ pretty_assertions = { workspace = true }
 [features]
 default = ["rustls"]
 rustls = ["tiberius/rustls"]
-native-tls = ["tiberius/native-tls"]
