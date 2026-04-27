@@ -59,7 +59,8 @@ impl RowRef for SqliteRowRef {
     }
     fn get_i32_opt(&self, c: &str) -> Result<Option<i32>, RowError> {
         match self.values.get(c) {
-            None | Some(Value::Null) => Ok(None),
+            None => Err(RowError::ColumnNotFound(c.into())),
+            Some(Value::Null) => Ok(None),
             Some(Value::Integer(i)) => i32::try_from(*i)
                 .map(Some)
                 .map_err(|_| Self::tc(c, "overflow")),
@@ -79,7 +80,8 @@ impl RowRef for SqliteRowRef {
     }
     fn get_i64_opt(&self, c: &str) -> Result<Option<i64>, RowError> {
         match self.values.get(c) {
-            None | Some(Value::Null) => Ok(None),
+            None => Err(RowError::ColumnNotFound(c.into())),
+            Some(Value::Null) => Ok(None),
             Some(Value::Integer(i)) => Ok(Some(*i)),
             Some(_) => Err(Self::tc(c, "not an integer")),
         }
@@ -98,7 +100,8 @@ impl RowRef for SqliteRowRef {
     }
     fn get_f64_opt(&self, c: &str) -> Result<Option<f64>, RowError> {
         match self.values.get(c) {
-            None | Some(Value::Null) => Ok(None),
+            None => Err(RowError::ColumnNotFound(c.into())),
+            Some(Value::Null) => Ok(None),
             Some(Value::Real(f)) => Ok(Some(*f)),
             Some(Value::Integer(i)) => Ok(Some(*i as f64)),
             Some(_) => Err(Self::tc(c, "not a number")),
@@ -123,7 +126,8 @@ impl RowRef for SqliteRowRef {
     }
     fn get_str_opt(&self, c: &str) -> Result<Option<&str>, RowError> {
         match self.values.get(c) {
-            None | Some(Value::Null) => Ok(None),
+            None => Err(RowError::ColumnNotFound(c.into())),
+            Some(Value::Null) => Ok(None),
             Some(Value::Text(s)) => Ok(Some(s.as_str())),
             Some(_) => Err(Self::tc(c, "not text")),
         }
@@ -142,7 +146,8 @@ impl RowRef for SqliteRowRef {
     }
     fn get_bytes_opt(&self, c: &str) -> Result<Option<&[u8]>, RowError> {
         match self.values.get(c) {
-            None | Some(Value::Null) => Ok(None),
+            None => Err(RowError::ColumnNotFound(c.into())),
+            Some(Value::Null) => Ok(None),
             Some(Value::Blob(b)) => Ok(Some(b.as_slice())),
             Some(Value::Text(s)) => Ok(Some(s.as_bytes())),
             Some(_) => Err(Self::tc(c, "not blob")),
