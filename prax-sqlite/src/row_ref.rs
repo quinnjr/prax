@@ -165,6 +165,60 @@ impl RowRef for SqliteRowRef {
                 .map_err(|e| Self::tc(c, e.to_string())),
         }
     }
+    fn get_naive_datetime(&self, c: &str) -> Result<chrono::NaiveDateTime, RowError> {
+        let s = self.get_str(c)?;
+        // Accept RFC3339 (strip tz to naive) OR naive "YYYY-MM-DD HH:MM:SS[.fff]" / "YYYY-MM-DDTHH:MM:SS[.fff]" formats.
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+            return Ok(dt.naive_utc());
+        }
+        for fmt in [
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M:%S",
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M:%S",
+        ] {
+            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+                return Ok(dt);
+            }
+        }
+        Err(Self::tc(
+            c,
+            format!("unrecognized naive datetime format: {s}"),
+        ))
+    }
+    fn get_naive_datetime_opt(&self, c: &str) -> Result<Option<chrono::NaiveDateTime>, RowError> {
+        match self.get_str_opt(c)? {
+            None => Ok(None),
+            Some(_) => self.get_naive_datetime(c).map(Some),
+        }
+    }
+    fn get_naive_date(&self, c: &str) -> Result<chrono::NaiveDate, RowError> {
+        let s = self.get_str(c)?;
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| Self::tc(c, e.to_string()))
+    }
+    fn get_naive_date_opt(&self, c: &str) -> Result<Option<chrono::NaiveDate>, RowError> {
+        match self.get_str_opt(c)? {
+            None => Ok(None),
+            Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .map(Some)
+                .map_err(|e| Self::tc(c, e.to_string())),
+        }
+    }
+    fn get_naive_time(&self, c: &str) -> Result<chrono::NaiveTime, RowError> {
+        let s = self.get_str(c)?;
+        for fmt in ["%H:%M:%S%.f", "%H:%M:%S"] {
+            if let Ok(t) = chrono::NaiveTime::parse_from_str(s, fmt) {
+                return Ok(t);
+            }
+        }
+        Err(Self::tc(c, format!("unrecognized naive time format: {s}")))
+    }
+    fn get_naive_time_opt(&self, c: &str) -> Result<Option<chrono::NaiveTime>, RowError> {
+        match self.get_str_opt(c)? {
+            None => Ok(None),
+            Some(_) => self.get_naive_time(c).map(Some),
+        }
+    }
     fn get_uuid(&self, c: &str) -> Result<uuid::Uuid, RowError> {
         uuid::Uuid::parse_str(self.get_str(c)?).map_err(|e| Self::tc(c, e.to_string()))
     }
