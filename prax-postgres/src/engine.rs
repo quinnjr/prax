@@ -43,7 +43,7 @@ impl PgEngine {
 }
 
 impl QueryEngine for PgEngine {
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -67,15 +67,11 @@ impl QueryEngine for PgEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // For now, we'll return an empty vec since we need FromPgRow implementation
-            // In practice, this would deserialize rows into T
-            // This is a placeholder - real implementation would use FromPgRow
-            let _ = rows;
-            Ok(Vec::new())
+            crate::deserialize::rows_into::<T>(rows)
         })
     }
 
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -94,7 +90,7 @@ impl QueryEngine for PgEngine {
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                 pg_params.iter().map(|p| p.as_ref() as _).collect();
 
-            let _row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
+            let row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
                 if e.to_string().contains("no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
@@ -102,14 +98,11 @@ impl QueryEngine for PgEngine {
                 }
             })?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            crate::deserialize::row_into::<T>(row)
         })
     }
 
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -133,19 +126,11 @@ impl QueryEngine for PgEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            match row {
-                Some(_row) => {
-                    // Placeholder - would deserialize row into T
-                    Err(prax_query::QueryError::internal(
-                        "deserialization not yet implemented".to_string(),
-                    ))
-                }
-                None => Ok(None),
-            }
+            row.map(crate::deserialize::row_into::<T>).transpose()
         })
     }
 
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -164,19 +149,16 @@ impl QueryEngine for PgEngine {
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                 pg_params.iter().map(|p| p.as_ref() as _).collect();
 
-            let _row = conn
+            let row = conn
                 .query_one(&sql, &param_refs)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            crate::deserialize::row_into::<T>(row)
         })
     }
 
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -200,9 +182,7 @@ impl QueryEngine for PgEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize rows into Vec<T>
-            let _ = rows;
-            Ok(Vec::new())
+            crate::deserialize::rows_into::<T>(rows)
         })
     }
 

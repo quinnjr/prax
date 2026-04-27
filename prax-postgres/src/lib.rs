@@ -31,6 +31,7 @@
 
 pub mod config;
 pub mod connection;
+pub mod deserialize;
 pub mod engine;
 pub mod error;
 pub mod pool;
