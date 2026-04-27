@@ -54,5 +54,8 @@ async fn query_many_returns_typed_rows() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
     assert_eq!(rows[0].email, "alice@example.com");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].email, "bob@example.com");
 }
