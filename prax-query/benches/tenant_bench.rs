@@ -7,12 +7,8 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use prax_query::tenant::{
-    TenantContext, TenantId,
-    cache::{CacheConfig, CacheLookup, ShardedTenantCache, TenantCache},
-    pool::{PoolConfig, TenantPoolManager},
-    prepared::{StatementCache, StatementKey},
-    rls::RlsManager,
-    task_local::{current_tenant_id, has_tenant, with_tenant},
+    CacheConfig, RlsManager, ShardedTenantCache, StatementCache, StatementKey, TenantCache,
+    TenantContext, TenantId, TenantPoolManager, current_tenant_id, has_tenant, with_tenant,
 };
 
 fn bench_tenant_context(c: &mut Criterion) {

@@ -11,6 +11,13 @@ documentation = "https://docs.rs/prax-query"
 keywords = ["orm", "query-builder", "database", "sql", "async"]
 categories = ["database", "asynchronous"]
 
+[lib]
+# Disable the default libtest bench target so `cargo bench` doesn't try
+# to run `src/lib.rs` unittests through libtest — they can't understand
+# criterion flags like `--save-baseline` and crash the Benchmark
+# Regression Check CI job.
+bench = false
+
 [dependencies]
 # Async runtime
 tokio = { workspace = true }

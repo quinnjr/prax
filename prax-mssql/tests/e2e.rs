@@ -1,0 +1,254 @@
+//! End-to-end tests for prax-mssql against a live SQL Server instance.
+//!
+//! Gated by `PRAX_E2E=1` and requires `MSSQL_URL`.
+//!
+//! ```sh
+//! docker compose up -d mssql
+//! docker compose run --rm test-mssql
+//! ```
+//!
+//! MSSQL assigns object names per-database and cleaning up is slow, so
+//! each test creates a uniquely named table and drops it at the end.
+
+#![cfg(test)]
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
+
+use prax_mssql::{MssqlConfig, MssqlPool};
+
+static TABLE_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+fn unique_table(prefix: &str) -> String {
+    let n = TABLE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    format!("e2e_{prefix}_{pid}_{n}")
+}
+
+fn skip_unless_e2e() -> Option<String> {
+    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
+        return None;
+    }
+    std::env::var("MSSQL_URL").ok()
+}
+
+async fn pool() -> MssqlPool {
+    let url = skip_unless_e2e().expect("PRAX_E2E=1 and MSSQL_URL required");
+    let config = MssqlConfig::from_connection_string(&url).expect("parse mssql url");
+    MssqlPool::builder()
+        .config(config)
+        .max_connections(4)
+        .connection_timeout(Duration::from_secs(15))
+        .trust_cert(true)
+        .build()
+        .await
+        .expect("connect to mssql")
+}
+
+async fn drop_table(pool: &MssqlPool, table: &str) {
+    let mut conn = pool.get().await.expect("cleanup conn");
+    let _ = conn
+        .batch_execute(&format!(
+            "IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"
+        ))
+        .await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_crud_roundtrip() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("crud");
+    drop_table(&pool, &table).await;
+
+    let mut conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "CREATE TABLE dbo.{table} (
+            id INT IDENTITY(1,1) PRIMARY KEY,
+            name NVARCHAR(64) NOT NULL,
+            score INT NOT NULL
+        )"
+    ))
+    .await
+    .expect("create table");
+
+    // INSERT — tiberius uses @P1, @P2, ... for parameter markers.
+    let n = conn
+        .execute(
+            &format!("INSERT INTO dbo.{table} (name, score) VALUES (@P1, @P2)"),
+            &[&"alice", &42_i32],
+        )
+        .await
+        .expect("insert");
+    assert_eq!(n, 1);
+
+    // SELECT
+    let rows = conn
+        .query(&format!("SELECT name, score FROM dbo.{table}"), &[])
+        .await
+        .expect("select");
+    assert_eq!(rows.len(), 1);
+    let name: &str = rows[0].get(0).expect("name");
+    let score: i32 = rows[0].get(1).expect("score");
+    assert_eq!(name, "alice");
+    assert_eq!(score, 42);
+
+    // UPDATE
+    let n = conn
+        .execute(
+            &format!("UPDATE dbo.{table} SET score = @P1 WHERE name = @P2"),
+            &[&100_i32, &"alice"],
+        )
+        .await
+        .expect("update");
+    assert_eq!(n, 1);
+
+    // DELETE
+    let n = conn
+        .execute(&format!("DELETE FROM dbo.{table}"), &[])
+        .await
+        .expect("delete");
+    assert_eq!(n, 1);
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_transaction_commit_and_rollback() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("tx");
+    drop_table(&pool, &table).await;
+
+    let mut conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, v INT NOT NULL)"
+    ))
+    .await
+    .expect("create");
+
+    // Commit path
+    conn.begin_transaction().await.expect("begin");
+    conn.execute(
+        &format!("INSERT INTO dbo.{table} (v) VALUES (@P1)"),
+        &[&1_i32],
+    )
+    .await
+    .expect("insert 1");
+    conn.commit().await.expect("commit");
+
+    // Rollback path
+    conn.begin_transaction().await.expect("begin");
+    conn.execute(
+        &format!("INSERT INTO dbo.{table} (v) VALUES (@P1)"),
+        &[&999_i32],
+    )
+    .await
+    .expect("insert doomed");
+    conn.rollback().await.expect("rollback");
+
+    let rows = conn
+        .query(&format!("SELECT v FROM dbo.{table} ORDER BY v"), &[])
+        .await
+        .expect("select");
+    let vs: Vec<i32> = rows.iter().map(|r| r.get::<i32, _>(0).unwrap()).collect();
+    assert_eq!(vs, vec![1], "only committed row should survive");
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_opt_missing_row() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("opt");
+    drop_table(&pool, &table).await;
+
+    let mut conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!("CREATE TABLE dbo.{table} (id INT PRIMARY KEY)"))
+        .await
+        .expect("create");
+
+    let row = conn
+        .query_opt(&format!("SELECT id FROM dbo.{table} WHERE id = 1"), &[])
+        .await
+        .expect("query_opt");
+    assert!(row.is_none());
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_concurrent_writes_via_pool() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("conc");
+    drop_table(&pool, &table).await;
+
+    {
+        let mut conn = pool.get().await.expect("conn");
+        conn.batch_execute(&format!(
+            "CREATE TABLE dbo.{table} (
+                id INT IDENTITY(1,1) PRIMARY KEY,
+                worker INT NOT NULL,
+                seq INT NOT NULL
+            )"
+        ))
+        .await
+        .expect("create");
+    }
+
+    let workers = 4_i32;
+    let per_worker = 25_i32;
+    let mut tasks = Vec::new();
+    for w in 0..workers {
+        let pool = pool.clone();
+        let table = table.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut conn = pool.get().await.expect("conn");
+            for s in 0..per_worker {
+                conn.execute(
+                    &format!("INSERT INTO dbo.{table} (worker, seq) VALUES (@P1, @P2)"),
+                    &[&w, &s],
+                )
+                .await
+                .expect("insert");
+            }
+        }));
+    }
+    for t in tasks {
+        t.await.expect("join");
+    }
+
+    let mut conn = pool.get().await.expect("conn");
+    let row = conn
+        .query_one(&format!("SELECT COUNT(*) FROM dbo.{table}"), &[])
+        .await
+        .expect("count");
+    let count: i32 = row.get(0).expect("count");
+    assert_eq!(count, workers * per_worker);
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_pool_is_healthy() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    assert!(pool.is_healthy().await);
+}
