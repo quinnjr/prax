@@ -10,6 +10,12 @@ ignore = [
     # These will be resolved when upstream crates update their dependencies.
     { id = "RUSTSEC-2023-0071", reason = "proc-macro-error is unmaintained (via diesel), waiting for upstream fix" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (via mysql_async), waiting for upstream fix" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained (via mongodb 2.x / scylla / cdrs-tokio), waiting for upstream to migrate to derive_more" },
+    { id = "RUSTSEC-2026-0111", reason = "diesel SQLite UTF-8 corruption is in a dev-dependency used only for ORM-comparison benchmarks; not on the production path" },
+    { id = "RUSTSEC-2024-0421", reason = "idna punycode issue is transitive via url crate; waiting for url to pick up idna >= 1.0" },
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki name constraint for URI names — transitive via multiple driver TLS stacks; waiting for upstream bumps" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraint — transitive; waiting for upstream bumps" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic — transitive; waiting for upstream bumps" },
 ]
 
 # This section is considered when running `cargo deny check licenses`

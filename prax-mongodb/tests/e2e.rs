@@ -209,7 +209,10 @@ async fn e2e_client_is_healthy_and_lists_collections() {
         .expect("insert");
 
     let names = client.list_collections().await.expect("list_collections");
-    assert!(names.iter().any(|n| n == &name), "expected {name} in {names:?}");
+    assert!(
+        names.iter().any(|n| n == &name),
+        "expected {name} in {names:?}"
+    );
 
     client.drop_collection(&name).await.expect("cleanup");
 }

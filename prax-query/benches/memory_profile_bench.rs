@@ -266,17 +266,21 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
     });
 
     group.bench_function("interned_filter_chain", |b| {
-        let interner = GlobalInterner::get_instance();
+        // `FieldName` is a `Cow<'static, str>`, so we need owned strings
+        // from the interner. `to_cow()` gives us `Cow::Owned` which
+        // clones cheaply each iteration — the benchmark's point is
+        // measuring the interner's cost, not the downstream conversion.
+        let interner = GlobalInterner::get();
         let user_id = interner.intern("user_id");
         let status = interner.intern("status");
         let created_at = interner.intern("created_at");
 
         b.iter(|| {
             let filter = Filter::and(vec![
-                Filter::Equals(user_id.as_ref().into(), FilterValue::Int(1)),
-                Filter::Equals(status.as_ref().into(), FilterValue::String("active".into())),
+                Filter::Equals(user_id.to_cow(), FilterValue::Int(1)),
+                Filter::Equals(status.to_cow(), FilterValue::String("active".into())),
                 Filter::Gt(
-                    created_at.as_ref().into(),
+                    created_at.to_cow(),
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
@@ -287,15 +291,22 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
     group.bench_function("arena_filter_chain", |b| {
         let arena = QueryArena::new();
 
+        // `ScopedFilter<'a>` is tied to the scope's lifetime, so we can't
+        // return it out of `scope()`. Render it to owned SQL inside the
+        // scope instead — that's what real consumers would do anyway.
         b.iter(|| {
-            let filter = arena.scope(|s| {
-                s.and(vec![
+            let sql = arena.scope(|s| {
+                let filter = s.and(vec![
                     s.eq("user_id", 1),
                     s.eq("status", "active"),
                     s.gt("created_at", "2024-01-01"),
-                ])
+                ]);
+                let mut buf = String::new();
+                let mut idx = 0;
+                filter.write_sql(&mut buf, &mut idx);
+                buf
             });
-            black_box(filter)
+            black_box(sql)
         });
     });
 
@@ -398,7 +409,7 @@ fn bench_allocation_throughput(c: &mut Criterion) {
             BenchmarkId::new("interned_strings", count),
             &count,
             |b, &count| {
-                let interner = ScopedInterner::new();
+                let mut interner = ScopedInterner::new();
 
                 b.iter(|| {
                     let mut interned = Vec::with_capacity(count);

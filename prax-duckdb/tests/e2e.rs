@@ -237,7 +237,9 @@ async fn e2e_transaction_rollback_preserves_state() {
     .await
     .expect("seed");
 
-    conn.execute_batch("BEGIN TRANSACTION").await.expect("begin");
+    conn.execute_batch("BEGIN TRANSACTION")
+        .await
+        .expect("begin");
     conn.execute(
         "UPDATE acct SET bal = ? WHERE id = ?",
         &[FilterValue::Int(0), FilterValue::Int(1)],

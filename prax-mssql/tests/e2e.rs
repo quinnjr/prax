@@ -174,11 +174,9 @@ async fn e2e_query_opt_missing_row() {
     drop_table(&pool, &table).await;
 
     let mut conn = pool.get().await.expect("conn");
-    conn.batch_execute(&format!(
-        "CREATE TABLE dbo.{table} (id INT PRIMARY KEY)"
-    ))
-    .await
-    .expect("create");
+    conn.batch_execute(&format!("CREATE TABLE dbo.{table} (id INT PRIMARY KEY)"))
+        .await
+        .expect("create");
 
     let row = conn
         .query_opt(&format!("SELECT id FROM dbo.{table} WHERE id = 1"), &[])

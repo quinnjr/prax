@@ -108,10 +108,7 @@ async fn e2e_crud_roundtrip() {
     assert_eq!(row["score"], serde_json::json!(100));
 
     // DELETE
-    let n = conn
-        .execute("DELETE FROM e2e_crud")
-        .await
-        .expect("delete");
+    let n = conn.execute("DELETE FROM e2e_crud").await.expect("delete");
     assert_eq!(n, 1);
 }
 

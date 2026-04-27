@@ -203,7 +203,10 @@ async fn e2e_lightweight_transaction_insert_if_not_exists() {
         .await
         .expect("select");
     let rows = result.rows.expect("rows");
-    let v = rows[0].columns[0].as_ref().and_then(|v| v.as_text()).cloned();
+    let v = rows[0].columns[0]
+        .as_ref()
+        .and_then(|v| v.as_text())
+        .cloned();
     assert_eq!(v.as_deref(), Some("first"));
 
     drop_table(&pool, &table).await;
@@ -275,9 +278,7 @@ async fn e2e_prepared_statement_cache_is_used() {
 
     pool.session()
         .query_unpaged(
-            format!(
-                "CREATE TABLE prax_test.{table} (id INT PRIMARY KEY, v INT)"
-            ),
+            format!("CREATE TABLE prax_test.{table} (id INT PRIMARY KEY, v INT)"),
             &[],
         )
         .await
