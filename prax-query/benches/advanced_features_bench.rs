@@ -239,6 +239,7 @@ fn bench_upsert_operations(c: &mut Criterion) {
             black_box(
                 UpsertBuilder::new("users")
                     .columns(vec!["email", "name", "updated_at"])
+                    .values(vec!["a@b.c", "Alice", "2026-01-01"])
                     .on_conflict_columns(vec!["email"])
                     .do_update(vec!["name", "updated_at"])
                     .build(),
@@ -251,6 +252,7 @@ fn bench_upsert_operations(c: &mut Criterion) {
             black_box(
                 UpsertBuilder::new("log_entries")
                     .columns(vec!["id", "message", "timestamp"])
+                    .values(vec!["1", "hello", "2026-01-01"])
                     .on_conflict_columns(vec!["id"])
                     .do_nothing()
                     .build(),
@@ -261,6 +263,7 @@ fn bench_upsert_operations(c: &mut Criterion) {
     group.bench_function("upsert_to_sql_postgres", |b| {
         let upsert = UpsertBuilder::new("users")
             .columns(vec!["email", "name"])
+            .values(vec!["a@b.c", "Alice"])
             .on_conflict_columns(vec!["email"])
             .do_update(vec!["name"])
             .build()
@@ -272,6 +275,7 @@ fn bench_upsert_operations(c: &mut Criterion) {
     group.bench_function("upsert_to_sql_mysql", |b| {
         let upsert = UpsertBuilder::new("users")
             .columns(vec!["email", "name"])
+            .values(vec!["a@b.c", "Alice"])
             .on_conflict_columns(vec!["email"])
             .do_update(vec!["name"])
             .build()
