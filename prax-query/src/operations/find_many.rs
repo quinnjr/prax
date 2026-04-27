@@ -33,7 +33,7 @@ pub struct FindManyOperation<E: QueryEngine, M: Model> {
     _model: PhantomData<M>,
 }
 
-impl<E: QueryEngine, M: Model> FindManyOperation<E, M> {
+impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     /// Create a new FindMany operation.
     pub fn new(engine: E) -> Self {
         Self {
@@ -158,11 +158,17 @@ mod tests {
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
     }
 
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
+    }
+
     #[derive(Clone)]
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -170,7 +176,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -178,7 +184,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -186,7 +192,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -194,7 +200,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,

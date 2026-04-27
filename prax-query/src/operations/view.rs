@@ -403,7 +403,7 @@ mod tests {
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: crate::traits::Model + Send + 'static>(
+        fn query_many<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -411,7 +411,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: crate::traits::Model + Send + 'static>(
+        fn query_one<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -419,7 +419,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: crate::traits::Model + Send + 'static>(
+        fn query_optional<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -427,7 +427,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: crate::traits::Model + Send + 'static>(
+        fn execute_insert<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -435,7 +435,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: crate::traits::Model + Send + 'static>(
+        fn execute_update<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,

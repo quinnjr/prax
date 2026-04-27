@@ -533,12 +533,18 @@ mod tests {
         const COLUMNS: &'static [&'static str] = &["id", "name", "age", "score"];
     }
 
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
+    }
+
     // A mock query engine
     #[derive(Clone)]
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<crate::filter::FilterValue>,
@@ -546,7 +552,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<crate::filter::FilterValue>,
@@ -554,7 +560,7 @@ mod tests {
             Box::pin(async { Err(crate::error::QueryError::not_found("Not implemented")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<crate::filter::FilterValue>,
@@ -562,7 +568,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<crate::filter::FilterValue>,
@@ -570,7 +576,7 @@ mod tests {
             Box::pin(async { Err(crate::error::QueryError::not_found("Not implemented")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<crate::filter::FilterValue>,

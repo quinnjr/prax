@@ -422,7 +422,7 @@ impl<E: QueryEngine> ProcedureCallOperation<E> {
     /// Execute the procedure and return typed results.
     pub async fn exec_returning<T>(self) -> QueryResult<Vec<T>>
     where
-        T: crate::traits::Model + Send + 'static,
+        T: crate::traits::Model + crate::row::FromRow + Send + 'static,
     {
         let (sql, params) = self.call.to_sql()?;
         self.engine.query_many(&sql, params).await

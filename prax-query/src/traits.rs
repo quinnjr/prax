@@ -82,35 +82,35 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// (PostgreSQL, MySQL, SQLite, etc.).
 pub trait QueryEngine: Send + Sync + Clone + 'static {
     /// Execute a SELECT query and return rows.
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<crate::filter::FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Vec<T>>>;
 
     /// Execute a SELECT query expecting one result.
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<crate::filter::FilterValue>,
     ) -> BoxFuture<'_, QueryResult<T>>;
 
     /// Execute a SELECT query expecting zero or one result.
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<crate::filter::FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Option<T>>>;
 
     /// Execute an INSERT query and return the created row.
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<crate::filter::FilterValue>,
     ) -> BoxFuture<'_, QueryResult<T>>;
 
     /// Execute an UPDATE query and return affected rows.
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<crate::filter::FilterValue>,
@@ -266,6 +266,12 @@ mod tests {
         const TABLE_NAME: &'static str = "test_models";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
+    }
+
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
     }
 
     #[test]
