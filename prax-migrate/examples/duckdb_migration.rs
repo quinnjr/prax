@@ -50,6 +50,7 @@ fn example_basic_table(generator: &DuckDbSqlGenerator) {
                 is_primary_key: true,
                 is_auto_increment: true,
                 is_unique: false,
+                vector: None,
             },
             FieldDiff {
                 name: "email".to_string(),
@@ -60,6 +61,7 @@ fn example_basic_table(generator: &DuckDbSqlGenerator) {
                 is_primary_key: false,
                 is_auto_increment: false,
                 is_unique: false,
+                vector: None,
             },
             FieldDiff {
                 name: "created_at".to_string(),
@@ -70,6 +72,7 @@ fn example_basic_table(generator: &DuckDbSqlGenerator) {
                 is_primary_key: false,
                 is_auto_increment: false,
                 is_unique: false,
+                vector: None,
             },
         ],
         primary_key: vec!["id".to_string()],
@@ -111,6 +114,7 @@ fn example_analytical_types(generator: &DuckDbSqlGenerator) {
                 is_primary_key: true,
                 is_auto_increment: true,
                 is_unique: false,
+                vector: None,
             },
             // VARCHAR[] — DuckDB array of strings (analogous to List<String>)
             FieldDiff {
@@ -122,6 +126,7 @@ fn example_analytical_types(generator: &DuckDbSqlGenerator) {
                 is_primary_key: false,
                 is_auto_increment: false,
                 is_unique: false,
+                vector: None,
             },
             // DECIMAL(10,2)[] — DuckDB array of decimals (nullable)
             FieldDiff {
@@ -133,6 +138,7 @@ fn example_analytical_types(generator: &DuckDbSqlGenerator) {
                 is_primary_key: false,
                 is_auto_increment: false,
                 is_unique: false,
+                vector: None,
             },
         ],
         primary_key: vec!["id".to_string()],
@@ -208,6 +214,7 @@ fn example_enums_and_views(generator: &DuckDbSqlGenerator) {
                 is_primary_key: true,
                 is_auto_increment: true,
                 is_unique: false,
+                vector: None,
             },
             FieldDiff {
                 name: "status".to_string(),
@@ -218,6 +225,7 @@ fn example_enums_and_views(generator: &DuckDbSqlGenerator) {
                 is_primary_key: false,
                 is_auto_increment: false,
                 is_unique: false,
+                vector: None,
             },
         ],
         primary_key: vec!["id".to_string()],

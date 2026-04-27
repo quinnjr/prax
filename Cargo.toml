@@ -104,6 +104,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "macros", "
 # pgvector (vector similarity search)
 pgvector = { version = "0.4", features = ["postgres"] }
 
+# Vector store for SQLite (LLM/RAG)
+sqlite-vector-rs = "0.2.2"
+
 # DuckDB (analytical database)
 duckdb = { version = "1.4", features = ["bundled", "json", "parquet", "chrono", "serde_json", "uuid"] }
 
