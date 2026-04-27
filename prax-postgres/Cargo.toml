@@ -46,6 +46,9 @@ url = "2.5"
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 pretty_assertions = { workspace = true }
+# E2E tests use these for type round-trip assertions.
+uuid = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = []

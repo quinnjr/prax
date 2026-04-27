@@ -1,25 +1,83 @@
-//! Integration tests against a live Cassandra cluster.
+//! Integration / E2E tests for prax-cassandra against a live Cassandra
+//! cluster.
 //!
-//! These tests are gated behind the `cassandra-live` feature and require
-//! a running Cassandra instance at `127.0.0.1:9042`. Run with:
+//! Gated behind the `cassandra-live` feature. The docker-compose
+//! `test-cassandra` runner sets `PRAX_E2E=1` and
+//! `CASSANDRA_URL=cassandra://localhost:9043/prax_test` (Cassandra runs
+//! on 9043 so it doesn't collide with ScyllaDB on 9042).
 //!
-//! ```bash
-//! cargo test -p prax-cassandra --features cassandra-live
+//! ```sh
+//! docker compose up -d cassandra
+//! docker compose run --rm test-cassandra
 //! ```
+//!
+//! ## Coverage status
+//!
+//! `prax-cassandra`'s own engine methods are currently stubs that return
+//! `CassandraError::Connection("not yet wired to cdrs-tokio")`. Until
+//! the engine is wired:
+//!
+//! - `e2e_pool_connect_returns_stub_error` pins the stub contract so
+//!   the day the engine lands, the test fails loudly, forcing us to
+//!   flip the assertion and expand coverage.
+//! - `e2e_cluster_is_reachable` confirms the docker-compose container
+//!   is healthy via a raw TCP probe, so once the engine is wired the
+//!   E2E harness already knows the target is up.
 
 #![cfg(feature = "cassandra-live")]
 
+use std::net::ToSocketAddrs;
+use std::time::Duration;
+
 use prax_cassandra::{CassandraConfig, CassandraPool};
 
+fn cassandra_contact_point() -> (String, u16) {
+    let url = std::env::var("CASSANDRA_URL")
+        .unwrap_or_else(|_| "cassandra://localhost:9043/prax_test".into());
+    let rest = url
+        .strip_prefix("cassandra://")
+        .expect("CASSANDRA_URL must start with cassandra://");
+    let (host_port, _keyspace) = rest.split_once('/').unwrap_or((rest, "prax_test"));
+    let (host, port) = host_port.split_once(':').unwrap_or((host_port, "9042"));
+    (host.to_string(), port.parse().expect("valid port"))
+}
+
 #[tokio::test]
-async fn test_connect_to_local_cluster() {
+#[ignore = "requires running Cassandra via docker-compose"]
+async fn e2e_pool_connect_returns_stub_error() {
+    // `prax-cassandra`'s engine is not yet wired to cdrs-tokio; the pool's
+    // connect is documented to return an error. Once the engine lands,
+    // flip this assertion to `is_ok()` and expand with real round-trips.
+    let (host, port) = cassandra_contact_point();
     let config = CassandraConfig::builder()
-        .known_nodes(["127.0.0.1:9042".to_string()])
+        .known_nodes([format!("{host}:{port}")])
         .build();
     let pool = CassandraPool::connect(config).await;
     assert!(
-        pool.is_ok(),
-        "expected to connect to local Cassandra: {:?}",
-        pool.err()
+        pool.is_err(),
+        "prax-cassandra pool is stubbed; once wired, flip this to is_ok()"
     );
+}
+
+/// Confirm the docker-compose Cassandra container is actually listening
+/// on the native-transport port. We don't speak the binary CQL protocol
+/// here — the goal is just to prove the service is reachable so that
+/// the day `prax-cassandra`'s engine is wired up, the compose harness
+/// is already known-good.
+#[tokio::test]
+#[ignore = "requires running Cassandra via docker-compose"]
+async fn e2e_cluster_is_reachable() {
+    let (host, port) = cassandra_contact_point();
+    let addrs: Vec<_> = format!("{host}:{port}")
+        .to_socket_addrs()
+        .expect("resolve")
+        .collect();
+    assert!(!addrs.is_empty(), "no resolved addresses for {host}:{port}");
+
+    let connect = tokio::net::TcpStream::connect(&addrs[0]);
+    let stream = tokio::time::timeout(Duration::from_secs(10), connect)
+        .await
+        .expect("tcp connect did not time out")
+        .unwrap_or_else(|e| panic!("failed to connect to {host}:{port}: {e}"));
+    drop(stream);
 }

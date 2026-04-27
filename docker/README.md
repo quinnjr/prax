@@ -6,7 +6,7 @@ This directory contains Docker configurations for all supported databases used i
 
 ```bash
 # Start all databases
-docker compose up -d postgres mysql mssql mongodb
+docker compose up -d postgres mysql mssql mongodb scylladb cassandra
 
 # Start a specific database
 docker compose up -d postgres
@@ -16,6 +16,28 @@ docker compose down
 
 # Stop and remove volumes (clean slate)
 docker compose down -v
+```
+
+## Running End-to-End Tests
+
+Each backend has a dedicated E2E test runner service. All runners set
+`PRAX_E2E=1` (the tests skip themselves otherwise) and pass
+`--include-ignored` so the `#[ignore]`-gated tests run.
+
+```bash
+# Run every backend's E2E suite (brings up all services)
+docker compose run --rm test
+
+# Run a single backend
+docker compose run --rm test-postgres
+docker compose run --rm test-mysql
+docker compose run --rm test-sqlite
+docker compose run --rm test-mssql
+docker compose run --rm test-mongodb
+docker compose run --rm test-duckdb       # embedded, no service
+docker compose run --rm test-scylladb
+docker compose run --rm test-cassandra    # currently stub-limited
+docker compose run --rm test-pgvector
 ```
 
 ## Supported Databases
@@ -98,6 +120,46 @@ mongosh "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=
 
 # Run demo
 cargo run --example mongodb_demo
+```
+
+### ScyllaDB
+
+- **Port**: 9042 (host network)
+- **Keyspace**: `prax_test` (auto-created by the E2E suite)
+
+```bash
+docker compose up -d scylladb
+
+# Connect with cqlsh
+docker exec -it prax-scylladb cqlsh
+
+# Run E2E tests
+docker compose run --rm test-scylladb
+```
+
+### Cassandra
+
+Runs on **port 9043** on the host so it doesn't collide with ScyllaDB
+(both services share `network_mode: host`).
+
+```bash
+docker compose up -d cassandra
+
+# Connect with cqlsh
+docker exec -it prax-cassandra cqlsh localhost 9043
+
+# Run E2E tests (currently a stub-level + reachability check;
+# prax-cassandra's engine is not yet wired to cdrs-tokio)
+docker compose run --rm test-cassandra
+```
+
+### DuckDB
+
+Embedded, no container. The `test-duckdb` runner exists so CI can
+exercise the in-process analytical path alongside the other backends.
+
+```bash
+docker compose run --rm test-duckdb
 ```
 
 ## Connection Strings
