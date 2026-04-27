@@ -1037,6 +1037,19 @@ impl SqliteGenerator {
         }
     }
 
+    /// Quote a SQL identifier, doubling embedded double quotes.
+    /// Mirrors prax-sqlite::vector::quote_ident (duplicated here to avoid
+    /// a circular dependency between prax-migrate and prax-sqlite).
+    fn quote_ident(name: &str) -> String {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+
+    /// Escape a single-quoted SQL string literal by doubling embedded single
+    /// quotes. Used for the string values inside `USING vector(...)` clauses.
+    fn escape_sql_literal(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
     /// Generate CREATE VIRTUAL TABLE for every vector column on this model.
     /// Returns None if no fields are vector columns.
     fn create_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
@@ -1049,7 +1062,10 @@ impl SqliteGenerator {
         let rowid = format!("{}_id", Self::singularize(&model.table_name));
         let vtable = format!("{}_vectors", model.table_name);
 
-        let mut clauses = vec![format!("rowid_column='{}'", rowid)];
+        let mut clauses = vec![format!(
+            "rowid_column='{}'",
+            Self::escape_sql_literal(&rowid)
+        )];
         for f in vector_fields {
             let v = f.vector.as_ref().unwrap();
             let idx_part = match v.index {
@@ -1058,7 +1074,7 @@ impl SqliteGenerator {
             };
             clauses.push(format!(
                 "{}='{}[{}] {}{}'",
-                f.column_name,
+                Self::quote_ident(&f.column_name),
                 v.element_type.as_sql(),
                 v.dimensions,
                 v.metric.as_sql(),
@@ -1067,8 +1083,8 @@ impl SqliteGenerator {
         }
 
         Some(format!(
-            "CREATE VIRTUAL TABLE \"{}\" USING vector(\n    {}\n);",
-            vtable,
+            "CREATE VIRTUAL TABLE {} USING vector(\n    {}\n);",
+            Self::quote_ident(&vtable),
             clauses.join(",\n    ")
         ))
     }
@@ -1077,8 +1093,8 @@ impl SqliteGenerator {
     fn drop_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
         if model.fields.iter().any(|f| f.vector.is_some()) {
             Some(format!(
-                "DROP TABLE IF EXISTS \"{}_vectors\";",
-                model.table_name
+                "DROP TABLE IF EXISTS {};",
+                Self::quote_ident(&format!("{}_vectors", model.table_name))
             ))
         } else {
             None
@@ -2483,7 +2499,7 @@ mod tests {
                 .contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector")
         );
         assert!(sql.up.contains("rowid_column='document_id'"));
-        assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
+        assert!(sql.up.contains("\"embedding\"='float4[1536] cosine hnsw'"));
 
         // Down migration drops the virtual table before the main table.
         let vt_pos = sql
@@ -2564,8 +2580,8 @@ mod tests {
             .matches("CREATE VIRTUAL TABLE \"documents_vectors\"")
             .count();
         assert_eq!(count, 1);
-        assert!(sql.up.contains("embedding='float4[1536] cosine hnsw'"));
-        assert!(sql.up.contains("summary_vec='float4[384] cosine hnsw'"));
+        assert!(sql.up.contains("\"embedding\"='float4[1536] cosine hnsw'"));
+        assert!(sql.up.contains("\"summary_vec\"='float4[384] cosine hnsw'"));
     }
 
     #[test]

@@ -57,11 +57,19 @@ impl VectorIndex {
     }
 
     /// Render the CREATE VIRTUAL TABLE statement.
+    ///
+    /// Column names and the rowid column are escaped for single-quoted
+    /// string values inside the `USING vector(...)` parameter list, and
+    /// the table name and column keys are escaped as SQL identifiers.
+    /// Schema-level identifier validation (alphanumeric + `_`) is the
+    /// primary defense; this layer provides defense-in-depth.
     pub fn to_create_sql(&self) -> String {
+        use crate::vector::{escape_sql_literal, quote_ident};
+
         let mut clauses: Vec<String> = Vec::new();
 
         if let Some(rowid) = &self.rowid_column {
-            clauses.push(format!("rowid_column='{}'", rowid));
+            clauses.push(format!("rowid_column='{}'", escape_sql_literal(rowid)));
         }
 
         for col in &self.columns {
@@ -71,7 +79,7 @@ impl VectorIndex {
             };
             clauses.push(format!(
                 "{}='{}[{}] {}{}'",
-                col.name,
+                quote_ident(&col.name),
                 col.element_type.as_sql(),
                 col.dimensions,
                 col.metric.as_sql(),
@@ -80,15 +88,16 @@ impl VectorIndex {
         }
 
         format!(
-            "CREATE VIRTUAL TABLE \"{}\" USING vector(\n    {}\n);",
-            self.table_name,
+            "CREATE VIRTUAL TABLE {} USING vector(\n    {}\n);",
+            quote_ident(&self.table_name),
             clauses.join(",\n    ")
         )
     }
 
     /// Render a DROP statement for this virtual table.
     pub fn to_drop_sql(&self) -> String {
-        format!("DROP TABLE IF EXISTS \"{}\";", self.table_name)
+        use crate::vector::quote_ident;
+        format!("DROP TABLE IF EXISTS {};", quote_ident(&self.table_name))
     }
 }
 
@@ -111,7 +120,7 @@ mod tests {
 
         assert!(sql.contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector("));
         assert!(sql.contains("rowid_column='document_id'"));
-        assert!(sql.contains("embedding='float4[1536] cosine hnsw'"));
+        assert!(sql.contains("\"embedding\"='float4[1536] cosine hnsw'"));
     }
 
     #[test]
@@ -125,7 +134,7 @@ mod tests {
                 None,
             )
             .to_create_sql();
-        assert!(sql.contains("v='float8[128] l2'"));
+        assert!(sql.contains("\"v\"='float8[128] l2'"));
         assert!(!sql.contains(" hnsw"));
     }
 
@@ -148,8 +157,8 @@ mod tests {
                 None,
             )
             .to_create_sql();
-        assert!(sql.contains("a='float4[4] cosine hnsw'"));
-        assert!(sql.contains("b='int1[8] inner'"));
+        assert!(sql.contains("\"a\"='float4[4] cosine hnsw'"));
+        assert!(sql.contains("\"b\"='int1[8] inner'"));
     }
 
     #[test]

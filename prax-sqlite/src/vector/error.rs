@@ -37,6 +37,15 @@ pub enum VectorError {
         /// Name of the missing builder field (e.g. "vector_table", "query_text").
         field: &'static str,
     },
+
+    /// A vector value failed validation (empty, wrong element type, or
+    /// contains non-finite floats like NaN or Inf that would break
+    /// JSON serialization for `vector_from_json`).
+    #[error("invalid vector value: {message}")]
+    InvalidValue {
+        /// Detail describing which value failed validation.
+        message: String,
+    },
 }
 
 /// Convenience alias for `Result<T, VectorError>`.

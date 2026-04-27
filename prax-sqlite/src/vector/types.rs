@@ -26,12 +26,20 @@ pub struct Embedding {
 }
 
 impl Embedding {
-    /// Create a new embedding from a Vec<f32>. Rejects empty vectors.
+    /// Create a new embedding from a Vec<f32>. Rejects empty vectors and
+    /// rejects NaN/Inf values — neither is valid JSON, and
+    /// `vector_from_json` would fail at query time instead of reporting
+    /// the real cause.
     pub fn new(data: Vec<f32>) -> VectorResult<Self> {
         if data.is_empty() {
             return Err(VectorError::DimensionMismatch {
                 expected: 1,
                 got: 0,
+            });
+        }
+        if data.iter().any(|v| !v.is_finite()) {
+            return Err(VectorError::InvalidValue {
+                message: "embedding contains NaN or Inf".to_string(),
             });
         }
         Ok(Self { data })
@@ -65,12 +73,18 @@ pub struct DoubleEmbedding {
 }
 
 impl DoubleEmbedding {
-    /// Create a new double embedding from a Vec<f64>. Rejects empty vectors.
+    /// Create a new double embedding from a Vec<f64>. Rejects empty vectors
+    /// and rejects NaN/Inf values (not valid JSON for `vector_from_json`).
     pub fn new(data: Vec<f64>) -> VectorResult<Self> {
         if data.is_empty() {
             return Err(VectorError::DimensionMismatch {
                 expected: 1,
                 got: 0,
+            });
+        }
+        if data.iter().any(|v| !v.is_finite()) {
+            return Err(VectorError::InvalidValue {
+                message: "embedding contains NaN or Inf".to_string(),
             });
         }
         Ok(Self { data })
@@ -187,6 +201,28 @@ mod tests {
         let emb = Embedding::new(vec![0.1, 0.2, 0.3]).unwrap();
         assert_eq!(emb.dimensions(), 3);
         assert_eq!(emb.as_slice(), &[0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn test_embedding_rejects_nan() {
+        let result = Embedding::new(vec![0.1, f32::NAN, 0.3]);
+        match result {
+            Err(VectorError::InvalidValue { message }) => {
+                assert!(message.contains("NaN") || message.contains("Inf"));
+            }
+            other => panic!("expected InvalidValue error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_embedding_rejects_inf() {
+        assert!(Embedding::new(vec![0.1, f32::INFINITY]).is_err());
+        assert!(Embedding::new(vec![f32::NEG_INFINITY, 0.1]).is_err());
+    }
+
+    #[test]
+    fn test_double_embedding_rejects_nan() {
+        assert!(DoubleEmbedding::new(vec![0.1, f64::NAN]).is_err());
     }
 
     #[test]
