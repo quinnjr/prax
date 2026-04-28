@@ -5,14 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::filter::FilterValue;
-use prax_sqlite::{DatabasePath, SqliteConfig, SqliteEngine, SqlitePool};
+use prax_sqlite::{DatabasePath, SqliteConfig, SqlitePool, SqliteRawEngine};
 use std::hint::black_box;
 
 /// Counter for unique email addresses.
 static EMAIL_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Create a test database with sample data using a temp file.
-async fn setup_test_db() -> (SqliteEngine, tempfile::TempDir) {
+async fn setup_test_db() -> (SqliteRawEngine, tempfile::TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
@@ -48,11 +48,11 @@ async fn setup_test_db() -> (SqliteEngine, tempfile::TempDir) {
     .await
     .unwrap();
 
-    (SqliteEngine::new(pool), temp_dir)
+    (SqliteRawEngine::new(pool), temp_dir)
 }
 
 /// Insert sample users into the database.
-async fn insert_sample_users(engine: &SqliteEngine, count: usize) {
+async fn insert_sample_users(engine: &SqliteRawEngine, count: usize) {
     for i in 0..count {
         let mut data = HashMap::new();
         data.insert(
