@@ -36,12 +36,12 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
         quote! {
             /// Order by this field ascending.
             pub fn asc() -> super::OrderByParam {
-                super::OrderByParam::#field_name_pascal(super::super::_prax_prelude::SortOrder::Asc)
+                super::OrderByParam::#field_name_pascal(::prax_orm::_prax_prelude::SortOrder::Asc)
             }
 
             /// Order by this field descending.
             pub fn desc() -> super::OrderByParam {
-                super::OrderByParam::#field_name_pascal(super::super::_prax_prelude::SortOrder::Desc)
+                super::OrderByParam::#field_name_pascal(::prax_orm::_prax_prelude::SortOrder::Desc)
             }
         }
     } else {
@@ -187,7 +187,7 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
         .filter(|f| !f.modifier.is_list() && !matches!(f.field_type, FieldType::Model(_)))
         .map(|f| {
             let name = pascal_ident(f.name());
-            quote! { #name(super::_prax_prelude::SortOrder) }
+            quote! { #name(::prax_orm::_prax_prelude::SortOrder) }
         })
         .collect();
 
@@ -225,7 +225,7 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
 
         impl OrderByParam {
             /// Get the column name and sort order.
-            pub fn column_and_order(&self) -> (&'static str, &super::_prax_prelude::SortOrder) {
+            pub fn column_and_order(&self) -> (&'static str, &::prax_orm::_prax_prelude::SortOrder) {
                 match self {
                     #(#column_matches,)*
                 }
@@ -235,8 +235,8 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
             pub fn to_sql(&self) -> String {
                 let (col, order) = self.column_and_order();
                 let dir = match order {
-                    super::_prax_prelude::SortOrder::Asc => "ASC",
-                    super::_prax_prelude::SortOrder::Desc => "DESC",
+                    ::prax_orm::_prax_prelude::SortOrder::Asc => "ASC",
+                    ::prax_orm::_prax_prelude::SortOrder::Desc => "DESC",
                 };
                 format!("{} {}", col, dir)
             }

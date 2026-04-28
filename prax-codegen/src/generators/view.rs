@@ -109,7 +109,7 @@ pub fn generate_view_module(view_def: &View) -> Result<TokenStream, syn::Error> 
                 /// Where conditions.
                 pub where_conditions: Vec<String>,
                 /// Order by clauses.
-                pub order_by: Vec<(&'static str, super::super::_prax_prelude::SortOrder)>,
+                pub order_by: Vec<(&'static str, ::prax_orm::_prax_prelude::SortOrder)>,
                 /// Maximum results.
                 pub take: Option<usize>,
                 /// Results to skip.
@@ -159,8 +159,8 @@ pub fn generate_view_module(view_def: &View) -> Result<TokenStream, syn::Error> 
                         sql.push_str(" ORDER BY ");
                         let order_parts: Vec<_> = self.order_by.iter().map(|(col, dir)| {
                             let dir_str = match dir {
-                                super::super::_prax_prelude::SortOrder::Asc => "ASC",
-                                super::super::_prax_prelude::SortOrder::Desc => "DESC",
+                                ::prax_orm::_prax_prelude::SortOrder::Asc => "ASC",
+                                ::prax_orm::_prax_prelude::SortOrder::Desc => "DESC",
                             };
                             format!("{} {}", col, dir_str)
                         }).collect();

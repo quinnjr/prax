@@ -177,7 +177,7 @@ pub fn generate_model_module_with_style(
                 #(#data_fields,)*
             }
 
-            impl super::_prax_prelude::PraxModel for #model_name {
+            impl ::prax_orm::_prax_prelude::PraxModel for #model_name {
                 const TABLE_NAME: &'static str = TABLE_NAME;
                 const PRIMARY_KEY: &'static [&'static str] = PRIMARY_KEY;
             }
