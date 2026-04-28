@@ -154,6 +154,21 @@ mod tests {
         }
     }
 
+    impl crate::traits::ModelRelationLoader<MockEngine> for TestModel {
+        fn load_relation<'a>(
+            _engine: &'a MockEngine,
+            _parents: &'a mut [Self],
+            spec: &'a crate::relations::IncludeSpec,
+        ) -> crate::traits::BoxFuture<'a, QueryResult<()>> {
+            let name = spec.relation_name.clone();
+            Box::pin(async move {
+                Err(QueryError::internal(format!(
+                    "unknown relation '{name}' on TestModel (mock)",
+                )))
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct MockEngine;
 
