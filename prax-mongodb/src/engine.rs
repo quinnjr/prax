@@ -99,7 +99,7 @@ impl MongoEngine {
 use crate::error::MongoResult;
 
 impl QueryEngine for MongoEngine {
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -125,14 +125,19 @@ impl QueryEngine for MongoEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Would need to deserialize docs into T
-            // For now, return empty - full implementation would use serde
-            let _ = docs;
-            Ok(Vec::new())
+            docs.iter()
+                .map(|d| {
+                    let row = crate::row_ref::BsonRowRef::new(d);
+                    T::from_row(&row).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -148,20 +153,21 @@ impl QueryEngine for MongoEngine {
                 .client
                 .collection_doc(&format!("{}s", T::MODEL_NAME.to_lowercase()));
 
-            let _doc = collection
+            let doc = collection
                 .find_one(filter, None)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?
                 .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
 
-            // Would deserialize doc into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            let row = crate::row_ref::BsonRowRef::new(&doc);
+            T::from_row(&row).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -183,18 +189,19 @@ impl QueryEngine for MongoEngine {
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
             match doc {
-                Some(_doc) => {
-                    // Would deserialize doc into T
-                    Err(prax_query::QueryError::internal(
-                        "deserialization not yet implemented".to_string(),
-                    ))
+                Some(doc) => {
+                    let row = crate::row_ref::BsonRowRef::new(&doc);
+                    T::from_row(&row).map(Some).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
                 }
                 None => Ok(None),
             }
         })
     }
 
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -234,7 +241,7 @@ impl QueryEngine for MongoEngine {
         })
     }
 
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         _params: Vec<FilterValue>,

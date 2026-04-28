@@ -310,7 +310,7 @@ impl QueryEngine for SqlxEngine {
         }
     }
 
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -319,18 +319,27 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing query_many via QueryEngine");
 
-            let _rows = self
+            let rows = self
                 .raw_query_many(&sql, &params)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - real implementation would deserialize rows into T
-            // For now, return empty vec
-            Ok(Vec::new())
+            rows.iter()
+                .map(|r| {
+                    let rr = crate::row_ref::SqlxRowRef::from_sqlx(r).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?;
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -339,7 +348,7 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing query_one via QueryEngine");
 
-            let _row = self.raw_query_one(&sql, &params).await.map_err(|e| {
+            let row = self.raw_query_one(&sql, &params).await.map_err(|e| {
                 let msg = e.to_string();
                 if msg.contains("no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
@@ -348,14 +357,18 @@ impl QueryEngine for SqlxEngine {
                 }
             })?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            let rr = crate::row_ref::SqlxRowRef::from_sqlx(&row).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })?;
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -364,17 +377,28 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing query_optional via QueryEngine");
 
-            let _row = self
+            let row = self
                 .raw_query_optional(&sql, &params)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - return None for now
-            Ok(None)
+            match row {
+                Some(r) => {
+                    let rr = crate::row_ref::SqlxRowRef::from_sqlx(&r).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?;
+                    T::from_row(&rr).map(Some).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                }
+                None => Ok(None),
+            }
         })
     }
 
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -383,19 +407,23 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_insert via QueryEngine");
 
-            let _row = self
+            let row = self
                 .raw_query_one(&sql, &params)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            let rr = crate::row_ref::SqlxRowRef::from_sqlx(&row).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })?;
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -404,13 +432,23 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_update via QueryEngine");
 
-            let _rows = self
+            let rows = self
                 .raw_query_many(&sql, &params)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - return empty vec for now
-            Ok(Vec::new())
+            rows.iter()
+                .map(|r| {
+                    let rr = crate::row_ref::SqlxRowRef::from_sqlx(r).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?;
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
