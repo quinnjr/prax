@@ -260,6 +260,15 @@ fn generate_where_param(model: &Model) -> TokenStream {
         })
         .collect();
 
+    let from_filter_arms: Vec<_> = model
+        .fields
+        .values()
+        .map(|field| {
+            let name = pascal_ident(field.name());
+            quote! { WhereParam::#name(op) => op.to_filter(), }
+        })
+        .collect();
+
     quote! {
         /// Where clause parameters for filtering queries.
         #[derive(Debug, Clone)]
@@ -295,6 +304,21 @@ fn generate_where_param(model: &Model) -> TokenStream {
             /// Negate a condition.
             pub fn not(condition: WhereParam) -> Self {
                 Self::Not(Box::new(condition))
+            }
+        }
+
+        impl From<WhereParam> for prax_query::filter::Filter {
+            fn from(p: WhereParam) -> Self {
+                match p {
+                    #(#from_filter_arms)*
+                    WhereParam::And(ps) => prax_query::filter::Filter::And(
+                        ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                    ),
+                    WhereParam::Or(ps) => prax_query::filter::Filter::Or(
+                        ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                    ),
+                    WhereParam::Not(p) => prax_query::filter::Filter::Not(Box::new((*p).into())),
+                }
             }
         }
     }

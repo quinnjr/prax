@@ -68,6 +68,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
+    // Generate From<WhereParam> for Filter match arms
+    let from_filter_arms: Vec<_> = field_infos
+        .iter()
+        .map(|f| {
+            let variant_name = format_ident!("{}", f.name.to_string().to_case(Case::Pascal));
+            quote! { WhereParam::#variant_name(op) => op.to_filter(), }
+        })
+        .collect();
+
     // Generate select param variants
     let select_variants: Vec<_> = field_infos
         .iter()
@@ -139,6 +148,21 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
                 And(Vec<WhereParam>),
                 Or(Vec<WhereParam>),
                 Not(Box<WhereParam>),
+            }
+
+            impl From<WhereParam> for ::prax_query::filter::Filter {
+                fn from(p: WhereParam) -> Self {
+                    match p {
+                        #(#from_filter_arms)*
+                        WhereParam::And(ps) => ::prax_query::filter::Filter::And(
+                            ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                        ),
+                        WhereParam::Or(ps) => ::prax_query::filter::Filter::Or(
+                            ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                        ),
+                        WhereParam::Not(p) => ::prax_query::filter::Filter::Not(Box::new((*p).into())),
+                    }
+                }
             }
 
             /// Select parameters.
@@ -344,6 +368,21 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
             Not(#ty),
             IsNull,
             IsNotNull,
+        }
+
+        impl WhereOp {
+            /// Convert to prax_query::filter::Filter.
+            pub fn to_filter(self) -> ::prax_query::filter::Filter {
+                use ::prax_query::filter::{Filter, FilterValue};
+                use ::std::borrow::Cow;
+                let col: Cow<'static, str> = Cow::Borrowed(COLUMN);
+                match self {
+                    Self::Equals(v) => Filter::Equals(col, v.into()),
+                    Self::Not(v) => Filter::NotEquals(col, v.into()),
+                    Self::IsNull => Filter::IsNull(col),
+                    Self::IsNotNull => Filter::IsNotNull(col),
+                }
+            }
         }
 
         pub fn equals(value: #ty) -> super::WhereParam {
