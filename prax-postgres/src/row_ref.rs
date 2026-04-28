@@ -31,13 +31,19 @@ use tokio_postgres::Row;
 /// Newtype wrapper around `tokio_postgres::Row` that implements
 /// `prax_query::row::RowRef`.
 ///
-/// The field is public so callers can move the raw `Row` out with
-/// `pg_row.0` when they need ownership (e.g., forwarding to a
-/// tokio-postgres API that consumes `Row`). For read-only access, prefer
-/// the `Deref` impl — it lets you call every `Row` method without
-/// reaching through the tuple field.
+/// The inner row is private; use [`PgRow::into_inner`] when ownership is
+/// needed (e.g., forwarding to a tokio-postgres API that consumes `Row`).
+/// For read-only access, the `Deref<Target = Row>` impl lets you call
+/// any `Row` method directly.
 #[repr(transparent)]
-pub struct PgRow(pub Row);
+pub struct PgRow(Row);
+
+impl PgRow {
+    /// Move the wrapped `tokio_postgres::Row` out of this wrapper.
+    pub fn into_inner(self) -> Row {
+        self.0
+    }
+}
 
 impl std::ops::Deref for PgRow {
     type Target = Row;
@@ -131,6 +137,28 @@ impl RowRef for PgRow {
     fn get_json_opt(&self, c: &str) -> Result<Option<serde_json::Value>, RowError> {
         into_row_error(c, self.try_get::<_, Option<serde_json::Value>>(c))
     }
-    // `get_decimal` / `get_decimal_opt` intentionally fall back to the trait's
-    // default-erroring impl; see the module docs for why.
+    fn get_decimal(&self, c: &str) -> Result<rust_decimal::Decimal, RowError> {
+        Err(RowError::TypeConversion {
+            column: c.to_string(),
+            message: "decimal columns require tokio-postgres with \
+                      `with-rust_decimal-*` feature, which this workspace does not \
+                      currently enable. Cast NUMERIC columns to TEXT in your SQL \
+                      (e.g. amount::text) and decode as String, or upgrade \
+                      tokio-postgres."
+                .to_string(),
+        })
+    }
+    fn get_decimal_opt(&self, c: &str) -> Result<Option<rust_decimal::Decimal>, RowError> {
+        // NULL can't be distinguished from the underlying "unsupported" state
+        // at this layer; surface the same actionable message.
+        Err(RowError::TypeConversion {
+            column: c.to_string(),
+            message: "decimal columns require tokio-postgres with \
+                      `with-rust_decimal-*` feature, which this workspace does not \
+                      currently enable. Cast NUMERIC columns to TEXT in your SQL \
+                      (e.g. amount::text) and decode as String, or upgrade \
+                      tokio-postgres."
+                .to_string(),
+        })
+    }
 }
