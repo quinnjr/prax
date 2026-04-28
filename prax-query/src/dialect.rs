@@ -7,11 +7,24 @@
 //! bound `QueryEngine` via `engine.dialect()`, so a single `build_sql`
 //! emission path serves every backend.
 
+/// Sealed supertrait so only this crate can implement `SqlDialect`.
+/// Prevents downstream crates from adding their own `SqlDialect`
+/// impls; we reserve the right to add new required methods to the
+/// trait without a SemVer break.
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for super::Postgres {}
+    impl Sealed for super::Sqlite {}
+    impl Sealed for super::Mysql {}
+    impl Sealed for super::Mssql {}
+    impl Sealed for super::NotSql {}
+}
+
 /// Cross-dialect SQL emission helpers.
 ///
 /// Implementations describe a single database backend's syntax choices.
 /// Engines return `&dyn SqlDialect` from `QueryEngine::dialect()`.
-pub trait SqlDialect: Send + Sync {
+pub trait SqlDialect: Send + Sync + sealed::Sealed {
     /// Emit the 1-indexed parameter placeholder for position `i`.
     fn placeholder(&self, i: usize) -> String;
 
@@ -164,16 +177,22 @@ impl SqlDialect for Mssql {
 
 impl SqlDialect for NotSql {
     fn placeholder(&self, _i: usize) -> String {
-        String::new()
+        unimplemented!(
+            "NotSql dialect does not emit SQL; engines that return NotSql from \
+             QueryEngine::dialect() must not route requests through the SQL \
+             operation builders (FindManyOperation, CreateOperation, etc.). \
+             Use a SQL-capable dialect (Postgres/Mysql/Sqlite/Mssql) or build \
+             queries natively (e.g. BSON for MongoDB)."
+        )
     }
     fn returning_clause(&self, _cols: &str) -> String {
-        String::new()
+        unimplemented!("NotSql::returning_clause — see NotSql::placeholder for details")
     }
-    fn quote_ident(&self, ident: &str) -> String {
-        ident.to_string()
+    fn quote_ident(&self, _ident: &str) -> String {
+        unimplemented!("NotSql::quote_ident — see NotSql::placeholder for details")
     }
     fn upsert_clause(&self, _c: &[&str], _s: &str) -> String {
-        String::new()
+        unimplemented!("NotSql::upsert_clause — see NotSql::placeholder for details")
     }
 }
 
@@ -234,12 +253,27 @@ mod tests {
     }
 
     #[test]
-    fn not_sql_methods_are_inert() {
-        assert_eq!(NotSql.placeholder(3), "");
-        assert_eq!(NotSql.returning_clause("*"), "");
-        assert_eq!(NotSql.upsert_clause(&[], "x = 1"), "");
-        // quote_ident is identity so the inert dialect round-trips identifiers.
-        assert_eq!(NotSql.quote_ident("col"), "col");
+    #[should_panic(expected = "NotSql dialect does not emit SQL")]
+    fn not_sql_placeholder_panics() {
+        let _ = NotSql.placeholder(1);
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_sql_quote_ident_panics() {
+        let _ = NotSql.quote_ident("col");
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_sql_returning_clause_panics() {
+        let _ = NotSql.returning_clause("*");
+    }
+
+    #[test]
+    #[should_panic]
+    fn not_sql_upsert_clause_panics() {
+        let _ = NotSql.upsert_clause(&[], "x = 1");
     }
 
     #[test]
@@ -256,5 +290,17 @@ mod tests {
         assert!(!Mysql.supports_distinct_on());
         assert!(!Mssql.supports_distinct_on());
         assert!(!NotSql.supports_distinct_on());
+    }
+
+    #[test]
+    fn sealed_pattern_prevents_external_impl() {
+        // The sealed supertrait means only types that impl sealed::Sealed
+        // can impl SqlDialect. Downstream crates can't access
+        // `sealed::Sealed` so they can't add new dialects. This test
+        // merely documents the intent; the enforcement is the compiler
+        // refusing to accept `impl SqlDialect for MyDialect` outside this
+        // crate.
+        use crate::dialect::{Postgres, SqlDialect};
+        let _p: &dyn SqlDialect = &Postgres;
     }
 }

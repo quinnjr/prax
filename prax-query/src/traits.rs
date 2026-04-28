@@ -308,6 +308,7 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "NotSql dialect does not emit SQL")]
     fn query_engine_dialect_defaults_to_not_sql() {
         // A minimal QueryEngine impl that doesn't override dialect() should
         // inherit the NotSql default so external implementors aren't forced
@@ -386,8 +387,8 @@ mod tests {
         }
 
         let e = DefaultEngine;
-        // The default dialect should be NotSql, whose placeholder method
-        // currently returns empty strings (will panic in task 44)
-        assert_eq!(e.dialect().placeholder(1), "");
+        // If the default ever regresses back to a SQL-emitting dialect, this
+        // test will fail because placeholder() won't panic.
+        let _ = e.dialect().placeholder(1);
     }
 }

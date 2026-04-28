@@ -251,10 +251,17 @@ impl From<u32> for FilterValue {
         Self::Int(v as i64)
     }
 }
-// u64 → i64 is a narrowing cast. Clamp rather than overflow silently.
+// u64 can exceed i64::MAX; panic on overflow rather than silently
+// clamping. Silent clamping lets a filter like `user::id::equals(u64::MAX)`
+// match the wrong row (`id = i64::MAX`) — a known authorization-bypass
+// footgun. Callers with known-safe values should cast explicitly:
+// `FilterValue::from(v as i64)`.
 impl From<u64> for FilterValue {
     fn from(v: u64) -> Self {
-        Self::Int(i64::try_from(v).unwrap_or(i64::MAX))
+        let v = i64::try_from(v).expect(
+            "u64 value exceeds i64::MAX; cast explicitly to i64 or use FilterValue::String",
+        );
+        Self::Int(v)
     }
 }
 
@@ -269,15 +276,23 @@ impl From<f32> for FilterValue {
 // `MysqlRowRef`, `SqliteRowRef`, `MssqlRowRef`), so a matching pair on
 // the parameter-binding side keeps the derive's emitted
 // `user::when::gt(dt)` chain compiling and symmetric.
+//
+// Temporal values round-trip as RFC3339/ISO-8601 strings.
+// Microsecond precision matches what Postgres/MySQL store and what the driver
+// `RowRef` bridges read. Callers that need different precision or format
+// should build their own `FilterValue::String` value.
 
 impl From<chrono::DateTime<chrono::Utc>> for FilterValue {
     fn from(v: chrono::DateTime<chrono::Utc>) -> Self {
-        Self::String(v.to_rfc3339())
+        // RFC3339 with microsecond precision: 2020-01-15T10:30:00.000000Z
+        Self::String(v.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
     }
 }
 impl From<chrono::NaiveDateTime> for FilterValue {
     fn from(v: chrono::NaiveDateTime) -> Self {
-        Self::String(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+        // ISO-8601 without timezone. Six fractional-second digits for
+        // bit-parity with Postgres/MySQL microsecond storage.
+        Self::String(v.format("%Y-%m-%dT%H:%M:%S%.6f").to_string())
     }
 }
 impl From<chrono::NaiveDate> for FilterValue {
@@ -287,7 +302,7 @@ impl From<chrono::NaiveDate> for FilterValue {
 }
 impl From<chrono::NaiveTime> for FilterValue {
     fn from(v: chrono::NaiveTime) -> Self {
-        Self::String(v.format("%H:%M:%S%.f").to_string())
+        Self::String(v.format("%H:%M:%S%.6f").to_string())
     }
 }
 
@@ -2359,5 +2374,64 @@ mod tests {
         let filter = Filter::IsNotNull("verified_at".into());
         let (sql, _) = filter.to_sql(0, &Postgres);
         assert_eq!(sql, r#""verified_at" IS NOT NULL"#);
+    }
+
+    #[test]
+    fn filter_value_from_u64_in_range() {
+        assert_eq!(FilterValue::from(42u64), FilterValue::Int(42));
+        assert_eq!(FilterValue::from(0u64), FilterValue::Int(0));
+        let max_safe = i64::MAX as u64;
+        assert_eq!(FilterValue::from(max_safe), FilterValue::Int(i64::MAX));
+    }
+
+    #[test]
+    #[should_panic(expected = "u64 value exceeds i64::MAX")]
+    fn filter_value_from_u64_overflow_panics() {
+        let _ = FilterValue::from(u64::MAX);
+    }
+
+    #[test]
+    fn filter_value_from_chrono_datetime_utc_rfc3339() {
+        use chrono::{TimeZone, Utc};
+        let dt = Utc.with_ymd_and_hms(2020, 1, 15, 10, 30, 45).unwrap();
+        let fv = FilterValue::from(dt);
+        assert_eq!(
+            fv,
+            FilterValue::String("2020-01-15T10:30:45.000000Z".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_datetime_iso() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2020, 1, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        let fv = FilterValue::from(dt);
+        assert_eq!(
+            fv,
+            FilterValue::String("2020-01-15T10:30:45.000000".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_date() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2020, 1, 15).unwrap();
+        assert_eq!(
+            FilterValue::from(d),
+            FilterValue::String("2020-01-15".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_time() {
+        use chrono::NaiveTime;
+        let t = NaiveTime::from_hms_opt(10, 30, 45).unwrap();
+        assert_eq!(
+            FilterValue::from(t),
+            FilterValue::String("10:30:45.000000".to_string())
+        );
     }
 }
