@@ -165,6 +165,18 @@ those retain the legacy API.
 
 `QueryEngine::query_one` behavior when the SQL returns 2+ rows is driver-dependent: Postgres errors (strict), while MySQL/SQLite/MSSQL silently return the first row. Callers that require "exactly one row or error" should add `LIMIT 2` (or `TOP 2` on MSSQL) and check the row count themselves, or use `count`/`query_many` + assert `len() == 1`.
 
+`find_many().select([...])` (and `find_first` / `find_unique`) now narrows
+the emitted SQL column list instead of always sending `SELECT *`. The
+returned rows are still decoded as whole `T` structs, so every
+non-`Option` field on `T` must appear in the SELECT list — otherwise
+you'll see `RowError::ColumnNotFound` (or a driver-level "column does not
+exist" surfaced through `RowError::TypeConversion`) when `FromRow` tries
+to read the missing column. Proper partial hydration (per-field
+`Option<T>` decoding that treats absent columns as `None`) is a
+follow-up; this change gets the easy 50% (narrower bandwidth) with no
+partial-struct complexity. Leave `.select(...)` unset to keep the old
+`SELECT *` behavior.
+
 - **TypeScript Generator** (`prax-typegen` v0.1.0) - Standalone crate for generating TypeScript from Prax schemas
   - TypeScript interface generation for models, enums, composite types, and views
   - Zod schema generation with runtime validation and inferred types

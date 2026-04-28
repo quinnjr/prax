@@ -448,6 +448,33 @@ mod tests {
         assert!(sql.contains("SELECT * FROM"));
     }
 
+    /// Task 28 regression test: a narrow `Select::fields` list must turn
+    /// the emitted `SELECT *` into an explicit column list so wide models
+    /// don't waste bandwidth. The projection still hydrates as the full
+    /// struct, so callers are responsible for covering every non-`Option`
+    /// field — see the CHANGELOG migration note.
+    #[test]
+    fn find_many_emits_explicit_column_list_when_select_narrows() {
+        let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
+            .select(Select::fields(["id", "email"]));
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
+        assert!(
+            sql.contains("SELECT id, email FROM") && !sql.contains("SELECT *"),
+            "expected narrow select list, got: {sql}"
+        );
+    }
+
+    /// Counterpart to the narrowing test: with no `.select(...)` call,
+    /// the default `Select::All` must still emit `SELECT *`. Guards
+    /// against a regression where a future refactor of the default
+    /// value silently drops back to an empty column list.
+    #[test]
+    fn find_many_emits_star_when_no_select() {
+        let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("SELECT *"), "expected SELECT *, got: {sql}");
+    }
+
     // ========== Distinct Tests ==========
 
     #[test]
