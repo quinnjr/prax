@@ -105,6 +105,38 @@ impl DuckDbConnection {
         Ok(())
     }
 
+    /// Execute a query and return all rows as typed row snapshots.
+    ///
+    /// Each row is materialised into a [`crate::row_ref::DuckDbRowRef`]
+    /// that owns its column values, so callers can map each snapshot
+    /// through `FromRow` without keeping the prepared statement alive.
+    pub fn query_rows(
+        &self,
+        sql: &str,
+        params: &[FilterValue],
+    ) -> DuckDbResult<Vec<crate::row_ref::DuckDbRowRef>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(sql)?;
+        let duckdb_params: Vec<DuckDbParam<'_>> = params.iter().map(DuckDbParam).collect();
+        let param_refs: Vec<&dyn duckdb::ToSql> = duckdb_params
+            .iter()
+            .map(|p| p as &dyn duckdb::ToSql)
+            .collect();
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        let column_names: Vec<String> = rows
+            .as_ref()
+            .map(|stmt| stmt.column_names())
+            .unwrap_or_default();
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(
+                crate::row_ref::DuckDbRowRef::from_duckdb(row, &column_names)
+                    .map_err(|e| DuckDbError::query(format!("row materialization failed: {e}")))?,
+            );
+        }
+        Ok(out)
+    }
+
     /// Execute a query and return all rows as JSON.
     #[instrument(skip(self, params), fields(sql = %sql))]
     pub fn query(&self, sql: &str, params: &[FilterValue]) -> DuckDbResult<Vec<JsonValue>> {
