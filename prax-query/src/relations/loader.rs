@@ -72,6 +72,12 @@ impl<E: QueryEngine> RelationLoader<E> {
     }
 
     /// Build a query for loading a one-to-many relation.
+    ///
+    /// Emits Postgres `$N` placeholders and passes the Postgres dialect to
+    /// any nested `Filter::to_sql` call. The relation executor and its SQL
+    /// builders will adopt the full dialect-threading pattern once relation
+    /// loading is wired into the live client; against a non-Postgres engine
+    /// today, the emitted SQL is Postgres-shaped.
     pub fn build_one_to_many_query(
         &self,
         spec: &RelationSpec,

@@ -93,6 +93,11 @@ impl<E: QueryEngine, V: View> ViewFindManyOperation<E, V> {
     }
 
     /// Build the SQL query.
+    ///
+    /// View operations do not yet accept a dialect. They emit Postgres
+    /// placeholders and `DISTINCT ON`; behaviour against other backends is
+    /// undefined until view ops inherit the dialect-threaded build_sql shape
+    /// that `FindManyOperation` and friends use.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
         let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 
@@ -213,6 +218,9 @@ impl<E: QueryEngine, V: View> ViewCountOperation<E, V> {
     }
 
     /// Build the SQL query.
+    ///
+    /// Same caveat as `ViewFindManyOperation::build_sql`: view ops still emit
+    /// Postgres placeholders unconditionally.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
         let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 

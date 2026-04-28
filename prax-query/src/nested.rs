@@ -52,6 +52,13 @@
 //!     .await?;
 //! ```
 
+// Every `Filter::to_sql` call in this module currently passes
+// `&crate::dialect::Postgres`. Nested writes are not yet wired into a live
+// client (Task 27 does that), and the SQL builders below emit Postgres
+// placeholder syntax (`$N`). When nested writes land on the live client path
+// they will thread the engine's dialect through here, replacing the
+// hard-coded Postgres reference.
+
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
