@@ -75,3 +75,29 @@ fn not_maps_to_not_equals() {
         _ => panic!("expected NotEquals, got {:?}", filter),
     }
 }
+
+// Qualified paths (e.g. `chrono::NaiveDate`) must classify the same as their
+// unqualified siblings — classify_field_type matches on the last path
+// segment's identifier — and the runtime FilterValue must have matching
+// From impls so the emitted `.gt(v).into()` chain actually compiles against
+// a typed value.
+#[derive(Model)]
+#[prax(table = "events")]
+struct Event {
+    #[prax(id)]
+    id: i32,
+    when: chrono::NaiveDate,
+}
+
+#[test]
+fn qualified_chrono_naive_date_emits_comparison_ops() {
+    let d = chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap();
+    let filter: prax_query::filter::Filter = event::when::gt(d).into();
+    match filter {
+        prax_query::filter::Filter::Gt(ref col, prax_query::filter::FilterValue::String(ref s)) => {
+            assert_eq!(col.as_ref(), "when");
+            assert_eq!(s, "2020-01-01");
+        }
+        _ => panic!("expected Gt/String on chrono::NaiveDate, got {filter:?}"),
+    }
+}

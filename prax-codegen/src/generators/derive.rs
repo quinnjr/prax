@@ -96,10 +96,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    // Prepare data for Model and FromRow trait implementations
+    // Relation fields (`Vec<_>`) are handled separately by the relation
+    // codegen; they're not columns and don't round-trip through FromRow.
     let all_columns: Vec<String> = field_infos
         .iter()
-        .filter(|f| !f.is_list) // relations are list-typed and handled elsewhere
+        .filter(|f| !f.is_list)
         .map(|f| f.column_name.clone())
         .collect();
     let pk_columns_owned: Vec<String> = field_infos

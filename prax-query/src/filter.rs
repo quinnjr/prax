@@ -221,6 +221,100 @@ impl<T: Into<FilterValue>> From<Option<T>> for FilterValue {
     }
 }
 
+// Integer widenings. The derive macro's `TypeCategory::Numeric` bucket
+// emits `.gt(v)` / `.in_(vec![v])` etc. on every Rust integer type, which
+// then flows through `v.into()` to a `FilterValue::Int(i64)`. Without
+// these impls, calling `user::age::gt(18u32)` would fail to compile.
+
+impl From<i8> for FilterValue {
+    fn from(v: i8) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<i16> for FilterValue {
+    fn from(v: i16) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u8> for FilterValue {
+    fn from(v: u8) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u16> for FilterValue {
+    fn from(v: u16) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u32> for FilterValue {
+    fn from(v: u32) -> Self {
+        Self::Int(v as i64)
+    }
+}
+// u64 → i64 is a narrowing cast. Clamp rather than overflow silently.
+impl From<u64> for FilterValue {
+    fn from(v: u64) -> Self {
+        Self::Int(i64::try_from(v).unwrap_or(i64::MAX))
+    }
+}
+
+impl From<f32> for FilterValue {
+    fn from(v: f32) -> Self {
+        Self::Float(f64::from(v))
+    }
+}
+
+// Temporal and UUID types round-trip as strings — every driver's row
+// bridge already materializes them via `FilterValue::String` (see
+// `MysqlRowRef`, `SqliteRowRef`, `MssqlRowRef`), so a matching pair on
+// the parameter-binding side keeps the derive's emitted
+// `user::when::gt(dt)` chain compiling and symmetric.
+
+impl From<chrono::DateTime<chrono::Utc>> for FilterValue {
+    fn from(v: chrono::DateTime<chrono::Utc>) -> Self {
+        Self::String(v.to_rfc3339())
+    }
+}
+impl From<chrono::NaiveDateTime> for FilterValue {
+    fn from(v: chrono::NaiveDateTime) -> Self {
+        Self::String(v.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
+    }
+}
+impl From<chrono::NaiveDate> for FilterValue {
+    fn from(v: chrono::NaiveDate) -> Self {
+        Self::String(v.format("%Y-%m-%d").to_string())
+    }
+}
+impl From<chrono::NaiveTime> for FilterValue {
+    fn from(v: chrono::NaiveTime) -> Self {
+        Self::String(v.format("%H:%M:%S%.f").to_string())
+    }
+}
+
+impl From<uuid::Uuid> for FilterValue {
+    fn from(v: uuid::Uuid) -> Self {
+        Self::String(v.to_string())
+    }
+}
+
+impl From<rust_decimal::Decimal> for FilterValue {
+    fn from(v: rust_decimal::Decimal) -> Self {
+        Self::String(v.to_string())
+    }
+}
+
+impl From<serde_json::Value> for FilterValue {
+    fn from(v: serde_json::Value) -> Self {
+        Self::Json(v)
+    }
+}
+
+// `Vec<u8>` is already reachable via the `Vec<T: Into<FilterValue>>`
+// blanket impl — it lands as `FilterValue::List` of `FilterValue::Int`
+// bytes. Drivers that want native BYTEA binding should intercept the
+// List variant and re-interpret. We intentionally don't shadow the
+// blanket with a dedicated impl (which would be a conflict anyway).
+
 /// Scalar filter operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarFilter<T> {
