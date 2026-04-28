@@ -335,15 +335,11 @@ async fn e2e_row_ref_primitive_reads() {
     let pool = pool().await;
     let mut conn = pool.get().await.expect("conn");
 
-    let stream = conn
+    let rows = conn
         .query("SELECT 42 AS n, N'hello' AS s", &[])
         .await
         .expect("query");
-    let row = stream
-        .into_row()
-        .await
-        .expect("into_row")
-        .expect("row present");
+    let row = rows.into_iter().next().expect("row present");
 
     let row_ref = MssqlRowRef::from_row(&row).expect("from_row");
     assert_eq!(row_ref.get_i32("n").unwrap(), 42);
