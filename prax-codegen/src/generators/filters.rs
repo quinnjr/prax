@@ -169,63 +169,31 @@ pub fn generate_field_filters(field: &Field, _model_name: &str) -> TokenStream {
         }
     }
 
+    // Emit the field's filter vocabulary as a FRAGMENT (no outer `pub mod`
+    // wrapper). The caller in `fields::generate_field_module` already wraps
+    // the contents in `pub mod #field_name { ... }`; nesting another
+    // `pub mod #field_name` here would yield `foo::id::id::WhereOp`.
+    let _ = field_name; // retained to document the symbol used by the caller
     quote! {
-        /// Filter operations for the `#col_name` field.
-        pub mod #field_name {
-            use super::*;
-
-            /// Column name in the database.
-            pub const COLUMN: &str = #col_name;
-
-            /// Where operation enum for this field.
-            #[derive(Debug, Clone)]
-            pub enum WhereOp {
-                #where_op_variants
-            }
-
-            impl WhereOp {
-                /// Convert to SQL condition string with parameter placeholder.
-                pub fn to_sql(&self, param_idx: usize) -> String {
-                    match self {
-                        Self::Equals(_) => format!("{} = ${}", COLUMN, param_idx),
-                        Self::Not(_) => format!("{} != ${}", COLUMN, param_idx),
-                        Self::IsNull => format!("{} IS NULL", COLUMN),
-                        Self::IsNotNull => format!("{} IS NOT NULL", COLUMN),
-                        Self::In(v) => {
-                            let placeholders: Vec<_> = (0..v.len())
-                                .map(|i| format!("${}", param_idx + i))
-                                .collect();
-                            format!("{} IN ({})", COLUMN, placeholders.join(", "))
-                        }
-                        Self::NotIn(v) => {
-                            let placeholders: Vec<_> = (0..v.len())
-                                .map(|i| format!("${}", param_idx + i))
-                                .collect();
-                            format!("{} NOT IN ({})", COLUMN, placeholders.join(", "))
-                        }
-                        Self::Gt(_) => format!("{} > ${}", COLUMN, param_idx),
-                        Self::Gte(_) => format!("{} >= ${}", COLUMN, param_idx),
-                        Self::Lt(_) => format!("{} < ${}", COLUMN, param_idx),
-                        Self::Lte(_) => format!("{} <= ${}", COLUMN, param_idx),
-                        Self::Contains(_) => format!("{} LIKE '%' || ${} || '%'", COLUMN, param_idx),
-                        Self::StartsWith(_) => format!("{} LIKE ${} || '%'", COLUMN, param_idx),
-                        Self::EndsWith(_) => format!("{} LIKE '%' || ${}", COLUMN, param_idx),
-                    }
-                }
-
-                /// Convert to prax_query::filter::Filter.
-                pub fn to_filter(self) -> prax_query::filter::Filter {
-                    use prax_query::filter::{Filter, FilterValue};
-                    use std::borrow::Cow;
-                    let col: Cow<'static, str> = Cow::Borrowed(COLUMN);
-                    match self {
-                        #(#to_filter_arms)*
-                    }
-                }
-            }
-
-            #(#ops)*
+        /// Where operation enum for this field.
+        #[derive(Debug, Clone)]
+        pub enum WhereOp {
+            #where_op_variants
         }
+
+        impl WhereOp {
+            /// Convert to `prax_query::filter::Filter`.
+            pub fn to_filter(self) -> prax_query::filter::Filter {
+                use prax_query::filter::{Filter, FilterValue};
+                use std::borrow::Cow;
+                let col: Cow<'static, str> = Cow::Borrowed(#col_name);
+                match self {
+                    #(#to_filter_arms)*
+                }
+            }
+        }
+
+        #(#ops)*
     }
 }
 

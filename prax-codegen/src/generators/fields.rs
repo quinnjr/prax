@@ -66,33 +66,12 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
         TokenStream::new()
     };
 
-    // Generate increment/decrement for numeric types
-    let numeric_ops = match &field.field_type {
-        FieldType::Scalar(s) if crate::types::supports_comparison(s) => {
-            if matches!(
-                s,
-                prax_schema::ast::ScalarType::Int
-                    | prax_schema::ast::ScalarType::BigInt
-                    | prax_schema::ast::ScalarType::Float
-                    | prax_schema::ast::ScalarType::Decimal
-            ) {
-                quote! {
-                    /// Increment this field by the given amount.
-                    pub fn increment(amount: #field_type) -> super::SetParam {
-                        super::SetParam::#field_name_pascal(super::#field_name::get_current_value() + amount)
-                    }
-
-                    /// Decrement this field by the given amount.
-                    pub fn decrement(amount: #field_type) -> super::SetParam {
-                        super::SetParam::#field_name_pascal(super::#field_name::get_current_value() - amount)
-                    }
-                }
-            } else {
-                TokenStream::new()
-            }
-        }
-        _ => TokenStream::new(),
-    };
+    // Increment/decrement helpers intentionally omitted — implementing them
+    // requires an atomic read-modify-write path (today's execution model is
+    // `SET col = ?`, not `SET col = col + ?`). The previous codegen emitted
+    // calls to a phantom `get_current_value()` that never existed, so the
+    // `pub mod` never compiled when a numeric field was present. Re-add once
+    // the Client exposes a proper `.increment()/.decrement()` update op.
 
     // Generate filter operations
     let filters = super::filters::generate_field_filters(field, model.name());
@@ -116,9 +95,8 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
 
             #order_by
             #set_ops
-            #numeric_ops
 
-            // Re-export filter operations
+            // Filter operations (WhereOp enum + equals/gt/... constructors)
             #filters
         }
     }
