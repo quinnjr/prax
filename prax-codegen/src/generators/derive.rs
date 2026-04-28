@@ -83,9 +83,35 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .filter(|f| !f.is_list)
         .map(|f| {
             let variant_name = format_ident!("{}", f.name.to_string().to_case(Case::Pascal));
-            quote! { #variant_name(super::_prax_prelude::SortOrder) }
+            quote! { #variant_name(::prax_orm::_prax_prelude::SortOrder) }
         })
         .collect();
+
+    // Prepare data for Model and FromRow trait implementations
+    let all_columns: Vec<String> = field_infos
+        .iter()
+        .filter(|f| !f.is_list) // relations are list-typed and handled elsewhere
+        .map(|f| f.column_name.clone())
+        .collect();
+    let pk_columns_owned: Vec<String> = field_infos
+        .iter()
+        .filter(|f| f.is_id)
+        .map(|f| f.column_name.clone())
+        .collect();
+    let from_row_fields: Vec<(Ident, Type, String)> = field_infos
+        .iter()
+        .filter(|f| !f.is_list)
+        .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone()))
+        .collect();
+
+    let model_trait_impl = super::derive_model_trait::emit(
+        name,
+        &name.to_string(),
+        &table_name,
+        &pk_columns_owned,
+        &all_columns,
+    );
+    let from_row_impl = super::derive_from_row::emit(name, &from_row_fields);
 
     Ok(quote! {
         /// Generated module for the #name model.
@@ -98,7 +124,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             /// Primary key column(s).
             pub const PRIMARY_KEY: &[&str] = &[#(#pk_fields),*];
 
-            impl super::_prax_prelude::PraxModel for #name {
+            impl ::prax_orm::_prax_prelude::PraxModel for #name {
                 const TABLE_NAME: &'static str = TABLE_NAME;
                 const PRIMARY_KEY: &'static [&'static str] = PRIMARY_KEY;
             }
@@ -180,6 +206,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
                 }
             }
         }
+
+        // Emit Model and FromRow trait implementations at crate root
+        #model_trait_impl
+        #from_row_impl
     })
 }
 
@@ -303,6 +333,9 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
     let column_name = &field.column_name;
     let ty = &field.ty;
 
+    // Generate PascalCase variant name for WhereParam
+    let variant_name = format_ident!("{}", field.name.to_string().to_case(Case::Pascal));
+
     // Generate basic where operations
     let where_ops = quote! {
         #[derive(Debug, Clone)]
@@ -314,11 +347,11 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
         }
 
         pub fn equals(value: #ty) -> super::WhereParam {
-            super::WhereParam::#field_name(WhereOp::Equals(value))
+            super::WhereParam::#variant_name(WhereOp::Equals(value))
         }
 
         pub fn not(value: #ty) -> super::WhereParam {
-            super::WhereParam::#field_name(WhereOp::Not(value))
+            super::WhereParam::#variant_name(WhereOp::Not(value))
         }
     };
 

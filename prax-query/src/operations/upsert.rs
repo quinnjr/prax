@@ -157,8 +157,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
             String::new()
         };
 
-        let conflict_cols: Vec<&str> =
-            self.conflict_columns.iter().map(|s| s.as_str()).collect();
+        let conflict_cols: Vec<&str> = self.conflict_columns.iter().map(|s| s.as_str()).collect();
 
         if update_set.is_empty() {
             // DO NOTHING variant

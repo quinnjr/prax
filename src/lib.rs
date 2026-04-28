@@ -657,3 +657,27 @@ pub use schema::{Schema, SchemaError};
 pub mod error {
     pub use prax_schema::SchemaError;
 }
+
+/// Common types used by generated Prax models.
+///
+/// This module is referenced by the `#[derive(Model)]` proc-macro.
+#[doc(hidden)]
+pub mod _prax_prelude {
+    /// Marker trait for Prax models.
+    pub trait PraxModel {
+        /// The table name in the database.
+        const TABLE_NAME: &'static str;
+
+        /// The primary key column(s).
+        const PRIMARY_KEY: &'static [&'static str];
+    }
+
+    /// Sort direction for order by clauses.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SortOrder {
+        /// Ascending order (A-Z, 0-9).
+        Asc,
+        /// Descending order (Z-A, 9-0).
+        Desc,
+    }
+}
