@@ -73,7 +73,7 @@ impl SqliteEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let snapshots: Vec<SqliteRowRef> = conn
             .inner()
@@ -93,11 +93,16 @@ impl SqliteEngine {
                 Ok(out)
             })
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
 
         snapshots
             .into_iter()
-            .map(|r| T::from_row(&r).map_err(|e| QueryError::deserialization(e.to_string())))
+            .map(|r| {
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })
+            })
             .collect()
     }
 
@@ -116,7 +121,7 @@ impl SqliteEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let snapshot: Option<SqliteRowRef> = conn
             .inner()
@@ -135,10 +140,15 @@ impl SqliteEngine {
                 }
             })
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
 
         snapshot
-            .map(|r| T::from_row(&r).map_err(|e| QueryError::deserialization(e.to_string())))
+            .map(|r| {
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })
+            })
             .transpose()
     }
 
@@ -147,7 +157,7 @@ impl SqliteEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let n = conn
             .inner()
@@ -157,7 +167,7 @@ impl SqliteEngine {
                 Ok(c.execute(&sql, refs.as_slice())?)
             })
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
         Ok(n as u64)
     }
 
@@ -166,7 +176,7 @@ impl SqliteEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let n = conn
             .inner()
@@ -178,7 +188,7 @@ impl SqliteEngine {
                 Ok(n)
             })
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
         Ok(n as u64)
     }
 }

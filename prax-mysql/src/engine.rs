@@ -74,19 +74,24 @@ impl MysqlEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let rows: Vec<MyRow> = conn
             .inner_mut()
             .exec(sql.as_str(), Params::Positional(bound))
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
 
         rows.into_iter()
             .map(|row| {
-                let rr = MysqlRowRef::from_row(row)
-                    .map_err(|e| QueryError::deserialization(e.to_string()))?;
-                T::from_row(&rr).map_err(|e| QueryError::deserialization(e.to_string()))
+                let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
+                T::from_row(&rr).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })
             })
             .collect()
     }
@@ -106,19 +111,24 @@ impl MysqlEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let row: Option<MyRow> = conn
             .inner_mut()
             .exec_first(sql.as_str(), Params::Positional(bound))
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
 
         match row {
             Some(r) => {
-                let rr = MysqlRowRef::from_row(r)
-                    .map_err(|e| QueryError::deserialization(e.to_string()))?;
-                let t = T::from_row(&rr).map_err(|e| QueryError::deserialization(e.to_string()))?;
+                let rr = MysqlRowRef::from_row(r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
+                let t = T::from_row(&rr).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
                 Ok(Some(t))
             }
             None => Ok(None),
@@ -130,12 +140,12 @@ impl MysqlEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         conn.inner_mut()
             .exec_drop(sql.as_str(), Params::Positional(bound))
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
         Ok(conn.inner().affected_rows())
     }
 
@@ -144,13 +154,13 @@ impl MysqlEngine {
             .pool
             .get()
             .await
-            .map_err(|e| QueryError::connection(e.to_string()))?;
+            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
         let count: Option<(i64,)> = conn
             .inner_mut()
             .exec_first(sql.as_str(), Params::Positional(bound))
             .await
-            .map_err(|e| QueryError::database(e.to_string()))?;
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
         count.map(|(n,)| n as u64).ok_or_else(|| {
             prax_query::QueryError::deserialization("count query returned no rows".to_string())
         })

@@ -36,7 +36,10 @@ impl PgEngine {
         values
             .iter()
             .map(|v| {
-                filter_value_to_sql(v).map_err(|e| prax_query::QueryError::database(e.to_string()))
+                filter_value_to_sql(v).map_err(|e| {
+                    let msg = e.to_string();
+                    prax_query::QueryError::database(msg).with_source(e)
+                })
             })
             .collect()
     }
@@ -56,11 +59,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_many");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -69,7 +71,7 @@ impl QueryEngine for PgEngine {
             let rows = conn
                 .query(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             crate::deserialize::rows_into::<T>(rows)
         })
@@ -84,21 +86,21 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_one");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
                 pg_params.iter().map(|p| p.as_ref() as _).collect();
 
             let row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
-                if e.to_string().contains("no rows") {
+                let msg = e.to_string();
+                if msg.contains("no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
-                    prax_query::QueryError::database(e.to_string())
+                    prax_query::QueryError::database(msg).with_source(e)
                 }
             })?;
 
@@ -115,11 +117,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_optional");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -128,7 +129,7 @@ impl QueryEngine for PgEngine {
             let row = conn
                 .query_opt(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             row.map(crate::deserialize::row_into::<T>).transpose()
         })
@@ -143,11 +144,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing insert");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -156,7 +156,7 @@ impl QueryEngine for PgEngine {
             let row = conn
                 .query_one(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             crate::deserialize::row_into::<T>(row)
         })
@@ -171,11 +171,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing update");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -184,7 +183,7 @@ impl QueryEngine for PgEngine {
             let rows = conn
                 .query(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             crate::deserialize::rows_into::<T>(rows)
         })
@@ -199,11 +198,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing delete");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -212,7 +210,7 @@ impl QueryEngine for PgEngine {
             let count = conn
                 .execute(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             Ok(count)
         })
@@ -223,11 +221,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing raw SQL");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -236,7 +233,7 @@ impl QueryEngine for PgEngine {
             let count = conn
                 .execute(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             Ok(count)
         })
@@ -247,11 +244,10 @@ impl QueryEngine for PgEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing count");
 
-            let conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let pg_params = Self::to_params(&params)?;
             let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -260,7 +256,7 @@ impl QueryEngine for PgEngine {
             let row = conn
                 .query_one(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             let count: i64 = row.get(0);
             Ok(count as u64)

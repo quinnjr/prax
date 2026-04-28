@@ -36,7 +36,10 @@ impl MssqlEngine {
         values
             .iter()
             .map(|v| {
-                filter_value_to_sql(v).map_err(|e| prax_query::QueryError::database(e.to_string()))
+                filter_value_to_sql(v).map_err(|e| {
+                    let msg = e.to_string();
+                    prax_query::QueryError::database(msg).with_source(e)
+                })
             })
             .collect()
     }
@@ -65,9 +68,14 @@ impl MssqlEngine {
     /// partial results. Callers that want per-row recovery should
     /// manually iterate and handle each result.
     fn decode_row<T: FromRow>(row: &tiberius::Row) -> prax_query::QueryResult<T> {
-        let row_ref = MssqlRowRef::from_row(row)
-            .map_err(|e| prax_query::QueryError::deserialization(e.to_string()))?;
-        T::from_row(&row_ref).map_err(|e| prax_query::QueryError::deserialization(e.to_string()))
+        let row_ref = MssqlRowRef::from_row(row).map_err(|e| {
+            let msg = e.to_string();
+            prax_query::QueryError::deserialization(msg).with_source(e)
+        })?;
+        T::from_row(&row_ref).map_err(|e| {
+            let msg = e.to_string();
+            prax_query::QueryError::deserialization(msg).with_source(e)
+        })
     }
 }
 
@@ -85,11 +93,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_many");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -98,7 +105,7 @@ impl QueryEngine for MssqlEngine {
             let rows = conn
                 .query(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             rows.iter().map(Self::decode_row).collect()
         })
@@ -113,11 +120,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_one");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -128,7 +134,7 @@ impl QueryEngine for MssqlEngine {
                 if msg.contains("no rows") || msg.contains("returned no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
-                    prax_query::QueryError::database(msg)
+                    prax_query::QueryError::database(msg).with_source(e)
                 }
             })?;
 
@@ -145,11 +151,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_optional");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -158,7 +163,7 @@ impl QueryEngine for MssqlEngine {
             let row = conn
                 .query_opt(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             match row {
                 Some(r) => Self::decode_row(&r).map(Some),
@@ -176,11 +181,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing insert");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -190,7 +194,7 @@ impl QueryEngine for MssqlEngine {
             let row = conn
                 .query_one(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             Self::decode_row(&row)
         })
@@ -205,11 +209,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing update");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -218,7 +221,7 @@ impl QueryEngine for MssqlEngine {
             let rows = conn
                 .query(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             rows.iter().map(Self::decode_row).collect()
         })
@@ -233,11 +236,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing delete");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -246,7 +248,7 @@ impl QueryEngine for MssqlEngine {
             let count = conn
                 .execute(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             Ok(count)
         })
@@ -257,11 +259,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing raw SQL");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -270,7 +271,7 @@ impl QueryEngine for MssqlEngine {
             let count = conn
                 .execute(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             Ok(count)
         })
@@ -281,11 +282,10 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing count");
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| prax_query::QueryError::connection(e.to_string()))?;
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
 
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
@@ -294,7 +294,7 @@ impl QueryEngine for MssqlEngine {
             let row = conn
                 .query_one(&sql, &param_refs)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
 
             // COUNT is always INT in SQL Server (COUNT_BIG is BIGINT). Probe i64
             // first (handles COUNT_BIG), fall back to i32 for COUNT. Use try_get so
@@ -314,9 +314,10 @@ impl QueryEngine for MssqlEngine {
                 Ok(None) => Err(prax_query::QueryError::deserialization(
                     "count query column 0 is NULL".to_string(),
                 )),
-                Err(e) => Err(prax_query::QueryError::deserialization(format!(
-                    "count query column 0 is not an integer: {e}"
-                ))),
+                Err(e) => {
+                    let msg = format!("count query column 0 is not an integer: {e}");
+                    Err(prax_query::QueryError::deserialization(msg).with_source(e))
+                }
             }
         })
     }

@@ -23,7 +23,10 @@ pub fn rows_into<T: FromRow>(rows: Vec<Row>) -> QueryResult<Vec<T>> {
     rows.into_iter()
         .map(|r| {
             let r = PgRow::from(r);
-            T::from_row(&r).map_err(|e| QueryError::deserialization(e.to_string()))
+            T::from_row(&r).map_err(|e| {
+                let msg = e.to_string();
+                QueryError::deserialization(msg).with_source(e)
+            })
         })
         .collect()
 }
@@ -34,5 +37,8 @@ pub fn rows_into<T: FromRow>(rows: Vec<Row>) -> QueryResult<Vec<T>> {
 /// if the FromRow impl returns an error. No partial-result fallback.
 pub fn row_into<T: FromRow>(row: Row) -> QueryResult<T> {
     let row = PgRow::from(row);
-    T::from_row(&row).map_err(|e| QueryError::deserialization(e.to_string()))
+    T::from_row(&row).map_err(|e| {
+        let msg = e.to_string();
+        QueryError::deserialization(msg).with_source(e)
+    })
 }
