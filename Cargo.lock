@@ -4574,6 +4574,7 @@ dependencies = [
  "prax-schema",
  "prax-sqlite",
  "rusqlite",
+ "rust_decimal",
  "sea-orm",
  "serde",
  "serde_json",
@@ -4584,6 +4585,8 @@ dependencies = [
  "tracing-chrome",
  "tracing-flame",
  "tracing-subscriber",
+ "trybuild",
+ "uuid",
 ]
 
 [[package]]

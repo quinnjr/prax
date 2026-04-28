@@ -241,6 +241,11 @@ sqlite = []
 mssql = []
 mongodb = []
 
+# trybuild UI tests for the derive macro. Gated because trybuild stderr
+# snapshots are sensitive to rustc version — run with
+# `cargo test --test derive_ui --features ui-tests` on a pinned toolchain.
+ui-tests = []
+
 # Profiling features
 profiling = ["tracing-subscriber", "tracing-flame", "tracing-chrome"]
 heap-profiling = ["dhat"]

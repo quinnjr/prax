@@ -1,0 +1,5 @@
+error: Model derive only supports structs with named fields
+ --> tests/ui/id_on_unit_struct.rs:8:1
+  |
+8 | struct Foo;
+  | ^^^^^^^^^^^
