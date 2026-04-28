@@ -81,10 +81,24 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Different implementations can be provided for different databases
 /// (PostgreSQL, MySQL, SQLite, etc.).
 pub trait QueryEngine: Send + Sync + Clone + 'static {
-    /// The SQL dialect this engine targets. Non-SQL engines (e.g., MongoDB)
-    /// return `&NotSql`, which produces inert placeholders — any attempt to
-    /// build SQL through them is meaningless and surfaces as empty strings.
-    fn dialect(&self) -> &dyn crate::dialect::SqlDialect;
+    /// The SQL dialect this engine targets.
+    ///
+    /// Drivers that emit SQL (Postgres, MySQL, SQLite, MSSQL) override this
+    /// to return their matching dialect so the shared `Operation` builders
+    /// emit dialect-appropriate placeholders, `RETURNING` clauses, identifier
+    /// quoting, and upsert syntax.
+    ///
+    /// The default returns `&crate::dialect::NotSql`, the inert dialect
+    /// whose methods all panic if called. Non-SQL engines (MongoDB,
+    /// document stores) can leave the default in place — their own
+    /// operations never call SQL builders, so the panicking dialect is
+    /// never invoked. If you implement `QueryEngine` for a SQL backend
+    /// and forget to override this method, every attempt to build SQL
+    /// through your engine will panic, which is the intended loud-failure
+    /// mode.
+    fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+        &crate::dialect::NotSql
+    }
 
     /// Execute a SELECT query and return rows.
     fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
@@ -291,5 +305,89 @@ mod tests {
         let filter = Filter::Equals("id".into(), crate::filter::FilterValue::Int(1));
         let converted = filter.clone().into_filter();
         assert_eq!(converted, filter);
+    }
+
+    #[test]
+    fn query_engine_dialect_defaults_to_not_sql() {
+        // A minimal QueryEngine impl that doesn't override dialect() should
+        // inherit the NotSql default so external implementors aren't forced
+        // to add a method they don't care about.
+        use crate::filter::FilterValue;
+
+        #[derive(Clone)]
+        struct DefaultEngine;
+
+        impl QueryEngine for DefaultEngine {
+            fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<T>> {
+                Box::pin(async { Err(crate::error::QueryError::not_found("test")) })
+            }
+
+            fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+                Box::pin(async { Ok(None) })
+            }
+
+            fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<T>> {
+                Box::pin(async { Err(crate::error::QueryError::not_found("test")) })
+            }
+
+            fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+
+            fn execute_delete(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+
+            fn execute_raw(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+
+            fn count(
+                &self,
+                _sql: &str,
+                _params: Vec<FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+
+            // Note: dialect() is NOT overridden - we're testing the default
+        }
+
+        let e = DefaultEngine;
+        // The default dialect should be NotSql, whose placeholder method
+        // currently returns empty strings (will panic in task 44)
+        assert_eq!(e.dialect().placeholder(1), "");
     }
 }

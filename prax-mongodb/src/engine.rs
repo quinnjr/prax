@@ -99,14 +99,6 @@ impl MongoEngine {
 use crate::error::MongoResult;
 
 impl QueryEngine for MongoEngine {
-    /// MongoDB is a document database, not SQL. This returns an inert `NotSql`
-    /// dialect whose methods produce empty strings. The engine's own operation
-    /// paths build BSON filters instead of SQL, so dialect methods are never
-    /// called in practice.
-    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
-        &prax_query::dialect::NotSql
-    }
-
     fn query_many<T: Model + Send + 'static>(
         &self,
         sql: &str,

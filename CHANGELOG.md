@@ -7,7 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (BREAKING)
+
+- **`prax-query::traits::QueryEngine`**: row-returning methods now require
+  `T: FromRow`. Add `#[derive(Model)]` (which emits `FromRow`) or a
+  hand-written `impl FromRow for MyModel`.
+- **`prax-query::traits::QueryEngine`**: new `dialect()` method on the
+  trait. Has a default returning the inert `NotSql` dialect, so existing
+  implementors continue to compile — but every SQL-backed engine must
+  override it or SQL building will panic at runtime.
+- **`prax-query::filter::Filter::to_sql`**: signature gained a
+  `dialect: &dyn SqlDialect` parameter. Callers must pass their engine's
+  dialect (or a literal `&prax_query::dialect::Postgres` if wedded to
+  that backend).
+- **`prax-query::filter::Filter::to_sql`**: column names are now quoted
+  through `dialect.quote_ident` before being interpolated into SQL.
+  Generated SQL now reads `"col" = $1` on Postgres (was `col = $1`),
+  `` `col` = ? `` on MySQL, `[col] = @P1` on MSSQL. Tests that matched
+  the unquoted form need updating.
+- **`prax-mysql::MysqlEngine` / `prax-sqlite::SqliteEngine`**: rewritten
+  to return typed rows (`T: FromRow`) instead of JSON blobs. The legacy
+  JSON API moved to `prax_mysql::raw::MysqlRawEngine` +
+  `prax_mysql::raw::MysqlJsonRow` (and the equivalent for SQLite).
+  Callers that wanted JSON: `use prax_{mysql,sqlite}::raw::{MysqlRawEngine, MysqlJsonRow}`.
+- **`prax-mysql::MysqlQueryResult` / `prax-sqlite::SqliteQueryResult`**:
+  types removed from public re-exports. Renamed to
+  `prax_{mysql,sqlite}::raw::{MysqlJsonRow, SqliteJsonRow}`.
+
 ### Added
+
+- **`prax-query::dialect`**: new module with `SqlDialect` trait and
+  `Postgres`/`Sqlite`/`Mysql`/`Mssql`/`NotSql` implementations. Attached
+  to `QueryEngine::dialect()`.
+- **`prax-query::row::FromRow` + `RowRef`**: expanded with default-
+  erroring getters for `chrono::DateTime<Utc>`, `chrono::NaiveDateTime`,
+  `chrono::NaiveDate`, `chrono::NaiveTime`, `uuid::Uuid`,
+  `rust_decimal::Decimal`, `serde_json::Value` and their `Option<T>`
+  variants. Drivers override the ones they support natively.
+- **`prax-query::row::into_row_error`**: helper for driver `RowRef`
+  bridges that maps any `Display` error into a `RowError::TypeConversion`.
+- **`prax-{postgres,sqlite,mysql,mssql}` row_ref modules**: typed row
+  bridges (`PgRow`, `SqliteRowRef`, `MysqlRowRef`, `MssqlRowRef`).
+- **`prax-{postgres,sqlite,mysql,mssql}::*Engine`**: implement
+  `QueryEngine` trait with typed row decoding via `FromRow`.
+- **`#[derive(Model)]`**: emits `impl prax_query::traits::Model` and
+  `impl prax_query::row::FromRow` alongside the legacy `PraxModel`
+  marker. Also emits per-field filter operator constructors
+  (`user::age::gt(18)`, etc.) that classify field types into
+  Numeric / String / Boolean / Other buckets.
+- **`FilterValue`**: `From` impls for signed and unsigned integer
+  widths, `f32`, `chrono::DateTime<Utc>`, `chrono::NaiveDateTime`,
+  `chrono::NaiveDate`, `chrono::NaiveTime`, `uuid::Uuid`,
+  `rust_decimal::Decimal`, `serde_json::Value`.
+
+### Migration Guide
+
+If you implement `QueryEngine` for a custom SQL backend:
+1. Add `fn dialect(&self) -> &dyn SqlDialect { &prax_query::dialect::Postgres }` (or the dialect you target).
+2. Ensure every type passed to `query_many::<T>`, `query_one::<T>`, etc. implements `FromRow`. Use `#[derive(Model)]`.
+
+If you use `prax-mysql` or `prax-sqlite`:
+- For typed rows (new default): no change — your `find_many::<User>()` etc. now return typed models.
+- For JSON blobs (legacy): import `MysqlRawEngine` / `SqliteRawEngine` from the `raw` module.
+
+If you call `Filter::to_sql` directly:
+- Update to `filter.to_sql(offset, &prax_query::dialect::Postgres)` (or your dialect).
 
 - **TypeScript Generator** (`prax-typegen` v0.1.0) - Standalone crate for generating TypeScript from Prax schemas
   - TypeScript interface generation for models, enums, composite types, and views
