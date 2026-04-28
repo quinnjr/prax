@@ -351,40 +351,145 @@ fn is_vec_type(ty: &Type) -> bool {
     false
 }
 
+/// Field type category for conditional filter emission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeCategory {
+    Numeric,
+    String,
+    Boolean,
+    Other,
+}
+
+/// Classify a Rust type for filter operator emission.
+///
+/// Inspects the type to determine which filter operators make sense. Unwraps
+/// Option<T> to classify the inner type. Returns the category that drives
+/// conditional emission of comparison, string, and IN operators.
+fn classify_field_type(ty: &Type) -> TypeCategory {
+    // Unwrap Option<T> to get the inner type.
+    let type_name = if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            if segment.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        // Recurse to classify the inner type.
+                        return classify_field_type(inner);
+                    }
+                }
+            }
+        }
+        // Not Option — extract the last segment as the type name.
+        type_path.path.segments.last().map(|s| s.ident.to_string())
+    } else {
+        None
+    };
+
+    match type_name.as_deref() {
+        Some(
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64" | "u128"
+            | "usize" | "f32" | "f64" | "Decimal" | "NaiveDate" | "NaiveDateTime" | "NaiveTime"
+            | "DateTime",
+        ) => TypeCategory::Numeric,
+        Some("String" | "str") => TypeCategory::String,
+        Some("bool") => TypeCategory::Boolean,
+        _ => TypeCategory::Other,
+    }
+}
+
 /// Generate a field module from derive macro field info.
 fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
     let field_name = &field.name;
     let column_name = &field.column_name;
     let ty = &field.ty;
-
-    // Generate PascalCase variant name for WhereParam
     let variant_name = format_ident!("{}", field.name.to_string().to_case(Case::Pascal));
+    let is_optional = field.is_optional;
+    let category = classify_field_type(ty);
 
-    // Generate basic where operations
-    let where_ops = quote! {
-        #[derive(Debug, Clone)]
-        pub enum WhereOp {
-            Equals(#ty),
-            Not(#ty),
-            IsNull,
-            IsNotNull,
+    // Collect WhereOp enum variants conditionally.
+    let mut variants = vec![quote! { Equals(#ty) }, quote! { Not(#ty) }];
+
+    if is_optional {
+        variants.push(quote! { IsNull });
+        variants.push(quote! { IsNotNull });
+    }
+
+    match category {
+        TypeCategory::Numeric => {
+            variants.push(quote! { In(Vec<#ty>) });
+            variants.push(quote! { NotIn(Vec<#ty>) });
+            variants.push(quote! { Gt(#ty) });
+            variants.push(quote! { Gte(#ty) });
+            variants.push(quote! { Lt(#ty) });
+            variants.push(quote! { Lte(#ty) });
         }
-
-        impl WhereOp {
-            /// Convert to prax_query::filter::Filter.
-            pub fn to_filter(self) -> ::prax_query::filter::Filter {
-                use ::prax_query::filter::{Filter, FilterValue};
-                use ::std::borrow::Cow;
-                let col: Cow<'static, str> = Cow::Borrowed(COLUMN);
-                match self {
-                    Self::Equals(v) => Filter::Equals(col, v.into()),
-                    Self::Not(v) => Filter::NotEquals(col, v.into()),
-                    Self::IsNull => Filter::IsNull(col),
-                    Self::IsNotNull => Filter::IsNotNull(col),
-                }
-            }
+        TypeCategory::String => {
+            variants.push(quote! { In(Vec<#ty>) });
+            variants.push(quote! { NotIn(Vec<#ty>) });
+            variants.push(quote! { Contains(String) });
+            variants.push(quote! { StartsWith(String) });
+            variants.push(quote! { EndsWith(String) });
         }
+        TypeCategory::Boolean => {}
+        TypeCategory::Other => {
+            variants.push(quote! { In(Vec<#ty>) });
+            variants.push(quote! { NotIn(Vec<#ty>) });
+        }
+    }
 
+    // Collect to_filter match arms in the same conditional shape.
+    let mut arms = vec![
+        quote! { Self::Equals(v) => Filter::Equals(col, v.into()) },
+        quote! { Self::Not(v) => Filter::NotEquals(col, v.into()) },
+    ];
+
+    if is_optional {
+        arms.push(quote! { Self::IsNull => Filter::IsNull(col) });
+        arms.push(quote! { Self::IsNotNull => Filter::IsNotNull(col) });
+    }
+
+    match category {
+        TypeCategory::Numeric => {
+            arms.push(
+                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
+            );
+            arms.push(
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+            );
+            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, v.into()) });
+            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, v.into()) });
+            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, v.into()) });
+            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, v.into()) });
+        }
+        TypeCategory::String => {
+            arms.push(
+                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
+            );
+            arms.push(
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+            );
+            arms.push(
+                quote! { Self::Contains(v) => Filter::Contains(col, FilterValue::String(v)) },
+            );
+            arms.push(
+                quote! { Self::StartsWith(v) => Filter::StartsWith(col, FilterValue::String(v)) },
+            );
+            arms.push(
+                quote! { Self::EndsWith(v) => Filter::EndsWith(col, FilterValue::String(v)) },
+            );
+        }
+        TypeCategory::Boolean => {}
+        TypeCategory::Other => {
+            arms.push(
+                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
+            );
+            arms.push(
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+            );
+        }
+    }
+
+    // Collect constructor functions.
+    let mut ctors = vec![quote! {
         pub fn equals(value: #ty) -> super::WhereParam {
             super::WhereParam::#variant_name(WhereOp::Equals(value))
         }
@@ -392,7 +497,84 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
         pub fn not(value: #ty) -> super::WhereParam {
             super::WhereParam::#variant_name(WhereOp::Not(value))
         }
-    };
+    }];
+
+    if is_optional {
+        ctors.push(quote! {
+            pub fn is_null() -> super::WhereParam {
+                super::WhereParam::#variant_name(WhereOp::IsNull)
+            }
+
+            pub fn is_not_null() -> super::WhereParam {
+                super::WhereParam::#variant_name(WhereOp::IsNotNull)
+            }
+        });
+    }
+
+    match category {
+        TypeCategory::Numeric => {
+            ctors.push(quote! {
+                pub fn in_(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::In(values))
+                }
+
+                pub fn not_in(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::NotIn(values))
+                }
+
+                pub fn gt(value: #ty) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::Gt(value))
+                }
+
+                pub fn gte(value: #ty) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::Gte(value))
+                }
+
+                pub fn lt(value: #ty) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::Lt(value))
+                }
+
+                pub fn lte(value: #ty) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::Lte(value))
+                }
+            });
+        }
+        TypeCategory::String => {
+            ctors.push(quote! {
+                pub fn in_(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::In(values))
+                }
+
+                pub fn not_in(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::NotIn(values))
+                }
+
+                pub fn contains(value: impl Into<String>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::Contains(value.into()))
+                }
+
+                pub fn starts_with(value: impl Into<String>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::StartsWith(value.into()))
+                }
+
+                pub fn ends_with(value: impl Into<String>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::EndsWith(value.into()))
+                }
+            });
+        }
+        TypeCategory::Boolean => {}
+        TypeCategory::Other => {
+            ctors.push(quote! {
+                pub fn in_(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::In(values))
+                }
+
+                pub fn not_in(values: Vec<#ty>) -> super::WhereParam {
+                    super::WhereParam::#variant_name(WhereOp::NotIn(values))
+                }
+            });
+        }
+    }
 
     quote! {
         pub mod #field_name {
@@ -400,7 +582,24 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 
             pub const COLUMN: &str = #column_name;
 
-            #where_ops
+            #[derive(Debug, Clone)]
+            pub enum WhereOp {
+                #(#variants,)*
+            }
+
+            impl WhereOp {
+                /// Convert to prax_query::filter::Filter.
+                pub fn to_filter(self) -> ::prax_query::filter::Filter {
+                    use ::prax_query::filter::{Filter, FilterValue};
+                    use ::std::borrow::Cow;
+                    let col: Cow<'static, str> = Cow::Borrowed(COLUMN);
+                    match self {
+                        #(#arms,)*
+                    }
+                }
+            }
+
+            #(#ctors)*
         }
     }
 }
