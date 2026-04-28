@@ -643,6 +643,33 @@ mod tests {
     }
 
     #[test]
+    fn create_mssql_emits_output_inserted_for_multiple_columns() {
+        // Regression guard: the dialect-level test at
+        // `dialect::tests::returning_mssql_is_output_inserted` verifies the
+        // per-column prefix expansion of `Mssql::returning_clause`, but not
+        // the wiring from the operation builder's `Select` list into that
+        // clause. If a future refactor fails to pass the selected columns
+        // through to the dialect, that path would silently fall back to
+        // `OUTPUT INSERTED.*`. This test pins the end-to-end SQL emitted by
+        // `CreateOperation::build_sql` when a narrow column list is set.
+        let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .set("name", "Alice")
+            .set("email", "alice@example.com")
+            .select(Select::fields(["id", "email"]));
+
+        let (sql, params) = op.build_sql(&crate::dialect::Mssql);
+        assert!(
+            sql.contains(" OUTPUT INSERTED.id, INSERTED.email"),
+            "expected OUTPUT INSERTED.id, INSERTED.email, got: {sql}"
+        );
+        assert!(
+            !sql.contains("INSERTED.*"),
+            "narrow Select must not fall back to INSERTED.*: {sql}"
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
     fn create_postgres_emits_returning() {
         let op =
             CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
