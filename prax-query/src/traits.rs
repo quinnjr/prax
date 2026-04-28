@@ -361,6 +361,31 @@ pub trait WithRelations: Model {
     type Select;
 }
 
+/// Routes a relation-include request to the right executor call.
+///
+/// Every `#[derive(Model)]` (and `prax_schema!`-generated model) emits
+/// an impl of this trait. Models with no relations get a trivial impl
+/// that errors on any unknown relation name; models with relations
+/// dispatch each name to [`crate::relations::executor::load_has_many`]
+/// and splice the results onto the parent slice.
+///
+/// Implementing this as a model-side trait — rather than carrying a
+/// `Vec<Box<dyn Loader>>` on the find-operation builder — keeps the
+/// executor fully monomorphic and lets `include(...)` remain a simple
+/// `String`-keyed lookup against the model's match arms.
+pub trait ModelRelationLoader<E: QueryEngine>: Sized {
+    /// Load every relation named by `spec` onto the `parents` slice.
+    ///
+    /// The slice is mutated in place — each parent's relation field is
+    /// set to the bucketed child collection. Models with no relations
+    /// return an `internal` [`crate::error::QueryError`] for any name.
+    fn load_relation<'a>(
+        engine: &'a E,
+        parents: &'a mut [Self],
+        spec: &'a crate::relations::IncludeSpec,
+    ) -> BoxFuture<'a, crate::error::QueryResult<()>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

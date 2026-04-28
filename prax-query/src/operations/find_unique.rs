@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::Filter;
-use crate::traits::{Model, QueryEngine};
+use crate::relations::IncludeSpec;
+use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::Select;
 
 /// A query operation that finds a single record by unique constraint.
@@ -23,6 +24,10 @@ pub struct FindUniqueOperation<E: QueryEngine, M: Model> {
     engine: E,
     filter: Filter,
     select: Select,
+    /// Relations to eager-load alongside the unique lookup. Mirrors
+    /// the `find_many` include list — even though the result is a
+    /// single row, the loader operates on a 1-element slice.
+    includes: Vec<IncludeSpec>,
     _model: PhantomData<M>,
 }
 
@@ -33,6 +38,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
             engine,
             filter: Filter::None,
             select: Select::All,
+            includes: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -46,6 +52,15 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Select specific fields.
     pub fn select(mut self, select: impl Into<Select>) -> Self {
         self.select = select.into();
+        self
+    }
+
+    /// Eager-load a relation alongside the unique lookup.
+    ///
+    /// Queued includes dispatch through the model's
+    /// [`ModelRelationLoader`] after the main SELECT returns.
+    pub fn include(mut self, spec: IncludeSpec) -> Self {
+        self.includes.push(spec);
         self
     }
 
@@ -81,21 +96,39 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Execute the query and return the result (errors if not found).
     pub async fn exec(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
         let (sql, params) = self.build_sql(dialect);
-        self.engine.query_one::<M>(&sql, params).await
+        let row = self.engine.query_one::<M>(&sql, params).await?;
+        // Wrap the single row in a 1-element slice for the loader.
+        // `into_iter().next()` below reads it back out without any
+        // extra clone.
+        let mut parents = vec![row];
+        for spec in &self.includes {
+            <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
+        }
+        Ok(parents.into_iter().next().expect("1-element vec"))
     }
 
     /// Execute the query and return an optional result.
     pub async fn exec_optional(self) -> QueryResult<Option<M>>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
         let (sql, params) = self.build_sql(dialect);
-        self.engine.query_optional::<M>(&sql, params).await
+        match self.engine.query_optional::<M>(&sql, params).await? {
+            None => Ok(None),
+            Some(row) => {
+                let mut parents = vec![row];
+                for spec in &self.includes {
+                    <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec)
+                        .await?;
+                }
+                Ok(parents.into_iter().next())
+            }
+        }
     }
 }
 

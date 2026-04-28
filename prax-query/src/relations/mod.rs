@@ -32,12 +32,15 @@
 //!     .await?;
 //! ```
 
+pub mod executor;
 mod include;
 mod loader;
+mod meta;
 mod select;
 mod spec;
 
 pub use include::{Include, IncludeSpec};
 pub use loader::{RelationLoadStrategy, RelationLoader};
+pub use meta::{RelationKind, RelationMeta};
 pub use select::{FieldSelection, SelectSpec};
 pub use spec::{RelationSpec, RelationType};

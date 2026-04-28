@@ -246,7 +246,9 @@ pub use procedure::{
 };
 pub use query::QueryBuilder;
 pub use raw::{RawExecuteOperation, RawQueryOperation, Sql};
-pub use relations::{Include, IncludeSpec, RelationLoader, RelationSpec, SelectSpec};
+pub use relations::{
+    Include, IncludeSpec, RelationKind, RelationLoader, RelationMeta, RelationSpec, SelectSpec,
+};
 pub use search::{
     FullTextIndex, FullTextIndexBuilder, FuzzyOptions, HighlightOptions, RankingOptions,
     SearchLanguage, SearchMode, SearchQuery, SearchQueryBuilder, SearchSql,
@@ -258,8 +260,8 @@ pub use security::{
 };
 pub use sequence::{OwnedBy, Sequence, SequenceBuilder};
 pub use traits::{
-    Executable, IntoFilter, MaterializedView, Model, ModelWithPk, QueryEngine, View,
-    ViewQueryEngine,
+    Executable, IntoFilter, MaterializedView, Model, ModelRelationLoader, ModelWithPk, QueryEngine,
+    View, ViewQueryEngine,
 };
 pub use transaction::{IsolationLevel, Transaction, TransactionConfig};
 pub use trigger::{

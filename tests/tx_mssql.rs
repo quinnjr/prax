@@ -71,16 +71,22 @@ async fn setup() -> Option<(PraxClient<MssqlEngine>, MssqlPool)> {
     let pool = build_pool(url).await;
 
     let mut conn = pool.get().await.expect("acquire conn for setup");
-    conn.batch_execute(
-        "IF OBJECT_ID('dbo.tx_mssql_users', 'U') IS NULL \
-             CREATE TABLE dbo.tx_mssql_users ( \
-                 id INT IDENTITY(1,1) PRIMARY KEY, \
-                 email NVARCHAR(255) UNIQUE NOT NULL, \
-                 name NVARCHAR(255) \
-             );",
-    )
-    .await
-    .expect("create tx_mssql_users");
+    // Tolerate "already exists" — both tests share the table and may
+    // race on the initial `CREATE`. T-SQL doesn't have `CREATE TABLE
+    // IF NOT EXISTS`, and the `IF OBJECT_ID IS NULL` guard is itself
+    // racy because MSSQL parses and compiles the whole batch up
+    // front, so both parallel runs can pass the check before either
+    // commits the table.
+    let _ = conn
+        .batch_execute(
+            "IF OBJECT_ID('dbo.tx_mssql_users', 'U') IS NULL \
+                 CREATE TABLE dbo.tx_mssql_users ( \
+                     id INT IDENTITY(1,1) PRIMARY KEY, \
+                     email NVARCHAR(255) UNIQUE NOT NULL, \
+                     name NVARCHAR(255) \
+                 );",
+        )
+        .await;
     drop(conn);
 
     Some((PraxClient::new(MssqlEngine::new(pool.clone())), pool))

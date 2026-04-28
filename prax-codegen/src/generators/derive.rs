@@ -3,6 +3,7 @@
 use convert_case::{Case, Casing};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
+use syn::spanned::Spanned;
 use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type};
 
 /// Parse and generate code for the `#[derive(Model)]` macro.
@@ -52,15 +53,21 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         ));
     }
 
-    // Generate field modules
+    // Generate field modules. Relation fields (`is_list`) don't map to
+    // a column, so they skip the scalar-field emitters and go through
+    // `relation_accessors::emit` instead.
     let field_modules: Vec<_> = field_infos
         .iter()
+        .filter(|f| !f.is_list)
         .map(generate_field_module_from_derive)
         .collect();
 
-    // Generate where param variants
+    // Generate where param variants. `is_list` fields are relations,
+    // not columns — emitting a `WhereOp` over `Vec<Related>` would try
+    // to build filters over a non-scalar type and fail to compile.
     let where_variants: Vec<_> = field_infos
         .iter()
+        .filter(|f| !f.is_list)
         .map(|f| {
             let variant_name = format_ident!("{}", f.name.to_string().to_case(Case::Pascal));
             let field_mod = &f.name;
@@ -68,18 +75,22 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    // Generate From<WhereParam> for Filter match arms
+    // Generate From<WhereParam> for Filter match arms. Mirrors the
+    // same filter applied to `where_variants` above.
     let from_filter_arms: Vec<_> = field_infos
         .iter()
+        .filter(|f| !f.is_list)
         .map(|f| {
             let variant_name = format_ident!("{}", f.name.to_string().to_case(Case::Pascal));
             quote! { WhereParam::#variant_name(op) => op.to_filter(), }
         })
         .collect();
 
-    // Generate select param variants
+    // Generate select param variants. Relation fields aren't columns,
+    // so they don't show up in `SelectParam` either.
     let select_variants: Vec<_> = field_infos
         .iter()
+        .filter(|f| !f.is_list)
         .map(|f| {
             let variant_name = format_ident!("{}", f.name.to_string().to_case(Case::Pascal));
             quote! { #variant_name }
@@ -113,6 +124,13 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .filter(|f| !f.is_list)
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone()))
         .collect();
+    // Relation fields get initialized to `Default::default()` on
+    // `from_row` — the `.include()` path fills them afterwards.
+    let from_row_relation_fields: Vec<Ident> = field_infos
+        .iter()
+        .filter(|f| f.is_list)
+        .map(|f| f.name.clone())
+        .collect();
     // Same shape as from_row_fields plus the is_id flag; the ModelWithPk
     // emitter needs is_id to route PK fields into pk_value() and every
     // scalar field into get_column_value().
@@ -129,9 +147,60 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &pk_columns_owned,
         &all_columns,
     );
-    let from_row_impl = super::derive_from_row::emit(name, &from_row_fields);
+    let from_row_impl =
+        super::derive_from_row::emit(name, &from_row_fields, &from_row_relation_fields);
     let model_with_pk_impl = super::derive_model_with_pk::emit(name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { super::#name });
+
+    // Per-relation `pub mod <field>` modules with `fetch()` and the
+    // `Relation` marker. Only relation fields — scalar fields already
+    // have their own `pub mod <field>` emitted by
+    // `generate_field_module_from_derive`.
+    let relation_mods: Vec<_> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.relation.as_ref().map(|rel| {
+                let kind = if f.is_list {
+                    super::relation_accessors::RelationKindTokens::HasMany
+                } else if f.is_optional {
+                    super::relation_accessors::RelationKindTokens::HasOne
+                } else {
+                    super::relation_accessors::RelationKindTokens::BelongsTo
+                };
+                super::relation_accessors::emit(super::relation_accessors::RelationSpec {
+                    field_name: &f.name,
+                    owner: name,
+                    target: &rel.target,
+                    kind,
+                    local_key: &rel.local_key,
+                    foreign_key: &rel.foreign_key,
+                })
+            })
+        })
+        .collect();
+
+    // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
+    // no relations still get an impl — it errors on any unknown name,
+    // preserving the uniform `ModelRelationLoader` bound on find
+    // operations.
+    let loader_relations: Vec<super::derive_relation_loader::LoaderRelation<'_>> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.relation.as_ref().map(|rel| {
+                let kind = if f.is_list {
+                    super::derive_relation_loader::LoaderKind::HasMany
+                } else {
+                    super::derive_relation_loader::LoaderKind::HasOne
+                };
+                super::derive_relation_loader::LoaderRelation {
+                    field_name: &f.name,
+                    target: &rel.target,
+                    kind,
+                }
+            })
+        })
+        .collect();
+    let model_relation_loader_impl = super::derive_relation_loader::emit(name, &loader_relations);
 
     Ok(quote! {
         /// Generated module for the #name model.
@@ -151,6 +220,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
             // Field modules
             #(#field_modules)*
+
+            // Per-relation modules — emitted for every field marked
+            // `#[prax(relation(...))]`. Each one defines `fetch()` +
+            // `Relation` (a zero-sized `RelationMeta` marker).
+            #(#relation_mods)*
 
             /// Where clause parameters.
             #[derive(Debug, Clone)]
@@ -195,6 +269,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         #model_trait_impl
         #from_row_impl
         #model_with_pk_impl
+
+        // Emit ModelRelationLoader<E> so every derived model — relations
+        // or not — can be used on the `.include()` path uniformly.
+        #model_relation_loader_impl
     })
 }
 
@@ -241,6 +319,27 @@ struct FieldInfo {
     is_unique: bool,
     is_optional: bool,
     is_list: bool,
+    relation: Option<RelationAttr>,
+}
+
+/// Parsed `#[prax(relation(target = "...", foreign_key = "...", local_key = "..."))]`.
+///
+/// Relation fields are not columns — the derive filters them out of
+/// every column/WhereParam/SelectParam emission path and funnels them
+/// instead into the per-relation `pub mod <field>` / `Relation` pair
+/// emitted by [`super::relation_accessors`] plus the per-model
+/// `ModelRelationLoader` impl emitted by
+/// [`super::derive_relation_loader`].
+#[derive(Debug)]
+struct RelationAttr {
+    /// Target model type identifier — the type the relation points at.
+    target: syn::Ident,
+    /// Column on the target model holding the FK back to this model's
+    /// PK (for `HasMany` / `HasOne`). Required.
+    foreign_key: String,
+    /// Column on this model referencing the target's PK (for
+    /// `BelongsTo`). Defaults to `"id"`.
+    local_key: String,
 }
 
 /// Parse a field and its `#[prax(...)]` attributes.
@@ -255,6 +354,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
     let mut is_id = false;
     let mut is_auto = false;
     let mut is_unique = false;
+    let mut relation: Option<RelationAttr> = None;
 
     // Determine if the type is Optional or Vec
     let is_optional = is_option_type(&ty);
@@ -275,6 +375,34 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
             } else if meta.path.is_ident("column") {
                 let value: LitStr = meta.value()?.parse()?;
                 column_name = value.value();
+            } else if meta.path.is_ident("relation") {
+                let mut target: Option<syn::Ident> = None;
+                let mut fk: Option<String> = None;
+                let mut lk: Option<String> = None;
+                meta.parse_nested_meta(|inner| {
+                    if inner.path.is_ident("target") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        target = Some(format_ident!("{}", s.value()));
+                    } else if inner.path.is_ident("foreign_key") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        fk = Some(s.value());
+                    } else if inner.path.is_ident("local_key") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        lk = Some(s.value());
+                    }
+                    Ok(())
+                })?;
+                let target = target.ok_or_else(|| {
+                    syn::Error::new(meta.path.span(), "relation requires target = \"ModelName\"")
+                })?;
+                let foreign_key = fk.ok_or_else(|| {
+                    syn::Error::new(meta.path.span(), "relation requires foreign_key = \"...\"")
+                })?;
+                relation = Some(RelationAttr {
+                    target,
+                    foreign_key,
+                    local_key: lk.unwrap_or_else(|| "id".to_string()),
+                });
             }
             Ok(())
         })?;
@@ -289,6 +417,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
         is_unique,
         is_optional,
         is_list,
+        relation,
     })
 }
 

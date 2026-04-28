@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::pagination::Pagination;
-use crate::traits::{Model, QueryEngine};
+use crate::relations::IncludeSpec;
+use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::{OrderBy, Select};
 
 /// A query operation that finds multiple records.
@@ -30,6 +31,10 @@ pub struct FindManyOperation<E: QueryEngine, M: Model> {
     pagination: Pagination,
     select: Select,
     distinct: Option<Vec<String>>,
+    /// Relations to eager-load after the main query returns. Each
+    /// spec drives one follow-up SELECT via the model's
+    /// [`ModelRelationLoader`] impl.
+    includes: Vec<IncludeSpec>,
     _model: PhantomData<M>,
 }
 
@@ -43,8 +48,20 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             pagination: Pagination::new(),
             select: Select::All,
             distinct: None,
+            includes: Vec::new(),
             _model: PhantomData,
         }
+    }
+
+    /// Eager-load a relation alongside the main query.
+    ///
+    /// Each `.include()` call appends one follow-up SELECT that
+    /// fetches the target rows for every parent returned by this
+    /// find. Children get stitched onto the parent slice by the
+    /// [`ModelRelationLoader`] impl emitted by `#[derive(Model)]`.
+    pub fn include(mut self, spec: IncludeSpec) -> Self {
+        self.includes.push(spec);
+        self
     }
 
     /// Add a filter condition.
@@ -135,13 +152,23 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     }
 
     /// Execute the query.
+    ///
+    /// After the main SELECT hydrates the parent rows, any pending
+    /// `.include()` specs are dispatched through
+    /// [`ModelRelationLoader::load_relation`] which issues one
+    /// additional SELECT per relation and stitches the children onto
+    /// the parent slice.
     pub async fn exec(self) -> QueryResult<Vec<M>>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
         let (sql, params) = self.build_sql(dialect);
-        self.engine.query_many::<M>(&sql, params).await
+        let mut parents = self.engine.query_many::<M>(&sql, params).await?;
+        for spec in &self.includes {
+            <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
+        }
+        Ok(parents)
     }
 }
 

@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::Filter;
-use crate::traits::{Model, QueryEngine};
+use crate::relations::IncludeSpec;
+use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::{OrderBy, Select};
 
 /// A query operation that finds the first record matching the filter.
@@ -27,6 +28,10 @@ pub struct FindFirstOperation<E: QueryEngine, M: Model> {
     filter: Filter,
     order_by: OrderBy,
     select: Select,
+    /// Relations to eager-load alongside the first-match lookup. Same
+    /// loader dispatch path as `find_many`/`find_unique` — the
+    /// executor sees a 1-element slice when a row is found.
+    includes: Vec<IncludeSpec>,
     _model: PhantomData<M>,
 }
 
@@ -38,6 +43,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
             filter: Filter::None,
             order_by: OrderBy::none(),
             select: Select::All,
+            includes: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -58,6 +64,12 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Select specific fields.
     pub fn select(mut self, select: impl Into<Select>) -> Self {
         self.select = select.into();
+        self
+    }
+
+    /// Eager-load a relation alongside the first-match lookup.
+    pub fn include(mut self, spec: IncludeSpec) -> Self {
+        self.includes.push(spec);
         self
     }
 
@@ -99,21 +111,36 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Execute the query and return an optional result.
     pub async fn exec(self) -> QueryResult<Option<M>>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
         let (sql, params) = self.build_sql(dialect);
-        self.engine.query_optional::<M>(&sql, params).await
+        match self.engine.query_optional::<M>(&sql, params).await? {
+            None => Ok(None),
+            Some(row) => {
+                let mut parents = vec![row];
+                for spec in &self.includes {
+                    <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec)
+                        .await?;
+                }
+                Ok(parents.into_iter().next())
+            }
+        }
     }
 
     /// Execute the query and error if not found.
     pub async fn exec_required(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
         let (sql, params) = self.build_sql(dialect);
-        self.engine.query_one::<M>(&sql, params).await
+        let row = self.engine.query_one::<M>(&sql, params).await?;
+        let mut parents = vec![row];
+        for spec in &self.includes {
+            <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
+        }
+        Ok(parents.into_iter().next().expect("1-element vec"))
     }
 }
 

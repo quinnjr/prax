@@ -21,6 +21,14 @@ use prax_mysql::{MysqlEngine, MysqlPool, MysqlPoolBuilder};
 use prax_orm::{Model, PraxClient, client};
 use prax_query::error::{QueryError, QueryResult};
 use prax_query::raw::Sql;
+use prax_query::sql::DatabaseType;
+
+// `Sql::new` defaults to Postgres-style `$N` placeholders; MySQL
+// only speaks `?`, so point every helper at the MySQL dialect
+// before binding.
+fn mysql_sql(s: &str) -> Sql {
+    Sql::new(s).with_db_type(DatabaseType::MySQL)
+}
 
 #[derive(Debug, Model)]
 #[prax(table = "tx_mysql_users")]
@@ -84,7 +92,7 @@ async fn transaction_rolls_back_on_error() {
     let email = "tx_rollback@mysql.example.com";
 
     client
-        .execute_raw(Sql::new("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
+        .execute_raw(mysql_sql("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
         .await
         .expect("pre-clean");
 
@@ -108,7 +116,7 @@ async fn transaction_rolls_back_on_error() {
 
     let rows: Vec<User> = client
         .query_raw(
-            Sql::new("SELECT id, email, name FROM tx_mysql_users WHERE email = ").bind(email),
+            mysql_sql("SELECT id, email, name FROM tx_mysql_users WHERE email = ").bind(email),
         )
         .await
         .expect("post-rollback read");
@@ -131,7 +139,7 @@ async fn transaction_commits_on_ok() {
     let email = "tx_commit@mysql.example.com";
 
     client
-        .execute_raw(Sql::new("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
+        .execute_raw(mysql_sql("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
         .await
         .expect("pre-clean");
 
@@ -152,7 +160,7 @@ async fn transaction_commits_on_ok() {
 
     let rows: Vec<User> = client
         .query_raw(
-            Sql::new("SELECT id, email, name FROM tx_mysql_users WHERE email = ").bind(email),
+            mysql_sql("SELECT id, email, name FROM tx_mysql_users WHERE email = ").bind(email),
         )
         .await
         .expect("post-commit read");
@@ -161,7 +169,7 @@ async fn transaction_commits_on_ok() {
     assert_eq!(rows[0].name.as_deref(), Some("Committed"));
 
     client
-        .execute_raw(Sql::new("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
+        .execute_raw(mysql_sql("DELETE FROM tx_mysql_users WHERE email = ").bind(email))
         .await
         .expect("post-test cleanup");
 }
