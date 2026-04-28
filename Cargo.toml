@@ -59,6 +59,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
 convert_case = "0.6"
+paste = "1.0"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -180,6 +181,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 prax-schema.workspace = true
 prax-codegen.workspace = true
+paste = { workspace = true }
+prax-query = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

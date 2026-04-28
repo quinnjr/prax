@@ -630,6 +630,20 @@ pub mod schema {
 pub use prax_codegen::Model;
 pub use prax_codegen::prax_schema;
 
+/// Top-level `PraxClient<E>` and the `prax::client!` macro. See
+/// [`client`] module docs for usage.
+pub mod client;
+pub use client::PraxClient;
+// The `client!` macro is re-exported automatically by `#[macro_export]`.
+
+// Macro plumbing: the expansion of `client!` references `$crate::__paste`
+// and `$crate::__prelude`. Re-export them at the crate root so callers do
+// not have to think about where the symbols live.
+#[doc(hidden)]
+pub use client::__paste;
+#[doc(hidden)]
+pub use client::__prelude;
+
 /// Prelude module for convenient imports.
 ///
 /// Import everything you need with a single line:
@@ -643,6 +657,7 @@ pub use prax_codegen::prax_schema;
 /// - Configuration types
 /// - Common traits and types
 pub mod prelude {
+    pub use crate::client::PraxClient;
     pub use crate::schema::{PraxConfig, Schema, parse_schema, parse_schema_file};
     pub use crate::{Model, prax_schema};
 }
