@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::pool::PgPool;
 use crate::types::filter_value_to_sql;

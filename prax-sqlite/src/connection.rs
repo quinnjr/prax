@@ -7,7 +7,7 @@ use std::time::Instant;
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_rusqlite::Connection;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::error::{SqliteError, SqliteResult};
 

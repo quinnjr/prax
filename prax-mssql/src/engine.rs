@@ -6,7 +6,7 @@ use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::pool::MssqlPool;
 use crate::row_ref::MssqlRowRef;

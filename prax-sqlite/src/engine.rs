@@ -5,7 +5,7 @@ use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use rusqlite::types::Value as SqlValue;
-use tracing::{debug, trace};
+use tracing::trace;
 
 use crate::pool::SqlitePool;
 use crate::row_ref::SqliteRowRef;
