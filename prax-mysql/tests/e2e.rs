@@ -236,3 +236,81 @@ async fn e2e_row_ref_primitive_reads() {
     assert_eq!(r.get_i32("n").unwrap(), 42);
     assert_eq!(r.get_str("s").unwrap(), "hello");
 }
+
+#[tokio::test]
+#[ignore = "requires running MySQL via docker-compose"]
+async fn e2e_query_many_typed_decodes_rows() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mysql::MysqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug, PartialEq)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mysql_typed";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("typed");
+    let pool = pool().await;
+    let engine = MysqlEngine::new(pool);
+
+    engine
+        .execute_raw(
+            &format!("DROP TABLE IF EXISTS {table}"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!(
+                "CREATE TABLE {table} (id INT AUTO_INCREMENT PRIMARY KEY, \
+                 email VARCHAR(255) NOT NULL)"
+            ),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!("INSERT INTO {table} (email) VALUES ('a@x.com'),('b@x.com')"),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let rows = engine
+        .query_many::<Person>(
+            &format!("SELECT id, email FROM {table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].email, "a@x.com");
+    assert_eq!(rows[1].email, "b@x.com");
+
+    engine
+        .execute_raw(&format!("DROP TABLE {table}"), vec![])
+        .await
+        .unwrap();
+}

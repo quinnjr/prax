@@ -16,7 +16,7 @@
 //! cargo run --example mysql_demo
 //! ```
 
-use prax_mysql::{MysqlConfig, MysqlEngine, MysqlPool};
+use prax_mysql::{MysqlConfig, MysqlPool, MysqlRawEngine};
 use prax_query::filter::FilterValue;
 use std::collections::HashMap;
 
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     println!("⚙️  Creating Prax MySQL engine...");
 
-    let engine = MysqlEngine::new(pool.clone());
+    let engine = MysqlRawEngine::new(pool.clone());
 
     println!("   ✓ Engine created and ready\n");
 
