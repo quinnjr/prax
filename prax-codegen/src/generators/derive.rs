@@ -122,7 +122,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &all_columns,
     );
     let from_row_impl = super::derive_from_row::emit(name, &from_row_fields);
-    let client_impl = super::derive_client::emit(name);
+    let client_impl = super::derive_client::emit(quote! { super::#name });
 
     Ok(quote! {
         /// Generated module for the #name model.
