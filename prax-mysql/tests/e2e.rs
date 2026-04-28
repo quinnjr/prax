@@ -314,3 +314,68 @@ async fn e2e_query_many_typed_decodes_rows() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires running MySQL via docker-compose"]
+async fn e2e_count_on_empty_table_is_zero_not_error() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    use prax_mysql::MysqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::traits::QueryEngine;
+
+    let pool = pool().await;
+    let engine = MysqlEngine::new(pool);
+    let table = unique_table("count_empty");
+
+    engine
+        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!("CREATE TABLE {table} (id INT PRIMARY KEY)"),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    // COUNT(*) on an empty table returns 0 as a row — not a NULL — so
+    // this must succeed with n == 0, not error out.
+    let n = engine
+        .count(
+            &format!("SELECT COUNT(*) FROM {table}"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+
+    engine
+        .execute_raw(&format!("DROP TABLE {table}"), vec![])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires running MySQL via docker-compose"]
+async fn e2e_row_ref_repeated_get_str_returns_same_slice() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    use mysql_async::prelude::Queryable;
+    use prax_mysql::row_ref::MysqlRowRef;
+    use prax_query::row::RowRef;
+
+    let pool = pool().await;
+    let mut conn = pool.get().await.unwrap();
+    let rows: Vec<mysql_async::Row> = conn.inner_mut().query("SELECT 'hello' AS s").await.unwrap();
+    let r = MysqlRowRef::from_row(rows.into_iter().next().unwrap()).unwrap();
+
+    let s1 = r.get_str("s").unwrap();
+    let s2 = r.get_str("s").unwrap();
+    assert_eq!(s1, s2);
+    // Same backing allocation — cache isn't re-computed.
+    assert!(std::ptr::eq(s1.as_ptr(), s2.as_ptr()));
+}

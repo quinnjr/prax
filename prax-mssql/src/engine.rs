@@ -6,7 +6,7 @@ use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::pool::MssqlPool;
 use crate::row_ref::MssqlRowRef;
@@ -74,7 +74,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_many");
+            trace!(sql = %sql, "Executing query_many");
 
             let mut conn = self
                 .pool
@@ -102,7 +102,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<T>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_one");
+            trace!(sql = %sql, "Executing query_one");
 
             let mut conn = self
                 .pool
@@ -114,10 +114,14 @@ impl QueryEngine for MssqlEngine {
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let row = conn
-                .query_one(&sql, &param_refs)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
+                let msg = e.to_string();
+                if msg.contains("no rows") || msg.contains("returned no rows") {
+                    prax_query::QueryError::not_found(T::MODEL_NAME)
+                } else {
+                    prax_query::QueryError::database(msg)
+                }
+            })?;
 
             Self::decode_row(&row)
         })
@@ -130,7 +134,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<Option<T>>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_optional");
+            trace!(sql = %sql, "Executing query_optional");
 
             let mut conn = self
                 .pool
@@ -161,7 +165,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<T>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing insert");
+            trace!(sql = %sql, "Executing insert");
 
             let mut conn = self
                 .pool
@@ -190,7 +194,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing update");
+            trace!(sql = %sql, "Executing update");
 
             let mut conn = self
                 .pool
@@ -218,7 +222,7 @@ impl QueryEngine for MssqlEngine {
     ) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing delete");
+            trace!(sql = %sql, "Executing delete");
 
             let mut conn = self
                 .pool
@@ -242,7 +246,7 @@ impl QueryEngine for MssqlEngine {
     fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing raw SQL");
+            trace!(sql = %sql, "Executing raw SQL");
 
             let mut conn = self
                 .pool
@@ -266,7 +270,7 @@ impl QueryEngine for MssqlEngine {
     fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = Self::convert_params(sql);
         Box::pin(async move {
-            debug!(sql = %sql, "Executing count");
+            trace!(sql = %sql, "Executing count");
 
             let mut conn = self
                 .pool
@@ -283,18 +287,28 @@ impl QueryEngine for MssqlEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // SQL Server's COUNT is INT; COUNT_BIG is BIGINT. Accept either
-            // and surface a deserialization error rather than silently
-            // collapsing a NULL / missing column to zero.
-            if let Some(n) = row.get::<i64, _>(0) {
-                return Ok(n as u64);
+            // COUNT is always INT in SQL Server (COUNT_BIG is BIGINT). Probe i64
+            // first (handles COUNT_BIG), fall back to i32 for COUNT. Use try_get so
+            // a type mismatch surfaces cleanly rather than being conflated with a
+            // NULL column.
+            match row.try_get::<i64, _>(0) {
+                Ok(Some(n)) => return Ok(n as u64),
+                Ok(None) => {
+                    return Err(prax_query::QueryError::deserialization(
+                        "count query column 0 is NULL".to_string(),
+                    ));
+                }
+                Err(_) => {} // wrong type, fall through to i32
             }
-            if let Some(n) = row.get::<i32, _>(0) {
-                return Ok(n as u64);
+            match row.try_get::<i32, _>(0) {
+                Ok(Some(n)) => Ok(n as u64),
+                Ok(None) => Err(prax_query::QueryError::deserialization(
+                    "count query column 0 is NULL".to_string(),
+                )),
+                Err(e) => Err(prax_query::QueryError::deserialization(format!(
+                    "count query column 0 is not an integer: {e}"
+                ))),
             }
-            Err(prax_query::QueryError::deserialization(
-                "count query returned no integer in column 0".to_string(),
-            ))
         })
     }
 }

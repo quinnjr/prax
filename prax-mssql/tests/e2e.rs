@@ -382,3 +382,76 @@ async fn e2e_row_ref_null_vs_absent_column() {
         "expected ColumnNotFound for absent column, got {err:?}",
     );
 }
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_one_missing_row_returns_not_found() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::error::ErrorCode;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_typed";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("one_missing");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool);
+    engine
+        .execute_raw(
+            &format!("IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!(
+                "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, email NVARCHAR(255) NOT NULL)"
+            ),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let err = engine
+        .query_one::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} WHERE id = 999"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.code,
+        ErrorCode::RecordNotFound,
+        "expected NotFound for missing row, got {err:?}"
+    );
+
+    engine
+        .execute_raw(&format!("DROP TABLE dbo.{table}"), vec![])
+        .await
+        .unwrap();
+}

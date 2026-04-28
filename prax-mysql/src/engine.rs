@@ -6,7 +6,7 @@ use prax_query::error::{QueryError, QueryResult};
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use tracing::debug;
+use tracing::trace;
 
 use crate::pool::MysqlPool;
 use crate::row_ref::MysqlRowRef;
@@ -33,12 +33,21 @@ impl MysqlEngine {
         params.iter().map(filter_value_to_mysql).collect()
     }
 
+    /// Decode multiple rows into typed models.
+    ///
+    /// # Short-circuit on decode error
+    ///
+    /// Uses `Result<Vec<T>, _>::collect`, which returns the first decode
+    /// error and discards every successfully-decoded row before it. A
+    /// row-level type mismatch therefore aborts the whole batch rather
+    /// than returning partial results. Callers that want per-row
+    /// recovery should manually iterate rows and handle each result.
     async fn query_rows<T: Model + FromRow>(
         &self,
         sql: String,
         params: Vec<FilterValue>,
     ) -> QueryResult<Vec<T>> {
-        debug!(sql = %sql, "mysql query_rows");
+        trace!(sql = %sql, "mysql query_rows");
         let mut conn = self
             .pool
             .get()
@@ -70,7 +79,7 @@ impl MysqlEngine {
         sql: String,
         params: Vec<FilterValue>,
     ) -> QueryResult<Option<T>> {
-        debug!(sql = %sql, "mysql query_first_row");
+        trace!(sql = %sql, "mysql query_first_row");
         let mut conn = self
             .pool
             .get()
@@ -120,7 +129,9 @@ impl MysqlEngine {
             .exec_first(sql.as_str(), Params::Positional(bound))
             .await
             .map_err(|e| QueryError::database(e.to_string()))?;
-        Ok(count.map(|(n,)| n as u64).unwrap_or(0))
+        count.map(|(n,)| n as u64).ok_or_else(|| {
+            prax_query::QueryError::deserialization("count query returned no rows".to_string())
+        })
     }
 }
 

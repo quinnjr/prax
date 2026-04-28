@@ -50,45 +50,58 @@ pub struct MssqlRowRef {
 }
 
 impl MssqlRowRef {
-    /// Build a materialized snapshot from a tiberius Row.
+    /// Materialize a tiberius row into an owned [`ColumnValue`] snapshot.
     ///
-    /// Uses tiberius's FromSql conversions to extract typed values.
+    /// tiberius doesn't expose `ColumnData` accessors that cleanly dispatch
+    /// on the column's declared SQL type; we instead probe `try_get::<T>`
+    /// for each Rust type we want to materialize. The branch order matters
+    /// because tiberius's `FromSql` impls are lenient — e.g. a NUMERIC
+    /// column can successfully decode as `f64` with precision loss.
+    ///
+    /// The branches are ordered by specificity: exact types first, lossy
+    /// coercions last. NUMERIC is probed before `f64`/`f32` so decimal
+    /// columns don't silently lose precision. NULL is detected via a final
+    /// `try_get::<i32, _>` returning `Ok(None)`.
+    ///
+    /// Unsupported tiberius types (TIME OFFSET, XML, geography, etc.) fall
+    /// through to the final `else` arm and produce a `RowError::TypeConversion`
+    /// naming the column so the caller can diagnose.
     pub fn from_row(row: &Row) -> Result<Self, RowError> {
         let mut values = HashMap::with_capacity(row.len());
         for (idx, col) in row.columns().iter().enumerate() {
             let name = col.name().to_string();
             let val = if let Ok(Some(s)) = row.try_get::<&str, _>(idx) {
                 ColumnValue::String(s.to_string())
+            } else if let Ok(Some(v)) = row.try_get::<bool, _>(idx) {
+                ColumnValue::Bool(v)
+            } else if let Ok(Some(v)) = row.try_get::<i16, _>(idx) {
+                ColumnValue::I16(v)
             } else if let Ok(Some(v)) = row.try_get::<i32, _>(idx) {
                 ColumnValue::I32(v)
             } else if let Ok(Some(v)) = row.try_get::<i64, _>(idx) {
                 ColumnValue::I64(v)
-            } else if let Ok(Some(v)) = row.try_get::<i16, _>(idx) {
-                ColumnValue::I16(v)
             } else if let Ok(Some(v)) = row.try_get::<u8, _>(idx) {
                 ColumnValue::U8(v)
-            } else if let Ok(Some(v)) = row.try_get::<f64, _>(idx) {
-                ColumnValue::F64(v)
-            } else if let Ok(Some(v)) = row.try_get::<f32, _>(idx) {
-                ColumnValue::F32(v)
-            } else if let Ok(Some(v)) = row.try_get::<bool, _>(idx) {
-                ColumnValue::Bool(v)
-            } else if let Ok(Some(v)) = row.try_get::<uuid::Uuid, _>(idx) {
-                ColumnValue::Uuid(v)
-            } else if let Ok(Some(v)) = row.try_get::<&[u8], _>(idx) {
-                ColumnValue::Bytes(v.to_vec())
-            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
-                ColumnValue::NaiveDateTime(v)
-            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveDate, _>(idx) {
-                ColumnValue::NaiveDate(v)
-            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveTime, _>(idx) {
-                ColumnValue::NaiveTime(v)
-            } else if let Ok(Some(v)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(idx) {
-                ColumnValue::DateTimeUtc(v)
             } else if let Ok(Some(v)) = row.try_get::<tiberius::numeric::Numeric, _>(idx) {
                 // tiberius doesn't surface a typed Decimal; materialize via its
                 // Display impl and let `get_decimal` parse into rust_decimal.
                 ColumnValue::Decimal(v.to_string())
+            } else if let Ok(Some(v)) = row.try_get::<f32, _>(idx) {
+                ColumnValue::F32(v)
+            } else if let Ok(Some(v)) = row.try_get::<f64, _>(idx) {
+                ColumnValue::F64(v)
+            } else if let Ok(Some(v)) = row.try_get::<uuid::Uuid, _>(idx) {
+                ColumnValue::Uuid(v)
+            } else if let Ok(Some(v)) = row.try_get::<&[u8], _>(idx) {
+                ColumnValue::Bytes(v.to_vec())
+            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveDate, _>(idx) {
+                ColumnValue::NaiveDate(v)
+            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveDateTime, _>(idx) {
+                ColumnValue::NaiveDateTime(v)
+            } else if let Ok(Some(v)) = row.try_get::<chrono::NaiveTime, _>(idx) {
+                ColumnValue::NaiveTime(v)
+            } else if let Ok(Some(v)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(idx) {
+                ColumnValue::DateTimeUtc(v)
             } else if let Ok(None) = row.try_get::<i32, _>(idx) {
                 ColumnValue::Null
             } else {

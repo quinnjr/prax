@@ -2,11 +2,10 @@
 //!
 //! `mysql_async::Row` exposes per-column `Value`s. `MysqlRowRef` pulls every
 //! column off the row at construction time and stores them in an owned
-//! `HashMap<String, Value>`. String reads go through a small interior-mutable
-//! cache so `RowRef::get_str`'s `&str` return type is respected (the cached
-//! `String` lives as long as `&self` and never moves).
+//! `HashMap<String, Value>`. String values are pre-decoded into a separate
+//! HashMap at construction time so `RowRef::get_str` can safely return `&str`
+//! without interior mutability or unsafe pointer casts.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use mysql_async::{Row, Value};
@@ -15,7 +14,7 @@ use prax_query::row::{RowError, RowRef};
 /// Owned snapshot of a MySQL row keyed by column name.
 pub struct MysqlRowRef {
     values: HashMap<String, Value>,
-    text_cache: RefCell<HashMap<String, String>>,
+    decoded: HashMap<String, String>,
 }
 
 impl MysqlRowRef {
@@ -23,15 +22,44 @@ impl MysqlRowRef {
     pub fn from_row(row: Row) -> Result<Self, RowError> {
         let columns = row.columns_ref().to_vec();
         let mut values = HashMap::with_capacity(columns.len());
+        let mut decoded = HashMap::with_capacity(columns.len());
         for (i, col) in columns.iter().enumerate() {
             let name = col.name_str().to_string();
             let v: Option<Value> = row.get(i);
-            values.insert(name, v.unwrap_or(Value::NULL));
+            let v = v.unwrap_or(Value::NULL);
+
+            // Decode to string form for every non-NULL value so get_str works
+            // on any column. Preserves existing behavior where get_str accepts
+            // integers, floats, dates, etc. and returns their string form.
+            let text = match &v {
+                Value::Bytes(b) => std::str::from_utf8(b).map(|s| s.to_string()).ok(),
+                Value::NULL => None,
+                Value::Int(i) => Some(i.to_string()),
+                Value::UInt(u) => Some(u.to_string()),
+                Value::Float(f) => Some(f.to_string()),
+                Value::Double(d) => Some(d.to_string()),
+                Value::Date(y, mo, d, h, mi, s, us) => Some(format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+                    y, mo, d, h, mi, s, us
+                )),
+                Value::Time(neg, days, h, m, s, us) => {
+                    let sign = if *neg { "-" } else { "" };
+                    Some(format!(
+                        "{}{}:{:02}:{:02}.{:06}",
+                        sign,
+                        days * 24 + (*h as u32),
+                        m,
+                        s,
+                        us
+                    ))
+                }
+            };
+            if let Some(t) = text {
+                decoded.insert(name.clone(), t);
+            }
+            values.insert(name, v);
         }
-        Ok(Self {
-            values,
-            text_cache: RefCell::new(HashMap::new()),
-        })
+        Ok(Self { values, decoded })
     }
 
     fn get(&self, c: &str) -> Result<&Value, RowError> {
@@ -45,40 +73,6 @@ impl MysqlRowRef {
             column: c.into(),
             message: msg.into(),
         }
-    }
-
-    /// Cache the decoded text form of `column` if not already present.
-    fn cache_text(&self, c: &str) -> Result<(), RowError> {
-        if self.text_cache.borrow().contains_key(c) {
-            return Ok(());
-        }
-        let text = match self.get(c)? {
-            Value::Bytes(b) => std::str::from_utf8(b)
-                .map_err(|e| Self::tc(c, e.to_string()))?
-                .to_string(),
-            Value::NULL => return Err(RowError::UnexpectedNull(c.into())),
-            Value::Int(i) => i.to_string(),
-            Value::UInt(u) => u.to_string(),
-            Value::Float(f) => f.to_string(),
-            Value::Double(d) => d.to_string(),
-            Value::Date(y, mo, d, h, mi, s, us) => format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
-                y, mo, d, h, mi, s, us
-            ),
-            Value::Time(neg, days, h, m, s, us) => {
-                let sign = if *neg { "-" } else { "" };
-                format!(
-                    "{}{}:{:02}:{:02}.{:06}",
-                    sign,
-                    days * 24 + (*h as u32),
-                    m,
-                    s,
-                    us
-                )
-            }
-        };
-        self.text_cache.borrow_mut().insert(c.to_string(), text);
-        Ok(())
     }
 }
 
@@ -147,21 +141,19 @@ impl RowRef for MysqlRowRef {
         self.get_i64_opt(c).map(|o| o.map(|i| i != 0))
     }
     fn get_str(&self, c: &str) -> Result<&str, RowError> {
-        self.cache_text(c)?;
-        // SAFETY: cache is interior-mutable but we never remove entries, so the
-        // returned `&str` remains valid for the life of `&self`.
-        let cache = self.text_cache.as_ptr();
-        unsafe {
-            (*cache)
-                .get(c)
-                .map(|s| s.as_str())
-                .ok_or_else(|| RowError::ColumnNotFound(c.into()))
+        match (self.values.get(c), self.decoded.get(c)) {
+            (None, _) => Err(RowError::ColumnNotFound(c.into())),
+            (Some(Value::NULL), _) => Err(RowError::UnexpectedNull(c.into())),
+            (_, Some(s)) => Ok(s.as_str()),
+            (Some(v), None) => Err(Self::tc(c, format!("not text: {v:?}"))),
         }
     }
     fn get_str_opt(&self, c: &str) -> Result<Option<&str>, RowError> {
-        match self.get(c)? {
-            Value::NULL => Ok(None),
-            _ => self.get_str(c).map(Some),
+        match (self.values.get(c), self.decoded.get(c)) {
+            (None, _) => Err(RowError::ColumnNotFound(c.into())),
+            (Some(Value::NULL), _) => Ok(None),
+            (_, Some(s)) => Ok(Some(s.as_str())),
+            (Some(v), None) => Err(Self::tc(c, format!("not text: {v:?}"))),
         }
     }
     fn get_bytes(&self, c: &str) -> Result<&[u8], RowError> {
