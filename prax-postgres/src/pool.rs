@@ -80,6 +80,17 @@ impl PgPool {
         Ok(PgConnection::new(client, self.statement_cache.clone()))
     }
 
+    /// Borrow the underlying `deadpool_postgres::Pool`.
+    ///
+    /// Reserved for intra-crate paths that need a raw `Object` (e.g.
+    /// [`crate::engine::PgEngine::transaction`], which pins a single
+    /// connection for the lifetime of an in-flight transaction). The
+    /// standard path is [`PgPool::get`], which returns a
+    /// cache-wrapped [`PgConnection`].
+    pub(crate) fn inner(&self) -> &Pool {
+        &self.inner
+    }
+
     /// Get the current pool status.
     pub fn status(&self) -> PoolStatus {
         let status = self.inner.status();

@@ -103,6 +103,48 @@ impl<E: QueryEngine> PraxClient<E> {
         let (s, p) = sql.build();
         self.engine.execute_raw(&s, p).await
     }
+
+    /// Run `f` inside a single database transaction.
+    ///
+    /// The closure receives a fresh `PraxClient<E>` whose engine is
+    /// bound to the in-flight transaction — every typed operation
+    /// emitted through that client (`tx.user().create()...`,
+    /// `tx.query_raw(...)`, etc.) routes through the same `BEGIN`
+    /// block. Returning `Ok(r)` commits and yields `Ok(r)` back;
+    /// returning `Err(e)` rolls back and surfaces `e` unchanged.
+    /// Panics bubble through and leave the connection to drop, which
+    /// aborts the transaction on the server.
+    ///
+    /// ```rust,ignore
+    /// use prax_query::error::QueryResult;
+    ///
+    /// let created = client
+    ///     .transaction(|tx| async move {
+    ///         let u = tx.user().create()
+    ///             .set("email", "alice@example.com")
+    ///             .exec().await?;
+    ///         tx.post().create()
+    ///             .set("author_id", u.id)
+    ///             .set("title", "hello")
+    ///             .exec().await?;
+    ///         QueryResult::Ok(u)
+    ///     })
+    ///     .await?;
+    /// ```
+    ///
+    /// Nested `transaction()` calls on the same engine return
+    /// `QueryError::internal(...)` until dialect-aware SAVEPOINT
+    /// support lands.
+    pub async fn transaction<R, Fut, F>(&self, f: F) -> QueryResult<R>
+    where
+        F: FnOnce(PraxClient<E>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = QueryResult<R>> + Send + 'static,
+        R: Send + 'static,
+    {
+        self.engine
+            .transaction(move |tx_engine| async move { f(PraxClient::new(tx_engine)).await })
+            .await
+    }
 }
 
 /// Attach per-model accessors to `PraxClient<E>`.

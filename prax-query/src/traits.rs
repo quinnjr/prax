@@ -182,6 +182,41 @@ pub trait QueryEngine: Send + Sync + Clone + 'static {
         params: Vec<crate::filter::FilterValue>,
     ) -> BoxFuture<'_, QueryResult<u64>>;
 
+    /// Execute an aggregate query (COUNT/SUM/AVG/MIN/MAX/GROUP BY) and
+    /// return one map of column name → [`crate::filter::FilterValue`]
+    /// per result row.
+    ///
+    /// Used by [`crate::operations::AggregateOperation`] and
+    /// [`crate::operations::GroupByOperation`] because aggregate result
+    /// sets don't fit a single `Model` schema: their columns are
+    /// dialect-chosen aliases (`_count`, `_sum_views`, …) whose types
+    /// depend on the aggregate function, and group-by queries also
+    /// include the grouped columns themselves. Returning untyped
+    /// column-value maps lets the aggregate builders adapt the shape
+    /// without every driver needing to generate a fresh `FromRow` impl
+    /// per query.
+    ///
+    /// The default returns
+    /// [`crate::error::QueryError::unsupported`], so non-SQL engines
+    /// (MongoDB, document stores) that never build aggregate queries
+    /// through the SQL operation builders don't have to implement this.
+    /// SQL engines must override.
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<crate::filter::FilterValue>,
+    ) -> BoxFuture<
+        '_,
+        QueryResult<Vec<std::collections::HashMap<String, crate::filter::FilterValue>>>,
+    > {
+        let _ = (sql, params);
+        Box::pin(async {
+            Err(crate::error::QueryError::unsupported(
+                "aggregate_query is not implemented for this engine",
+            ))
+        })
+    }
+
     /// Refresh a materialized view.
     ///
     /// For PostgreSQL, this executes `REFRESH MATERIALIZED VIEW`.
@@ -199,6 +234,32 @@ pub trait QueryEngine: Send + Sync + Clone + 'static {
                 "Materialized view refresh is not supported by this database",
             ))
         })
+    }
+
+    /// Run the closure inside a transaction.
+    ///
+    /// Drivers that support real transactions override this to issue
+    /// `BEGIN` / `COMMIT` / `ROLLBACK` and route every query emitted
+    /// by the closure through the same underlying transaction. The
+    /// default below simply hands the closure a clone of the current
+    /// engine and executes it inline — it has **no transactional
+    /// semantics** on its own, so drivers that care about atomicity
+    /// must override. The default exists so non-SQL backends
+    /// (MongoDB, document stores) don't have to stub a method they
+    /// don't care about.
+    ///
+    /// The `Self: Clone` bound lets the default clone the engine into
+    /// the closure; every concrete `QueryEngine` already needs `Clone`
+    /// for [`ModelAccessor`] routing, so it's free in practice.
+    fn transaction<'a, R, Fut, F>(&'a self, f: F) -> BoxFuture<'a, QueryResult<R>>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'a,
+        Fut: Future<Output = QueryResult<R>> + Send + 'a,
+        R: Send + 'a,
+        Self: Clone,
+    {
+        let me = self.clone();
+        Box::pin(async move { f(me).await })
     }
 }
 
