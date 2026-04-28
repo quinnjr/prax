@@ -134,10 +134,16 @@ impl SqlDialect for Mssql {
     }
     fn returning_clause(&self, cols: &str) -> String {
         if cols == "*" {
-            " OUTPUT INSERTED.*".into()
-        } else {
-            format!(" OUTPUT INSERTED.{}", cols)
+            // OUTPUT INSERTED.* is the only syntactic shortcut T-SQL accepts;
+            // bare OUTPUT INSERTED.cols_with_commas would need per-column
+            // prefixing, which this branch short-circuits.
+            return " OUTPUT INSERTED.*".into();
         }
+        let prefixed: Vec<String> = cols
+            .split(',')
+            .map(|c| format!("INSERTED.{}", c.trim()))
+            .collect();
+        format!(" OUTPUT {}", prefixed.join(", "))
     }
     fn quote_ident(&self, i: &str) -> String {
         format!("[{}]", i.replace(']', "]]"))
@@ -186,9 +192,14 @@ mod tests {
     #[test]
     fn returning_mssql_is_output_inserted() {
         assert_eq!(Mssql.returning_clause("*"), " OUTPUT INSERTED.*");
+        assert_eq!(Mssql.returning_clause("id"), " OUTPUT INSERTED.id");
         assert_eq!(
             Mssql.returning_clause("id, email"),
-            " OUTPUT INSERTED.id, email"
+            " OUTPUT INSERTED.id, INSERTED.email"
+        );
+        assert_eq!(
+            Mssql.returning_clause("id,email,name"),
+            " OUTPUT INSERTED.id, INSERTED.email, INSERTED.name"
         );
     }
 
@@ -212,6 +223,10 @@ mod tests {
     fn quote_ident_backends_escape_the_embedded_quote() {
         assert_eq!(
             Postgres.quote_ident(r#"col"with"quote"#),
+            r#""col""with""quote""#
+        );
+        assert_eq!(
+            Sqlite.quote_ident(r#"col"with"quote"#),
             r#""col""with""quote""#
         );
         assert_eq!(Mysql.quote_ident("co`l"), "`co``l`");
