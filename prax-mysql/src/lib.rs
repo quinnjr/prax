@@ -24,6 +24,8 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! See [`MysqlEngine`]'s doc block for 0.7 breaking changes.
 
 pub mod config;
 pub mod connection;

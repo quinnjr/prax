@@ -13,6 +13,28 @@ use crate::row_ref::MysqlRowRef;
 use crate::types::filter_value_to_mysql;
 
 /// MySQL query engine backed by `mysql_async`.
+///
+/// # Breaking changes (0.7)
+///
+/// `MysqlEngine` no longer has inherent `query` / `query_one` / `query_opt`
+/// methods that returned untyped `RowData` / `serde_json::Value`. It now
+/// implements [`prax_query::traits::QueryEngine`], whose row-returning
+/// methods are generic over `T: Model + FromRow` and return typed models.
+///
+/// Migration:
+/// - Replace `engine.query(sql, params)` with
+///   `engine.query_many::<YourType>(sql, params).await?`, where `YourType`
+///   carries `#[derive(prax_orm::Model)]` (which emits both `Model` and
+///   `FromRow`) or hand-written `impl Model + impl FromRow`.
+/// - For ad-hoc typed queries without a full `Model`, bridge through
+///   [`crate::row_ref::MysqlRowRef::from_row`] inside a custom `FromRow`
+///   impl.
+/// - For the legacy JSON-blob API, use [`crate::raw::MysqlRawEngine`] +
+///   [`crate::raw::MysqlJsonRow`].
+/// - To run side-effecting SQL that returns no rows, call
+///   [`prax_query::traits::QueryEngine::execute_raw`].
+///
+/// See `CHANGELOG.md` for the full migration guide.
 #[derive(Clone)]
 pub struct MysqlEngine {
     pool: MysqlPool,

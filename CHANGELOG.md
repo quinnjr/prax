@@ -30,9 +30,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JSON API moved to `prax_mysql::raw::MysqlRawEngine` +
   `prax_mysql::raw::MysqlJsonRow` (and the equivalent for SQLite).
   Callers that wanted JSON: `use prax_{mysql,sqlite}::raw::{MysqlRawEngine, MysqlJsonRow}`.
+- **`prax-mysql::MysqlEngine` inherent methods removed**: the old
+  inherent methods `query(sql, params) -> Vec<RowData>`,
+  `query_one(sql, params) -> RowData`, `query_opt(sql, params) -> Option<RowData>`
+  no longer exist. They are replaced by the `QueryEngine` trait methods
+  `query_many::<T>`, `query_one::<T>`, `query_optional::<T>`, each of
+  which requires `T: Model + FromRow`. Callers consuming raw `RowData`
+  / `serde_json::Value` must either migrate to a typed model via
+  `#[derive(Model)]`, bridge through `prax_mysql::row_ref::MysqlRowRef`
+  in a hand-written `FromRow`, or switch to `prax_mysql::raw::MysqlRawEngine`
+  for the legacy JSON API. Side-effecting SQL that returns no rows
+  should call `QueryEngine::execute_raw`.
+- **`prax-sqlite::SqliteEngine` inherent methods removed**: same
+  breakage as `MysqlEngine`. The old `query` / `query_one` / `query_opt`
+  are gone; use `query_many::<T>` / `query_one::<T>` /
+  `query_optional::<T>` with `T: Model + FromRow`, bridge via
+  `prax_sqlite::row_ref::SqliteRowRef::from_rusqlite` for ad-hoc typed
+  rows, or fall back to `prax_sqlite::raw::SqliteRawEngine` for the
+  JSON API.
 - **`prax-mysql::MysqlQueryResult` / `prax-sqlite::SqliteQueryResult`**:
   types removed from public re-exports. Renamed to
   `prax_{mysql,sqlite}::raw::{MysqlJsonRow, SqliteJsonRow}`.
+- **`#[derive(Model)]` now emits `FromRow` in addition to `Model`**:
+  the derive expands to *both* `impl prax_query::traits::Model for …`
+  and `impl prax_query::row::FromRow for …`. If you had a hand-written
+  `impl Model for …` or `impl FromRow for …` for a type that also
+  carries the derive, the two impls will conflict (`E0119`). Delete
+  the hand-written impl and rely on the derive, or drop the derive
+  and keep the hand-written impls.
+- **`#[derive(Model)]` now emits a lowercase-struct module**: alongside
+  the per-field filter constructors, the derive emits
+  `mod <lowercase_struct_name> { pub mod <field> { fn equals, gt, lt, … } }`.
+  Crates that already define a module named the same as the lowercase
+  form of a derived struct (e.g., a struct `User` plus a local
+  `mod user { … }`) will see an `E0428` duplicate-definition error.
+  Rename one of them.
+- **`FilterValue::from::<u64>`**: values greater than `i64::MAX` now
+  panic instead of silently clamping. Callers that pass untrusted
+  `u64` inputs must validate the range before conversion, or switch
+  to `FilterValue::Int(value as i64)` with their own clamp policy.
 
 ### Added
 
@@ -72,6 +108,60 @@ If you use `prax-mysql` or `prax-sqlite`:
 
 If you call `Filter::to_sql` directly:
 - Update to `filter.to_sql(offset, &prax_query::dialect::Postgres)` (or your dialect).
+
+If you called `MysqlEngine`/`SqliteEngine` inherent methods directly:
+
+```rust
+// BEFORE (0.6)
+let rows: Vec<RowData> = engine.query("SELECT * FROM users", vec![]).await?;
+
+// AFTER (0.7) — with #[derive(Model)]
+#[derive(prax_orm::Model)]
+#[prax(table = "users")]
+struct User {
+    #[prax(id)]
+    id: i32,
+    email: String,
+}
+
+let rows: Vec<User> = engine
+    .query_many::<User>("SELECT id, email FROM users", vec![])
+    .await?;
+
+// AFTER (0.7) — ad-hoc typed row without the Model derive
+use prax_mysql::row_ref::MysqlRowRef;
+use prax_query::row::{FromRow, RowError, RowRef};
+use prax_query::traits::Model;
+
+struct UserSummary { id: i32, email: String }
+
+impl Model for UserSummary {
+    const MODEL_NAME: &'static str = "UserSummary";
+    const TABLE_NAME: &'static str = "users";
+    // … fill in the remaining associated items per the trait …
+}
+
+impl FromRow for UserSummary {
+    fn from_row(row: &dyn RowRef) -> Result<Self, RowError> {
+        Ok(Self {
+            id: row.get_i32("id")?,
+            email: row.get_string("email")?,
+        })
+    }
+}
+
+let rows: Vec<UserSummary> = engine
+    .query_many::<UserSummary>("SELECT id, email FROM users", vec![])
+    .await?;
+```
+
+The SQLite bridge is identical apart from the row-ref import:
+`use prax_sqlite::row_ref::SqliteRowRef;` and, inside a raw-row
+callback, build the ref via `SqliteRowRef::from_rusqlite(&row)`.
+
+If you need the old untyped JSON-blob behavior, switch to
+`prax_mysql::raw::MysqlRawEngine` / `prax_sqlite::raw::SqliteRawEngine`;
+those retain the legacy API.
 
 `QueryEngine::query_one` behavior when the SQL returns 2+ rows is driver-dependent: Postgres errors (strict), while MySQL/SQLite/MSSQL silently return the first row. Callers that require "exactly one row or error" should add `LIMIT 2` (or `TOP 2` on MSSQL) and check the row count themselves, or use `count`/`query_many` + assert `len() == 1`.
 
