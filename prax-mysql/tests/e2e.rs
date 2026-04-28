@@ -12,7 +12,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+use prax_mysql::row_ref::MysqlRowRef;
 use prax_mysql::{MysqlPool, MysqlPoolBuilder};
+use prax_query::row::RowRef;
 
 static TABLE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -216,4 +218,21 @@ async fn e2e_pool_is_healthy() {
     }
     let pool = pool().await;
     assert!(pool.is_healthy().await);
+}
+
+#[tokio::test]
+#[ignore = "requires running MySQL via docker-compose"]
+async fn e2e_row_ref_primitive_reads() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let mut conn = pool.get().await.expect("conn");
+    let rows = conn
+        .query_raw("SELECT 42 AS n, 'hello' AS s")
+        .await
+        .expect("query");
+    let r = MysqlRowRef::from_row(rows.into_iter().next().unwrap()).unwrap();
+    assert_eq!(r.get_i32("n").unwrap(), 42);
+    assert_eq!(r.get_str("s").unwrap(), "hello");
 }

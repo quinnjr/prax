@@ -4538,6 +4538,7 @@ dependencies = [
  "futures",
  "mysql_async 0.36.2",
  "prax-query",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
