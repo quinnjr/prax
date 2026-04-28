@@ -208,16 +208,75 @@ impl QueryEngine for MysqlEngine {
         sql: &str,
         params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<T>> {
-        // MySQL 8.0.22+ supports INSERT ... RETURNING. INSERT RETURNING yields
-        // at most one row per inserted tuple; query_first_row avoids ever
-        // materializing a tail if the caller's SQL yields many (which would
-        // be a misuse, but the engine shouldn't punish it with unbounded
-        // allocation).
+        // MySQL 8.0 does NOT support `INSERT ... RETURNING` (that's a
+        // MariaDB 10.5+ extension), so `Mysql::returning_clause` emits
+        // nothing and we reconstruct the inserted row by running the
+        // INSERT, grabbing `LAST_INSERT_ID()` off the same connection,
+        // and issuing a follow-up SELECT on the primary key.
+        //
+        // The SELECT-back has to run on the same connection as the
+        // INSERT — `last_insert_id` is a per-session value, and the
+        // pool could hand a different connection to a later call. We
+        // therefore borrow the connection once and issue both
+        // statements on it.
         let sql = sql.to_string();
         Box::pin(async move {
-            self.query_first_row::<T>(sql, params)
-                .await?
-                .ok_or_else(|| QueryError::not_found(T::MODEL_NAME))
+            if T::PRIMARY_KEY.len() != 1 {
+                return Err(QueryError::database(format!(
+                    "MySQL execute_insert requires a single-column primary \
+                     key on {} to look up the inserted row via \
+                     LAST_INSERT_ID(); got {} PK columns",
+                    T::MODEL_NAME,
+                    T::PRIMARY_KEY.len(),
+                )));
+            }
+            let pk = T::PRIMARY_KEY[0];
+
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let bound = Self::bind(&params);
+
+            trace!(sql = %sql, "mysql execute_insert");
+            conn.inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            let last_id = conn.inner().last_insert_id().ok_or_else(|| {
+                QueryError::database(format!(
+                    "MySQL execute_insert: no LAST_INSERT_ID after inserting \
+                     into {} — does the table have an AUTO_INCREMENT column?",
+                    T::TABLE_NAME,
+                ))
+            })?;
+
+            let select_sql = format!(
+                "SELECT {cols} FROM {table} WHERE {pk} = ?",
+                cols = T::COLUMNS.join(", "),
+                table = T::TABLE_NAME,
+                pk = pk,
+            );
+            trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
+            let row: Option<MyRow> = conn
+                .inner_mut()
+                .exec_first(
+                    select_sql.as_str(),
+                    Params::Positional(vec![MyValue::UInt(last_id)]),
+                )
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            let row = row.ok_or_else(|| QueryError::not_found(T::MODEL_NAME))?;
+            let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                let msg = e.to_string();
+                QueryError::deserialization(msg).with_source(e)
+            })?;
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
@@ -226,8 +285,76 @@ impl QueryEngine for MysqlEngine {
         sql: &str,
         params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+        // MySQL 8.0 has no `UPDATE ... RETURNING`, so the update builder
+        // emits a plain UPDATE (Mysql::returning_clause returns "").
+        // We run it, then re-run the WHERE against a SELECT on the same
+        // connection to pull back the updated rows.
+        //
+        // `sql` already has the form `UPDATE <table> SET <...> WHERE
+        // <filter>`. We reuse the `WHERE <filter>` portion by splitting
+        // on " WHERE " — every generated UPDATE always includes a WHERE
+        // clause (UpdateOperation requires `.r#where(...)`), and the
+        // WHERE parameters are bound positionally after the SET
+        // parameters so we need to extract just the WHERE-phase params
+        // to rebind on the SELECT.
         let sql = sql.to_string();
-        Box::pin(self.query_rows::<T>(sql, params))
+        Box::pin(async move {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let bound = Self::bind(&params);
+
+            trace!(sql = %sql, "mysql execute_update");
+            conn.inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            // Extract the `WHERE ...` tail so we can re-SELECT with it.
+            // UpdateOperation::build_sql always produces `... WHERE <filter>`.
+            let where_idx = sql.rfind(" WHERE ").ok_or_else(|| {
+                QueryError::database(
+                    "MySQL execute_update expected a WHERE clause in the \
+                     generated SQL; got none. Cannot fetch updated rows."
+                        .to_string(),
+                )
+            })?;
+            let where_clause = &sql[where_idx..];
+
+            // The WHERE params follow the SET params in `params`. Count
+            // the `?` placeholders in the UPDATE body (before `WHERE`)
+            // to know how many to skip.
+            let set_body = &sql[..where_idx];
+            let set_param_count = set_body.matches('?').count();
+            let where_params: Vec<FilterValue> = params.into_iter().skip(set_param_count).collect();
+
+            let select_sql = format!(
+                "SELECT {cols} FROM {table}{where_clause}",
+                cols = T::COLUMNS.join(", "),
+                table = T::TABLE_NAME,
+            );
+            trace!(sql = %select_sql, "mysql execute_update select-back");
+            let bound = Self::bind(&where_params);
+            let rows: Vec<MyRow> = conn
+                .inner_mut()
+                .exec(select_sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            rows.into_iter()
+                .map(|row| {
+                    let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                        let msg = e.to_string();
+                        QueryError::deserialization(msg).with_source(e)
+                    })?;
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
+        })
     }
 
     fn execute_delete(
@@ -247,5 +374,109 @@ impl QueryEngine for MysqlEngine {
     fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = sql.to_string();
         Box::pin(self.count_rows(sql, params))
+    }
+
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<std::collections::HashMap<String, FilterValue>>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            trace!(sql = %sql, "mysql aggregate_query");
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let bound = Self::bind(&params);
+            let rows: Vec<MyRow> = conn
+                .inner_mut()
+                .exec(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let mut map = std::collections::HashMap::new();
+                    // Snapshot the column list once per row — `columns_ref`
+                    // returns an Arc<[Column]> slice which we clone out to
+                    // avoid borrowing `row` across per-column takes.
+                    let cols: Vec<(String, usize)> = row
+                        .columns_ref()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (c.name_str().to_string(), i))
+                        .collect();
+                    for (name, idx) in cols {
+                        let value = decode_mysql_aggregate_cell(&row, idx);
+                        map.insert(name, value);
+                    }
+                    map
+                })
+                .collect())
+        })
+    }
+}
+
+/// Decode a MySQL aggregate result cell into a [`FilterValue`].
+///
+/// MySQL returns aggregates with dialect-specific widths: COUNT is
+/// BIGINT, SUM over an INT column returns DECIMAL, AVG returns
+/// DECIMAL, MIN/MAX preserves the source column's width. We can't
+/// know those in advance for arbitrary aggregate queries, so we
+/// introspect the raw `mysql_async::Value` tag and project to the
+/// closest `FilterValue`. DECIMAL arrives as `Value::Bytes` (text
+/// encoding) — we parse to f64 so the `AggregateResult` folder's
+/// `sum`/`avg` HashMap picks up a usable number.
+///
+/// `Value::NULL` maps to `FilterValue::Null`. Unknown variants fall
+/// back to their debug-text representation so a novel column type
+/// doesn't silently drop.
+fn decode_mysql_aggregate_cell(row: &MyRow, idx: usize) -> FilterValue {
+    use mysql_async::from_value_opt;
+    let raw = match row.as_ref(idx) {
+        Some(v) => v.clone(),
+        None => return FilterValue::Null,
+    };
+    match raw {
+        MyValue::NULL => FilterValue::Null,
+        MyValue::Int(n) => FilterValue::Int(n),
+        MyValue::UInt(n) => {
+            // MySQL BIGINT UNSIGNED can exceed i64::MAX; clamp to keep
+            // `FilterValue::Int` monotonic. Values in that range are
+            // rare in aggregate result sets (they come from
+            // BIGINT UNSIGNED columns only).
+            FilterValue::Int(n.min(i64::MAX as u64) as i64)
+        }
+        MyValue::Float(f) => FilterValue::Float(f as f64),
+        MyValue::Double(f) => FilterValue::Float(f),
+        MyValue::Bytes(ref bytes) => {
+            // Text-encoded values (VARCHAR, CHAR, DECIMAL, DATE, ...).
+            // DECIMAL arrives here; parse to f64 if it looks numeric so
+            // sum/avg accessors round-trip.
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(n) = s.parse::<i64>() {
+                    FilterValue::Int(n)
+                } else if let Ok(f) = s.parse::<f64>() {
+                    FilterValue::Float(f)
+                } else {
+                    FilterValue::String(s.to_string())
+                }
+            } else {
+                // Non-UTF8 bytes (BINARY / BLOB). Fall back to lossy.
+                FilterValue::String(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+        other => {
+            // Date/Time variants — re-encode as String via
+            // from_value_opt(String), which mysql_async implements for
+            // every primitive. If that fails, surface Null rather than
+            // aborting the whole aggregate.
+            from_value_opt::<String>(other)
+                .map(FilterValue::String)
+                .unwrap_or(FilterValue::Null)
+        }
     }
 }

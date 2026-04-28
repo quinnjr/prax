@@ -76,8 +76,15 @@ pub struct Postgres;
 /// `ON CONFLICT (cols) DO UPDATE SET ...` upserts.
 pub struct Sqlite;
 
-/// MySQL dialect: `?` placeholders (positionless), `RETURNING` (8.0.22+),
+/// MySQL dialect: `?` placeholders (positionless), no `RETURNING`
+/// support (that's a MariaDB 10.5+ extension, not MySQL 8.0),
 /// backtick-quoted identifiers, `ON DUPLICATE KEY UPDATE ...` upserts.
+///
+/// Because MySQL can't emit the inserted/updated row in-line, the
+/// `MysqlEngine` compensates at the driver layer: inserts look up
+/// `LAST_INSERT_ID()` and SELECT back, updates re-run the WHERE as a
+/// SELECT. See `prax_mysql::MysqlEngine::execute_insert` /
+/// `execute_update` for details.
 pub struct Mysql;
 
 /// Microsoft SQL Server dialect: `@PN` placeholders, `OUTPUT INSERTED.*`,
@@ -130,8 +137,22 @@ impl SqlDialect for Mysql {
     fn placeholder(&self, _i: usize) -> String {
         "?".into()
     }
-    fn returning_clause(&self, cols: &str) -> String {
-        format!(" RETURNING {}", cols)
+    fn returning_clause(&self, _cols: &str) -> String {
+        // MySQL 8.0 does NOT support `INSERT ... RETURNING` / `UPDATE ...
+        // RETURNING` / `DELETE ... RETURNING`. That syntax only works on
+        // MariaDB 10.5+. Emitting it here produces a 1064 syntax error
+        // on every insert/update through a typed client.
+        //
+        // The `MysqlEngine`'s `execute_insert` / `execute_update`
+        // implementations compensate by running the DML first, then
+        // issuing a follow-up SELECT keyed on `LAST_INSERT_ID()` (for
+        // inserts) or re-running the filter (for updates). Returning
+        // an empty clause keeps the rest of the build_sql machinery
+        // working without driver-specific branches.
+        String::new()
+    }
+    fn insert_has_returning(&self) -> bool {
+        false
     }
     fn quote_ident(&self, i: &str) -> String {
         format!("`{}`", i.replace('`', "``"))
