@@ -64,6 +64,14 @@ pub fn emit(model_path: TokenStream) -> TokenStream {
             pub fn count(&self)
                 -> ::prax_query::operations::CountOperation<E, #model_path>
             { ::prax_query::operations::CountOperation::new(self.engine.clone()) }
+
+            pub fn aggregate(&self)
+                -> ::prax_query::operations::AggregateOperation<#model_path, E>
+            { ::prax_query::operations::AggregateOperation::with_engine(self.engine.clone()) }
+
+            pub fn group_by(&self, columns: Vec<String>)
+                -> ::prax_query::operations::GroupByOperation<#model_path, E>
+            { ::prax_query::operations::GroupByOperation::with_engine(self.engine.clone(), columns) }
         }
     }
 }

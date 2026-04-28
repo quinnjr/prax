@@ -95,6 +95,12 @@ impl AggregateField {
 }
 
 /// Result of an aggregation query.
+///
+/// Populated from the single-row result of an aggregate query by
+/// [`AggregateOperation::exec`]. The keys in each map are the
+/// *column names* stripped of the `_sum_` / `_avg_` / `_min_` /
+/// `_max_` prefixes emitted by [`AggregateField::alias`], so callers
+/// index by the original column (e.g. `result.sum.get("views")`).
 #[derive(Debug, Clone, Default)]
 pub struct AggregateResult {
     /// Total count (if requested).
@@ -109,13 +115,108 @@ pub struct AggregateResult {
     pub max: std::collections::HashMap<String, serde_json::Value>,
 }
 
+impl AggregateResult {
+    /// Build an [`AggregateResult`] from the single column-value map
+    /// returned by [`crate::traits::QueryEngine::aggregate_query`] for
+    /// a whole-table aggregate.
+    ///
+    /// The input map's keys are the dialect-emitted aliases
+    /// (`_count`, `_sum_<col>`, `_avg_<col>`, …). This method strips
+    /// the prefix and routes each entry into the right typed accessor
+    /// bucket. Values that don't parse as the expected numeric type
+    /// are dropped silently — aggregates against empty result sets
+    /// legitimately return NULL.
+    pub fn from_row(row: std::collections::HashMap<String, crate::filter::FilterValue>) -> Self {
+        use crate::filter::FilterValue;
+        let mut out = Self::default();
+        for (k, v) in row {
+            if k == "_count" {
+                if let FilterValue::Int(n) = v {
+                    out.count = Some(n);
+                }
+            } else if let Some(col) = k.strip_prefix("_sum_") {
+                if let Some(f) = value_to_f64(&v) {
+                    out.sum.insert(col.to_string(), f);
+                }
+            } else if let Some(col) = k.strip_prefix("_avg_") {
+                if let Some(f) = value_to_f64(&v) {
+                    out.avg.insert(col.to_string(), f);
+                }
+            } else if let Some(col) = k.strip_prefix("_min_") {
+                out.min.insert(col.to_string(), filter_value_to_json(&v));
+            } else if let Some(col) = k.strip_prefix("_max_") {
+                out.max.insert(col.to_string(), filter_value_to_json(&v));
+            }
+        }
+        out
+    }
+
+    /// Pull the sum of a column as `f64` if present.
+    pub fn sum_as_f64(&self, column: &str) -> Option<f64> {
+        self.sum.get(column).copied()
+    }
+
+    /// Pull the average of a column as `f64` if present.
+    pub fn avg_as_f64(&self, column: &str) -> Option<f64> {
+        self.avg.get(column).copied()
+    }
+
+    /// Pull the minimum of a column as `f64` if the stored JSON value
+    /// is numeric.
+    pub fn min_as_f64(&self, column: &str) -> Option<f64> {
+        self.min.get(column).and_then(|v| v.as_f64())
+    }
+
+    /// Pull the maximum of a column as `f64` if the stored JSON value
+    /// is numeric.
+    pub fn max_as_f64(&self, column: &str) -> Option<f64> {
+        self.max.get(column).and_then(|v| v.as_f64())
+    }
+}
+
+fn value_to_f64(v: &crate::filter::FilterValue) -> Option<f64> {
+    use crate::filter::FilterValue;
+    match v {
+        FilterValue::Int(n) => Some(*n as f64),
+        FilterValue::Float(f) => Some(*f),
+        FilterValue::String(s) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn filter_value_to_json(v: &crate::filter::FilterValue) -> serde_json::Value {
+    use crate::filter::FilterValue;
+    match v {
+        FilterValue::Null => serde_json::Value::Null,
+        FilterValue::Bool(b) => serde_json::Value::Bool(*b),
+        FilterValue::Int(n) => serde_json::Value::from(*n),
+        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        FilterValue::String(s) => serde_json::Value::String(s.clone()),
+        FilterValue::Json(j) => j.clone(),
+        FilterValue::List(_) => serde_json::Value::Null,
+    }
+}
+
 /// Aggregate operation builder.
+///
+/// # Engine ownership
+///
+/// The builder stores an `Option<E>` rather than the engine directly
+/// so existing unit tests that construct an `AggregateOperation` just
+/// to exercise SQL emission (`AggregateOperation::<Model,
+/// MockEngine>::new()`) keep working without a real engine.
+/// Production code always goes through [`AggregateOperation::with_engine`]
+/// (what the generated `Client<E>::aggregate()` accessor calls), and
+/// [`Self::exec`] refuses to run when the engine slot is empty.
 #[derive(Debug)]
 pub struct AggregateOperation<M: Model, E: QueryEngine> {
     /// Phantom data for model type.
     _model: PhantomData<M>,
-    /// Phantom data for engine type.
-    _engine: PhantomData<E>,
+    /// Engine used by [`Self::exec`]. SQL-emission-only constructors
+    /// leave this `None`.
+    engine: Option<E>,
     /// Aggregate fields to compute.
     fields: Vec<AggregateField>,
     /// Filter conditions.
@@ -123,11 +224,27 @@ pub struct AggregateOperation<M: Model, E: QueryEngine> {
 }
 
 impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
-    /// Create a new aggregate operation.
+    /// Create a new aggregate operation without an engine.
+    ///
+    /// Useful for unit tests that only exercise [`Self::build_sql`].
+    /// [`Self::exec`] will refuse to run on a builder created this way.
     pub fn new() -> Self {
         Self {
             _model: PhantomData,
-            _engine: PhantomData,
+            engine: None,
+            fields: Vec::new(),
+            filter: None,
+        }
+    }
+
+    /// Create a new aggregate operation bound to a concrete engine.
+    ///
+    /// This is what the generated `Client<E>::aggregate()` accessor
+    /// calls.
+    pub fn with_engine(engine: E) -> Self {
+        Self {
+            _model: PhantomData,
+            engine: Some(engine),
             fields: Vec::new(),
             filter: None,
         }
@@ -218,12 +335,27 @@ impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
     }
 
     /// Execute the aggregate operation.
-    pub async fn exec(self, _engine: &E) -> QueryResult<AggregateResult> {
-        let dialect = &crate::dialect::Postgres;
-        let (_sql, _params) = self.build_sql(dialect);
-        // In a real implementation, this would execute the query
-        // For now, return a placeholder
-        Ok(AggregateResult::default())
+    ///
+    /// Routes the single-row aggregate result through
+    /// [`crate::traits::QueryEngine::aggregate_query`] and folds the
+    /// column→value map into an [`AggregateResult`]. Returns an empty
+    /// result (all fields `None`/empty) if the query yields zero rows
+    /// — aggregates on empty tables do this on Postgres/MySQL/SQLite.
+    ///
+    /// Errors with `QueryError::internal` if the builder was
+    /// constructed via [`Self::new`] without an engine.
+    pub async fn exec(self) -> QueryResult<AggregateResult> {
+        let engine = self.engine.as_ref().ok_or_else(|| {
+            crate::error::QueryError::internal(
+                "AggregateOperation::exec called on a builder without an engine; \
+                 use Client<E>::aggregate() (which calls with_engine) instead of \
+                 AggregateOperation::new()",
+            )
+        })?;
+        let dialect = engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
+        let mut rows = engine.aggregate_query(&sql, params).await?;
+        Ok(AggregateResult::from_row(rows.pop().unwrap_or_default()))
     }
 }
 
@@ -234,12 +366,20 @@ impl<M: Model, E: QueryEngine> Default for AggregateOperation<M, E> {
 }
 
 /// Group by operation builder.
+///
+/// # Engine ownership
+///
+/// Like [`AggregateOperation`], holds an `Option<E>` so SQL-emission
+/// unit tests compile without a real engine. Production code uses
+/// [`GroupByOperation::with_engine`] via the generated
+/// `Client<E>::group_by` accessor.
 #[derive(Debug)]
 pub struct GroupByOperation<M: Model, E: QueryEngine> {
     /// Phantom data for model type.
     _model: PhantomData<M>,
-    /// Phantom data for engine type.
-    _engine: PhantomData<E>,
+    /// Engine used by [`Self::exec`]; `None` for SQL-emission-only
+    /// unit-test constructors.
+    engine: Option<E>,
     /// Columns to group by.
     group_columns: Vec<String>,
     /// Aggregate fields to compute.
@@ -299,11 +439,32 @@ impl HavingOp {
 }
 
 impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
-    /// Create a new group by operation.
+    /// Create a new group-by operation without an engine.
+    ///
+    /// Useful for unit tests that only exercise [`Self::build_sql`].
+    /// [`Self::exec`] will refuse to run on a builder created this way.
     pub fn new(columns: Vec<String>) -> Self {
         Self {
             _model: PhantomData,
-            _engine: PhantomData,
+            engine: None,
+            group_columns: columns,
+            agg_fields: Vec::new(),
+            filter: None,
+            having: None,
+            order_by: Vec::new(),
+            skip: None,
+            take: None,
+        }
+    }
+
+    /// Create a new group-by operation bound to a concrete engine.
+    ///
+    /// This is what the generated `Client<E>::group_by(cols)` accessor
+    /// calls.
+    pub fn with_engine(engine: E, columns: Vec<String>) -> Self {
+        Self {
+            _model: PhantomData,
+            engine: Some(engine),
             group_columns: columns,
             agg_fields: Vec::new(),
             filter: None,
@@ -457,12 +618,47 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
         (sql, params)
     }
 
-    /// Execute the group by operation.
-    pub async fn exec(self, _engine: &E) -> QueryResult<Vec<GroupByResult>> {
-        let dialect = &crate::dialect::Postgres;
-        let (_sql, _params) = self.build_sql(dialect);
-        // In a real implementation, this would execute the query
-        Ok(Vec::new())
+    /// Execute the group-by operation.
+    ///
+    /// Returns one [`GroupByResult`] per grouped row. Each result
+    /// splits the row map into two buckets:
+    /// - `group_values`: entries whose key matches a column named in
+    ///   `group_columns`.
+    /// - `aggregates`: everything else — parsed through
+    ///   [`AggregateResult::from_row`].
+    ///
+    /// Errors with `QueryError::internal` if the builder was
+    /// constructed via [`Self::new`] without an engine.
+    pub async fn exec(self) -> QueryResult<Vec<GroupByResult>> {
+        let engine = self.engine.as_ref().ok_or_else(|| {
+            crate::error::QueryError::internal(
+                "GroupByOperation::exec called on a builder without an engine; \
+                 use Client<E>::group_by() (which calls with_engine) instead of \
+                 GroupByOperation::new()",
+            )
+        })?;
+        let dialect = engine.dialect();
+        let group_columns = self.group_columns.clone();
+        let (sql, params) = self.build_sql(dialect);
+        let rows = engine.aggregate_query(&sql, params).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let mut group_values = std::collections::HashMap::new();
+                let mut agg_map = std::collections::HashMap::new();
+                for (k, v) in row {
+                    if group_columns.iter().any(|c| c == &k) {
+                        group_values.insert(k, filter_value_to_json(&v));
+                    } else {
+                        agg_map.insert(k, v);
+                    }
+                }
+                GroupByResult {
+                    group_values,
+                    aggregates: AggregateResult::from_row(agg_map),
+                }
+            })
+            .collect())
     }
 }
 
@@ -823,12 +1019,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_aggregate_exec() {
-        let engine = MockEngine;
+    async fn test_aggregate_exec_without_engine_errors() {
+        // `new()` leaves engine = None; exec must refuse to run rather
+        // than silently doing nothing or panicking.
         let op: AggregateOperation<TestModel, MockEngine> = AggregateOperation::new().count();
+        let err = op.exec().await.unwrap_err();
+        assert!(err.to_string().contains("without an engine"));
+    }
 
-        let result = op.exec(&engine).await;
-        assert!(result.is_ok());
+    #[tokio::test]
+    async fn test_aggregate_exec_with_engine_ok() {
+        // MockEngine doesn't override `aggregate_query`, so the default
+        // impl returns `unsupported`. We just verify the engine-to-trait
+        // wiring is intact.
+        let op: AggregateOperation<TestModel, MockEngine> =
+            AggregateOperation::with_engine(MockEngine).count();
+        let err = op.exec().await.unwrap_err();
+        assert!(err.to_string().contains("aggregate_query"));
     }
 
     // ========== GroupByOperation Tests ==========
@@ -975,14 +1182,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_group_by_exec() {
-        let engine = MockEngine;
+    async fn test_group_by_exec_without_engine_errors() {
         let op: GroupByOperation<TestModel, MockEngine> =
             GroupByOperation::new(vec!["department".into()]).count();
+        let err = op.exec().await.unwrap_err();
+        assert!(err.to_string().contains("without an engine"));
+    }
 
-        let result = op.exec(&engine).await;
-        assert!(result.is_ok());
-        assert!(result.unwrap().is_empty());
+    #[tokio::test]
+    async fn test_group_by_exec_with_engine_ok() {
+        let op: GroupByOperation<TestModel, MockEngine> =
+            GroupByOperation::with_engine(MockEngine, vec!["department".into()]).count();
+        let err = op.exec().await.unwrap_err();
+        assert!(err.to_string().contains("aggregate_query"));
     }
 
     // ========== HavingOp Tests ==========

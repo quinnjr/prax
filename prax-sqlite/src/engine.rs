@@ -274,4 +274,59 @@ impl QueryEngine for SqliteEngine {
         let sql = sql.to_string();
         Box::pin(self.count_rows(sql, params))
     }
+
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<std::collections::HashMap<String, FilterValue>>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            trace!(sql = %sql, "sqlite aggregate_query");
+            let conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let bound = Self::bind(&params);
+            let rows: Vec<std::collections::HashMap<String, FilterValue>> = conn
+                .inner()
+                .call(move |c| {
+                    let mut stmt = c.prepare(&sql)?;
+                    let column_names: Vec<String> =
+                        stmt.column_names().iter().map(|s| s.to_string()).collect();
+                    let refs: Vec<&dyn rusqlite::ToSql> =
+                        bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                    let mut rows = stmt.query(refs.as_slice())?;
+                    let mut out = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        let mut map = std::collections::HashMap::new();
+                        for (i, name) in column_names.iter().enumerate() {
+                            // SQLite storage classes are dynamic per-row:
+                            // INTEGER, REAL, TEXT, BLOB, NULL. Pull each
+                            // cell as an untyped `Value` and project into
+                            // the closest `FilterValue` variant. BLOB
+                            // becomes `Null` — aggregate results never
+                            // return BLOB in practice, and surfacing raw
+                            // bytes through FilterValue doesn't buy
+                            // anything for the caller.
+                            let v: SqlValue = row.get(i).unwrap_or(SqlValue::Null);
+                            let fv = match v {
+                                SqlValue::Null => FilterValue::Null,
+                                SqlValue::Integer(n) => FilterValue::Int(n),
+                                SqlValue::Real(f) => FilterValue::Float(f),
+                                SqlValue::Text(s) => FilterValue::String(s),
+                                SqlValue::Blob(_) => FilterValue::Null,
+                            };
+                            map.insert(name.clone(), fv);
+                        }
+                        out.push(map);
+                    }
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(rows)
+        })
+    }
 }

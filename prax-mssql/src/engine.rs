@@ -374,6 +374,88 @@ impl QueryEngine for MssqlEngine {
             }
         })
     }
+
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<std::collections::HashMap<String, FilterValue>>>> {
+        let sql = Self::convert_params(sql);
+        Box::pin(async move {
+            trace!(sql = %sql, "Executing aggregate_query");
+
+            let mut conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
+
+            let mssql_params = Self::to_params(&params)?;
+            let param_refs: Vec<&dyn tiberius::ToSql> =
+                mssql_params.iter().map(|p| p.as_ref()).collect();
+
+            let rows = conn
+                .query(&sql, &param_refs)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+
+            Ok(rows
+                .iter()
+                .map(|row| {
+                    let mut map = std::collections::HashMap::new();
+                    for (i, col) in row.columns().iter().enumerate() {
+                        let name = col.name().to_string();
+                        let value = decode_mssql_aggregate_cell(row, i);
+                        map.insert(name, value);
+                    }
+                    map
+                })
+                .collect())
+        })
+    }
+}
+
+/// Decode a single aggregate result cell from tiberius into a
+/// [`FilterValue`].
+///
+/// MSSQL aggregates return dialect-specific types: COUNT is INT,
+/// SUM over an INT column returns the source width (BIGINT for
+/// COUNT_BIG), AVG returns the numeric type of the column, and
+/// MIN/MAX preserves it. Tiberius exposes columns through a
+/// handful of numeric + text `try_get` specializations — we probe
+/// them in order and project into a [`FilterValue`] that
+/// [`prax_query::operations::AggregateResult::from_row`] can
+/// interpret.
+///
+/// Unknown / unprobeable columns surface as `FilterValue::Null`
+/// rather than aborting the whole aggregate query; the caller's
+/// view shows the cell as "not decoded" instead of losing every
+/// aggregate.
+fn decode_mssql_aggregate_cell(row: &tiberius::Row, idx: usize) -> FilterValue {
+    // i64 / i32 / i16 / f64 / f32 / bool / String — probe in that
+    // order so COUNT(BIGINT) hits the i64 arm before degrading to a
+    // float representation that would lose precision.
+    if let Ok(Some(n)) = row.try_get::<i64, _>(idx) {
+        return FilterValue::Int(n);
+    }
+    if let Ok(Some(n)) = row.try_get::<i32, _>(idx) {
+        return FilterValue::Int(n as i64);
+    }
+    if let Ok(Some(n)) = row.try_get::<i16, _>(idx) {
+        return FilterValue::Int(n as i64);
+    }
+    if let Ok(Some(f)) = row.try_get::<f64, _>(idx) {
+        return FilterValue::Float(f);
+    }
+    if let Ok(Some(f)) = row.try_get::<f32, _>(idx) {
+        return FilterValue::Float(f as f64);
+    }
+    if let Ok(Some(b)) = row.try_get::<bool, _>(idx) {
+        return FilterValue::Bool(b);
+    }
+    if let Ok(Some(s)) = row.try_get::<&str, _>(idx) {
+        return FilterValue::String(s.to_string());
+    }
+    FilterValue::Null
 }
 
 /// A typed query builder that uses the MSSQL engine.
