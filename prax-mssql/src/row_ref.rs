@@ -85,6 +85,10 @@ impl MssqlRowRef {
                 ColumnValue::NaiveTime(v)
             } else if let Ok(Some(v)) = row.try_get::<chrono::DateTime<chrono::Utc>, _>(idx) {
                 ColumnValue::DateTimeUtc(v)
+            } else if let Ok(Some(v)) = row.try_get::<tiberius::numeric::Numeric, _>(idx) {
+                // tiberius doesn't surface a typed Decimal; materialize via its
+                // Display impl and let `get_decimal` parse into rust_decimal.
+                ColumnValue::Decimal(v.to_string())
             } else if let Ok(None) = row.try_get::<i32, _>(idx) {
                 ColumnValue::Null
             } else {

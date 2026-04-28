@@ -345,3 +345,40 @@ async fn e2e_row_ref_primitive_reads() {
     assert_eq!(row_ref.get_i32("n").unwrap(), 42);
     assert_eq!(row_ref.get_str("s").unwrap(), "hello");
 }
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_row_ref_null_vs_absent_column() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::row_ref::MssqlRowRef;
+    use prax_query::row::{RowError, RowRef};
+
+    let pool = pool().await;
+    let mut conn = pool.get().await.expect("conn");
+
+    let rows = conn
+        .query(
+            "SELECT CAST(42 AS INT) AS present, CAST(NULL AS INT) AS nulled",
+            &[],
+        )
+        .await
+        .expect("query");
+    let row = rows.into_iter().next().expect("row present");
+    let r = MssqlRowRef::from_row(&row).expect("from_row");
+
+    // Present column with a value → Ok(Some(_)).
+    assert_eq!(r.get_i32_opt("present").unwrap(), Some(42));
+
+    // Present column whose value is NULL → Ok(None).
+    assert_eq!(r.get_i32_opt("nulled").unwrap(), None);
+
+    // Absent column (not in the SELECT list) → Err(ColumnNotFound).
+    let err = r.get_i32_opt("missing").unwrap_err();
+    assert!(
+        matches!(err, RowError::ColumnNotFound(ref col) if col == "missing"),
+        "expected ColumnNotFound for absent column, got {err:?}",
+    );
+}

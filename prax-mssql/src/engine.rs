@@ -283,8 +283,18 @@ impl QueryEngine for MssqlEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            let count: i32 = row.get(0).unwrap_or(0);
-            Ok(count as u64)
+            // SQL Server's COUNT is INT; COUNT_BIG is BIGINT. Accept either
+            // and surface a deserialization error rather than silently
+            // collapsing a NULL / missing column to zero.
+            if let Some(n) = row.get::<i64, _>(0) {
+                return Ok(n as u64);
+            }
+            if let Some(n) = row.get::<i32, _>(0) {
+                return Ok(n as u64);
+            }
+            Err(prax_query::QueryError::deserialization(
+                "count query returned no integer in column 0".to_string(),
+            ))
         })
     }
 }
