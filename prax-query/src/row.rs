@@ -184,6 +184,20 @@ fn unsupported_get(column: &str, getter: &str) -> RowError {
     }
 }
 
+/// Map a driver-level error into a `RowError::TypeConversion` tagged with the
+/// column the caller asked for. Shared by every driver's `RowRef` bridge so
+/// the diagnostic message shape is identical across Postgres, SQLite, MySQL,
+/// and MSSQL. The happy path is an unchanged `Ok(value)`.
+pub fn into_row_error<T, E: std::fmt::Display>(
+    column: &str,
+    res: Result<T, E>,
+) -> Result<T, RowError> {
+    res.map_err(|e| RowError::TypeConversion {
+        column: column.to_string(),
+        message: e.to_string(),
+    })
+}
+
 /// Trait for types that can be deserialized from a row reference (zero-copy).
 ///
 /// This trait uses lifetimes to enable borrowing string data directly

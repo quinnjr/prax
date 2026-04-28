@@ -25,19 +25,8 @@
 //! callers that need decimal values should cast the column to text
 //! (`amount::text`) and parse in application code.
 
-use prax_query::row::{RowError, RowRef};
+use prax_query::row::{RowError, RowRef, into_row_error};
 use tokio_postgres::Row;
-
-/// Wrap any `tokio_postgres` error surfaced by `try_get` into a `RowError`
-/// tagged with the column the caller asked for. Used by every `RowRef`
-/// method body; keeping it factored means the error shape stays uniform
-/// when we later add tracing/span context.
-fn into_row_error<T, E: std::fmt::Display>(column: &str, res: Result<T, E>) -> Result<T, RowError> {
-    res.map_err(|e| RowError::TypeConversion {
-        column: column.to_string(),
-        message: e.to_string(),
-    })
-}
 
 /// Newtype wrapper around `tokio_postgres::Row` that implements
 /// `prax_query::row::RowRef`.

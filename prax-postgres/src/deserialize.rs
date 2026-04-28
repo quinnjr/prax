@@ -1,8 +1,7 @@
 //! Row -> T: FromRow helpers for PgEngine.
 //!
 //! `tokio_postgres::Row` does not implement `prax_query::row::RowRef` (orphan
-//! rule); we wrap each row in `PgRow` first, which does. Task 3 introduced
-//! that newtype.
+//! rule); we wrap each row in `PgRow` first, which does.
 
 use prax_query::error::{QueryError, QueryResult};
 use prax_query::row::FromRow;
