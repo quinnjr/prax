@@ -392,3 +392,101 @@ async fn e2e_pool_is_healthy() {
     let pool = pool().await;
     assert!(pool.is_healthy().await, "pool should report healthy");
 }
+
+// =============================================================================
+// Query engine typed decoding
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose"]
+async fn e2e_query_many_typed_decodes_rows() {
+    use prax_postgres::PgEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug, PartialEq)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "crud_people";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("crud_people");
+    drop_table(&pool, &table).await;
+
+    let conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "CREATE TABLE {table} (id SERIAL PRIMARY KEY, email TEXT NOT NULL)"
+    ))
+    .await
+    .expect("create table");
+
+    conn.batch_execute(&format!(
+        "INSERT INTO {table} (email) VALUES ('alice@example.com'), ('bob@example.com')"
+    ))
+    .await
+    .expect("insert");
+
+    let engine = PgEngine::new(pool.clone());
+    let rows = engine
+        .query_many::<Person>(
+            &format!("SELECT id, email FROM {table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .expect("query_many");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].email, "alice@example.com");
+    assert_eq!(rows[1].email, "bob@example.com");
+
+    drop_table(&pool, &table).await;
+}
+
+// =============================================================================
+// Row reference primitive reads
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose"]
+async fn e2e_row_ref_primitive_reads() {
+    use prax_postgres::row_ref::PgRow;
+    use prax_query::row::RowRef;
+
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    let pool = pool().await;
+    let conn = pool.get().await.expect("conn");
+
+    let raw_row = conn
+        .query_one("SELECT 42::int4 AS n, 'hello'::text AS s", &[])
+        .await
+        .expect("query_one");
+
+    let row = PgRow::from(raw_row);
+    assert_eq!(row.get_i32("n").unwrap(), 42);
+    assert_eq!(row.get_str("s").unwrap(), "hello");
+}
