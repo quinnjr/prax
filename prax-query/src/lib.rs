@@ -205,7 +205,7 @@ pub use filter::{
     OrFilterBuilder, ScalarFilter, SmallValueList, ToFilterValue, ValueList,
 };
 pub use json::{JsonAgg, JsonFilter, JsonIndex, JsonIndexBuilder, JsonOp, JsonPath, PathSegment};
-pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
+pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOp, NestedWriteOperations};
 pub use operations::{
     AggregateField,
     AggregateOperation,
@@ -464,7 +464,9 @@ pub mod prelude {
     pub use crate::filter::{Filter, FilterValue, ScalarFilter};
     pub use crate::introspection::{DatabaseSchema, TableInfo, generate_prax_schema};
     pub use crate::json::{JsonFilter, JsonOp, JsonPath};
-    pub use crate::nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
+    pub use crate::nested::{
+        NestedWrite, NestedWriteBuilder, NestedWriteOp, NestedWriteOperations,
+    };
     pub use crate::operations::*;
     pub use crate::pagination::{Cursor, CursorDirection, Pagination};
     pub use crate::partition::{Partition, PartitionBuilder, PartitionType, RangeBound};

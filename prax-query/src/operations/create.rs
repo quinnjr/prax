@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::FilterValue;
-use crate::traits::{Model, QueryEngine};
+use crate::nested::NestedWriteOp;
+use crate::traits::{Model, ModelWithPk, QueryEngine};
 use crate::types::Select;
 
 /// A create operation for inserting a new record.
@@ -26,6 +27,10 @@ pub struct CreateOperation<E: QueryEngine, M: Model> {
     columns: Vec<String>,
     values: Vec<FilterValue>,
     select: Select,
+    /// Queued nested-write ops run after the parent INSERT inside an
+    /// implicit transaction. Populated by [`CreateOperation::with`].
+    /// Empty on the fast path (single INSERT, no transaction wrap).
+    nested: Vec<NestedWriteOp>,
     _model: PhantomData<M>,
 }
 
@@ -37,6 +42,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
             columns: Vec::new(),
             values: Vec::new(),
             select: Select::All,
+            nested: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -66,9 +72,41 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
         self
     }
 
+    /// Queue a nested write to run alongside this create.
+    ///
+    /// The parent `INSERT` and every queued nested op execute inside a
+    /// single implicit transaction — any failure rolls back the parent
+    /// INSERT too. Typical use is via the codegen-emitted per-relation
+    /// helpers:
+    ///
+    /// ```rust,ignore
+    /// c.user().create()
+    ///     .set("email", "u@x.com")
+    ///     .with(user::posts::create(vec![
+    ///         vec![("title".into(), "p1".into())],
+    ///     ]))
+    ///     .exec().await?;
+    /// ```
+    pub fn with(mut self, nw: NestedWriteOp) -> Self {
+        self.nested.push(nw);
+        self
+    }
+
     /// Build the SQL query.
     pub fn build_sql(
         &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        Self::build_insert_sql(&self.columns, &self.values, &self.select, dialect)
+    }
+
+    /// Free-function form of [`Self::build_sql`] — takes the pieces by
+    /// reference so the `exec` path can reuse it after destructuring
+    /// `self` to move the captured state into the transaction closure.
+    fn build_insert_sql(
+        columns: &[String],
+        values: &[FilterValue],
+        select: &Select,
         dialect: &dyn crate::dialect::SqlDialect,
     ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
@@ -79,31 +117,69 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
 
         // Columns
         sql.push_str(" (");
-        sql.push_str(&self.columns.join(", "));
+        sql.push_str(&columns.join(", "));
         sql.push(')');
 
         // VALUES
         sql.push_str(" VALUES (");
-        let placeholders: Vec<_> = (1..=self.values.len())
-            .map(|i| dialect.placeholder(i))
-            .collect();
+        let placeholders: Vec<_> = (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
         sql.push_str(&placeholders.join(", "));
         sql.push(')');
 
         // RETURNING clause
-        sql.push_str(&dialect.returning_clause(&self.select.to_sql()));
+        sql.push_str(&dialect.returning_clause(&select.to_sql()));
 
-        (sql, self.values.clone())
+        (sql, values.to_vec())
     }
 
     /// Execute the create operation and return the created record.
+    ///
+    /// When no nested writes have been queued via [`Self::with`], this
+    /// runs a single `INSERT ... RETURNING` (or equivalent) against the
+    /// engine. When nested writes are queued, the whole operation is
+    /// wrapped in a transaction — the parent `INSERT` runs first, then
+    /// each nested op in order; if any nested op fails the parent
+    /// insert is rolled back too.
+    ///
+    /// The `ModelWithPk` bound on the transactional branch is what
+    /// gives the nested-write executor the parent's primary-key value
+    /// to splice into child rows' foreign-key columns.
     pub async fn exec(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelWithPk,
     {
-        let dialect = self.engine.dialect();
-        let (sql, params) = self.build_sql(dialect);
-        self.engine.execute_insert::<M>(&sql, params).await
+        let CreateOperation {
+            engine,
+            columns,
+            values,
+            select,
+            nested,
+            _model,
+        } = self;
+
+        // Fast path: no nested writes, run the INSERT directly.
+        if nested.is_empty() {
+            let dialect = engine.dialect();
+            let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
+            return engine.execute_insert::<M>(&sql, params).await;
+        }
+
+        // Slow path: wrap the INSERT + nested writes in a transaction.
+        // `engine.transaction` clones the engine into the closure and
+        // routes every query emitted inside through the same `BEGIN`
+        // block. A non-Ok return from the closure triggers ROLLBACK.
+        engine
+            .transaction(move |tx| async move {
+                let dialect = tx.dialect();
+                let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
+                let parent: M = tx.execute_insert::<M>(&sql, params).await?;
+                let parent_pk = parent.pk_value();
+                for nw in nested {
+                    nw.execute(&tx, &parent_pk).await?;
+                }
+                Ok(parent)
+            })
+            .await
     }
 }
 
@@ -228,6 +304,19 @@ mod tests {
     impl crate::row::FromRow for TestModel {
         fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
             Ok(TestModel)
+        }
+    }
+
+    // Gate the transactional `CreateOperation::exec` path in tests:
+    // the new nested-write wiring requires `ModelWithPk` on the return
+    // type. A fixed constant PK is fine because these tests never
+    // exercise the nested path — they only need exec() to compile.
+    impl crate::traits::ModelWithPk for TestModel {
+        fn pk_value(&self) -> FilterValue {
+            FilterValue::Int(0)
+        }
+        fn get_column_value(&self, _column: &str) -> Option<FilterValue> {
+            None
         }
     }
 

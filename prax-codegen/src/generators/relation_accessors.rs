@@ -57,7 +57,18 @@ pub struct RelationSpec<'a> {
     pub foreign_key: &'a str,
 }
 
-/// Emit `pub mod <field>` with `fetch()` and `Relation`.
+/// Emit `pub mod <field>` with `fetch()`, `Relation`, and the nested
+/// write helpers `connect()` / `create()`.
+///
+/// `connect()` / `create()` return a [`::prax_query::nested::NestedWriteOp`]
+/// suitable for feeding into `CreateOperation::with(...)`. The child
+/// payload for `create()` is a `Vec<Vec<(String, FilterValue)>>` rather
+/// than a strongly-typed `<target>::CreateInput` because the derive
+/// emission path doesn't materialize a per-model `CreateInput` struct —
+/// switching to a typed payload would require either generating one or
+/// branching the codegen between derive/schema paths. The untyped
+/// payload keeps both paths compatible at the cost of losing compile-
+/// time column-name checking on the nested-create arm.
 pub fn emit(spec: RelationSpec<'_>) -> TokenStream {
     let field_mod = spec.field_name;
     let field_name_str = spec.field_name.to_string();
@@ -82,6 +93,43 @@ pub fn emit(spec: RelationSpec<'_>) -> TokenStream {
             /// relation. Used as `include(user::posts::fetch())`.
             pub fn fetch() -> ::prax_query::relations::IncludeSpec {
                 ::prax_query::relations::IncludeSpec::new(#field_name_str)
+            }
+
+            /// Queue a nested `Connect` for feeding into
+            /// `CreateOperation::with(...)`. Currently this only
+            /// compiles — `NestedWriteOp::execute` returns an internal
+            /// error for `Connect` until the child-PK column name is
+            /// plumbed into the nested-write metadata.
+            pub fn connect(
+                pk: impl Into<::prax_query::filter::FilterValue>,
+            ) -> ::prax_query::nested::NestedWriteOp {
+                ::prax_query::nested::NestedWriteOp::Connect {
+                    relation: #field_name_str.into(),
+                    pk: pk.into(),
+                }
+            }
+
+            /// Queue one or more nested `Create`s for feeding into
+            /// `CreateOperation::with(...)`. Each child is a
+            /// `Vec<(column, value)>`. The FK column + parent PK are
+            /// appended automatically at execute time — callers must
+            /// not include the FK themselves.
+            pub fn create(
+                children: ::std::vec::Vec<
+                    ::std::vec::Vec<(
+                        ::std::string::String,
+                        ::prax_query::filter::FilterValue,
+                    )>,
+                >,
+            ) -> ::prax_query::nested::NestedWriteOp {
+                ::prax_query::nested::NestedWriteOp::Create {
+                    relation: #field_name_str.into(),
+                    target_table: <super::super::#target
+                        as ::prax_query::traits::Model>::TABLE_NAME
+                        .into(),
+                    foreign_key: #foreign.into(),
+                    payload: children,
+                }
             }
 
             /// Zero-sized relation marker carrying meta via

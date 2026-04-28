@@ -61,9 +61,10 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
+use crate::error::{QueryError, QueryResult};
 use crate::filter::{Filter, FilterValue};
 use crate::sql::quote_identifier;
-use crate::traits::Model;
+use crate::traits::{Model, QueryEngine};
 
 /// Represents a nested write operation for relations.
 #[derive(Debug, Clone)]
@@ -576,6 +577,111 @@ impl NestedWriteOperations {
     /// Get total number of statements.
     pub fn len(&self) -> usize {
         self.pre_statements.len() + self.post_statements.len()
+    }
+}
+
+/// Model-erased nested write op used by `CreateOperation::with(...)`.
+///
+/// The type-parameterized [`NestedWrite`] above is keyed on the parent
+/// model and doesn't compose across heterogeneous child types — a
+/// `CreateOperation<E, User>.with(posts_write)` needs to carry child
+/// writes for a different model (`Post`) than the parent, so `User`'s
+/// `NestedWrite<User>` can't encode them. This sibling enum drops the
+/// model type parameter and carries only the runtime metadata the
+/// execution path actually needs: the target table, the foreign-key
+/// column on that table, and the raw child-column payload.
+///
+/// Emitted by the codegen's per-relation `create()` / `connect()`
+/// helpers on `user::posts::*`. Payloads are a nested
+/// `Vec<Vec<(String, FilterValue)>>` rather than a strongly-typed
+/// `CreateInput` because the derive path doesn't currently emit a
+/// `CreateInput` struct per model — see the task docs for the trade-off
+/// and the upgrade path.
+#[derive(Debug, Clone)]
+pub enum NestedWriteOp {
+    /// Create children whose FK column points at the parent's PK.
+    ///
+    /// `relation` is retained for diagnostics/debugging; the executor
+    /// only needs `target_table`, `foreign_key`, and `payload`.
+    Create {
+        /// Name of the relation on the parent model.
+        relation: String,
+        /// Target child table.
+        target_table: String,
+        /// FK column on the child table that references the parent's PK.
+        foreign_key: String,
+        /// One `Vec<(column, value)>` per child row. The FK column +
+        /// parent PK are appended by [`NestedWriteOp::execute`].
+        payload: Vec<Vec<(String, FilterValue)>>,
+    },
+    /// Connect an existing child by its PK — not yet implemented.
+    ///
+    /// Connect on a `HasMany`/`HasOne` relation translates to
+    /// `UPDATE <child_table> SET <fk> = <parent_pk> WHERE <child_pk> = <pk>`,
+    /// but plumbing the child-PK column name through to execute time
+    /// needs more relation metadata than the current codegen surface
+    /// exposes. The variant carries its data so callers can still
+    /// build it, but [`NestedWriteOp::execute`] returns
+    /// [`QueryError::internal`] until the metadata is wired.
+    Connect {
+        /// Name of the relation on the parent model.
+        relation: String,
+        /// Primary key of the child row to connect.
+        pk: FilterValue,
+    },
+}
+
+impl NestedWriteOp {
+    /// Execute this nested write inside `engine`, using `parent_pk`
+    /// as the foreign-key value to splice into each child row.
+    ///
+    /// For `Create`, this emits one `INSERT INTO <target_table> (...)`
+    /// per child, appending the FK column + parent PK to whatever
+    /// columns/values the caller supplied.
+    pub async fn execute<E>(self, engine: &E, parent_pk: &FilterValue) -> QueryResult<()>
+    where
+        E: QueryEngine,
+    {
+        match self {
+            NestedWriteOp::Connect { relation, pk: _ } => {
+                let _ = relation;
+                Err(QueryError::internal(
+                    "nested Connect is not yet implemented (needs child-PK column metadata)",
+                ))
+            }
+            NestedWriteOp::Create {
+                relation: _,
+                target_table,
+                foreign_key,
+                payload,
+            } => {
+                let dialect = engine.dialect();
+                for child in payload {
+                    // Split the caller-supplied (col, val) pairs, then
+                    // append the FK column + parent PK so the child
+                    // points at the parent we just inserted.
+                    let mut columns: Vec<String> = child.iter().map(|(c, _)| c.clone()).collect();
+                    let mut values: Vec<FilterValue> = child.into_iter().map(|(_, v)| v).collect();
+                    columns.push(foreign_key.clone());
+                    values.push(parent_pk.clone());
+
+                    let placeholders: Vec<String> =
+                        (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
+                    let quoted_cols: Vec<String> =
+                        columns.iter().map(|c| dialect.quote_ident(c)).collect();
+
+                    let sql = format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        dialect.quote_ident(&target_table),
+                        quoted_cols.join(", "),
+                        placeholders.join(", "),
+                    );
+
+                    engine.execute_raw(&sql, values).await?;
+                }
+                Ok(())
+            }
+        }
     }
 }
 
