@@ -57,6 +57,59 @@ impl MssqlEngine {
         result
     }
 
+    /// T-SQL places `OUTPUT INSERTED.*` between the column list and
+    /// `VALUES ...`, not at the end of the statement. The cross-dialect
+    /// `build_sql` in prax-query appends the dialect's returning clause
+    /// after `VALUES (...)`, which works for Postgres / SQLite / (future)
+    /// MySQL RETURNING but yields a 102 "Incorrect syntax near 'OUTPUT'"
+    /// error against SQL Server. We rearrange the statement here so the
+    /// generic builder doesn't need to know about T-SQL clause ordering.
+    ///
+    /// Input:  `INSERT INTO t (c1,c2) VALUES (@P1,@P2) OUTPUT INSERTED.*`
+    /// Output: `INSERT INTO t (c1,c2) OUTPUT INSERTED.* VALUES (@P1,@P2)`
+    ///
+    /// Leaves the SQL untouched if no ` OUTPUT ` clause is present (e.g.
+    /// raw SQL from `QueryEngine::execute_raw`) or if the clause is
+    /// already correctly positioned before `VALUES`.
+    fn rearrange_output_for_insert(sql: &str) -> String {
+        let Some(output_idx) = sql.rfind(" OUTPUT ") else {
+            return sql.to_string();
+        };
+        let Some(values_idx) = sql.find(" VALUES ") else {
+            return sql.to_string();
+        };
+        if output_idx < values_idx {
+            // already in T-SQL order
+            return sql.to_string();
+        }
+        let prefix = &sql[..values_idx];
+        let output_clause = &sql[output_idx..];
+        let values_clause = &sql[values_idx..output_idx];
+        format!("{prefix}{output_clause}{values_clause}")
+    }
+
+    /// For UPDATE, T-SQL places `OUTPUT INSERTED.*` between the SET
+    /// clause and the WHERE clause. Mirrors `rearrange_output_for_insert`
+    /// but anchors on ` WHERE ` instead of ` VALUES `. Update statements
+    /// without a WHERE clause leave the trailing OUTPUT in place — that's
+    /// already a T-SQL-legal form (`UPDATE t SET c=v OUTPUT INSERTED.*`).
+    fn rearrange_output_for_update(sql: &str) -> String {
+        let Some(output_idx) = sql.rfind(" OUTPUT ") else {
+            return sql.to_string();
+        };
+        let Some(where_idx) = sql.find(" WHERE ") else {
+            // OUTPUT at the end of a WHERE-less UPDATE is already legal.
+            return sql.to_string();
+        };
+        if output_idx < where_idx {
+            return sql.to_string();
+        }
+        let prefix = &sql[..where_idx];
+        let output_clause = &sql[output_idx..];
+        let where_clause = &sql[where_idx..output_idx];
+        format!("{prefix}{output_clause}{where_clause}")
+    }
+
     /// Decode a single row via the MssqlRowRef bridge.
     ///
     /// # Short-circuit on decode error
@@ -177,7 +230,7 @@ impl QueryEngine for MssqlEngine {
         sql: &str,
         params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<T>> {
-        let sql = Self::convert_params(sql);
+        let sql = Self::rearrange_output_for_insert(&Self::convert_params(sql));
         Box::pin(async move {
             trace!(sql = %sql, "Executing insert");
 
@@ -205,7 +258,7 @@ impl QueryEngine for MssqlEngine {
         sql: &str,
         params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
-        let sql = Self::convert_params(sql);
+        let sql = Self::rearrange_output_for_update(&Self::convert_params(sql));
         Box::pin(async move {
             trace!(sql = %sql, "Executing update");
 
