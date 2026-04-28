@@ -4,10 +4,12 @@ use std::marker::PhantomData;
 
 use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
+use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use tracing::debug;
 
 use crate::pool::MssqlPool;
+use crate::row_ref::MssqlRowRef;
 use crate::types::filter_value_to_sql;
 
 /// Microsoft SQL Server query engine that implements the Prax QueryEngine trait.
@@ -51,6 +53,13 @@ impl MssqlEngine {
 
         result
     }
+
+    /// Decode a single row via the MssqlRowRef bridge.
+    fn decode_row<T: FromRow>(row: &tiberius::Row) -> prax_query::QueryResult<T> {
+        let row_ref = MssqlRowRef::from_row(row)
+            .map_err(|e| prax_query::QueryError::deserialization(e.to_string()))?;
+        T::from_row(&row_ref).map_err(|e| prax_query::QueryError::deserialization(e.to_string()))
+    }
 }
 
 impl QueryEngine for MssqlEngine {
@@ -58,7 +67,7 @@ impl QueryEngine for MssqlEngine {
         &prax_query::dialect::Mssql
     }
 
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -77,17 +86,16 @@ impl QueryEngine for MssqlEngine {
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let _rows = conn
+            let rows = conn
                 .query(&sql, &param_refs)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize rows into Vec<T>
-            Ok(Vec::new())
+            rows.iter().map(Self::decode_row).collect()
         })
     }
 
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -106,22 +114,16 @@ impl QueryEngine for MssqlEngine {
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let _row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
-                if e.to_string().contains("no rows") {
-                    prax_query::QueryError::not_found(T::MODEL_NAME)
-                } else {
-                    prax_query::QueryError::database(e.to_string())
-                }
-            })?;
+            let row = conn
+                .query_one(&sql, &param_refs)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            Self::decode_row(&row)
         })
     }
 
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -146,18 +148,13 @@ impl QueryEngine for MssqlEngine {
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
             match row {
-                Some(_row) => {
-                    // Placeholder - would deserialize row into T
-                    Err(prax_query::QueryError::internal(
-                        "deserialization not yet implemented".to_string(),
-                    ))
-                }
+                Some(r) => Self::decode_row(&r).map(Some),
                 None => Ok(None),
             }
         })
     }
 
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -176,20 +173,17 @@ impl QueryEngine for MssqlEngine {
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            // For INSERT with RETURNING, MSSQL uses OUTPUT clause
-            let _row = conn
+            // For INSERT with RETURNING, MSSQL uses OUTPUT clause which returns rows.
+            let row = conn
                 .query_one(&sql, &param_refs)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize row into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            Self::decode_row(&row)
         })
     }
 
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -208,13 +202,12 @@ impl QueryEngine for MssqlEngine {
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let _rows = conn
+            let rows = conn
                 .query(&sql, &param_refs)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Placeholder - would deserialize rows into Vec<T>
-            Ok(Vec::new())
+            rows.iter().map(Self::decode_row).collect()
         })
     }
 

@@ -252,3 +252,100 @@ async fn e2e_pool_is_healthy() {
     let pool = pool().await;
     assert!(pool.is_healthy().await);
 }
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_many_typed_decodes_rows() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug, PartialEq)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_typed";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("typed");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool.clone());
+
+    // Drop and create table
+    let mut conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"
+    ))
+    .await
+    .expect("drop table");
+    conn.batch_execute(&format!(
+        "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, email NVARCHAR(255) NOT NULL)"
+    ))
+    .await
+    .expect("create table");
+    conn.batch_execute(&format!(
+        "INSERT INTO dbo.{table} (email) VALUES ('a@x.com'),('b@x.com')"
+    ))
+    .await
+    .expect("insert");
+    drop(conn);
+
+    let rows = engine
+        .query_many::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .expect("query_many");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].email, "a@x.com");
+    assert_eq!(rows[1].email, "b@x.com");
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_row_ref_primitive_reads() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::row_ref::MssqlRowRef;
+    use prax_query::row::RowRef;
+
+    let pool = pool().await;
+    let mut conn = pool.get().await.expect("conn");
+
+    let stream = conn
+        .query("SELECT 42 AS n, N'hello' AS s", &[])
+        .await
+        .expect("query");
+    let row = stream
+        .into_row()
+        .await
+        .expect("into_row")
+        .expect("row present");
+
+    let row_ref = MssqlRowRef::from_row(&row).expect("from_row");
+    assert_eq!(row_ref.get_i32("n").unwrap(), 42);
+    assert_eq!(row_ref.get_str("s").unwrap(), "hello");
+}
