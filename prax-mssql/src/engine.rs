@@ -1,27 +1,56 @@
 //! Microsoft SQL Server query engine implementation.
 
 use std::marker::PhantomData;
+use std::sync::Arc;
 
+use bb8::PooledConnection;
+use bb8_tiberius::ConnectionManager;
 use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
+use tokio::sync::Mutex;
 use tracing::trace;
 
 use crate::pool::MssqlPool;
 use crate::row_ref::MssqlRowRef;
 use crate::types::filter_value_to_sql;
 
+/// `PooledConnection` with the `'static` lifetime emitted by
+/// [`bb8::Pool::get_owned`]. Needed because in-flight transactions
+/// must outlive any stack frame — we hand the tx-bound engine back
+/// to the closure, which can pass it into spawned tasks.
+type OwnedTxClient = PooledConnection<'static, ConnectionManager>;
+
 /// Microsoft SQL Server query engine that implements the Prax QueryEngine trait.
+///
+/// # Transaction mode
+///
+/// `MssqlEngine` has two modes, controlled by `tx_conn`:
+///
+/// - **Pool mode** (`tx_conn == None`, default): each query acquires
+///   a fresh connection via the short-lived `MssqlPool::get()` and
+///   drops it on the way out.
+/// - **Transaction mode** (`tx_conn == Some(..)`): each query locks
+///   the pinned [`OwnedTxClient`] so every `BEGIN`, closure-emitted
+///   statement, and `COMMIT`/`ROLLBACK` runs on the same physical
+///   connection. The mutex is `tokio::sync::Mutex` because tiberius
+///   calls are async and the lock has to span `.await`.
 #[derive(Clone)]
 pub struct MssqlEngine {
     pool: MssqlPool,
+    /// Present when this engine is bound to an in-flight transaction.
+    /// `None` in the normal pool-backed case.
+    tx_conn: Option<Arc<Mutex<OwnedTxClient>>>,
 }
 
 impl MssqlEngine {
     /// Create a new MSSQL engine with the given connection pool.
     pub fn new(pool: MssqlPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tx_conn: None,
+        }
     }
 
     /// Get a reference to the connection pool.
@@ -146,19 +175,32 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_many");
 
-            let mut conn =
-                self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
-
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let rows = conn
-                .query(&sql, &param_refs)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let rows =
+                if let Some(tx) = &self.tx_conn {
+                    // Tx mode: drive the pinned connection so the query
+                    // lands inside the same BEGIN/COMMIT block as every
+                    // sibling call. `PooledConnection` derefs to the
+                    // inner `tiberius::Client`, so `.query()` here is the
+                    // raw tiberius method (not the MssqlConnection wrapper).
+                    let mut guard = tx.lock().await;
+                    let stream = guard.query(&sql, &param_refs).await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?;
+                    stream.into_first_result().await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?
+                } else {
+                    let mut conn = self.pool.get().await.map_err(|e| {
+                        prax_query::QueryError::connection(e.to_string()).with_source(e)
+                    })?;
+                    conn.query(&sql, &param_refs).await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?
+                };
 
             rows.iter().map(Self::decode_row).collect()
         })
@@ -173,24 +215,47 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_one");
 
-            let mut conn =
-                self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
-
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let row = conn.query_one(&sql, &param_refs).await.map_err(|e| {
+            // Shared `no rows` → `NotFound` translation, factored out
+            // so both dispatch arms convert the same error text the
+            // same way.
+            let map_err = |e: tiberius::error::Error| -> prax_query::QueryError {
                 let msg = e.to_string();
                 if msg.contains("no rows") || msg.contains("returned no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
                     prax_query::QueryError::database(msg).with_source(e)
                 }
-            })?;
+            };
 
+            let rows = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                let stream = guard.query(&sql, &param_refs).await.map_err(map_err)?;
+                stream.into_first_result().await.map_err(map_err)?
+            } else {
+                let mut conn = self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
+                // Use the underlying client directly so we reuse the
+                // same tiberius-error mapping as the tx arm. The
+                // wrapper's `query_one` has its own "no rows" check —
+                // we inline the equivalent via `rows.first()` below.
+                conn.inner()
+                    .query(&sql, &param_refs)
+                    .await
+                    .map_err(map_err)?
+                    .into_first_result()
+                    .await
+                    .map_err(map_err)?
+            };
+
+            let row = rows
+                .into_iter()
+                .next()
+                .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
             Self::decode_row(&row)
         })
     }
@@ -204,21 +269,29 @@ impl QueryEngine for MssqlEngine {
         Box::pin(async move {
             trace!(sql = %sql, "Executing query_optional");
 
-            let mut conn =
-                self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
-
             let mssql_params = Self::to_params(&params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> =
                 mssql_params.iter().map(|p| p.as_ref()).collect();
 
-            let row = conn
-                .query_opt(&sql, &param_refs)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let rows =
+                if let Some(tx) = &self.tx_conn {
+                    let mut guard = tx.lock().await;
+                    let stream = guard.query(&sql, &param_refs).await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?;
+                    stream.into_first_result().await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?
+                } else {
+                    let mut conn = self.pool.get().await.map_err(|e| {
+                        prax_query::QueryError::connection(e.to_string()).with_source(e)
+                    })?;
+                    conn.query(&sql, &param_refs).await.map_err(|e| {
+                        prax_query::QueryError::database(e.to_string()).with_source(e)
+                    })?
+                };
 
-            match row {
+            match rows.into_iter().next() {
                 Some(r) => Self::decode_row(&r).map(Some),
                 None => Ok(None),
             }

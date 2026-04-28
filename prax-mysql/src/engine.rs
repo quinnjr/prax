@@ -1,13 +1,17 @@
 //! MySQL query engine implementing `prax_query::QueryEngine`.
 
+use std::sync::Arc;
+
 use mysql_async::prelude::*;
 use mysql_async::{Params, Row as MyRow, Value as MyValue};
 use prax_query::error::{QueryError, QueryResult};
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
+use tokio::sync::Mutex;
 use tracing::trace;
 
+use crate::connection::MysqlConnection;
 use crate::pool::MysqlPool;
 use crate::row_ref::MysqlRowRef;
 use crate::types::filter_value_to_mysql;
@@ -35,15 +39,34 @@ use crate::types::filter_value_to_mysql;
 ///   [`prax_query::traits::QueryEngine::execute_raw`].
 ///
 /// See `CHANGELOG.md` for the full migration guide.
+///
+/// # Transaction mode
+///
+/// `MysqlEngine` has two modes, controlled by `tx_conn`:
+///
+/// - **Pool mode** (`tx_conn == None`, default): each query acquires
+///   a fresh connection from the pool and drops it after the call.
+/// - **Transaction mode** (`tx_conn == Some(..)`): each query pins
+///   the same [`MysqlConnection`] through an `Arc<Mutex<_>>` so
+///   `BEGIN`, every closure-emitted query, and `COMMIT`/`ROLLBACK`
+///   all land on the same physical connection. The mutex is
+///   `tokio::sync::Mutex` because `mysql_async` calls are async and
+///   the lock has to span `.await`.
 #[derive(Clone)]
 pub struct MysqlEngine {
     pool: MysqlPool,
+    /// Present when this engine is bound to an in-flight transaction.
+    /// `None` in the normal pool-backed case.
+    tx_conn: Option<Arc<Mutex<MysqlConnection>>>,
 }
 
 impl MysqlEngine {
     /// Create a new engine with the given pool.
     pub fn new(pool: MysqlPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tx_conn: None,
+        }
     }
 
     /// Get a reference to the connection pool.
@@ -70,17 +93,27 @@ impl MysqlEngine {
         params: Vec<FilterValue>,
     ) -> QueryResult<Vec<T>> {
         trace!(sql = %sql, "mysql query_rows");
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
-        let rows: Vec<MyRow> = conn
-            .inner_mut()
-            .exec(sql.as_str(), Params::Positional(bound))
-            .await
-            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+        let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+            // Tx mode: drive the pinned connection so the query lands
+            // inside the same BEGIN…COMMIT block as every sibling call.
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        };
 
         rows.into_iter()
             .map(|row| {
@@ -107,17 +140,25 @@ impl MysqlEngine {
         params: Vec<FilterValue>,
     ) -> QueryResult<Option<T>> {
         trace!(sql = %sql, "mysql query_first_row");
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
-        let row: Option<MyRow> = conn
-            .inner_mut()
-            .exec_first(sql.as_str(), Params::Positional(bound))
-            .await
-            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+        let row: Option<MyRow> = if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        };
 
         match row {
             Some(r) => {
@@ -136,31 +177,49 @@ impl MysqlEngine {
     }
 
     async fn exec_raw(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
-        conn.inner_mut()
-            .exec_drop(sql.as_str(), Params::Positional(bound))
-            .await
-            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
-        Ok(conn.inner().affected_rows())
+        if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(guard.inner().affected_rows())
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(conn.inner().affected_rows())
+        }
     }
 
     async fn count_rows(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
-        let mut conn = self
-            .pool
-            .get()
-            .await
-            .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
         let bound = Self::bind(&params);
-        let count: Option<(i64,)> = conn
-            .inner_mut()
-            .exec_first(sql.as_str(), Params::Positional(bound))
-            .await
-            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+        let count: Option<(i64,)> = if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        };
         count.map(|(n,)| n as u64).ok_or_else(|| {
             prax_query::QueryError::deserialization("count query returned no rows".to_string())
         })
@@ -232,42 +291,71 @@ impl QueryEngine for MysqlEngine {
             }
             let pk = T::PRIMARY_KEY[0];
 
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
             let bound = Self::bind(&params);
-
-            trace!(sql = %sql, "mysql execute_insert");
-            conn.inner_mut()
-                .exec_drop(sql.as_str(), Params::Positional(bound))
-                .await
-                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
-
-            let last_id = conn.inner().last_insert_id().ok_or_else(|| {
-                QueryError::database(format!(
-                    "MySQL execute_insert: no LAST_INSERT_ID after inserting \
-                     into {} — does the table have an AUTO_INCREMENT column?",
-                    T::TABLE_NAME,
-                ))
-            })?;
-
             let select_sql = format!(
                 "SELECT {cols} FROM {table} WHERE {pk} = ?",
                 cols = T::COLUMNS.join(", "),
                 table = T::TABLE_NAME,
                 pk = pk,
             );
-            trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
-            let row: Option<MyRow> = conn
-                .inner_mut()
-                .exec_first(
-                    select_sql.as_str(),
-                    Params::Positional(vec![MyValue::UInt(last_id)]),
-                )
-                .await
-                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            trace!(sql = %sql, "mysql execute_insert");
+
+            // In tx mode, drive the pinned connection so INSERT,
+            // LAST_INSERT_ID and the SELECT-back all land on the same
+            // session. In pool mode, borrow a single connection for
+            // the same reason — `last_insert_id` is per-session and
+            // the pool could otherwise hand a different connection to
+            // the SELECT.
+            let row: Option<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                let last_id = guard.inner().last_insert_id().ok_or_else(|| {
+                    QueryError::database(format!(
+                        "MySQL execute_insert: no LAST_INSERT_ID after inserting \
+                         into {} — does the table have an AUTO_INCREMENT column?",
+                        T::TABLE_NAME,
+                    ))
+                })?;
+                trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
+                guard
+                    .inner_mut()
+                    .exec_first(
+                        select_sql.as_str(),
+                        Params::Positional(vec![MyValue::UInt(last_id)]),
+                    )
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                let last_id = conn.inner().last_insert_id().ok_or_else(|| {
+                    QueryError::database(format!(
+                        "MySQL execute_insert: no LAST_INSERT_ID after inserting \
+                         into {} — does the table have an AUTO_INCREMENT column?",
+                        T::TABLE_NAME,
+                    ))
+                })?;
+                trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
+                conn.inner_mut()
+                    .exec_first(
+                        select_sql.as_str(),
+                        Params::Positional(vec![MyValue::UInt(last_id)]),
+                    )
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
             let row = row.ok_or_else(|| QueryError::not_found(T::MODEL_NAME))?;
             let rr = MysqlRowRef::from_row(row).map_err(|e| {
                 let msg = e.to_string();
@@ -299,18 +387,9 @@ impl QueryEngine for MysqlEngine {
         // to rebind on the SELECT.
         let sql = sql.to_string();
         Box::pin(async move {
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
             let bound = Self::bind(&params);
 
             trace!(sql = %sql, "mysql execute_update");
-            conn.inner_mut()
-                .exec_drop(sql.as_str(), Params::Positional(bound))
-                .await
-                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
 
             // Extract the `WHERE ...` tail so we can re-SELECT with it.
             // UpdateOperation::build_sql always produces `... WHERE <filter>`.
@@ -336,12 +415,39 @@ impl QueryEngine for MysqlEngine {
                 table = T::TABLE_NAME,
             );
             trace!(sql = %select_sql, "mysql execute_update select-back");
-            let bound = Self::bind(&where_params);
-            let rows: Vec<MyRow> = conn
-                .inner_mut()
-                .exec(select_sql.as_str(), Params::Positional(bound))
-                .await
-                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            let where_bound = Self::bind(&where_params);
+
+            // Tx mode pins the connection so UPDATE + SELECT see the
+            // same snapshot. Pool mode borrows one connection for the
+            // same reason — otherwise MySQL's REPEATABLE READ default
+            // could let the SELECT land on a pre-UPDATE snapshot.
+            let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                guard
+                    .inner_mut()
+                    .exec(select_sql.as_str(), Params::Positional(where_bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec(select_sql.as_str(), Params::Positional(where_bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
             rows.into_iter()
                 .map(|row| {
                     let rr = MysqlRowRef::from_row(row).map_err(|e| {
@@ -384,17 +490,25 @@ impl QueryEngine for MysqlEngine {
         let sql = sql.to_string();
         Box::pin(async move {
             trace!(sql = %sql, "mysql aggregate_query");
-            let mut conn = self
-                .pool
-                .get()
-                .await
-                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
             let bound = Self::bind(&params);
-            let rows: Vec<MyRow> = conn
-                .inner_mut()
-                .exec(sql.as_str(), Params::Positional(bound))
-                .await
-                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
 
             Ok(rows
                 .into_iter()
@@ -416,6 +530,72 @@ impl QueryEngine for MysqlEngine {
                     map
                 })
                 .collect())
+        })
+    }
+
+    fn transaction<'a, R, Fut, F>(&'a self, f: F) -> BoxFuture<'a, QueryResult<R>>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'a,
+        Fut: std::future::Future<Output = QueryResult<R>> + Send + 'a,
+        R: Send + 'a,
+        Self: Clone,
+    {
+        Box::pin(async move {
+            // Refuse nested transactions until dialect-aware SAVEPOINT
+            // support lands. Callers can still drive SAVEPOINT / RELEASE
+            // manually via `execute_raw` if they need it.
+            if self.tx_conn.is_some() {
+                return Err(QueryError::internal(
+                    "nested transactions not yet implemented \
+                     (call .transaction() on the outer engine only, or \
+                     issue SAVEPOINT via execute_raw)",
+                ));
+            }
+
+            // Pin a single connection for the duration of the tx.
+            // mysql_async's `Transaction<'_>` type borrows from its
+            // `Conn`, which would force a `mem::transmute` to bundle
+            // both into a heap cell. We follow the `PgEngine` fallback
+            // instead: issue raw `START TRANSACTION` and let the
+            // connection's own session state carry the transaction.
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .query_drop("START TRANSACTION")
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            let tx_conn = Arc::new(Mutex::new(conn));
+            let tx_engine = MysqlEngine {
+                pool: self.pool.clone(),
+                tx_conn: Some(tx_conn.clone()),
+            };
+
+            // Run the caller's closure on the tx-bound engine clone.
+            let result = f(tx_engine).await;
+
+            // Finalise: COMMIT on success, best-effort ROLLBACK on
+            // failure. Preserve the caller's error if ROLLBACK fails —
+            // the connection drops in a moment either way and the
+            // server aborts the transaction on session close.
+            let mut guard = tx_conn.lock().await;
+            match result {
+                Ok(v) => {
+                    guard
+                        .inner_mut()
+                        .query_drop("COMMIT")
+                        .await
+                        .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let _ = guard.inner_mut().query_drop("ROLLBACK").await;
+                    Err(e)
+                }
+            }
         })
     }
 }
