@@ -122,6 +122,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &all_columns,
     );
     let from_row_impl = super::derive_from_row::emit(name, &from_row_fields);
+    let client_impl = super::derive_client::emit(name);
 
     Ok(quote! {
         /// Generated module for the #name model.
@@ -178,58 +179,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
                 #(#order_variants,)*
             }
 
-            /// Query builder.
-            #[derive(Debug, Default)]
-            pub struct Query {
-                pub select: Vec<SelectParam>,
-                pub where_: Vec<WhereParam>,
-                pub order_by: Vec<OrderByParam>,
-                pub skip: Option<usize>,
-                pub take: Option<usize>,
-            }
-
-            impl Query {
-                pub fn new() -> Self {
-                    Self::default()
-                }
-
-                pub fn r#where(mut self, param: WhereParam) -> Self {
-                    self.where_.push(param);
-                    self
-                }
-
-                pub fn order_by(mut self, param: OrderByParam) -> Self {
-                    self.order_by.push(param);
-                    self
-                }
-
-                pub fn skip(mut self, n: usize) -> Self {
-                    self.skip = Some(n);
-                    self
-                }
-
-                pub fn take(mut self, n: usize) -> Self {
-                    self.take = Some(n);
-                    self
-                }
-            }
-
-            /// Model actions.
-            pub struct Actions;
-
-            impl Actions {
-                pub fn find_many() -> Query {
-                    Query::new()
-                }
-
-                pub fn find_unique() -> Query {
-                    Query::new().take(1)
-                }
-
-                pub fn find_first() -> Query {
-                    Query::new().take(1)
-                }
-            }
+            #client_impl
         }
 
         // Emit Model and FromRow trait implementations at crate root
