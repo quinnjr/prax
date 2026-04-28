@@ -9,7 +9,11 @@ use crate::error::CassandraResult;
 /// Public pool handle for executing queries against a Cassandra cluster.
 ///
 /// cdrs-tokio manages its own per-node connection pool; this wrapper
-/// exposes a stable type for the prax-cassandra public API.
+/// exposes a stable type for the prax-cassandra public API. `Clone` is
+/// cheap (the underlying `Arc<CassandraConnection>` is reference-counted)
+/// so callers — including the `QueryEngine` trait impl — can clone the
+/// pool into each per-query future without contention.
+#[derive(Clone)]
 pub struct CassandraPool {
     connection: Arc<CassandraConnection>,
 }

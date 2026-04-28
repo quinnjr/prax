@@ -126,6 +126,163 @@ impl<'a> BatchBuilder<'a> {
     }
 }
 
+/// Top-level query engine for the Cassandra driver.
+///
+/// Thin wrapper around [`CassandraPool`] that lets `#[derive(Model)]`-
+/// generated `Client<E>` target Cassandra through the same codegen
+/// pipeline the SQL drivers use. The underlying pool methods are still
+/// stubbed to return a "not yet wired" error until the cdrs-tokio
+/// integration lands, so `QueryEngine` method calls surface that same
+/// error. The trait surface is stable — only the runtime wiring is
+/// outstanding.
+#[derive(Clone)]
+pub struct CassandraEngine {
+    pool: CassandraPool,
+}
+
+impl CassandraEngine {
+    /// Create a new engine wrapping the given pool.
+    pub fn new(pool: CassandraPool) -> Self {
+        Self { pool }
+    }
+
+    /// Borrow the underlying pool. Exposed for callers that need to
+    /// reach the raw query/execute/batch helpers directly.
+    pub fn pool(&self) -> &CassandraPool {
+        &self.pool
+    }
+}
+
+impl prax_query::traits::QueryEngine for CassandraEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Cql
+    }
+
+    fn query_many<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        _params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        // The prax-cassandra driver is wire-stubbed: pool.query returns
+        // an error until the cdrs-tokio integration lands. Surface the
+        // underlying stub error verbatim so callers see the same message
+        // whether they route through the Client API or the raw pool
+        // methods.
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let _: QueryResult = pool
+                .query(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            // Row decoding for Cassandra lives behind the real
+            // integration — the stubbed `Row` type stores raw bytes
+            // only, so there's no RowRef bridge to hand each row to
+            // `T::from_row`. Return an empty Vec until that lands.
+            Ok(Vec::new())
+        })
+    }
+
+    fn query_one<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        _params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let _: QueryResult = pool
+                .query(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+        })
+    }
+
+    fn query_optional<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        _params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let _: QueryResult = pool
+                .query(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            Ok(None)
+        })
+    }
+
+    fn execute_insert<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        // CQL has no RETURNING; mirror ScyllaEngine's behaviour.
+        let _ = (sql, params);
+        Box::pin(async move {
+            Err(prax_query::QueryError::unsupported(
+                "CassandraEngine::execute_insert: CQL has no RETURNING",
+            ))
+        })
+    }
+
+    fn execute_update<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let _ = (sql, params);
+        Box::pin(async move {
+            Err(prax_query::QueryError::unsupported(
+                "CassandraEngine::execute_update: CQL has no RETURNING",
+            ))
+        })
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        _params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let _: () = pool
+                .execute(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            Ok(0)
+        })
+    }
+
+    fn execute_raw(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        self.execute_delete(sql, params)
+    }
+
+    fn count(
+        &self,
+        sql: &str,
+        _params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
+        Box::pin(async move {
+            let _: QueryResult = pool
+                .query(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            Ok(0)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

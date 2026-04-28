@@ -44,7 +44,7 @@ pub use config::{
     CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind, TlsConfig,
 };
 pub use connection::CassandraConnection;
-pub use engine::{BatchBuilder, QueryResult};
+pub use engine::{BatchBuilder, CassandraEngine, QueryResult};
 pub use error::{CassandraError, CassandraResult};
 pub use pool::CassandraPool;
 pub use row::{FromRow, Row};
