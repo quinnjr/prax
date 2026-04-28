@@ -4641,6 +4641,7 @@ dependencies = [
  "postgres-types",
  "prax-query",
  "pretty_assertions",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
