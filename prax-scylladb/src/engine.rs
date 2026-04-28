@@ -264,6 +264,196 @@ impl ScyllaEngine {
     pub fn table<T: FromScyllaRow>(&self, table: &str) -> TableQuery<T> {
         TableQuery::new(self.clone(), table.to_string())
     }
+
+    /// Shared fetch path for the prax-query `QueryEngine` impl. Converts
+    /// `FilterValue` parameters to `CqlValue` via the crate's existing
+    /// `ToCqlValue` trait, extracts column names from the query result,
+    /// and hands each row to the caller's `FromRow` via `ScyllaRowRef`.
+    async fn fetch_typed<T: prax_query::traits::Model + prax_query::row::FromRow>(
+        &self,
+        cql: &str,
+        params: &[prax_query::filter::FilterValue],
+    ) -> prax_query::QueryResult<Vec<T>> {
+        use crate::types::ToCqlValue;
+        let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+            .iter()
+            .map(|v| v.to_cql())
+            .collect::<ScyllaResult<_>>()
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        let result = self
+            .pool
+            .execute(cql, cql_values)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        let col_names: Vec<String> = result
+            .col_specs()
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect();
+        let rows = result.rows.unwrap_or_default();
+        rows.into_iter()
+            .map(|row| {
+                let r =
+                    crate::row_ref::ScyllaRowRef::from_scylla(row, &col_names).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?;
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    prax_query::QueryError::deserialization(msg).with_source(e)
+                })
+            })
+            .collect()
+    }
+
+    async fn fetch_affected(
+        &self,
+        cql: &str,
+        params: &[prax_query::filter::FilterValue],
+    ) -> prax_query::QueryResult<u64> {
+        use crate::types::ToCqlValue;
+        let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+            .iter()
+            .map(|v| v.to_cql())
+            .collect::<ScyllaResult<_>>()
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        self.pool
+            .execute(cql, cql_values)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        // Scylla doesn't report affected-row counts for CQL statements.
+        // Returning 0 is honest; callers that need a count should issue
+        // a follow-up SELECT.
+        Ok(0)
+    }
+}
+
+impl prax_query::traits::QueryEngine for ScyllaEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Cql
+    }
+
+    fn query_many<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_typed::<T>(&sql, &params).await })
+    }
+
+    fn query_one<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
+        })
+    }
+
+    fn query_optional<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            Ok(rows.drain(..).next())
+        })
+    }
+
+    fn execute_insert<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        // CQL has no `RETURNING`; the dialect emits an empty clause.
+        // `execute_insert` is unreachable for Scylla through the typed
+        // Client path today (`insert_has_returning()` is false so the
+        // operation layer would have to compensate with a follow-up
+        // SELECT — not yet implemented). Surface a clear error so the
+        // intent isn't silently discarded.
+        let _ = (sql, params);
+        Box::pin(async move {
+            Err(prax_query::QueryError::unsupported(
+                "ScyllaEngine::execute_insert: CQL has no RETURNING; \
+                 use `insert()` + a follow-up `query_one()` keyed on the PK",
+            ))
+        })
+    }
+
+    fn execute_update<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let _ = (sql, params);
+        Box::pin(async move {
+            Err(prax_query::QueryError::unsupported(
+                "ScyllaEngine::execute_update: CQL has no RETURNING; \
+                 use raw execute and a follow-up SELECT",
+            ))
+        })
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn execute_raw(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn count(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            use crate::types::ToCqlValue;
+            let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+                .iter()
+                .map(|v| v.to_cql())
+                .collect::<ScyllaResult<_>>()
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let result = self
+                .pool
+                .execute(&sql, cql_values)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let rows = result.rows.unwrap_or_default();
+            let first = rows.into_iter().next().ok_or_else(|| {
+                prax_query::QueryError::deserialization("count returned no row".to_string())
+            })?;
+            // COUNT(*) in CQL returns a single BigInt column.
+            match first.columns.first() {
+                Some(Some(scylla::frame::response::result::CqlValue::BigInt(n))) => Ok(*n as u64),
+                Some(Some(scylla::frame::response::result::CqlValue::Int(n))) => Ok(*n as u64),
+                _ => Err(prax_query::QueryError::deserialization(
+                    "count column missing or wrong type in CQL result".to_string(),
+                )),
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for ScyllaEngine {

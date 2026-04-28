@@ -102,6 +102,7 @@ mod engine;
 mod error;
 mod pool;
 mod row;
+pub mod row_ref;
 mod types;
 
 pub use config::{ScyllaConfig, ScyllaConfigBuilder};
