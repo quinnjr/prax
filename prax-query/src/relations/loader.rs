@@ -90,7 +90,8 @@ impl<E: QueryEngine> RelationLoader<E> {
 
         // Apply filter if present
         if let Some(ref filter) = include.filter {
-            let (filter_sql, filter_params) = filter.to_sql(parent_ids.len());
+            let (filter_sql, filter_params) =
+                filter.to_sql(parent_ids.len(), &crate::dialect::Postgres);
             sql.push_str(" AND ");
             sql.push_str(&filter_sql);
 

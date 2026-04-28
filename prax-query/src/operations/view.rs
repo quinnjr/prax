@@ -94,7 +94,7 @@ impl<E: QueryEngine, V: View> ViewFindManyOperation<E, V> {
 
     /// Build the SQL query.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+        let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 
         let mut sql = String::new();
 
@@ -214,7 +214,7 @@ impl<E: QueryEngine, V: View> ViewCountOperation<E, V> {
 
     /// Build the SQL query.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+        let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 
         let mut sql = format!("SELECT COUNT(*) FROM {}", V::DB_VIEW_NAME);
 

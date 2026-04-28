@@ -51,8 +51,11 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> DeleteOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -67,15 +70,17 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> DeleteOperation<E, M> {
         }
 
         // RETURNING clause
-        sql.push_str(" RETURNING ");
-        sql.push_str(&self.select.to_sql());
+        sql.push_str(&dialect.returning_clause(&self.select.to_sql()));
 
         (sql, params)
     }
 
     /// Build SQL without RETURNING (for count).
-    fn build_sql_count(&self) -> (String, Vec<FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    fn build_sql_count(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -95,13 +100,15 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> DeleteOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_update::<M>(&sql, params).await
     }
 
     /// Execute the delete and return the count of deleted records.
     pub async fn exec_count(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql_count();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql_count(dialect);
         self.engine.execute_delete(&sql, params).await
     }
 }
@@ -131,8 +138,11 @@ impl<E: QueryEngine, M: Model> DeleteManyOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -149,7 +159,8 @@ impl<E: QueryEngine, M: Model> DeleteManyOperation<E, M> {
 
     /// Execute the delete and return the count of deleted records.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_delete(&sql, params).await
     }
 }
@@ -267,7 +278,7 @@ mod tests {
     #[test]
     fn test_delete_new() {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(sql.contains("RETURNING *"));
@@ -279,7 +290,7 @@ mod tests {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(sql.contains("WHERE"));
@@ -294,7 +305,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING id, name"));
         assert!(!sql.contains("RETURNING *"));
@@ -312,7 +323,7 @@ mod tests {
                 FilterValue::String("2024-01-01".to_string()),
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -322,7 +333,7 @@ mod tests {
     #[test]
     fn test_delete_without_filter() {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(sql.contains("DELETE FROM test_models"));
@@ -333,7 +344,7 @@ mod tests {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql_count();
+        let (sql, params) = op.build_sql_count(&crate::dialect::Postgres);
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(sql.contains("WHERE"));
@@ -349,7 +360,7 @@ mod tests {
                 Filter::Equals("status".into(), FilterValue::String("archived".to_string())),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OR"));
         assert_eq!(params.len(), 2);
@@ -367,7 +378,7 @@ mod tests {
                 ],
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 3);
@@ -397,7 +408,7 @@ mod tests {
     #[test]
     fn test_delete_many_new() {
         let op = DeleteManyOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(!sql.contains("RETURNING"));
@@ -410,7 +421,7 @@ mod tests {
             Filter::In("id".into(), vec![FilterValue::Int(1), FilterValue::Int(2)]),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(sql.contains("IN"));
@@ -424,7 +435,7 @@ mod tests {
             .r#where(Filter::Equals("tenant_id".into(), FilterValue::Int(1)))
             .r#where(Filter::Equals("deleted".into(), FilterValue::Bool(true)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -434,7 +445,7 @@ mod tests {
     #[test]
     fn test_delete_many_without_filter() {
         let op = DeleteManyOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
     }
@@ -451,7 +462,7 @@ mod tests {
             ),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("NOT IN"));
         assert_eq!(params.len(), 2);
@@ -477,7 +488,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let delete_pos = sql.find("DELETE FROM").unwrap();
         let where_pos = sql.find("WHERE").unwrap();
@@ -492,7 +503,7 @@ mod tests {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::IsNull("deleted_at".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IS NULL"));
         assert!(params.is_empty()); // IS NULL doesn't have params
@@ -503,7 +514,7 @@ mod tests {
         let op = DeleteOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::IsNotNull("email".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IS NOT NULL"));
         assert!(params.is_empty());

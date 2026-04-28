@@ -183,7 +183,7 @@ mod tests {
     fn test_query_builder_find_many() {
         let qb = QueryBuilder::<MockEngine, TestModel>::new(MockEngine);
         let op = qb.find_many();
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
         assert!(sql.contains("SELECT * FROM test_models"));
     }
 
@@ -191,7 +191,7 @@ mod tests {
     fn test_query_builder_find_by_id() {
         let qb = QueryBuilder::<MockEngine, TestModel>::new(MockEngine);
         let op = qb.find_by_id(1i32);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("id = $1"));
         assert_eq!(params.len(), 1);

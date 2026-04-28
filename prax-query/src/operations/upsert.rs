@@ -106,7 +106,10 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut param_idx = 1;
@@ -127,7 +130,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
             .iter()
             .map(|v| {
                 params.push(v.clone());
-                let p = format!("${}", param_idx);
+                let p = dialect.placeholder(param_idx);
                 param_idx += 1;
                 p
             })
@@ -135,36 +138,44 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
         sql.push_str(&placeholders.join(", "));
         sql.push(')');
 
-        // ON CONFLICT
-        sql.push_str(" ON CONFLICT ");
-        if !self.conflict_columns.is_empty() {
-            sql.push('(');
-            sql.push_str(&self.conflict_columns.join(", "));
-            sql.push_str(") ");
-        }
-
-        // DO UPDATE SET
-        if self.update_columns.is_empty() {
-            sql.push_str("DO NOTHING");
-        } else {
-            sql.push_str("DO UPDATE SET ");
+        // Upsert clause (ON CONFLICT / ON DUPLICATE KEY)
+        // Build update SET clause
+        let update_set = if !self.update_columns.is_empty() {
             let update_parts: Vec<_> = self
                 .update_columns
                 .iter()
                 .zip(self.update_values.iter())
                 .map(|(col, val)| {
                     params.push(val.clone());
-                    let part = format!("{} = ${}", col, param_idx);
+                    let part = format!("{} = {}", col, dialect.placeholder(param_idx));
                     param_idx += 1;
                     part
                 })
                 .collect();
-            sql.push_str(&update_parts.join(", "));
+            update_parts.join(", ")
+        } else {
+            String::new()
+        };
+
+        let conflict_cols: Vec<&str> =
+            self.conflict_columns.iter().map(|s| s.as_str()).collect();
+
+        if update_set.is_empty() {
+            // DO NOTHING variant
+            if conflict_cols.is_empty() {
+                sql.push_str(" ON CONFLICT DO NOTHING");
+            } else {
+                sql.push_str(" ON CONFLICT (");
+                sql.push_str(&conflict_cols.join(", "));
+                sql.push_str(") DO NOTHING");
+            }
+        } else {
+            // Use dialect's upsert_clause for DO UPDATE SET
+            sql.push_str(&dialect.upsert_clause(&conflict_cols, &update_set));
         }
 
         // RETURNING clause
-        sql.push_str(" RETURNING ");
-        sql.push_str(&self.select.to_sql());
+        sql.push_str(&dialect.returning_clause(&self.select.to_sql()));
 
         (sql, params)
     }
@@ -174,7 +185,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_insert::<M>(&sql, params).await
     }
 }
@@ -277,7 +289,7 @@ mod tests {
     #[test]
     fn test_upsert_new() {
         let op = UpsertOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("ON CONFLICT"));
@@ -293,7 +305,7 @@ mod tests {
             .create_set("name", "Test")
             .update_set("name", "Updated");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("ON CONFLICT (email)"));
@@ -310,7 +322,7 @@ mod tests {
             .on_conflict(["id"])
             .create_set("id", FilterValue::Int(1));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT (id)"));
     }
@@ -322,7 +334,7 @@ mod tests {
             .create_set("email", "test@example.com")
             .create_set("tenant_id", FilterValue::Int(1));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT (tenant_id, email)"));
     }
@@ -332,7 +344,7 @@ mod tests {
         let op = UpsertOperation::<MockEngine, TestModel>::new(MockEngine)
             .create_set("email", "test@example.com");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT"));
         assert!(!sql.contains("ON CONFLICT ("));
@@ -347,7 +359,7 @@ mod tests {
             .create_set("email", "test@example.com")
             .create_set("name", "Test User");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(email, name)"));
         assert!(sql.contains("VALUES ($1, $2)"));
@@ -365,7 +377,7 @@ mod tests {
             .on_conflict(["email"])
             .create(create_data);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(email, name, age)"));
         assert!(sql.contains("VALUES ($1, $2, $3)"));
@@ -382,7 +394,7 @@ mod tests {
             .update_set("name", "Updated Name")
             .update_set("updated_at", "2024-01-01");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DO UPDATE SET"));
         assert!(sql.contains("name = $"));
@@ -401,7 +413,7 @@ mod tests {
             .create_set("id", FilterValue::Int(1))
             .update(update_data);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DO UPDATE SET"));
         assert_eq!(params.len(), 3); // 1 create + 2 update
@@ -415,7 +427,7 @@ mod tests {
             .on_conflict(["email"])
             .create_set("email", "test@example.com");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DO NOTHING"));
         assert!(!sql.contains("DO UPDATE"));
@@ -428,7 +440,7 @@ mod tests {
             .create_set("email", "test@example.com")
             .create_set("name", "Test");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DO NOTHING"));
         assert_eq!(params.len(), 2);
@@ -444,7 +456,7 @@ mod tests {
             .update_set("name", "Updated")
             .select(Select::fields(["id", "email"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING id, email"));
         assert!(!sql.contains("RETURNING *"));
@@ -457,7 +469,7 @@ mod tests {
             .create_set("email", "test@example.com")
             .select(Select::All);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING *"));
     }
@@ -474,7 +486,7 @@ mod tests {
             .on_conflict(["email"])
             .create_set("email", "test@example.com");
 
-        let (_, _) = op.build_sql();
+        let (_, _) = op.build_sql(&crate::dialect::Postgres);
         // where_ sets the filter but doesn't affect upsert SQL directly
     }
 
@@ -488,7 +500,7 @@ mod tests {
             .update_set("name", "Updated")
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let insert_pos = sql.find("INSERT INTO").unwrap();
         let values_pos = sql.find("VALUES").unwrap();
@@ -505,7 +517,7 @@ mod tests {
     #[test]
     fn test_upsert_table_name() {
         let op = UpsertOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -520,7 +532,7 @@ mod tests {
             .create_set("name", "Create Name")
             .update_set("name", "Update Name");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Create params first, then update params
         assert!(sql.contains("VALUES ($1, $2)"));
@@ -563,7 +575,7 @@ mod tests {
             .update_set("name", "Updated User")
             .select(Select::fields(["id", "name", "email"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("ON CONFLICT (email)"));
@@ -581,7 +593,7 @@ mod tests {
             .create_set("id", FilterValue::Int(1))
             .create_set("nickname", FilterValue::Null);
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[1], FilterValue::Null);
     }
@@ -594,7 +606,7 @@ mod tests {
             .create_set("active", FilterValue::Bool(true))
             .update_set("active", FilterValue::Bool(false));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[1], FilterValue::Bool(true));
         assert_eq!(params[2], FilterValue::Bool(false));
@@ -607,7 +619,7 @@ mod tests {
             .create_set("id", FilterValue::Int(1))
             .create_set("score", FilterValue::Float(99.5));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Int(1));
         assert_eq!(params[1], FilterValue::Float(99.5));
@@ -621,7 +633,7 @@ mod tests {
             .create_set("id", FilterValue::Int(1))
             .create_set("metadata", FilterValue::Json(json.clone()));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[1], FilterValue::Json(json));
     }

@@ -183,7 +183,10 @@ impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
     }
 
     /// Build the SQL for this operation.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
         let mut params = Vec::new();
 
         // If no fields specified, default to count
@@ -206,7 +209,7 @@ impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
 
         // Add WHERE clause
         if let Some(filter) = &self.filter {
-            let (where_sql, where_params) = filter.to_sql(params.len() + 1);
+            let (where_sql, where_params) = filter.to_sql(params.len() + 1, dialect);
             sql.push_str(&format!(" WHERE {}", where_sql));
             params.extend(where_params);
         }
@@ -216,7 +219,8 @@ impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
 
     /// Execute the aggregate operation.
     pub async fn exec(self, _engine: &E) -> QueryResult<AggregateResult> {
-        let (_sql, _params) = self.build_sql();
+        let dialect = &crate::dialect::Postgres;
+        let (_sql, _params) = self.build_sql(dialect);
         // In a real implementation, this would execute the query
         // For now, return a placeholder
         Ok(AggregateResult::default())
@@ -371,7 +375,10 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
     }
 
     /// Build the SQL for this operation.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
         let mut params = Vec::new();
 
         // Build SELECT clause
@@ -397,7 +404,7 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
 
         // Add WHERE clause
         if let Some(filter) = &self.filter {
-            let (where_sql, where_params) = filter.to_sql(params.len() + 1);
+            let (where_sql, where_params) = filter.to_sql(params.len() + 1, dialect);
             sql.push_str(&format!(" WHERE {}", where_sql));
             params.extend(where_params);
         }
@@ -452,7 +459,8 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
 
     /// Execute the group by operation.
     pub async fn exec(self, _engine: &E) -> QueryResult<Vec<GroupByResult>> {
-        let (_sql, _params) = self.build_sql();
+        let dialect = &crate::dialect::Postgres;
+        let (_sql, _params) = self.build_sql(dialect);
         // In a real implementation, this would execute the query
         Ok(Vec::new())
     }
@@ -699,7 +707,7 @@ mod tests {
     #[test]
     fn test_aggregate_operation_new() {
         let op: AggregateOperation<TestModel, MockEngine> = AggregateOperation::new();
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Default should be count all
         assert!(sql.contains("COUNT(*)"));
@@ -709,7 +717,7 @@ mod tests {
     #[test]
     fn test_aggregate_operation_default() {
         let op: AggregateOperation<TestModel, MockEngine> = AggregateOperation::default();
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(*)"));
         assert!(params.is_empty());
@@ -720,7 +728,7 @@ mod tests {
         let op: AggregateOperation<TestModel, MockEngine> =
             AggregateOperation::new().count().sum("score").avg("age");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("COUNT(*)"));
@@ -735,7 +743,7 @@ mod tests {
         let op: AggregateOperation<TestModel, MockEngine> =
             AggregateOperation::new().count_column("email");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(email)"));
     }
@@ -745,7 +753,7 @@ mod tests {
         let op: AggregateOperation<TestModel, MockEngine> =
             AggregateOperation::new().count_distinct("email");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(DISTINCT email)"));
     }
@@ -755,7 +763,7 @@ mod tests {
         let op: AggregateOperation<TestModel, MockEngine> =
             AggregateOperation::new().min("age").max("age");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("MIN(age)"));
         assert!(sql.contains("MAX(age)"));
@@ -767,7 +775,7 @@ mod tests {
             .count()
             .r#where(Filter::Gt("age".into(), FilterValue::Int(18)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("age")); // Not quoted since "age" is not a reserved word
@@ -785,7 +793,7 @@ mod tests {
                 Filter::Equals("active".into(), FilterValue::Bool(true)),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -803,7 +811,7 @@ mod tests {
             .min("age")
             .max("age");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(*)"));
         assert!(sql.contains("COUNT(name)"));
@@ -830,7 +838,7 @@ mod tests {
         let op: GroupByOperation<TestModel, MockEngine> =
             GroupByOperation::new(vec!["department".into()]);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("GROUP BY department"));
     }
@@ -842,7 +850,7 @@ mod tests {
                 .count()
                 .avg("score");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("name")); // Not quoted since "name" is not a reserved word
@@ -857,7 +865,7 @@ mod tests {
         let op: GroupByOperation<TestModel, MockEngine> =
             GroupByOperation::new(vec!["department".into(), "role".into()]).count();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("GROUP BY department, role"));
     }
@@ -867,7 +875,7 @@ mod tests {
         let op: GroupByOperation<TestModel, MockEngine> =
             GroupByOperation::new(vec!["category".into()]).sum("amount");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SUM(amount)"));
     }
@@ -879,7 +887,7 @@ mod tests {
                 .min("price")
                 .max("price");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("MIN(price)"));
         assert!(sql.contains("MAX(price)"));
@@ -892,7 +900,7 @@ mod tests {
                 .count()
                 .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("GROUP BY"));
@@ -906,7 +914,7 @@ mod tests {
                 .count()
                 .having(having::count_gt(5.0));
 
-        let (sql, _params) = op.build_sql();
+        let (sql, _params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("HAVING COUNT(*) > 5"));
     }
@@ -920,7 +928,7 @@ mod tests {
                 .take(10)
                 .skip(5);
 
-        let (sql, _params) = op.build_sql();
+        let (sql, _params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY _count DESC")); // Not quoted since "_count" is not a reserved word
         assert!(sql.contains("LIMIT 10"));
@@ -934,7 +942,7 @@ mod tests {
                 .count()
                 .order_by(OrderByField::asc("name").nulls(NullsOrder::First));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY"));
         assert!(sql.contains("NULLS FIRST"));
@@ -947,7 +955,7 @@ mod tests {
                 .count()
                 .skip(20);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OFFSET 20"));
         assert!(!sql.contains("LIMIT"));
@@ -960,7 +968,7 @@ mod tests {
                 .count()
                 .take(50);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIMIT 50"));
         assert!(!sql.contains("OFFSET"));
@@ -1112,7 +1120,7 @@ mod tests {
                 .take(10)
                 .skip(5);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Check SQL clause ordering: SELECT, FROM, WHERE, GROUP BY, HAVING, ORDER BY, LIMIT, OFFSET
         let select_pos = sql.find("SELECT").unwrap();
@@ -1138,7 +1146,7 @@ mod tests {
         let op: AggregateOperation<TestModel, MockEngine> =
             AggregateOperation::new().count().sum("score");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("GROUP BY"));
     }
@@ -1147,7 +1155,7 @@ mod tests {
     fn test_group_by_empty_columns() {
         let op: GroupByOperation<TestModel, MockEngine> = GroupByOperation::new(vec![]).count();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Empty group columns should not produce GROUP BY
         assert!(!sql.contains("GROUP BY"));

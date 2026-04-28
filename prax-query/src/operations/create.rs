@@ -67,7 +67,10 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
 
         // INSERT INTO clause
@@ -81,13 +84,14 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
 
         // VALUES
         sql.push_str(" VALUES (");
-        let placeholders: Vec<_> = (1..=self.values.len()).map(|i| format!("${}", i)).collect();
+        let placeholders: Vec<_> = (1..=self.values.len())
+            .map(|i| dialect.placeholder(i))
+            .collect();
         sql.push_str(&placeholders.join(", "));
         sql.push(')');
 
         // RETURNING clause
-        sql.push_str(" RETURNING ");
-        sql.push_str(&self.select.to_sql());
+        sql.push_str(&dialect.returning_clause(&self.select.to_sql()));
 
         (sql, self.values.clone())
     }
@@ -97,7 +101,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_insert::<M>(&sql, params).await
     }
 }
@@ -153,7 +158,10 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
         let mut all_params = Vec::new();
 
@@ -177,7 +185,7 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
                 .iter()
                 .map(|v| {
                     all_params.push(v.clone());
-                    let placeholder = format!("${}", param_idx);
+                    let placeholder = dialect.placeholder(param_idx);
                     param_idx += 1;
                     placeholder
                 })
@@ -197,7 +205,8 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
 
     /// Execute the create operation and return the number of created records.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_raw(&sql, params).await
     }
 }
@@ -315,7 +324,7 @@ mod tests {
     #[test]
     fn test_create_new() {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("RETURNING *"));
@@ -328,7 +337,7 @@ mod tests {
             .set("name", "Alice")
             .set("email", "alice@example.com");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("(name, email)"));
@@ -342,7 +351,7 @@ mod tests {
         let op =
             CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name)"));
         assert!(sql.contains("VALUES ($1)"));
@@ -358,7 +367,7 @@ mod tests {
         ];
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set_many(values);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name, email, age)"));
         assert!(sql.contains("VALUES ($1, $2, $3)"));
@@ -371,7 +380,7 @@ mod tests {
             .set("name", "Alice")
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING id, name"));
         assert!(!sql.contains("RETURNING *"));
@@ -383,7 +392,7 @@ mod tests {
             .set("name", "Alice")
             .set("nickname", FilterValue::Null);
 
-        let (_sql, params) = op.build_sql();
+        let (_sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 2);
         assert_eq!(params[1], FilterValue::Null);
@@ -394,7 +403,7 @@ mod tests {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("active", FilterValue::Bool(true));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Bool(true));
     }
@@ -405,7 +414,7 @@ mod tests {
             .set("count", FilterValue::Int(42))
             .set("price", FilterValue::Float(99.99));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Int(42));
         assert_eq!(params[1], FilterValue::Float(99.99));
@@ -417,7 +426,7 @@ mod tests {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("metadata", FilterValue::Json(json.clone()));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Json(json));
     }
@@ -438,7 +447,7 @@ mod tests {
     #[test]
     fn test_create_many_new() {
         let op = CreateManyOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(!sql.contains("RETURNING")); // CreateMany doesn't return
@@ -452,7 +461,7 @@ mod tests {
             .row(["Alice", "alice@example.com"])
             .row(["Bob", "bob@example.com"]);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("(name, email)"));
@@ -466,7 +475,7 @@ mod tests {
             .columns(["name"])
             .row(["Alice"]);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("VALUES ($1)"));
         assert_eq!(params.len(), 1);
@@ -479,7 +488,7 @@ mod tests {
             .row(["Alice", "alice@example.com"])
             .skip_duplicates();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT DO NOTHING"));
     }
@@ -490,7 +499,7 @@ mod tests {
             .columns(["name"])
             .row(["Alice"]);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("ON CONFLICT"));
     }
@@ -506,7 +515,7 @@ mod tests {
             .columns(["name", "email"])
             .rows(rows);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("VALUES ($1, $2), ($3, $4), ($5, $6)"));
         assert_eq!(params.len(), 6);
@@ -519,7 +528,7 @@ mod tests {
             .row(["1", "2"])
             .row(["3", "4"]);
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Params should be ordered: row1.a, row1.b, row2.a, row2.b
         assert_eq!(params[0], FilterValue::String("1".to_string()));
@@ -550,7 +559,7 @@ mod tests {
             .set("name", "Alice")
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let insert_pos = sql.find("INSERT INTO").unwrap();
         let columns_pos = sql.find("(name)").unwrap();
@@ -569,7 +578,7 @@ mod tests {
             .row(["Alice", "alice@test.com"])
             .skip_duplicates();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let insert_pos = sql.find("INSERT INTO").unwrap();
         let columns_pos = sql.find("(name, email)").unwrap();
@@ -584,7 +593,7 @@ mod tests {
     #[test]
     fn test_create_table_name() {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -598,7 +607,7 @@ mod tests {
             .set("email", "alice@test.com")
             .select(Select::fields(["id", "name"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name, email)"));
         assert!(sql.contains("VALUES ($1, $2)"));
@@ -614,9 +623,30 @@ mod tests {
             .row(["3", "4"])
             .skip_duplicates();
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT DO NOTHING"));
         assert_eq!(params.len(), 4);
+    }
+
+    // ========== Cross-Dialect Tests ==========
+
+    #[test]
+    fn create_mssql_emits_output_inserted() {
+        let op =
+            CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
+        let (sql, _) = op.build_sql(&crate::dialect::Mssql);
+        assert!(
+            sql.contains(" OUTPUT INSERTED.*"),
+            "expected OUTPUT INSERTED.*, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn create_postgres_emits_returning() {
+        let op =
+            CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("RETURNING "), "expected RETURNING, got: {sql}");
     }
 }

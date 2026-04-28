@@ -91,8 +91,11 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -136,7 +139,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.query_many::<M>(&sql, params).await
     }
 }
@@ -242,7 +246,7 @@ mod tests {
     #[test]
     fn test_find_many_new() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(params.is_empty());
@@ -251,7 +255,7 @@ mod tests {
     #[test]
     fn test_find_many_basic() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(sql, "SELECT * FROM test_models");
         assert!(params.is_empty());
@@ -264,7 +268,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("name".into(), "Alice".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("name = $1"));
@@ -280,7 +284,7 @@ mod tests {
             ))
             .r#where(Filter::Gte("age".into(), FilterValue::Int(18)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -294,7 +298,7 @@ mod tests {
             Filter::Equals("role".into(), FilterValue::String("moderator".to_string())),
         ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OR"));
         assert_eq!(params.len(), 2);
@@ -310,7 +314,7 @@ mod tests {
             ],
         ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 2);
@@ -319,7 +323,7 @@ mod tests {
     #[test]
     fn test_find_many_without_filter() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(params.is_empty());
@@ -332,7 +336,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .order_by(OrderByField::desc("created_at"));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY created_at DESC"));
     }
@@ -342,7 +346,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .order_by(OrderByField::asc("name"));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY name ASC"));
     }
@@ -350,7 +354,7 @@ mod tests {
     #[test]
     fn test_find_many_without_order() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("ORDER BY"));
     }
@@ -361,7 +365,7 @@ mod tests {
             .order_by(OrderByField::asc("name"))
             .order_by(OrderByField::desc("created_at"));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY created_at DESC"));
         assert!(!sql.contains("ORDER BY name"));
@@ -375,7 +379,7 @@ mod tests {
             .skip(10)
             .take(20);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIMIT 20"));
         assert!(sql.contains("OFFSET 10"));
@@ -385,7 +389,7 @@ mod tests {
     fn test_find_many_with_skip_only() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine).skip(5);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OFFSET 5"));
     }
@@ -394,7 +398,7 @@ mod tests {
     fn test_find_many_with_take_only() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine).take(100);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIMIT 100"));
     }
@@ -406,7 +410,7 @@ mod tests {
             .cursor(cursor)
             .take(10);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Cursor pagination should add some cursor-based filtering
         assert!(sql.contains("LIMIT 10"));
@@ -419,7 +423,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name FROM"));
         assert!(!sql.contains("SELECT *"));
@@ -430,7 +434,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id FROM"));
     }
@@ -439,7 +443,7 @@ mod tests {
     fn test_find_many_select_all() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine).select(Select::All);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM"));
     }
@@ -450,7 +454,7 @@ mod tests {
     fn test_find_many_with_distinct() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine).distinct(["category"]);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DISTINCT ON (category)"));
     }
@@ -460,7 +464,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .distinct(["category", "status"]);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DISTINCT ON (category, status)"));
     }
@@ -468,7 +472,7 @@ mod tests {
     #[test]
     fn test_find_many_without_distinct() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("DISTINCT"));
     }
@@ -484,7 +488,7 @@ mod tests {
             .take(20)
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Check correct SQL clause ordering
         let select_pos = sql.find("SELECT").unwrap();
@@ -504,7 +508,7 @@ mod tests {
     #[test]
     fn test_find_many_table_name() {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -547,7 +551,7 @@ mod tests {
             .select(Select::fields(["id", "name", "email"]))
             .distinct(["category"]);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("DISTINCT ON (category)"));
         assert!(sql.contains("SELECT"));
@@ -568,7 +572,7 @@ mod tests {
                 FilterValue::String("@example.com".to_string()),
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
@@ -579,7 +583,7 @@ mod tests {
         let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::IsNull("deleted_at".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IS NULL"));
         assert!(params.is_empty());
@@ -594,7 +598,7 @@ mod tests {
             )),
         ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("NOT"));
         assert_eq!(params.len(), 1);
@@ -606,9 +610,38 @@ mod tests {
             .r#where(Filter::Gte("age".into(), FilterValue::Int(18)))
             .r#where(Filter::Lte("age".into(), FilterValue::Int(65)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
+    }
+
+    // ========== Cross-Dialect Tests ==========
+
+    #[test]
+    fn builds_mysql_placeholders() {
+        let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
+            .r#where(Filter::Equals("name".into(), "a".into()));
+        let (sql, _) = op.build_sql(&crate::dialect::Mysql);
+        assert!(
+            sql.contains("?") && !sql.contains("$1"),
+            "expected ? placeholders, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn builds_mssql_placeholders() {
+        let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
+            .r#where(Filter::Equals("name".into(), "a".into()));
+        let (sql, _) = op.build_sql(&crate::dialect::Mssql);
+        assert!(sql.contains("@P1"), "expected @P1 placeholders, got: {sql}");
+    }
+
+    #[test]
+    fn builds_sqlite_placeholders() {
+        let op = FindManyOperation::<MockEngine, TestModel>::new(MockEngine)
+            .r#where(Filter::Equals("name".into(), "a".into()));
+        let (sql, _) = op.build_sql(&crate::dialect::Sqlite);
+        assert!(sql.contains("?1"), "expected ?1 placeholders, got: {sql}");
     }
 }

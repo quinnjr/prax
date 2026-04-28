@@ -348,7 +348,7 @@ impl NestedWriteBuilder {
         if self.is_one_to_many {
             // For one-to-many, update the foreign key on related records
             for filter in filters {
-                let (where_sql, mut params) = filter.to_sql(1);
+                let (where_sql, mut params) = filter.to_sql(1, &crate::dialect::Postgres);
                 let sql = format!(
                     "UPDATE {} SET {} = ${} WHERE {}",
                     quote_identifier(&self.related_table),
@@ -363,7 +363,7 @@ impl NestedWriteBuilder {
             // For many-to-many, insert into join table
             // First, we need to get the IDs of the related records
             for filter in filters {
-                let (where_sql, mut params) = filter.to_sql(1);
+                let (where_sql, mut params) = filter.to_sql(1, &crate::dialect::Postgres);
 
                 // Get the related record ID (assuming single-column PK for now)
                 let select_sql = format!(
@@ -405,7 +405,7 @@ impl NestedWriteBuilder {
         if self.is_one_to_many {
             // For one-to-many, set the foreign key to NULL
             for filter in filters {
-                let (where_sql, mut params) = filter.to_sql(1);
+                let (where_sql, mut params) = filter.to_sql(1, &crate::dialect::Postgres);
                 let sql = format!(
                     "UPDATE {} SET {} = NULL WHERE {} AND {} = ${}",
                     quote_identifier(&self.related_table),
@@ -420,7 +420,7 @@ impl NestedWriteBuilder {
         } else if let Some(join) = &self.join_table {
             // For many-to-many, delete from join table
             for filter in filters {
-                let (where_sql, mut params) = filter.to_sql(2);
+                let (where_sql, mut params) = filter.to_sql(2, &crate::dialect::Postgres);
                 let sql = format!(
                     "DELETE FROM {} WHERE {} = $1 AND {} IN (SELECT id FROM {} WHERE {})",
                     quote_identifier(&join.table_name),
@@ -515,7 +515,7 @@ impl NestedWriteBuilder {
         let mut statements = Vec::new();
 
         for filter in filters {
-            let (where_sql, mut params) = filter.to_sql(1);
+            let (where_sql, mut params) = filter.to_sql(1, &crate::dialect::Postgres);
             let sql = format!(
                 "DELETE FROM {} WHERE {} AND {} = ${}",
                 quote_identifier(&self.related_table),

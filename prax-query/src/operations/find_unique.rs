@@ -50,8 +50,11 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -80,7 +83,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.query_one::<M>(&sql, params).await
     }
 
@@ -89,7 +93,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.query_optional::<M>(&sql, params).await
     }
 }
@@ -194,7 +199,7 @@ mod tests {
     #[test]
     fn test_find_unique_new() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("LIMIT 1"));
@@ -206,7 +211,7 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("WHERE"));
@@ -223,7 +228,7 @@ mod tests {
                 FilterValue::String("test@example.com".to_string()),
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("email = $1"));
@@ -238,7 +243,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name FROM"));
         assert!(!sql.contains("SELECT *"));
@@ -250,7 +255,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id FROM"));
     }
@@ -261,7 +266,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::All);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM"));
     }
@@ -279,7 +284,7 @@ mod tests {
                 Filter::Equals("tenant_id".into(), FilterValue::Int(1)),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -289,7 +294,7 @@ mod tests {
     #[test]
     fn test_find_unique_without_filter() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(params.is_empty());
@@ -300,7 +305,7 @@ mod tests {
         let op =
             FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine).r#where(Filter::None);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Filter::None should not produce WHERE clause
         assert!(!sql.contains("WHERE"));
@@ -315,7 +320,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Check SQL structure order
         let select_pos = sql.find("SELECT").unwrap();
@@ -331,7 +336,7 @@ mod tests {
     #[test]
     fn test_find_unique_table_name() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -370,7 +375,7 @@ mod tests {
             Filter::Equals("name".into(), FilterValue::String("Alice".to_string())),
         );
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::String("Alice".to_string()));
@@ -381,7 +386,7 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("id".into(), FilterValue::Int(42)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::Int(42));
@@ -392,7 +397,7 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::Bool(true));
@@ -407,7 +412,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name"));
         assert!(sql.contains("WHERE"));
@@ -421,7 +426,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .r#where(Filter::Equals("id".into(), FilterValue::Int(2)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Should only have the second filter's param
         assert_eq!(params.len(), 1);
