@@ -194,6 +194,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+trybuild = { workspace = true }
 
 # ORM comparison benchmarks
 diesel = { workspace = true }
