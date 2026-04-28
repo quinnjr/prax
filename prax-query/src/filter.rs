@@ -2434,4 +2434,142 @@ mod tests {
             FilterValue::String("10:30:45.000000".to_string())
         );
     }
+
+    // ==================== Extended From-impl coverage ====================
+    // Pins the tail of From<T> for FilterValue impls that weren't previously
+    // exercised. Each test guards against a specific regression a driver
+    // would surface downstream — wrong format, wrong variant, or silent
+    // precision loss.
+
+    #[test]
+    fn filter_value_from_uuid_is_lowercase_hyphenated() {
+        // Driver bridges (Postgres/MySQL/SQLite/MSSQL) all receive the
+        // 36-char hyphenated lowercase form; pinning it here prevents a
+        // hypothetical switch to simple/hyphen-less encoding from silently
+        // breaking every WHERE uuid_col = $1 binding.
+        use uuid::Uuid;
+        let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        match FilterValue::from(u) {
+            FilterValue::String(ref s) => {
+                assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(s, &u.to_string());
+            }
+            other => panic!("expected FilterValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_uuid_nil_round_trips() {
+        use uuid::Uuid;
+        let u = Uuid::nil();
+        assert_eq!(
+            FilterValue::from(u),
+            FilterValue::String("00000000-0000-0000-0000-000000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_decimal_uses_to_string_not_f64() {
+        // Critical: Decimal must NOT round-trip via f64. Using to_string()
+        // preserves precision that parsing-to-f64 loses. "3.14" stays "3.14",
+        // not "3.1400000000000001".
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let d = Decimal::from_str("3.14").unwrap();
+        assert_eq!(
+            FilterValue::from(d),
+            FilterValue::String("3.14".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_decimal_high_precision_preserved() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        // 28-digit mantissa — would lose precision through f64.
+        let d = Decimal::from_str("1234567890.1234567890").unwrap();
+        match FilterValue::from(d) {
+            FilterValue::String(ref s) => {
+                assert_eq!(s, "1234567890.1234567890");
+            }
+            other => panic!("expected FilterValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_serde_json_value_keeps_json_variant() {
+        let v = serde_json::json!({"key": "value", "nested": [1, 2, 3]});
+        match FilterValue::from(v.clone()) {
+            FilterValue::Json(inner) => {
+                assert_eq!(inner, v);
+            }
+            other => panic!("expected FilterValue::Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_serde_json_null_keeps_json_variant() {
+        // `serde_json::Value::Null` must land as FilterValue::Json(Null),
+        // NOT FilterValue::Null — the JSON variant signals to the dialect
+        // bridge that this column wants JSONB/JSON binding semantics, not
+        // SQL NULL.
+        let v = serde_json::Value::Null;
+        match FilterValue::from(v) {
+            FilterValue::Json(serde_json::Value::Null) => {}
+            other => panic!("expected FilterValue::Json(Null), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_option_none_maps_to_null() {
+        // Repeats an existing test at a different call site — this is the
+        // "all integer widths flow through the same Option impl" guard.
+        let none_i32: Option<i32> = None;
+        assert_eq!(FilterValue::from(none_i32), FilterValue::Null);
+        let none_string: Option<String> = None;
+        assert_eq!(FilterValue::from(none_string), FilterValue::Null);
+    }
+
+    #[test]
+    fn filter_value_from_signed_integer_extremes() {
+        // Every integer width widens to Int(i64). Pinning MIN catches sign
+        // extension bugs (e.g. if `v as i64` were replaced with `v as u64 as i64`).
+        assert_eq!(FilterValue::from(i8::MIN), FilterValue::Int(i8::MIN as i64));
+        assert_eq!(FilterValue::from(i8::MAX), FilterValue::Int(i8::MAX as i64));
+        assert_eq!(
+            FilterValue::from(i16::MIN),
+            FilterValue::Int(i16::MIN as i64)
+        );
+        assert_eq!(
+            FilterValue::from(i16::MAX),
+            FilterValue::Int(i16::MAX as i64)
+        );
+    }
+
+    #[test]
+    fn filter_value_from_unsigned_integer_extremes() {
+        // u8/u16/u32 all fit in i64 so these never panic. u64::MAX has its
+        // own dedicated `#[should_panic]` test at filter_value_from_u64_overflow_panics.
+        assert_eq!(FilterValue::from(u8::MAX), FilterValue::Int(u8::MAX as i64));
+        assert_eq!(
+            FilterValue::from(u16::MAX),
+            FilterValue::Int(u16::MAX as i64)
+        );
+        assert_eq!(
+            FilterValue::from(u32::MAX),
+            FilterValue::Int(u32::MAX as i64)
+        );
+        // u32::MAX = 4_294_967_295, well below i64::MAX.
+        assert_eq!(FilterValue::from(u32::MAX), FilterValue::Int(4_294_967_295));
+    }
+
+    #[test]
+    fn filter_value_from_f32_widens_to_f64() {
+        // f32 -> f64 widening must happen via `f64::from(v)`, NOT `v as f64`
+        // — the cast form is fine for IEEE-754 normal values but we pin it
+        // here to document intent. 1.5f32 is exactly representable so no
+        // precision loss either way.
+        let v: f32 = 1.5;
+        assert_eq!(FilterValue::from(v), FilterValue::Float(1.5));
+    }
 }
