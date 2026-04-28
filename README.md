@@ -83,96 +83,66 @@ prax-armature = "0.6"
 
 ## Quick Start
 
-### Define Your Models
+Define models, wire them to a `PraxClient<E>`, and run typed CRUD against
+a real connection pool. The snippet below mirrors
+[`examples/client_crud_postgres.rs`](./examples/client_crud_postgres.rs)
+and matches the runtime shape of the driver — field accessors are
+`snake_case` (e.g. `user::created_at::desc()`), not `camelCase`.
 
-```rust
-use prax::prelude::*;
+```rust,ignore
+use prax_orm::{client, Model, PraxClient};
+use prax_postgres::{PgEngine, PgPool, PgPoolBuilder};
 
-#[derive(Model)]
+#[derive(Model, Debug)]
 #[prax(table = "users")]
-pub struct User {
-    #[prax(id, auto_increment)]
-    pub id: i32,
-
+struct User {
+    #[prax(id, auto)]
+    id: i32,
     #[prax(unique)]
-    pub email: String,
-
-    pub name: Option<String>,
-
-    #[prax(default = "now()")]
-    pub created_at: DateTime<Utc>,
-
-    #[prax(relation(has_many))]
-    pub posts: Vec<Post>,
+    email: String,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Model)]
-#[prax(table = "posts")]
-pub struct Post {
-    #[prax(id, auto_increment)]
-    pub id: i32,
-
-    pub title: String,
-
-    pub content: String,
-
-    #[prax(relation(belongs_to))]
-    pub author: User,
-
-    pub author_id: i32,
-}
-```
-
-### Connect and Query
-
-```rust
-use prax::prelude::*;
+// Attaches `client.user()` via the generated `PraxClientExt` trait.
+client!(User);
 
 #[tokio::main]
-async fn main() -> Result<(), prax::Error> {
-    // Connect to database
-    let client = PraxClient::new("postgresql://localhost/mydb").await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pool: PgPool = PgPoolBuilder::new()
+        .url("postgres://prax:prax_test_password@localhost:5432/prax_test")
+        .build()
+        .await?;
+    let client = PraxClient::new(PgEngine::new(pool));
 
-    // Find many with filtering and relations
-    let users = client
+    // Create
+    let alice = client
+        .user()
+        .create()
+        .set("email", "alice@example.com")
+        .exec()
+        .await?;
+
+    // Find with a where-filter and ordering. Field accessors use the
+    // struct's lowercased field name: `user::created_at::desc()`.
+    let recent = client
         .user()
         .find_many()
-        .where(user::email::contains("@example.com"))
-        .include(user::posts::fetch())
+        .r#where(user::email::contains("@example.com"))
         .order_by(user::created_at::desc())
-        .take(10)
         .exec()
         .await?;
 
-    // Create a new user
-    let user = client
-        .user()
-        .create(user::Create {
-            email: "hello@example.com".into(),
-            name: Some("Alice".into()),
-            ..Default::default()
-        })
-        .exec()
-        .await?;
-
-    // Update with filtering
-    let updated = client
-        .user()
-        .update_many()
-        .where(user::created_at::lt(Utc::now() - Duration::days(30)))
-        .data(user::Update {
-            name: Some("Inactive User".into()),
-            ..Default::default()
-        })
-        .exec()
-        .await?;
-
-    // Transactions
+    // Transactions: closure receives a client bound to the tx. Commit on
+    // Ok, rollback on Err.
     client
         .transaction(|tx| async move {
-            let user = tx.user().create(/* ... */).exec().await?;
-            tx.post().create(/* ... */).exec().await?;
-            Ok(())
+            tx.user()
+                .update()
+                .r#where(user::id::equals(alice.id))
+                .set("email", "alice+updated@example.com")
+                .exec()
+                .await?;
+            Ok::<_, prax_query::error::QueryError>(())
         })
         .await?;
 
