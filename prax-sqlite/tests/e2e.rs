@@ -281,3 +281,112 @@ async fn e2e_query_many_typed_decodes_rows() {
     assert_eq!(rows[1].id, 2);
     assert_eq!(rows[1].name, "b");
 }
+
+/// Regression test for the `query_one` tail-materialization contract.
+///
+/// `query_one` nominally means "fetch exactly one row", but the driver
+/// implementations disagree on what happens when the SQL returns 2+:
+///
+/// - `tokio-postgres::query_one` errors on 0 or 2+ rows.
+/// - `mysql_async::exec_first` silently takes the first row.
+/// - `rusqlite::rows.next()` (what this engine uses) silently takes
+///   the first row and drops the rest.
+/// - `tiberius::query_one` silently takes the first row.
+///
+/// This test locks down SQLite's "first row wins" behavior so that if
+/// someone later changes the engine to iterate twice and error on 2+,
+/// the change surfaces here and gets a deliberate CHANGELOG / migration
+/// update rather than slipping in silently.
+#[tokio::test]
+#[ignore = "SQLite E2E — run via `docker compose run --rm test-sqlite`"]
+async fn e2e_query_one_with_multiple_rows_behavior() {
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+    use prax_sqlite::SqliteEngine;
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_sqlite_one_multi";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(r: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: r.get_i32("id")?,
+                email: r.get_string("email")?,
+            })
+        }
+    }
+
+    if !skip_unless_e2e() {
+        return;
+    }
+    let db = test_db().await;
+    let pool = &db.pool;
+    let engine = SqliteEngine::new(pool.clone());
+
+    // Static table in a fresh tempdir DB — no race, but DROP-first keeps
+    // the test idempotent.
+    engine
+        .execute_raw("DROP TABLE IF EXISTS e2e_sqlite_one_multi", vec![])
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            "CREATE TABLE e2e_sqlite_one_multi (id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             email TEXT NOT NULL)",
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            "INSERT INTO e2e_sqlite_one_multi (email) VALUES ('a@x.com'), ('b@x.com')",
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .query_one::<Person>(
+            "SELECT id, email FROM e2e_sqlite_one_multi ORDER BY id",
+            Vec::<FilterValue>::new(),
+        )
+        .await;
+
+    // Observed: rusqlite's `rows.next()` path in query_first_row yields
+    // the first row and drops the rest. Callers that want Postgres-style
+    // "error on 2+" must add `LIMIT 2` and check the row count manually.
+    match result {
+        Ok(p) => {
+            assert_eq!(
+                p.email, "a@x.com",
+                "SQLite query_one should return the first row (by ORDER BY) \
+                 when 2+ rows match; this documents the rusqlite 'take first' \
+                 semantics and must not regress silently."
+            );
+        }
+        Err(e) => {
+            panic!(
+                "SQLite engine is documented to return the first row on a \
+                 multi-row query_one (rusqlite::Rows::next semantics, via \
+                 query_first_row). If the engine was changed to error, \
+                 update this test, the Unreleased CHANGELOG migration \
+                 guide, and any callers that relied on the implicit \
+                 'take first' behavior. Got: {e:?}"
+            );
+        }
+    }
+
+    engine
+        .execute_raw("DROP TABLE e2e_sqlite_one_multi", vec![])
+        .await
+        .unwrap();
+}

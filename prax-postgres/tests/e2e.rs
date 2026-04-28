@@ -490,3 +490,107 @@ async fn e2e_row_ref_primitive_reads() {
     assert_eq!(row.get_i32("n").unwrap(), 42);
     assert_eq!(row.get_str("s").unwrap(), "hello");
 }
+
+/// Regression test for the `query_one` tail-materialization contract.
+///
+/// `query_one` is supposed to materialize "exactly one row", but the
+/// driver implementations disagree on what happens when the SQL returns
+/// 2+:
+///
+/// - `tokio-postgres::query_one` errors on 0 or 2+ rows (what this
+///   engine uses) — this is the strict contract.
+/// - `mysql_async::exec_first` silently takes the first row.
+/// - `rusqlite::rows.next()` silently takes the first row.
+/// - `tiberius::query_one` silently takes the first row.
+///
+/// This test locks down Postgres's strict "row count mismatch" error
+/// for multi-row queries. If tokio-postgres ever changes to match the
+/// other drivers (silently taking first), callers that relied on the
+/// error to detect bad queries will regress — the failure should show
+/// up here and force a CHANGELOG / migration update.
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose"]
+async fn e2e_query_one_with_multiple_rows_behavior() {
+    use prax_postgres::PgEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_pg_one_multi";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(r: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: r.get_i32("id")?,
+                email: r.get_string("email")?,
+            })
+        }
+    }
+
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("one_multi");
+    drop_table(&pool, &table).await;
+
+    let conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "CREATE TABLE {table} (id SERIAL PRIMARY KEY, email TEXT NOT NULL)"
+    ))
+    .await
+    .expect("create");
+    conn.batch_execute(&format!(
+        "INSERT INTO {table} (email) VALUES ('a@x.com'), ('b@x.com')"
+    ))
+    .await
+    .expect("insert");
+    drop(conn);
+
+    let engine = PgEngine::new(pool.clone());
+    let result = engine
+        .query_one::<Person>(
+            &format!("SELECT id, email FROM {table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await;
+
+    // Observed: tokio-postgres' `query_one` errors with "query returned
+    // an unexpected number of rows" when the result set has 2+. The
+    // engine routes that through QueryError::database — it's not a
+    // NotFound because that's reserved for the zero-row case.
+    match result {
+        Ok(p) => {
+            panic!(
+                "Postgres is expected to error on multi-row query_one \
+                 (tokio-postgres semantics). If the driver has changed \
+                 to silently take the first row, update this test, the \
+                 Unreleased CHANGELOG migration guide, and warn callers \
+                 that relied on the strict 'exactly one' guarantee. Got: \
+                 {p:?}"
+            );
+        }
+        Err(e) => {
+            // Sanity-check the error is about row count, not a
+            // connection/deserialization/type issue that would mask a
+            // real regression.
+            let msg = e.to_string().to_lowercase();
+            assert!(
+                msg.contains("row") || msg.contains("unexpected"),
+                "expected a row-count-related error from tokio-postgres \
+                 on multi-row query_one, got: {e:?}"
+            );
+        }
+    }
+
+    drop_table(&pool, &table).await;
+}

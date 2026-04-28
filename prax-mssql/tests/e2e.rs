@@ -455,3 +455,112 @@ async fn e2e_query_one_missing_row_returns_not_found() {
         .await
         .unwrap();
 }
+
+/// Regression test for the `query_one` tail-materialization contract.
+///
+/// `query_one` nominally means "fetch exactly one row", but the driver
+/// implementations disagree on what happens when the SQL returns 2+:
+///
+/// - `tokio-postgres::query_one` errors on 0 or 2+ rows.
+/// - `mysql_async::exec_first` silently takes the first row.
+/// - `rusqlite::rows.next()` silently takes the first row.
+/// - `tiberius::query_one` (what this engine uses) silently takes the
+///   first row and discards the rest.
+///
+/// This test locks down MSSQL's "first row wins" behavior so that if
+/// someone later switches to an implementation that errors on 2+, the
+/// change surfaces here and gets a deliberate CHANGELOG / migration
+/// update rather than slipping in silently.
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_one_with_multiple_rows_behavior() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_one_multi";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(r: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: r.get_i32("id")?,
+                email: r.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("one_multi");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool.clone());
+
+    engine
+        .execute_raw(
+            &format!("IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!(
+                "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, \
+                 email NVARCHAR(255) NOT NULL)"
+            ),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!("INSERT INTO dbo.{table} (email) VALUES ('a@x.com'),('b@x.com')"),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .query_one::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await;
+
+    // Observed: tiberius' `query_one` yields the first row and drops the
+    // rest. Callers that want Postgres-style "error on 2+" must add
+    // `TOP 2` + check the row count themselves.
+    match result {
+        Ok(p) => {
+            assert_eq!(
+                p.email, "a@x.com",
+                "MSSQL query_one should return the first row (by ORDER BY) \
+                 when 2+ rows match; this documents tiberius' 'take first' \
+                 semantics and must not regress silently."
+            );
+        }
+        Err(e) => {
+            panic!(
+                "MSSQL engine is documented to return the first row on a \
+                 multi-row query_one (tiberius::Client::query_one \
+                 semantics). If the driver has changed to erroring, update \
+                 this test, the Unreleased CHANGELOG migration guide, and \
+                 any callers that relied on the implicit 'take first' \
+                 behavior. Got: {e:?}"
+            );
+        }
+    }
+
+    drop_table(&pool, &table).await;
+}

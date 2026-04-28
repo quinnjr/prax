@@ -73,6 +73,8 @@ If you use `prax-mysql` or `prax-sqlite`:
 If you call `Filter::to_sql` directly:
 - Update to `filter.to_sql(offset, &prax_query::dialect::Postgres)` (or your dialect).
 
+`QueryEngine::query_one` behavior when the SQL returns 2+ rows is driver-dependent: Postgres errors (strict), while MySQL/SQLite/MSSQL silently return the first row. Callers that require "exactly one row or error" should add `LIMIT 2` (or `TOP 2` on MSSQL) and check the row count themselves, or use `count`/`query_many` + assert `len() == 1`.
+
 - **TypeScript Generator** (`prax-typegen` v0.1.0) - Standalone crate for generating TypeScript from Prax schemas
   - TypeScript interface generation for models, enums, composite types, and views
   - Zod schema generation with runtime validation and inferred types
