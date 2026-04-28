@@ -224,3 +224,60 @@ async fn e2e_pool_reuses_connections() {
         assert_eq!(row["v"], serde_json::json!(i));
     }
 }
+
+#[tokio::test]
+#[ignore = "SQLite E2E — run via `docker compose run --rm test-sqlite`"]
+async fn e2e_query_many_typed_decodes_rows() {
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+    use prax_sqlite::SqliteEngine;
+
+    #[derive(Debug)]
+    struct Item {
+        id: i32,
+        name: String,
+    }
+
+    impl Model for Item {
+        const MODEL_NAME: &'static str = "Item";
+        const TABLE_NAME: &'static str = "items";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "name"];
+    }
+
+    impl FromRow for Item {
+        fn from_row(r: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Item {
+                id: r.get_i32("id")?,
+                name: r.get_string("name")?,
+            })
+        }
+    }
+
+    if !skip_unless_e2e() {
+        return;
+    }
+    let db = test_db().await;
+    let pool = &db.pool;
+    let engine = SqliteEngine::new(pool.clone());
+
+    let conn = pool.get().await.expect("conn");
+    conn.execute_batch("CREATE TABLE e2e_query_many (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+        .await
+        .expect("create table");
+
+    conn.execute_batch("INSERT INTO e2e_query_many (id, name) VALUES (1, 'a'), (2, 'b')")
+        .await
+        .expect("insert");
+
+    let rows = engine
+        .query_many::<Item>("SELECT id, name FROM e2e_query_many ORDER BY id", vec![])
+        .await
+        .expect("query_many");
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, 1);
+    assert_eq!(rows[0].name, "a");
+    assert_eq!(rows[1].id, 2);
+    assert_eq!(rows[1].name, "b");
+}
