@@ -113,6 +113,14 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .filter(|f| !f.is_list)
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone()))
         .collect();
+    // Same shape as from_row_fields plus the is_id flag; the ModelWithPk
+    // emitter needs is_id to route PK fields into pk_value() and every
+    // scalar field into get_column_value().
+    let model_with_pk_fields: Vec<(Ident, Type, String, bool)> = field_infos
+        .iter()
+        .filter(|f| !f.is_list)
+        .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone(), f.is_id))
+        .collect();
 
     let model_trait_impl = super::derive_model_trait::emit(
         name,
@@ -122,6 +130,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &all_columns,
     );
     let from_row_impl = super::derive_from_row::emit(name, &from_row_fields);
+    let model_with_pk_impl = super::derive_model_with_pk::emit(name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { super::#name });
 
     Ok(quote! {
@@ -182,9 +191,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #client_impl
         }
 
-        // Emit Model and FromRow trait implementations at crate root
+        // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
         #model_trait_impl
         #from_row_impl
+        #model_with_pk_impl
     })
 }
 

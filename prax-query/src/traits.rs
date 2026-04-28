@@ -21,6 +21,32 @@ pub trait Model: Sized + Send + Sync {
     const COLUMNS: &'static [&'static str];
 }
 
+/// Runtime access to a model's primary key and column values.
+///
+/// Used by relation loaders (parent → child FK bucketing) and by upsert
+/// to build the conflict-row lookup. Implemented by codegen for every
+/// `#[derive(Model)]` struct and every `prax_schema!`-generated model.
+///
+/// Both methods return a [`crate::filter::FilterValue`] that mirrors
+/// exactly what the matching `From<T>` impl on the binding side would
+/// produce, so a PK value extracted here is a drop-in replacement for
+/// the same value produced by an equivalent type-checked filter.
+pub trait ModelWithPk: Model {
+    /// Primary-key value for this row.
+    ///
+    /// Single-column PKs return the appropriate scalar variant.
+    /// Composite PKs collapse to [`crate::filter::FilterValue::List`]
+    /// in the same declaration order as [`Model::PRIMARY_KEY`].
+    fn pk_value(&self) -> crate::filter::FilterValue;
+
+    /// Look up a column by its SQL name.
+    ///
+    /// Returns `None` for column names not present in [`Model::COLUMNS`].
+    /// The relation executor uses this to extract foreign-key values
+    /// from a fetched parent row without knowing the concrete FK type.
+    fn get_column_value(&self, column: &str) -> Option<crate::filter::FilterValue>;
+}
+
 /// A database view that can be queried (read-only).
 ///
 /// Views are similar to models but only support read operations.

@@ -171,6 +171,21 @@ pub fn generate_model_module_with_style(
             (rust_field, rust_ty, column_name_of(f))
         })
         .collect();
+    // Same tuple shape plus an is_id flag. ModelWithPk's `pk_value()`
+    // reads only the id fields; `get_column_value()` routes every
+    // scalar column, so we need the same rows from_row_fields has.
+    let model_with_pk_fields: Vec<(syn::Ident, syn::Type, String, bool)> = model
+        .fields
+        .values()
+        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| {
+            let rust_field = snake_ident(f.name());
+            let rust_ty: syn::Type =
+                syn::parse2(field_type_to_rust(&f.field_type, &f.modifier).into())
+                    .expect("generated Rust type should parse");
+            (rust_field, rust_ty, column_name_of(f), f.is_id())
+        })
+        .collect();
 
     let model_trait_impl = super::derive_model_trait::emit(
         &model_name,
@@ -180,6 +195,7 @@ pub fn generate_model_module_with_style(
         &all_columns,
     );
     let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields);
+    let model_with_pk_impl = super::derive_model_with_pk::emit(&model_name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { #model_name });
 
     // Generate GraphQL derives if model_style is GraphQL
@@ -253,9 +269,11 @@ pub fn generate_model_module_with_style(
             #order_by_param
             #set_param
 
-            // Model, FromRow, and Client<E> — mirrors what #[derive(Model)] emits.
+            // Model, FromRow, ModelWithPk, and Client<E> — mirrors what
+            // #[derive(Model)] emits.
             #model_trait_impl
             #from_row_impl
+            #model_with_pk_impl
             #client_impl
 
             // Query/Actions pre-compiled-SQL builders (legacy, being replaced by Client<E>).

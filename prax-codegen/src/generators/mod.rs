@@ -4,6 +4,7 @@ mod derive;
 mod derive_client;
 mod derive_from_row;
 mod derive_model_trait;
+mod derive_model_with_pk;
 mod enum_gen;
 mod fields;
 mod filters;

@@ -169,3 +169,22 @@ fn author_fromrow_maps_null_optional_to_none() {
     assert_eq!(author_null.id, 8);
     assert!(author_null.name.is_none());
 }
+
+#[test]
+fn author_implements_model_with_pk() {
+    use prax_query::filter::FilterValue;
+    use prax_query::traits::ModelWithPk;
+    let a = Author {
+        id: 42,
+        email: "a@b.c".into(),
+        name: None,
+    };
+    assert_eq!(a.pk_value(), FilterValue::Int(42));
+    assert_eq!(
+        a.get_column_value("email"),
+        Some(FilterValue::String("a@b.c".into()))
+    );
+    // None → Null, not a missing-column signal.
+    assert_eq!(a.get_column_value("name"), Some(FilterValue::Null));
+    assert_eq!(a.get_column_value("nonexistent"), None);
+}

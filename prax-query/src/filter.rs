@@ -330,6 +330,138 @@ impl From<serde_json::Value> for FilterValue {
 // List variant and re-interpret. We intentionally don't shadow the
 // blanket with a dedicated impl (which would be a conflict anyway).
 
+/// Reverse of [`crate::row::FromColumn`]: convert an in-memory value to
+/// a [`FilterValue`] suitable for parameter binding.
+///
+/// Used by the relation executor and [`crate::traits::ModelWithPk`] to
+/// project a fetched row's primary/foreign key into a placeholder value
+/// without going through the `From<T>` path (which consumes the value).
+///
+/// # Intentional omissions
+///
+/// `u64` is omitted by design: [`From<u64>`] panics on overflow, but
+/// `to_filter_value(&self)` takes a borrow and cannot recover or fail
+/// gracefully without hidden clamping. Callers with `u64` primary keys
+/// should cast explicitly (`(self.id as i64).to_filter_value()`) or
+/// use `FilterValue::String(self.id.to_string())` when full range
+/// preservation matters.
+pub trait ToFilterValue {
+    /// Convert this value to a [`FilterValue`] by borrowing.
+    fn to_filter_value(&self) -> FilterValue;
+}
+
+impl ToFilterValue for i8 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i16 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i64 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self)
+    }
+}
+impl ToFilterValue for u8 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for u16 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for u32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for f32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Float(f64::from(*self))
+    }
+}
+impl ToFilterValue for f64 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Float(*self)
+    }
+}
+impl ToFilterValue for bool {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Bool(*self)
+    }
+}
+impl ToFilterValue for String {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.clone())
+    }
+}
+impl ToFilterValue for str {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for uuid::Uuid {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for rust_decimal::Decimal {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for chrono::DateTime<chrono::Utc> {
+    fn to_filter_value(&self) -> FilterValue {
+        // Mirrors From<DateTime<Utc>>: RFC3339 with microsecond precision.
+        FilterValue::String(self.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    }
+}
+impl ToFilterValue for chrono::NaiveDateTime {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%Y-%m-%dT%H:%M:%S%.6f").to_string())
+    }
+}
+impl ToFilterValue for chrono::NaiveDate {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%Y-%m-%d").to_string())
+    }
+}
+impl ToFilterValue for chrono::NaiveTime {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%H:%M:%S%.6f").to_string())
+    }
+}
+impl ToFilterValue for serde_json::Value {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Json(self.clone())
+    }
+}
+impl ToFilterValue for Vec<u8> {
+    fn to_filter_value(&self) -> FilterValue {
+        // Bytes round-trip as a list of ints to match the existing
+        // `From<Vec<T>>` blanket behavior. Drivers that want native
+        // BYTEA binding intercept the List variant.
+        FilterValue::List(self.iter().map(|b| FilterValue::Int(*b as i64)).collect())
+    }
+}
+impl<T: ToFilterValue> ToFilterValue for Option<T> {
+    fn to_filter_value(&self) -> FilterValue {
+        self.as_ref()
+            .map(T::to_filter_value)
+            .unwrap_or(FilterValue::Null)
+    }
+}
+
 /// Scalar filter operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarFilter<T> {
@@ -2571,5 +2703,34 @@ mod tests {
         // precision loss either way.
         let v: f32 = 1.5;
         assert_eq!(FilterValue::from(v), FilterValue::Float(1.5));
+    }
+
+    // ==================== ToFilterValue tests ====================
+    // These pin the reverse-of-FromColumn projection used by the relation
+    // loader and `ModelWithPk`. Each case guards against a drift from the
+    // matching `From<T>` impl above; the relation executor relies on them
+    // producing byte-identical values to the parameter-binding path.
+
+    #[test]
+    fn to_filter_value_option_some_some() {
+        let v: Option<i32> = Some(42);
+        assert_eq!(v.to_filter_value(), FilterValue::Int(42));
+    }
+
+    #[test]
+    fn to_filter_value_option_none_is_null() {
+        let v: Option<i32> = None;
+        assert_eq!(v.to_filter_value(), FilterValue::Null);
+    }
+
+    #[test]
+    fn to_filter_value_uuid_is_string() {
+        let id = uuid::Uuid::nil();
+        assert_eq!(id.to_filter_value(), FilterValue::String(id.to_string()));
+    }
+
+    #[test]
+    fn to_filter_value_bool_is_bool() {
+        assert_eq!(true.to_filter_value(), FilterValue::Bool(true));
     }
 }

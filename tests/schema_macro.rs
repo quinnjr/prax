@@ -32,3 +32,24 @@ fn schema_implements_model_and_fromrow() {
         "User"
     );
 }
+
+#[test]
+fn schema_user_implements_model_with_pk() {
+    use prax_query::filter::FilterValue;
+    use prax_query::traits::ModelWithPk;
+    let u = user::User {
+        id: 7,
+        email: "e@f.g".into(),
+        name: Some("n".into()),
+    };
+    assert_eq!(u.pk_value(), FilterValue::Int(7));
+    assert_eq!(
+        u.get_column_value("email"),
+        Some(FilterValue::String("e@f.g".into()))
+    );
+    assert_eq!(
+        u.get_column_value("name"),
+        Some(FilterValue::String("n".into()))
+    );
+    assert_eq!(u.get_column_value("missing"), None);
+}

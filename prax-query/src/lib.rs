@@ -202,7 +202,7 @@ pub use error::{ErrorCode, ErrorContext, QueryError, QueryResult, Suggestion};
 pub use extension::{Extension, ExtensionBuilder, Point, Polygon};
 pub use filter::{
     AndFilterBuilder, FieldName, Filter, FilterValue, FluentFilterBuilder, LargeValueList,
-    OrFilterBuilder, ScalarFilter, SmallValueList, ValueList,
+    OrFilterBuilder, ScalarFilter, SmallValueList, ToFilterValue, ValueList,
 };
 pub use json::{JsonAgg, JsonFilter, JsonIndex, JsonIndexBuilder, JsonOp, JsonPath, PathSegment};
 pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
@@ -258,7 +258,8 @@ pub use security::{
 };
 pub use sequence::{OwnedBy, Sequence, SequenceBuilder};
 pub use traits::{
-    Executable, IntoFilter, MaterializedView, Model, QueryEngine, View, ViewQueryEngine,
+    Executable, IntoFilter, MaterializedView, Model, ModelWithPk, QueryEngine, View,
+    ViewQueryEngine,
 };
 pub use transaction::{IsolationLevel, Transaction, TransactionConfig};
 pub use trigger::{
