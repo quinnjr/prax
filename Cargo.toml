@@ -214,6 +214,7 @@ prax-mongodb = { workspace = true }
 rusqlite = { workspace = true }
 bson = { workspace = true }
 futures = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "query_builder"

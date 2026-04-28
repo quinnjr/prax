@@ -28,7 +28,10 @@
 //! # }
 //! ```
 
-use prax_query::traits::QueryEngine;
+use prax_query::error::QueryResult;
+use prax_query::raw::Sql;
+use prax_query::row::FromRow;
+use prax_query::traits::{Model, QueryEngine};
 
 /// Top-level client grouping every model's per-model `Client<E>`.
 #[derive(Clone)]
@@ -45,6 +48,60 @@ impl<E: QueryEngine> PraxClient<E> {
     /// Borrow the underlying engine. Accessor macros clone it per call.
     pub fn engine(&self) -> &E {
         &self.engine
+    }
+
+    /// Execute a typed raw SQL query, decoding each returned row as `T`.
+    ///
+    /// The typed Client API covers the common cases, but every ORM
+    /// eventually hits something it doesn't yet model — window functions,
+    /// vendor-specific extensions, recursive CTEs, bespoke aggregates.
+    /// `query_raw` is the escape hatch: build a parameterized
+    /// [`prax_query::raw::Sql`] and route the result through the same
+    /// [`FromRow`] bridge the derived models use, so the returned
+    /// records stay typed.
+    ///
+    /// `T` must implement both [`Model`] (so the driver can associate
+    /// the query with a table) and [`FromRow`] (so each row can be
+    /// decoded). Both are provided automatically by `#[derive(Model)]`.
+    ///
+    /// ```rust,ignore
+    /// use prax_query::raw::Sql;
+    ///
+    /// let users: Vec<User> = client
+    ///     .query_raw(
+    ///         Sql::new("SELECT id, email FROM users WHERE email = ")
+    ///             .bind("alice@example.com"),
+    ///     )
+    ///     .await?;
+    /// ```
+    pub async fn query_raw<T>(&self, sql: Sql) -> QueryResult<Vec<T>>
+    where
+        T: Model + FromRow + Send + 'static,
+    {
+        let (s, p) = sql.build();
+        self.engine.query_many::<T>(&s, p).await
+    }
+
+    /// Execute a raw statement that doesn't return rows.
+    ///
+    /// Use this for `INSERT` / `UPDATE` / `DELETE` / DDL when the typed
+    /// Client API doesn't model what you need. Returns the
+    /// driver-reported affected-row count.
+    ///
+    /// ```rust,ignore
+    /// use prax_query::raw::Sql;
+    ///
+    /// let n = client
+    ///     .execute_raw(
+    ///         Sql::new("UPDATE users SET verified = TRUE WHERE id = ")
+    ///             .bind(user_id),
+    ///     )
+    ///     .await?;
+    /// assert_eq!(n, 1);
+    /// ```
+    pub async fn execute_raw(&self, sql: Sql) -> QueryResult<u64> {
+        let (s, p) = sql.build();
+        self.engine.execute_raw(&s, p).await
     }
 }
 
