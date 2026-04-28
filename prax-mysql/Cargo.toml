@@ -34,6 +34,9 @@ chrono = { workspace = true, features = ["serde"] }
 # UUID
 uuid = { workspace = true, features = ["v4", "serde"] }
 
+# Decimal type
+rust_decimal = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 
