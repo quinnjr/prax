@@ -4580,6 +4580,7 @@ dependencies = [
  "prax-query",
  "prax-schema",
  "prax-sqlite",
+ "prax-sqlx",
  "rusqlite",
  "rust_decimal",
  "sea-orm",

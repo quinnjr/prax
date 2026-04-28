@@ -211,6 +211,7 @@ prax-mysql = { workspace = true }
 prax-sqlite = { workspace = true }
 prax-mssql = { workspace = true }
 prax-mongodb = { workspace = true }
+prax-sqlx = { workspace = true }
 rusqlite = { workspace = true }
 bson = { workspace = true }
 futures = { workspace = true }
