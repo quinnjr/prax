@@ -76,7 +76,7 @@ impl SqliteConnection {
     /// Execute a query and return all rows as JSON values.
     pub async fn query(&self, sql: &str) -> SqliteResult<Vec<serde_json::Value>> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing query");
+        trace!(sql = %sql, "Executing query");
 
         self.conn()
             .call(move |conn| {
@@ -107,7 +107,7 @@ impl SqliteConnection {
         params: Vec<rusqlite::types::Value>,
     ) -> SqliteResult<Vec<serde_json::Value>> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing parameterized query");
+        trace!(sql = %sql, "Executing parameterized query");
 
         self.conn()
             .call(move |conn| {
@@ -137,7 +137,7 @@ impl SqliteConnection {
     /// Execute a query and return a single row.
     pub async fn query_one(&self, sql: &str) -> SqliteResult<serde_json::Value> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing query_one");
+        trace!(sql = %sql, "Executing query_one");
 
         self.conn()
             .call(move |conn| {
@@ -161,7 +161,7 @@ impl SqliteConnection {
     /// Execute a query and return an optional row.
     pub async fn query_optional(&self, sql: &str) -> SqliteResult<Option<serde_json::Value>> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing query_optional");
+        trace!(sql = %sql, "Executing query_optional");
 
         self.conn()
             .call(move |conn| {
@@ -191,7 +191,7 @@ impl SqliteConnection {
     /// Execute a statement and return the number of affected rows.
     pub async fn execute(&self, sql: &str) -> SqliteResult<usize> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing statement");
+        trace!(sql = %sql, "Executing statement");
 
         self.conn()
             .call(move |conn| Ok(conn.execute(&sql, [])?))
@@ -206,7 +206,7 @@ impl SqliteConnection {
         params: Vec<rusqlite::types::Value>,
     ) -> SqliteResult<usize> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing parameterized statement");
+        trace!(sql = %sql, "Executing parameterized statement");
 
         self.conn()
             .call(move |conn| {
@@ -221,7 +221,7 @@ impl SqliteConnection {
     /// Execute a statement and return the last insert rowid.
     pub async fn execute_insert(&self, sql: &str) -> SqliteResult<i64> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing insert");
+        trace!(sql = %sql, "Executing insert");
 
         self.conn()
             .call(move |conn| {
@@ -239,7 +239,7 @@ impl SqliteConnection {
         params: Vec<rusqlite::types::Value>,
     ) -> SqliteResult<i64> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing parameterized insert");
+        trace!(sql = %sql, "Executing parameterized insert");
 
         self.conn()
             .call(move |conn| {
@@ -255,7 +255,7 @@ impl SqliteConnection {
     /// Execute multiple statements in a batch.
     pub async fn execute_batch(&self, sql: &str) -> SqliteResult<()> {
         let sql = sql.to_string();
-        debug!(sql = %sql, "Executing batch");
+        trace!(sql = %sql, "Executing batch");
 
         self.conn()
             .call(move |conn| Ok(conn.execute_batch(&sql)?))

@@ -3,7 +3,7 @@
 use bb8::PooledConnection;
 use bb8_tiberius::ConnectionManager;
 use tiberius::Row;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::error::{MssqlError, MssqlResult};
 
@@ -24,7 +24,7 @@ impl<'a> MssqlConnection<'a> {
         sql: &str,
         params: &[&dyn tiberius::ToSql],
     ) -> MssqlResult<Vec<Row>> {
-        debug!(sql = %sql, "Executing query");
+        trace!(sql = %sql, "Executing query");
 
         let stream = self.client.query(sql, params).await?;
         let rows = stream.into_first_result().await?;
@@ -37,7 +37,7 @@ impl<'a> MssqlConnection<'a> {
         sql: &str,
         params: &[&dyn tiberius::ToSql],
     ) -> MssqlResult<Row> {
-        debug!(sql = %sql, "Executing query_one");
+        trace!(sql = %sql, "Executing query_one");
 
         let mut rows = self.query(sql, params).await?;
 
@@ -54,7 +54,7 @@ impl<'a> MssqlConnection<'a> {
         sql: &str,
         params: &[&dyn tiberius::ToSql],
     ) -> MssqlResult<Option<Row>> {
-        debug!(sql = %sql, "Executing query_opt");
+        trace!(sql = %sql, "Executing query_opt");
 
         let mut rows = self.query(sql, params).await?;
 
@@ -71,7 +71,7 @@ impl<'a> MssqlConnection<'a> {
         sql: &str,
         params: &[&dyn tiberius::ToSql],
     ) -> MssqlResult<u64> {
-        debug!(sql = %sql, "Executing statement");
+        trace!(sql = %sql, "Executing statement");
 
         let result = self.client.execute(sql, params).await?;
         Ok(result.total())
@@ -79,7 +79,7 @@ impl<'a> MssqlConnection<'a> {
 
     /// Execute a batch of statements (separated by GO or semicolons).
     pub async fn batch_execute(&mut self, sql: &str) -> MssqlResult<()> {
-        debug!(sql = %sql, "Executing batch");
+        trace!(sql = %sql, "Executing batch");
         self.client.simple_query(sql).await?.into_results().await?;
         Ok(())
     }

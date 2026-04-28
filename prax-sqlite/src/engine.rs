@@ -5,7 +5,7 @@ use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use rusqlite::types::Value as SqlValue;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::pool::SqlitePool;
 use crate::row_ref::SqliteRowRef;
@@ -32,12 +32,21 @@ impl SqliteEngine {
         params.iter().map(filter_value_to_sqlite).collect()
     }
 
+    /// Decode multiple rows into typed models.
+    ///
+    /// # Short-circuit on decode error
+    ///
+    /// Uses `Result<Vec<T>, _>::collect`, which returns the first decode
+    /// error and discards every successfully-decoded row before it. A
+    /// row-level type mismatch therefore aborts the whole batch rather
+    /// than returning partial results. Callers that want per-row
+    /// recovery should manually iterate rows and handle each result.
     async fn query_rows<T: Model + FromRow>(
         &self,
         sql: String,
         params: Vec<FilterValue>,
     ) -> QueryResult<Vec<T>> {
-        debug!(sql = %sql, "sqlite query_rows");
+        trace!(sql = %sql, "sqlite query_rows");
         let conn = self
             .pool
             .get()
@@ -80,7 +89,7 @@ impl SqliteEngine {
         sql: String,
         params: Vec<FilterValue>,
     ) -> QueryResult<Option<T>> {
-        debug!(sql = %sql, "sqlite query_first_row");
+        trace!(sql = %sql, "sqlite query_first_row");
         let conn = self
             .pool
             .get()

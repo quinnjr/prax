@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::pool::PgPool;
 use crate::types::filter_value_to_sql;
@@ -54,7 +54,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_many");
+            trace!(sql = %sql, "Executing query_many");
 
             let conn = self
                 .pool
@@ -82,7 +82,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<T>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_one");
+            trace!(sql = %sql, "Executing query_one");
 
             let conn = self
                 .pool
@@ -113,7 +113,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<Option<T>>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing query_optional");
+            trace!(sql = %sql, "Executing query_optional");
 
             let conn = self
                 .pool
@@ -141,7 +141,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<T>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing insert");
+            trace!(sql = %sql, "Executing insert");
 
             let conn = self
                 .pool
@@ -169,7 +169,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing update");
+            trace!(sql = %sql, "Executing update");
 
             let conn = self
                 .pool
@@ -197,7 +197,7 @@ impl QueryEngine for PgEngine {
     ) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing delete");
+            trace!(sql = %sql, "Executing delete");
 
             let conn = self
                 .pool
@@ -221,7 +221,7 @@ impl QueryEngine for PgEngine {
     fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing raw SQL");
+            trace!(sql = %sql, "Executing raw SQL");
 
             let conn = self
                 .pool
@@ -245,7 +245,7 @@ impl QueryEngine for PgEngine {
     fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            debug!(sql = %sql, "Executing count");
+            trace!(sql = %sql, "Executing count");
 
             let conn = self
                 .pool

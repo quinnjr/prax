@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use rusqlite::types::Value;
 use serde_json::Value as JsonValue;
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, trace};
 
 use prax_query::filter::FilterValue;
 use prax_query::types::SortOrder;
@@ -235,7 +235,7 @@ impl SqliteRawEngine {
         offset: Option<u64>,
     ) -> Result<Vec<SqliteJsonRow>, SqliteError> {
         let (sql, params) = self.build_select(table, columns, filters, sort, limit, offset);
-        debug!(sql = %sql, "Executing query_many");
+        trace!(sql = %sql, "Executing query_many");
 
         let conn = self.pool.get().await?;
 
@@ -253,7 +253,7 @@ impl SqliteRawEngine {
         filters: &HashMap<String, FilterValue>,
     ) -> Result<SqliteJsonRow, SqliteError> {
         let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_one");
+        trace!(sql = %sql, "Executing query_one");
 
         let conn = self.pool.get().await?;
 
@@ -280,7 +280,7 @@ impl SqliteRawEngine {
         filters: &HashMap<String, FilterValue>,
     ) -> Result<Option<SqliteJsonRow>, SqliteError> {
         let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_optional");
+        trace!(sql = %sql, "Executing query_optional");
 
         let conn = self.pool.get().await?;
 
@@ -297,7 +297,7 @@ impl SqliteRawEngine {
         data: &HashMap<String, FilterValue>,
     ) -> Result<SqliteJsonRow, SqliteError> {
         let (sql, params) = self.build_insert(table, data);
-        debug!(sql = %sql, "Executing insert");
+        trace!(sql = %sql, "Executing insert");
 
         let conn = self.pool.get().await?;
 
@@ -326,7 +326,7 @@ impl SqliteRawEngine {
         filters: &HashMap<String, FilterValue>,
     ) -> Result<u64, SqliteError> {
         let (sql, params) = self.build_update(table, data, filters);
-        debug!(sql = %sql, "Executing update");
+        trace!(sql = %sql, "Executing update");
 
         let conn = self.pool.get().await?;
 
@@ -343,7 +343,7 @@ impl SqliteRawEngine {
         filters: &HashMap<String, FilterValue>,
     ) -> Result<u64, SqliteError> {
         let (sql, params) = self.build_delete(table, filters);
-        debug!(sql = %sql, "Executing delete");
+        trace!(sql = %sql, "Executing delete");
 
         let conn = self.pool.get().await?;
 
@@ -606,7 +606,7 @@ impl SqliteRawEngine {
             sql.push_str(&conditions.join(" AND "));
         }
 
-        debug!(sql = %sql, "Executing count");
+        trace!(sql = %sql, "Executing count");
 
         let conn = self.pool.get().await?;
 

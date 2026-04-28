@@ -55,6 +55,15 @@ impl MssqlEngine {
     }
 
     /// Decode a single row via the MssqlRowRef bridge.
+    ///
+    /// # Short-circuit on decode error
+    ///
+    /// When called via `.iter().map(Self::decode_row).collect()`, the
+    /// iterator short-circuits on the first decode error and discards
+    /// every successfully-decoded row before it. A row-level type
+    /// mismatch therefore aborts the whole batch rather than returning
+    /// partial results. Callers that want per-row recovery should
+    /// manually iterate and handle each result.
     fn decode_row<T: FromRow>(row: &tiberius::Row) -> prax_query::QueryResult<T> {
         let row_ref = MssqlRowRef::from_row(row)
             .map_err(|e| prax_query::QueryError::deserialization(e.to_string()))?;
