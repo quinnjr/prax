@@ -17,6 +17,7 @@ mod sealed {
     impl Sealed for super::Sqlite {}
     impl Sealed for super::Mysql {}
     impl Sealed for super::Mssql {}
+    impl Sealed for super::Cql {}
     impl Sealed for super::NotSql {}
 }
 
@@ -92,6 +93,16 @@ pub struct Mysql;
 /// require MERGE, which the engine post-processes; the upsert clause emits
 /// empty.
 pub struct Mssql;
+
+/// Cassandra Query Language dialect, used by `ScyllaEngine` and the
+/// Cassandra driver. CQL overlaps with SQL for the basic
+/// `SELECT/INSERT/UPDATE/DELETE ... WHERE` shapes the Client API emits,
+/// but diverges on many details: no `RETURNING`, no cross-partition
+/// joins, no traditional `ON CONFLICT` (use `IF NOT EXISTS` LWT
+/// instead), no transactions, and `?` positional placeholders only.
+/// The CQL dialect emits that subset safely; engine-level compensation
+/// covers the RETURNING gap the way MySQL does.
+pub struct Cql;
 
 /// Inert dialect for engines that do not emit SQL (document stores such as
 /// MongoDB). Every helper returns an empty or identity value. Calling these
@@ -193,6 +204,32 @@ impl SqlDialect for Mssql {
     }
     fn rollback_sql(&self) -> &'static str {
         "ROLLBACK TRANSACTION"
+    }
+}
+
+impl SqlDialect for Cql {
+    fn placeholder(&self, _i: usize) -> String {
+        "?".into()
+    }
+    fn returning_clause(&self, _cols: &str) -> String {
+        // CQL has no RETURNING; the Cassandra/Scylla engine issues a
+        // follow-up SELECT keyed on primary-key equality after every
+        // INSERT/UPDATE. See prax-scylladb's execute_insert for details.
+        String::new()
+    }
+    fn insert_has_returning(&self) -> bool {
+        false
+    }
+    fn quote_ident(&self, i: &str) -> String {
+        // CQL accepts double-quoted case-sensitive identifiers; without
+        // quoting, identifiers are lowercased.
+        format!("\"{}\"", i.replace('"', "\"\""))
+    }
+    fn upsert_clause(&self, _c: &[&str], _s: &str) -> String {
+        // CQL has no ON CONFLICT. An INSERT is effectively an upsert
+        // by default (last-write-wins). Callers that need strict
+        // insert-or-fail should append `IF NOT EXISTS` via raw SQL.
+        String::new()
     }
 }
 
