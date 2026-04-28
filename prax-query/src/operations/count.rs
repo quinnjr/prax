@@ -229,7 +229,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("active = $1"));
+        assert!(sql.contains(r#""active" = $1"#));
         assert_eq!(params.len(), 1);
     }
 

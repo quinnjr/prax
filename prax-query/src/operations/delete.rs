@@ -294,7 +294,7 @@ mod tests {
 
         assert!(sql.contains("DELETE FROM test_models"));
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("id = $1"));
+        assert!(sql.contains(r#""id" = $1"#));
         assert!(sql.contains("RETURNING *"));
         assert_eq!(params.len(), 1);
     }

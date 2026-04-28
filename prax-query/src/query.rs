@@ -193,7 +193,7 @@ mod tests {
         let op = qb.find_by_id(1i32);
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("id = $1"));
+        assert!(sql.contains(r#""id" = $1"#));
         assert_eq!(params.len(), 1);
     }
 }

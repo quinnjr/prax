@@ -564,7 +564,7 @@ mod tests {
         // SET params come first, then WHERE params
         assert!(sql.contains("field1 = $1"));
         assert!(sql.contains("field2 = $2"));
-        assert!(sql.contains("id = $3"));
+        assert!(sql.contains(r#""id" = $3"#));
         assert_eq!(params.len(), 3);
     }
 
@@ -577,7 +577,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("field1 = $1"));
-        assert!(sql.contains("id = $2"));
+        assert!(sql.contains(r#""id" = $2"#));
         assert_eq!(params.len(), 2);
     }
 

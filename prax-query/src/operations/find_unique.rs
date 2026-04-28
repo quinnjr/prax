@@ -215,7 +215,7 @@ mod tests {
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("id = $1"));
+        assert!(sql.contains(r#""id" = $1"#));
         assert!(sql.contains("LIMIT 1"));
         assert_eq!(params.len(), 1);
     }
@@ -231,7 +231,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("email = $1"));
+        assert!(sql.contains(r#""email" = $1"#));
         assert_eq!(params.len(), 1);
     }
 
