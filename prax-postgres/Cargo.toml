@@ -23,6 +23,8 @@ futures = { workspace = true }
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"] }
 deadpool-postgres = { version = "0.14", features = ["rt_tokio_1"] }
 postgres-types = { version = "0.2", features = ["derive"] }
+# bytes::BytesMut is the output buffer tokio-postgres' ToSql trait writes into.
+bytes = "1"
 
 # Serialization
 serde = { workspace = true }

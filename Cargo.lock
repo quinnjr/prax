@@ -4586,6 +4586,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
@@ -4645,6 +4646,7 @@ dependencies = [
 name = "prax-postgres"
 version = "0.7.3"
 dependencies = [
+ "bytes",
  "chrono",
  "deadpool-postgres",
  "futures",
