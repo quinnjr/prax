@@ -26,6 +26,14 @@ use std::time::Duration;
 
 use prax_cassandra::{CassandraConfig, CassandraPool};
 
+/// Skip e2e tests unless `PRAX_E2E=1` is set. CI builds with
+/// `--all-features --include-ignored` but doesn't stand up a Cassandra
+/// service, so these tests would otherwise stall on cdrs-tokio's
+/// no-timeout connection retry loop.
+fn e2e_enabled() -> bool {
+    std::env::var("PRAX_E2E").ok().as_deref() == Some("1")
+}
+
 fn cassandra_contact_point() -> (String, u16) {
     let url = std::env::var("CASSANDRA_URL")
         .unwrap_or_else(|_| "cassandra://localhost:9043/prax_test".into());
@@ -40,6 +48,9 @@ fn cassandra_contact_point() -> (String, u16) {
 #[tokio::test]
 #[ignore = "requires running Cassandra via docker-compose"]
 async fn e2e_pool_connect_succeeds() {
+    if !e2e_enabled() {
+        return;
+    }
     let (host, port) = cassandra_contact_point();
     let config = CassandraConfig::builder()
         .known_nodes([format!("{host}:{port}")])
@@ -61,6 +72,9 @@ async fn e2e_pool_connect_succeeds() {
 #[tokio::test]
 #[ignore = "requires running Cassandra via docker-compose"]
 async fn e2e_cluster_is_reachable() {
+    if !e2e_enabled() {
+        return;
+    }
     let (host, port) = cassandra_contact_point();
     let addrs: Vec<_> = format!("{host}:{port}")
         .to_socket_addrs()
