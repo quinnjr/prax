@@ -65,19 +65,13 @@ fn snapshot_cell(row: &CdrsRow, col: &str) -> Cell {
 }
 
 impl CassandraRowRef {
-    pub fn from_cdrs(row: &CdrsRow) -> Self {
-        // cdrs-tokio exposes column specs via the internal metadata
-        // but not through a public `col_names()` accessor. Fortunately
-        // every `IntoRustByName<T>` impl starts with a `contains_column`
-        // check, so we can probe a set of "known" column names — but
-        // there's no way to enumerate without touching private fields.
-        //
-        // The caller hands us a column-name list extracted from the
-        // query builder. See `CassandraPool::query` for where we pull
-        // the names off the row spec.
-        Self::from_cdrs_with_cols(row, &collect_col_names(row))
-    }
-
+    /// Snapshot a cdrs-tokio row into an owned column-keyed map.
+    ///
+    /// The caller must supply the full list of column names (cdrs-tokio
+    /// doesn't expose row metadata through a public enumerator, so the
+    /// engine pulls `T::COLUMNS` off the typed model and passes it in).
+    /// Any name not present on the row surfaces as
+    /// [`RowError::ColumnNotFound`] at access time.
     pub fn from_cdrs_with_cols(row: &CdrsRow, names: &[String]) -> Self {
         let mut cells = HashMap::with_capacity(names.len());
         for n in names {
@@ -85,18 +79,6 @@ impl CassandraRowRef {
         }
         Self { cells }
     }
-}
-
-/// Best-effort column-name enumeration. cdrs-tokio's Row doesn't
-/// publicly expose its column list, so we reflect through the Debug
-/// format of the RowsMetadata. Callers that need deterministic
-/// enumeration should use [`CassandraRowRef::from_cdrs_with_cols`]
-/// directly and pass the names explicitly.
-fn collect_col_names(_row: &CdrsRow) -> Vec<String> {
-    // Fallback: empty. The engine's query path pulls the column names
-    // from the prepared-statement metadata and uses
-    // `from_cdrs_with_cols` instead.
-    Vec::new()
 }
 
 impl RowRef for CassandraRowRef {
