@@ -25,18 +25,25 @@ use prax_pgvector::ops::{
 use prax_pgvector::query::{HybridSearchBuilder, VectorSearchBuilder};
 use prax_pgvector::{BinaryVector, DistanceMetric, Embedding, SparseEmbedding};
 
-/// Get the database connection string from environment or use the default for the
-/// running `pgvector-test` container.
-fn database_url() -> String {
-    env::var("DATABASE_URL").unwrap_or_else(|_| {
+/// Get the database connection string, skipping the test when `PRAX_E2E`
+/// isn't set. CI runs with `--all-features --include-ignored` but only
+/// stands up a postgres service without the separate pgvector-test
+/// container, so without this gate every test in this file would fail
+/// on ConnectionRefused.
+fn database_url() -> Option<String> {
+    if env::var("PRAX_E2E").ok().as_deref() != Some("1") {
+        return None;
+    }
+    Some(env::var("DATABASE_URL").unwrap_or_else(|_| {
         "host=localhost port=5434 user=postgres password=testpass dbname=prax_vector_test"
             .to_string()
-    })
+    }))
 }
 
-/// Connect to the test database.
-async fn connect() -> Client {
-    let (client, connection) = tokio_postgres::connect(&database_url(), NoTls)
+/// Connect to the test database, or return `None` if e2e is disabled.
+async fn connect() -> Option<Client> {
+    let url = database_url()?;
+    let (client, connection) = tokio_postgres::connect(&url, NoTls)
         .await
         .expect("failed to connect to pgvector test database");
 
@@ -46,7 +53,7 @@ async fn connect() -> Client {
         }
     });
 
-    client
+    Some(client)
 }
 
 // =============================================================================
@@ -56,7 +63,7 @@ async fn connect() -> Client {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_extension_is_installed() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let row = client
         .query_one(extension::check_extension_sql(), &[])
@@ -70,7 +77,7 @@ async fn test_extension_is_installed() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_extension_version() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let row = client
         .query_one(extension::version_sql(), &[])
@@ -93,7 +100,7 @@ async fn test_extension_version() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_insert_and_retrieve_dense_vector() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let embedding = Embedding::new(vec![0.5, 0.5, 0.5]);
     let pgvec: pgvector::Vector = embedding.clone().into();
@@ -132,7 +139,7 @@ async fn test_insert_and_retrieve_dense_vector() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_insert_and_retrieve_sparse_vector() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let sparse = SparseEmbedding::from_dense(vec![1.0, 0.0, 2.0, 0.0]);
     let pgvec: pgvector::SparseVector = sparse.clone().into();
@@ -171,7 +178,7 @@ async fn test_insert_and_retrieve_sparse_vector() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_insert_and_retrieve_binary_vector() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let bv = BinaryVector::from_bools(&[true, false, true, false, true, false, true, false]);
     let pgbit: pgvector::Bit = bv.clone().into();
@@ -217,7 +224,7 @@ async fn test_insert_and_retrieve_binary_vector() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_nearest_neighbor_l2() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // Query for vectors near [1.0, 0.0, 0.0] — should match "cat" first
     let query_vec = pgvector::Vector::from(vec![1.0, 0.0, 0.0]);
@@ -251,7 +258,7 @@ async fn test_nearest_neighbor_l2() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_nearest_neighbor_cosine() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_vec = pgvector::Vector::from(vec![0.1, 0.2, 0.3, 0.4]);
 
@@ -279,7 +286,7 @@ async fn test_nearest_neighbor_cosine() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_nearest_neighbor_inner_product() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_vec = pgvector::Vector::from(vec![0.5, 0.6, 0.7, 0.8]);
 
@@ -305,7 +312,7 @@ async fn test_nearest_neighbor_inner_product() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_radius_search() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_vec = pgvector::Vector::from(vec![1.0, 0.0, 0.0]);
 
@@ -341,7 +348,7 @@ async fn test_radius_search() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_ops_nearest_neighbor_sql_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let sql = nearest_neighbor_sql("embeddings", "embedding", DistanceMetric::L2, 1, 3, &[]);
     let query_vec = pgvector::Vector::from(vec![1.0, 0.0, 0.0]);
@@ -357,7 +364,7 @@ async fn test_ops_nearest_neighbor_sql_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_ops_radius_search_sql_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let sql = radius_search_sql(
         "embeddings",
@@ -383,7 +390,7 @@ async fn test_ops_radius_search_sql_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_distance_param_sql_in_query() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let distance_expr = distance_param_sql("embedding", "$1", DistanceMetric::Cosine);
     let sql = format!(
@@ -414,7 +421,7 @@ async fn test_distance_param_sql_in_query() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_search_params_set_commands() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let params = SearchParams::new().ef_search(100).probes(5);
 
@@ -448,7 +455,7 @@ async fn test_search_params_set_commands() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_basic() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let search = VectorSearchBuilder::new("embeddings", "embedding")
@@ -475,7 +482,7 @@ async fn test_vector_search_builder_basic() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_with_select() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let search = VectorSearchBuilder::new("embeddings", "embedding")
@@ -503,7 +510,7 @@ async fn test_vector_search_builder_with_select() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_with_where() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let search = VectorSearchBuilder::new("embeddings", "embedding")
@@ -531,7 +538,7 @@ async fn test_vector_search_builder_with_where() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_max_distance() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let search = VectorSearchBuilder::new("embeddings", "embedding")
@@ -561,7 +568,7 @@ async fn test_vector_search_builder_max_distance() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_pagination() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
 
@@ -611,7 +618,7 @@ async fn test_vector_search_builder_pagination() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_all_metrics() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let metrics = [
         DistanceMetric::L2,
@@ -646,7 +653,7 @@ async fn test_vector_search_builder_all_metrics() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_search_builder_with_ef_search() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let search = VectorSearchBuilder::new("embeddings", "embedding")
@@ -678,7 +685,7 @@ async fn test_vector_search_builder_with_ef_search() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_filter_nearest_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![0.0, 1.0, 0.0]);
     let filter = VectorFilter::nearest("embedding", query_embedding.clone(), DistanceMetric::L2, 2);
@@ -701,7 +708,7 @@ async fn test_vector_filter_nearest_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_filter_within_distance_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let filter = VectorFilter::within_distance(
@@ -729,7 +736,7 @@ async fn test_vector_filter_within_distance_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_filter_with_extra_where() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![1.0, 0.0, 0.0]);
     let filter = VectorFilter::nearest("embedding", query_embedding.clone(), DistanceMetric::L2, 5);
@@ -755,7 +762,7 @@ async fn test_vector_filter_with_extra_where() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_vector_order_by_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![0.0, 0.0, 1.0]);
     let order = VectorOrderBy::new("embedding", query_embedding.clone(), DistanceMetric::L2);
@@ -797,7 +804,7 @@ async fn test_vector_order_by_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_create_and_drop_hnsw_index() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let index = VectorIndex::hnsw("idx_test_hnsw_integration", "embeddings", "embedding")
         .metric(DistanceMetric::Cosine)
@@ -849,7 +856,7 @@ async fn test_create_and_drop_hnsw_index() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_create_and_drop_ivfflat_index() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let index = VectorIndex::ivfflat("idx_test_ivfflat_integration", "embeddings", "embedding")
         .metric(DistanceMetric::L2)
@@ -885,7 +892,7 @@ async fn test_create_and_drop_ivfflat_index() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_index_with_all_metrics() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let metrics = [
         DistanceMetric::L2,
@@ -925,7 +932,7 @@ async fn test_index_with_all_metrics() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_add_vector_column() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // Create a temporary table
     client
@@ -969,7 +976,7 @@ async fn test_add_vector_column() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_hybrid_search_execution() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let query_embedding = Embedding::new(vec![0.1, 0.2, 0.3, 0.4]);
     let search = HybridSearchBuilder::new("documents")
@@ -1004,7 +1011,7 @@ async fn test_hybrid_search_execution() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_dimension_mismatch_error() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // embeddings table has vector(3) — inserting a 4-dim vector should fail
     let wrong_dim = pgvector::Vector::from(vec![1.0, 2.0, 3.0, 4.0]);
@@ -1025,7 +1032,7 @@ async fn test_dimension_mismatch_error() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_null_vector_handling() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // Insert a document with NULL embedding
     client
@@ -1063,7 +1070,7 @@ async fn test_null_vector_handling() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_empty_result_set() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // Use a very restrictive radius that no vector can match
     let query_vec = pgvector::Vector::from(vec![1.0, 0.0, 0.0]);
@@ -1086,7 +1093,7 @@ async fn test_empty_result_set() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_local_l2_distance_matches_postgres() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let a = Embedding::new(vec![1.0, 2.0, 3.0]);
     let b = Embedding::new(vec![4.0, 5.0, 6.0]);
@@ -1117,7 +1124,7 @@ async fn test_local_l2_distance_matches_postgres() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_local_cosine_distance_matches_postgres() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let a = Embedding::new(vec![1.0, 2.0, 3.0]);
     let b = Embedding::new(vec![4.0, 5.0, 6.0]);
@@ -1149,7 +1156,7 @@ async fn test_local_cosine_distance_matches_postgres() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_local_inner_product_matches_postgres() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     let a = Embedding::new(vec![1.0, 2.0, 3.0]);
     let b = Embedding::new(vec![4.0, 5.0, 6.0]);
@@ -1184,7 +1191,7 @@ async fn test_local_inner_product_matches_postgres() {
 #[tokio::test]
 #[ignore = "requires PostgreSQL with pgvector"]
 async fn test_batch_insert_and_search() {
-    let client = connect().await;
+    let Some(client) = connect().await else { return; };
 
     // Create a temporary table
     client
