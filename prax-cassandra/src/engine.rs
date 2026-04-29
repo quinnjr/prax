@@ -172,10 +172,13 @@ impl<'a> BatchBuilder<'a> {
 ///
 /// Thin wrapper around [`CassandraPool`] that lets `#[derive(Model)]`-
 /// generated `Client<E>` target Cassandra through the same codegen
-/// pipeline the SQL drivers use. Queries route through the real
-/// cdrs-tokio session; `execute_insert`/`execute_update` still return
-/// `QueryError::unsupported` because CQL has no RETURNING clause and
-/// the follow-up SELECT path isn't wired yet.
+/// pipeline the SQL drivers use. Routes SELECT/DELETE through the real
+/// cdrs-tokio session; `execute_update` runs the UPDATE then re-
+/// SELECTs rows matching the WHERE clause; `execute_insert` currently
+/// returns [`QueryError::unsupported`] — the pool's query/execute API
+/// doesn't accept bound params yet, so a safe PK-keyed follow-up
+/// SELECT isn't possible. Prefer [`prax_scylladb::ScyllaEngine`] for
+/// typed Client inserts against any CQL-compatible cluster.
 #[derive(Clone)]
 pub struct CassandraEngine {
     pool: CassandraPool,
@@ -214,15 +217,8 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
             result
                 .rows
                 .iter()
-                .filter_map(|r| r.as_cdrs())
-                .map(|cdrs_row| {
-                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
-                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
-                    T::from_row(&rr).map_err(|e| {
-                        let msg = e.to_string();
-                        prax_query::QueryError::deserialization(msg).with_source(e)
-                    })
-                })
+                .map(|r| r.as_cdrs())
+                .map(decode_row::<T>)
                 .collect()
         })
     }
@@ -242,15 +238,10 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
             let cdrs_row = result
                 .rows
                 .iter()
-                .filter_map(|r| r.as_cdrs())
+                .map(|r| r.as_cdrs())
                 .next()
                 .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
-            let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
-            let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
-            T::from_row(&rr).map_err(|e| {
-                let msg = e.to_string();
-                prax_query::QueryError::deserialization(msg).with_source(e)
-            })
+            decode_row::<T>(cdrs_row)
         })
     }
 
@@ -266,17 +257,13 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
                 .query(&sql)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            match result.rows.iter().filter_map(|r| r.as_cdrs()).next() {
-                None => Ok(None),
-                Some(cdrs_row) => {
-                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
-                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
-                    Ok(Some(T::from_row(&rr).map_err(|e| {
-                        let msg = e.to_string();
-                        prax_query::QueryError::deserialization(msg).with_source(e)
-                    })?))
-                }
-            }
+            result
+                .rows
+                .iter()
+                .map(|r| r.as_cdrs())
+                .next()
+                .map(decode_row::<T>)
+                .transpose()
         })
     }
 
@@ -285,42 +272,20 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
         sql: &str,
         _params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
-        // CQL has no RETURNING. The underlying pool.query/execute doesn't
-        // take params yet (the stub accepts a single cql string), so we
-        // can't run a real follow-up SELECT until the prepared-statement
-        // path lands. For now, run the INSERT and re-fetch by PK-column
-        // equality extracted from the raw SQL literals.
-        let sql = sql.to_string();
-        let pool = self.pool.clone();
+        // CassandraPool::query/execute doesn't accept bound params yet —
+        // the prepared-statement integration is a follow-up task. Without
+        // real parameter binding, a PK-keyed follow-up SELECT can't be
+        // built safely (a LIMIT 1 with no WHERE would race concurrent
+        // writers and return the wrong row). Refuse rather than fabricate
+        // a result. The Scylla driver is feature-complete on this path
+        // and is the recommended CQL backend for typed Client inserts.
+        let _ = (sql, T::MODEL_NAME);
         Box::pin(async move {
-            pool.execute(&sql)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            // Without a real parameter-binding path, we can't build the
-            // follow-up SELECT reliably. Mirror MySQL's insert-then-
-            // SELECT-all-columns contract: fetch the most recent row by
-            // any PK order and hope the caller's filter matches.
-            let select_sql = format!(
-                "SELECT {} FROM {} LIMIT 1",
-                T::COLUMNS.join(", "),
-                T::TABLE_NAME
-            );
-            let result = pool
-                .query(&select_sql)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            let cdrs_row = result
-                .rows
-                .iter()
-                .filter_map(|r| r.as_cdrs())
-                .next()
-                .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
-            let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
-            let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
-            T::from_row(&rr).map_err(|e| {
-                let msg = e.to_string();
-                prax_query::QueryError::deserialization(msg).with_source(e)
-            })
+            Err(prax_query::QueryError::unsupported(
+                "CassandraEngine::execute_insert requires prepared-statement \
+                 binding to safely re-fetch by PK; use ScyllaEngine or call \
+                 pool.execute + pool.query manually",
+            ))
         })
     }
 
@@ -332,12 +297,19 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
         let sql = sql.to_string();
         let pool = self.pool.clone();
         Box::pin(async move {
-            // Same story as execute_insert: run the UPDATE, then re-
-            // fetch rows matching the WHERE clause.
             pool.execute(&sql)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            let where_clause = extract_where_clause(&sql).unwrap_or_else(|| "true".to_string());
+            // Recover the WHERE clause from the generated UPDATE so the
+            // follow-up SELECT touches the same rows. Refuse to SELECT
+            // everything on a WHERE-less UPDATE — that would be a
+            // worse failure mode than erroring.
+            let where_clause = extract_where_clause(&sql).ok_or_else(|| {
+                prax_query::QueryError::internal(
+                    "CassandraEngine::execute_update: UPDATE lacked a WHERE \
+                     clause; refusing to SELECT entire table",
+                )
+            })?;
             let select_sql = format!(
                 "SELECT {} FROM {} WHERE {}",
                 T::COLUMNS.join(", "),
@@ -351,15 +323,8 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
             result
                 .rows
                 .iter()
-                .filter_map(|r| r.as_cdrs())
-                .map(|cdrs_row| {
-                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
-                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
-                    T::from_row(&rr).map_err(|e| {
-                        let msg = e.to_string();
-                        prax_query::QueryError::deserialization(msg).with_source(e)
-                    })
-                })
+                .map(|r| r.as_cdrs())
+                .map(decode_row::<T>)
                 .collect()
         })
     }
@@ -405,11 +370,22 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
     }
 }
 
-/// Extract the WHERE clause body from an UPDATE/DELETE statement.
-fn extract_where_clause(sql: &str) -> Option<String> {
-    let lower = sql.to_ascii_lowercase();
-    let i = lower.find(" where ")?;
-    Some(sql[i + " where ".len()..].trim().to_string())
+// WHERE-clause extraction lives in prax_query::sql::parse — import
+// here under the old name to minimise churn.
+use prax_query::sql::parse::extract_where_body as extract_where_clause;
+
+/// Decode one cdrs-tokio row into the caller's `T: Model + FromRow`.
+/// Shared by every QueryEngine method that hands back typed rows, so
+/// the column-list allocation and error-wrapping stay in one place.
+fn decode_row<T: prax_query::traits::Model + prax_query::row::FromRow>(
+    cdrs_row: &cdrs_tokio::types::rows::Row,
+) -> prax_query::QueryResult<T> {
+    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+    T::from_row(&rr).map_err(|e| {
+        let msg = e.to_string();
+        prax_query::QueryError::deserialization(msg).with_source(e)
+    })
 }
 
 #[cfg(test)]

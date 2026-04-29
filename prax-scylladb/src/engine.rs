@@ -3,8 +3,6 @@
 //! Provides high-level operations for interacting with ScyllaDB.
 
 use scylla::batch::Batch;
-#[allow(unused_imports)]
-use scylla::frame::response::result::Row;
 use scylla::query::Query;
 use scylla::serialize::batch::BatchValues;
 use scylla::serialize::row::SerializeRow;
@@ -684,40 +682,14 @@ impl<T> std::fmt::Debug for TableQuery<T> {
     }
 }
 
-/// Parse `INSERT INTO tbl (col1, col2, ...) VALUES ...` and return the
-/// column names in declaration order. Returns `None` if the SQL isn't
-/// an INSERT or the column list is malformed.
-fn parse_insert_columns(sql: &str) -> Option<Vec<String>> {
-    let open = sql.find('(')?;
-    let close = sql[open..].find(')').map(|i| open + i)?;
-    let body = &sql[open + 1..close];
-    Some(
-        body.split(',')
-            .map(|c| c.trim().to_string())
-            .filter(|c| !c.is_empty())
-            .collect(),
-    )
-}
-
-/// Extract the WHERE clause body from an UPDATE statement.
-fn extract_update_where(sql: &str) -> Option<String> {
-    let lower = sql.to_ascii_lowercase();
-    let i = lower.find(" where ")?;
-    Some(sql[i + " where ".len()..].trim().to_string())
-}
-
-/// Count the `?` placeholders inside an UPDATE statement's SET clause
-/// (i.e., before the WHERE keyword). Used to split the bound params
-/// between SET values and WHERE values.
-fn count_set_placeholders(sql: &str) -> Option<usize> {
-    let lower = sql.to_ascii_lowercase();
-    let set_start = lower.find(" set ")?;
-    let where_start = lower[set_start..]
-        .find(" where ")
-        .map(|i| set_start + i)
-        .unwrap_or(sql.len());
-    Some(sql[set_start..where_start].matches('?').count())
-}
+// SQL-string-parsing helpers live in prax_query::sql::parse — this
+// driver re-exports them under their old names for backwards
+// compatibility with earlier commits. New call sites inside the
+// driver use the shared path directly.
+use prax_query::sql::parse::{
+    count_set_placeholders, extract_insert_columns as parse_insert_columns,
+    extract_where_body as extract_update_where,
+};
 
 #[cfg(test)]
 mod tests {
