@@ -26,32 +26,31 @@ use std::time::Duration;
 
 use prax_cassandra::{CassandraConfig, CassandraPool};
 
-/// Skip e2e tests unless `PRAX_E2E=1` is set. CI builds with
-/// `--all-features --include-ignored` but doesn't stand up a Cassandra
-/// service, so these tests would otherwise stall on cdrs-tokio's
-/// no-timeout connection retry loop.
-fn e2e_enabled() -> bool {
-    std::env::var("PRAX_E2E").ok().as_deref() == Some("1")
-}
-
-fn cassandra_contact_point() -> (String, u16) {
-    let url = std::env::var("CASSANDRA_URL")
-        .unwrap_or_else(|_| "cassandra://localhost:9043/prax_test".into());
+/// Return the contact point only when e2e is explicitly enabled AND a
+/// URL is supplied. CI sets `PRAX_E2E=1` for the postgres/mysql/mssql
+/// suites but does NOT start a Cassandra service; without this gate,
+/// the tests would fall through to a default `localhost:9043` and
+/// stall on cdrs-tokio's no-timeout connection retry loop. The
+/// docker-compose `test-cassandra` runner supplies both env vars.
+fn cassandra_contact_point() -> Option<(String, u16)> {
+    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
+        return None;
+    }
+    let url = std::env::var("CASSANDRA_URL").ok()?;
     let rest = url
         .strip_prefix("cassandra://")
         .expect("CASSANDRA_URL must start with cassandra://");
     let (host_port, _keyspace) = rest.split_once('/').unwrap_or((rest, "prax_test"));
     let (host, port) = host_port.split_once(':').unwrap_or((host_port, "9042"));
-    (host.to_string(), port.parse().expect("valid port"))
+    Some((host.to_string(), port.parse().expect("valid port")))
 }
 
 #[tokio::test]
 #[ignore = "requires running Cassandra via docker-compose"]
 async fn e2e_pool_connect_succeeds() {
-    if !e2e_enabled() {
+    let Some((host, port)) = cassandra_contact_point() else {
         return;
-    }
-    let (host, port) = cassandra_contact_point();
+    };
     let config = CassandraConfig::builder()
         .known_nodes([format!("{host}:{port}")])
         .build();
@@ -72,10 +71,9 @@ async fn e2e_pool_connect_succeeds() {
 #[tokio::test]
 #[ignore = "requires running Cassandra via docker-compose"]
 async fn e2e_cluster_is_reachable() {
-    if !e2e_enabled() {
+    let Some((host, port)) = cassandra_contact_point() else {
         return;
-    }
-    let (host, port) = cassandra_contact_point();
+    };
     let addrs: Vec<_> = format!("{host}:{port}")
         .to_socket_addrs()
         .expect("resolve")
