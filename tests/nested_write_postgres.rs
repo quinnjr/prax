@@ -21,12 +21,24 @@
 
 #![cfg(test)]
 
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use prax_orm::{Model, PraxClient, client};
 use prax_postgres::{PgEngine, PgPool, PgPoolBuilder};
 use prax_query::error::QueryResult;
 use prax_query::filter::FilterValue;
+
+/// Serialize tests inside this file — both tests mutate the shared
+/// `nested_{users,posts}` tables and run in parallel by default, so
+/// one test's TRUNCATE in setup can wipe out another test's in-flight
+/// state. A process-wide mutex guarantees they run one at a time.
+fn test_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
 
 /// Child model with FK back to the parent. `Clone` is required for
 /// `.include()` round-trips; we don't use include() here but keep the
@@ -107,6 +119,7 @@ async fn setup() -> Option<PraxClient<PgEngine>> {
 #[tokio::test]
 #[ignore = "requires docker-compose postgres (PRAX_E2E=1)"]
 async fn create_user_with_nested_posts() {
+    let _guard = test_lock();
     let Some(c) = setup().await else {
         eprintln!("skipping: PRAX_E2E not set");
         return;
@@ -147,6 +160,7 @@ async fn create_user_with_nested_posts() {
 #[tokio::test]
 #[ignore = "requires docker-compose postgres (PRAX_E2E=1)"]
 async fn nested_write_failure_rolls_back_parent() {
+    let _guard = test_lock();
     let Some(c) = setup().await else {
         eprintln!("skipping: PRAX_E2E not set");
         return;
