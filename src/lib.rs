@@ -225,7 +225,7 @@
 //!
 //! ### Filter Operations
 //!
-//! ```rust,ignore
+//! ```text
 //! // Equality
 //! user::email::equals("test@example.com")
 //!

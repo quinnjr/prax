@@ -102,7 +102,7 @@
 //!
 //! Custom validators can be registered and referenced by name:
 //!
-//! ```rust,ignore
+//! ```text
 //! // Register custom validator
 //! validation::register_custom("strongPassword", |value: &str| {
 //!     // Must have uppercase, lowercase, number, and special char

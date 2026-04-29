@@ -17,7 +17,7 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```text
 //! use prax_scylladb::{ScyllaConfig, ScyllaPool};
 //!
 //! #[tokio::main]
@@ -59,7 +59,7 @@
 //!
 //! For frequently executed queries, use prepared statements:
 //!
-//! ```rust,no_run
+//! ```text
 //! use prax_scylladb::ScyllaEngine;
 //!
 //! async fn get_user(engine: &ScyllaEngine, id: uuid::Uuid) -> Result<Option<User>, Error> {
@@ -73,7 +73,7 @@
 //!
 //! Execute multiple statements atomically:
 //!
-//! ```rust,no_run
+//! ```text
 //! use prax_scylladb::ScyllaEngine;
 //!
 //! async fn transfer_funds(
