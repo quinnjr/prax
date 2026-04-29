@@ -375,18 +375,61 @@ impl prax_query::traits::QueryEngine for ScyllaEngine {
         sql: &str,
         params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
-        // CQL has no `RETURNING`; the dialect emits an empty clause.
-        // `execute_insert` is unreachable for Scylla through the typed
-        // Client path today (`insert_has_returning()` is false so the
-        // operation layer would have to compensate with a follow-up
-        // SELECT — not yet implemented). Surface a clear error so the
-        // intent isn't silently discarded.
-        let _ = (sql, params);
+        let sql = sql.to_string();
         Box::pin(async move {
-            Err(prax_query::QueryError::unsupported(
-                "ScyllaEngine::execute_insert: CQL has no RETURNING; \
-                 use `insert()` + a follow-up `query_one()` keyed on the PK",
-            ))
+            // CQL has no RETURNING. Run the INSERT, then issue a
+            // follow-up SELECT keyed on the PK columns extracted from
+            // the bound params. The codegen passes the columns in the
+            // same order as T::COLUMNS, so we can find the PK values
+            // by position.
+            self.fetch_affected(&sql, &params).await?;
+
+            // Extract the PK columns from COLUMNS by name match.
+            let pk_columns = T::PRIMARY_KEY;
+            if pk_columns.is_empty() {
+                return Err(prax_query::QueryError::unsupported(
+                    "ScyllaEngine::execute_insert requires Model::PRIMARY_KEY to be non-empty",
+                ));
+            }
+
+            // Parse `INSERT INTO t (col1, col2, ...) VALUES (...)` to
+            // recover the column→param index mapping. Fail loudly if
+            // we can't locate the column list — callers that bypass
+            // the generic builder get a clean error.
+            let insert_cols = parse_insert_columns(&sql).ok_or_else(|| {
+                prax_query::QueryError::internal(
+                    "ScyllaEngine::execute_insert: could not parse INSERT column list",
+                )
+            })?;
+
+            // Build WHERE clause using the PK column positions.
+            let mut where_parts = Vec::with_capacity(pk_columns.len());
+            let mut where_params = Vec::with_capacity(pk_columns.len());
+            for pk in pk_columns {
+                let idx = insert_cols.iter().position(|c| c == pk).ok_or_else(|| {
+                    prax_query::QueryError::internal(format!(
+                        "ScyllaEngine::execute_insert: PK column {pk} not in INSERT list"
+                    ))
+                })?;
+                where_parts.push(format!("{} = ?", pk));
+                where_params.push(params.get(idx).cloned().ok_or_else(|| {
+                    prax_query::QueryError::internal(
+                        "ScyllaEngine::execute_insert: param index out of range",
+                    )
+                })?);
+            }
+            let select_sql = format!(
+                "SELECT {} FROM {} WHERE {}",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME,
+                where_parts.join(" AND "),
+            );
+            let mut rows = self.fetch_typed::<T>(&select_sql, &where_params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
         })
     }
 
@@ -395,12 +438,30 @@ impl prax_query::traits::QueryEngine for ScyllaEngine {
         sql: &str,
         params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
-        let _ = (sql, params);
+        let sql = sql.to_string();
         Box::pin(async move {
-            Err(prax_query::QueryError::unsupported(
-                "ScyllaEngine::execute_update: CQL has no RETURNING; \
-                 use raw execute and a follow-up SELECT",
-            ))
+            // Run the UPDATE, then re-SELECT rows that match the WHERE
+            // clause. The WHERE is extracted from the generated SQL so
+            // the follow-up SELECT sees the same filter.
+            self.fetch_affected(&sql, &params).await?;
+
+            let where_clause = extract_update_where(&sql).ok_or_else(|| {
+                prax_query::QueryError::internal(
+                    "ScyllaEngine::execute_update: could not parse WHERE clause",
+                )
+            })?;
+            // The WHERE params are the tail of `params` — the UPDATE
+            // SET clause consumes the head. Count the SET placeholders
+            // to find the split point.
+            let set_count = count_set_placeholders(&sql).unwrap_or(0);
+            let where_params: Vec<_> = params.into_iter().skip(set_count).collect();
+            let select_sql = format!(
+                "SELECT {} FROM {} WHERE {}",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME,
+                where_clause,
+            );
+            self.fetch_typed::<T>(&select_sql, &where_params).await
         })
     }
 
@@ -621,6 +682,41 @@ impl<T> std::fmt::Debug for TableQuery<T> {
             .field("table", &self.table)
             .finish()
     }
+}
+
+/// Parse `INSERT INTO tbl (col1, col2, ...) VALUES ...` and return the
+/// column names in declaration order. Returns `None` if the SQL isn't
+/// an INSERT or the column list is malformed.
+fn parse_insert_columns(sql: &str) -> Option<Vec<String>> {
+    let open = sql.find('(')?;
+    let close = sql[open..].find(')').map(|i| open + i)?;
+    let body = &sql[open + 1..close];
+    Some(
+        body.split(',')
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect(),
+    )
+}
+
+/// Extract the WHERE clause body from an UPDATE statement.
+fn extract_update_where(sql: &str) -> Option<String> {
+    let lower = sql.to_ascii_lowercase();
+    let i = lower.find(" where ")?;
+    Some(sql[i + " where ".len()..].trim().to_string())
+}
+
+/// Count the `?` placeholders inside an UPDATE statement's SET clause
+/// (i.e., before the WHERE keyword). Used to split the bound params
+/// between SET values and WHERE values.
+fn count_set_placeholders(sql: &str) -> Option<usize> {
+    let lower = sql.to_ascii_lowercase();
+    let set_start = lower.find(" set ")?;
+    let where_start = lower[set_start..]
+        .find(" where ")
+        .map(|i| set_start + i)
+        .unwrap_or(sql.len());
+    Some(sql[set_start..where_start].matches('?').count())
 }
 
 #[cfg(test)]
