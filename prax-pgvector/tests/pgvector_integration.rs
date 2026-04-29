@@ -25,19 +25,18 @@ use prax_pgvector::ops::{
 use prax_pgvector::query::{HybridSearchBuilder, VectorSearchBuilder};
 use prax_pgvector::{BinaryVector, DistanceMetric, Embedding, SparseEmbedding};
 
-/// Get the database connection string, skipping the test when `PRAX_E2E`
-/// isn't set. CI runs with `--all-features --include-ignored` but only
-/// stands up a postgres service without the separate pgvector-test
-/// container, so without this gate every test in this file would fail
-/// on ConnectionRefused.
+/// Get the database connection string, returning `None` when the
+/// dedicated pgvector test container isn't available.
+///
+/// These tests target a different postgres instance from the main
+/// CI/e2e suite — one that has the `embeddings`/`documents`/
+/// `binary_features` schema pre-created by the docker-compose
+/// `pgvector-test` service. The GitHub Actions CI job uses
+/// `pgvector/pgvector:pg16` as its normal test postgres (on port
+/// 5432) but never creates that schema, so we gate on `DATABASE_URL`
+/// being explicitly set: the compose runner exports it, CI does not.
 fn database_url() -> Option<String> {
-    if env::var("PRAX_E2E").ok().as_deref() != Some("1") {
-        return None;
-    }
-    Some(env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "host=localhost port=5434 user=postgres password=testpass dbname=prax_vector_test"
-            .to_string()
-    }))
+    env::var("DATABASE_URL").ok()
 }
 
 /// Connect to the test database, or return `None` if e2e is disabled.
