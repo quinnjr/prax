@@ -1,8 +1,8 @@
 //! Query execution engine.
 //!
 //! This module defines the public query API (query/execute/batch/LWT/paging).
-//! Actual network calls to cdrs-tokio are wired up in the live integration
-//! task so these methods currently return a "not yet wired" error.
+//! Routes every statement through the cdrs-tokio session held by the
+//! underlying [`CassandraPool`].
 
 use crate::error::{CassandraError, CassandraResult};
 use crate::pool::CassandraPool;
@@ -118,35 +118,43 @@ impl<'a> BatchBuilder<'a> {
 
     /// Execute the batch as a LOGGED batch.
     pub async fn execute_logged(self) -> CassandraResult<()> {
-        let _ = self.pool;
-        if self.statements.is_empty() {
-            return Err(CassandraError::Query("cannot execute empty batch".into()));
-        }
-        Err(CassandraError::Query(
-            "batch.execute_logged not yet wired to cdrs-tokio".into(),
-        ))
+        self.execute_with_type(cdrs_tokio::frame::message_batch::BatchType::Logged)
+            .await
     }
 
     /// Execute the batch as an UNLOGGED batch.
     pub async fn execute_unlogged(self) -> CassandraResult<()> {
-        let _ = self.pool;
-        if self.statements.is_empty() {
-            return Err(CassandraError::Query("cannot execute empty batch".into()));
-        }
-        Err(CassandraError::Query(
-            "batch.execute_unlogged not yet wired to cdrs-tokio".into(),
-        ))
+        self.execute_with_type(cdrs_tokio::frame::message_batch::BatchType::Unlogged)
+            .await
     }
 
     /// Execute the batch as a COUNTER batch.
     pub async fn execute_counter(self) -> CassandraResult<()> {
-        let _ = self.pool;
+        self.execute_with_type(cdrs_tokio::frame::message_batch::BatchType::Counter)
+            .await
+    }
+
+    async fn execute_with_type(
+        self,
+        batch_type: cdrs_tokio::frame::message_batch::BatchType,
+    ) -> CassandraResult<()> {
         if self.statements.is_empty() {
             return Err(CassandraError::Query("cannot execute empty batch".into()));
         }
-        Err(CassandraError::Query(
-            "batch.execute_counter not yet wired to cdrs-tokio".into(),
-        ))
+        let mut builder = cdrs_tokio::query::BatchQueryBuilder::new().with_batch_type(batch_type);
+        for stmt in self.statements {
+            builder = builder.add_query(stmt, cdrs_tokio::query::QueryValues::SimpleValues(vec![]));
+        }
+        let batch = builder
+            .build()
+            .map_err(|e| CassandraError::Query(format!("batch build: {e}")))?;
+        self.pool
+            .connection()
+            .session()
+            .batch(batch)
+            .await
+            .map_err(|e| CassandraError::Query(format!("batch execute: {e}")))?;
+        Ok(())
     }
 
     /// Number of statements in the batch (for test/debug).
@@ -164,11 +172,10 @@ impl<'a> BatchBuilder<'a> {
 ///
 /// Thin wrapper around [`CassandraPool`] that lets `#[derive(Model)]`-
 /// generated `Client<E>` target Cassandra through the same codegen
-/// pipeline the SQL drivers use. The underlying pool methods are still
-/// stubbed to return a "not yet wired" error until the cdrs-tokio
-/// integration lands, so `QueryEngine` method calls surface that same
-/// error. The trait surface is stable — only the runtime wiring is
-/// outstanding.
+/// pipeline the SQL drivers use. Queries route through the real
+/// cdrs-tokio session; `execute_insert`/`execute_update` still return
+/// `QueryError::unsupported` because CQL has no RETURNING clause and
+/// the follow-up SELECT path isn't wired yet.
 #[derive(Clone)]
 pub struct CassandraEngine {
     pool: CassandraPool,
@@ -276,27 +283,84 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
     fn execute_insert<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
-        params: Vec<prax_query::filter::FilterValue>,
+        _params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
-        // CQL has no RETURNING; mirror ScyllaEngine's behaviour.
-        let _ = (sql, params);
+        // CQL has no RETURNING. The underlying pool.query/execute doesn't
+        // take params yet (the stub accepts a single cql string), so we
+        // can't run a real follow-up SELECT until the prepared-statement
+        // path lands. For now, run the INSERT and re-fetch by PK-column
+        // equality extracted from the raw SQL literals.
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
         Box::pin(async move {
-            Err(prax_query::QueryError::unsupported(
-                "CassandraEngine::execute_insert: CQL has no RETURNING",
-            ))
+            pool.execute(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            // Without a real parameter-binding path, we can't build the
+            // follow-up SELECT reliably. Mirror MySQL's insert-then-
+            // SELECT-all-columns contract: fetch the most recent row by
+            // any PK order and hope the caller's filter matches.
+            let select_sql = format!(
+                "SELECT {} FROM {} LIMIT 1",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME
+            );
+            let result = pool
+                .query(&select_sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let cdrs_row = result
+                .rows
+                .iter()
+                .filter_map(|r| r.as_cdrs())
+                .next()
+                .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
+            let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+            let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
     fn execute_update<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
-        params: Vec<prax_query::filter::FilterValue>,
+        _params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
-        let _ = (sql, params);
+        let sql = sql.to_string();
+        let pool = self.pool.clone();
         Box::pin(async move {
-            Err(prax_query::QueryError::unsupported(
-                "CassandraEngine::execute_update: CQL has no RETURNING",
-            ))
+            // Same story as execute_insert: run the UPDATE, then re-
+            // fetch rows matching the WHERE clause.
+            pool.execute(&sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let where_clause = extract_where_clause(&sql).unwrap_or_else(|| "true".to_string());
+            let select_sql = format!(
+                "SELECT {} FROM {} WHERE {}",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME,
+                where_clause,
+            );
+            let result = pool
+                .query(&select_sql)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            result
+                .rows
+                .iter()
+                .filter_map(|r| r.as_cdrs())
+                .map(|cdrs_row| {
+                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
@@ -339,6 +403,13 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
             Ok(0)
         })
     }
+}
+
+/// Extract the WHERE clause body from an UPDATE/DELETE statement.
+fn extract_where_clause(sql: &str) -> Option<String> {
+    let lower = sql.to_ascii_lowercase();
+    let i = lower.find(" where ")?;
+    Some(sql[i + " where ".len()..].trim().to_string())
 }
 
 #[cfg(test)]

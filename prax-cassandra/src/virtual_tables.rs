@@ -25,23 +25,110 @@ impl<'a> VirtualTables<'a> {
 
     /// Query `system.local` for cluster information.
     pub async fn cluster_info(&self) -> CassandraResult<ClusterInfo> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::cluster_info not yet wired".into(),
-        ))
+        use cdrs_tokio::types::ByName;
+        let result = self
+            .pool
+            .query("SELECT cluster_name, partitioner, release_version FROM system.local")
+            .await?;
+        let cdrs_row = result
+            .rows
+            .iter()
+            .filter_map(|r| r.as_cdrs())
+            .next()
+            .ok_or_else(|| {
+                crate::error::CassandraError::Query("system.local returned no row".into())
+            })?;
+        Ok(ClusterInfo {
+            cluster_name: cdrs_row
+                .by_name::<String>("cluster_name")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default(),
+            partitioner: cdrs_row
+                .by_name::<String>("partitioner")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default(),
+            release_version: cdrs_row
+                .by_name::<String>("release_version")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default(),
+        })
     }
 
-    /// Query `system.peers_v2` for peer information.
+    /// Query `system.peers_v2` for peer information. Falls back to the
+    /// legacy `system.peers` table on clusters that don't yet expose
+    /// the v2 virtual table.
     pub async fn peers(&self) -> CassandraResult<Vec<PeerInfo>> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::peers not yet wired".into(),
-        ))
+        use cdrs_tokio::types::ByName;
+        let result = match self
+            .pool
+            .query("SELECT peer, data_center, host_id, rack, release_version FROM system.peers_v2")
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                // Legacy Cassandra clusters only have `system.peers`.
+                self.pool
+                    .query(
+                        "SELECT peer, data_center, host_id, rack, release_version FROM system.peers",
+                    )
+                    .await?
+            }
+        };
+        let mut peers = Vec::with_capacity(result.rows.len());
+        for row in result.rows.iter().filter_map(|r| r.as_cdrs()) {
+            let peer = row
+                .by_name::<IpAddr>("peer")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .ok_or_else(|| {
+                    crate::error::CassandraError::Query("peer column was null".into())
+                })?;
+            let data_center = row
+                .by_name::<String>("data_center")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default();
+            let host_id = row
+                .by_name::<Uuid>("host_id")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_else(Uuid::nil);
+            let rack = row
+                .by_name::<String>("rack")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default();
+            let release_version = row
+                .by_name::<String>("release_version")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default();
+            peers.push(PeerInfo {
+                peer,
+                data_center,
+                host_id,
+                rack,
+                release_version,
+            });
+        }
+        Ok(peers)
     }
 
     /// Query `system_views.settings` for runtime configuration.
     pub async fn settings(&self) -> CassandraResult<Vec<(String, String)>> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::settings not yet wired".into(),
-        ))
+        use cdrs_tokio::types::ByName;
+        let result = self
+            .pool
+            .query("SELECT name, value FROM system_views.settings")
+            .await?;
+        let mut out = Vec::with_capacity(result.rows.len());
+        for row in result.rows.iter().filter_map(|r| r.as_cdrs()) {
+            let name = row
+                .by_name::<String>("name")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default();
+            let value = row
+                .by_name::<String>("value")
+                .map_err(|e| crate::error::CassandraError::Query(e.to_string()))?
+                .unwrap_or_default();
+            out.push((name, value));
+        }
+        Ok(out)
     }
 }
 

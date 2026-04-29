@@ -11,18 +11,13 @@
 //! docker compose run --rm test-cassandra
 //! ```
 //!
-//! ## Coverage status
+//! ## Coverage
 //!
-//! `prax-cassandra`'s own engine methods are currently stubs that return
-//! `CassandraError::Connection("not yet wired to cdrs-tokio")`. Until
-//! the engine is wired:
-//!
-//! - `e2e_pool_connect_returns_stub_error` pins the stub contract so
-//!   the day the engine lands, the test fails loudly, forcing us to
-//!   flip the assertion and expand coverage.
-//! - `e2e_cluster_is_reachable` confirms the docker-compose container
-//!   is healthy via a raw TCP probe, so once the engine is wired the
-//!   E2E harness already knows the target is up.
+//! - `e2e_pool_connect_succeeds` opens a real cdrs-tokio session
+//!   against the docker-compose Cassandra container and pings it
+//!   with `SELECT now() FROM system.local` via [`CassandraConnection::ping`].
+//! - `e2e_cluster_is_reachable` raw TCP probe against the native-
+//!   transport port, kept as a fast-failing sanity check.
 
 #![cfg(feature = "cassandra-live")]
 
@@ -44,19 +39,18 @@ fn cassandra_contact_point() -> (String, u16) {
 
 #[tokio::test]
 #[ignore = "requires running Cassandra via docker-compose"]
-async fn e2e_pool_connect_returns_stub_error() {
-    // `prax-cassandra`'s engine is not yet wired to cdrs-tokio; the pool's
-    // connect is documented to return an error. Once the engine lands,
-    // flip this assertion to `is_ok()` and expand with real round-trips.
+async fn e2e_pool_connect_succeeds() {
     let (host, port) = cassandra_contact_point();
     let config = CassandraConfig::builder()
         .known_nodes([format!("{host}:{port}")])
         .build();
-    let pool = CassandraPool::connect(config).await;
-    assert!(
-        pool.is_err(),
-        "prax-cassandra pool is stubbed; once wired, flip this to is_ok()"
-    );
+    let pool = CassandraPool::connect(config)
+        .await
+        .expect("connect to docker-compose cassandra");
+    pool.connection()
+        .ping()
+        .await
+        .expect("ping `SELECT now() FROM system.local`");
 }
 
 /// Confirm the docker-compose Cassandra container is actually listening
