@@ -105,7 +105,7 @@ mod row;
 pub mod row_ref;
 mod types;
 
-pub use config::{ScyllaConfig, ScyllaConfigBuilder};
+pub use config::{ConsistencyLevel, ScyllaConfig, ScyllaConfigBuilder, SerialConsistencyLevel};
 pub use connection::ScyllaConnection;
 pub use engine::{ScyllaBatch, ScyllaEngine};
 pub use error::{ScyllaError, ScyllaResult};

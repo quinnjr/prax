@@ -199,8 +199,12 @@ macro_rules! __client_accessor_impl {
     };
 }
 
+// `pastey` is a drop-in fork of the now-archived `paste` crate; its
+// `paste!` macro lives at the same name. Re-export under the existing
+// `__paste` symbol so the `client!`-macro expansions in this and
+// downstream crates keep compiling without a source change.
 #[doc(hidden)]
-pub use ::paste as __paste;
+pub use ::pastey as __paste;
 
 /// Re-exports used by the `client!` macro expansion. Keeps callers from
 /// needing to import `prax_query::traits::QueryEngine` themselves.

@@ -630,8 +630,8 @@ pub mod schema {
 pub use prax_codegen::Model;
 pub use prax_codegen::prax_schema;
 
-/// Top-level `PraxClient<E>` and the `prax::client!` macro. See
-/// [`client`] module docs for usage.
+/// Top-level `PraxClient<E>` and the `prax::client!` macro. See the
+/// [`client`](mod@client) module docs for usage.
 pub mod client;
 pub use client::PraxClient;
 // The `client!` macro is re-exported automatically by `#[macro_export]`.
