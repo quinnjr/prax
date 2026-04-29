@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use bson::{Bson, Document, doc};
+use bson::{Document, doc};
 use futures::TryStreamExt;
 use mongodb::Collection;
 use prax_query::QueryResult;
@@ -260,62 +260,31 @@ impl QueryEngine for MongoEngine {
         Box::pin(async move {
             debug!(data = %sql, "Executing update");
 
-            // Parse the filter from the SQL-ish string the same way
-            // query_many does — MongoDB uses the "sql" parameter as a
-            // JSON filter document. The `$set` clause is derived from
-            // the params vec: callers bundle "col=val" pairs that the
-            // engine flattens into a Mongo update document.
             let filter = Self::build_filter(&sql, &params)
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let set_doc = build_set_doc(&sql, &params)
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // For the $set document we reuse the same params, treating
-            // each as a field assignment. Keys come from a helper the
-            // caller embeds in the SQL string as "SET col1=$1, col2=$2".
-            // If the SQL doesn't name set-columns, fall back to re-
-            // running the filter as a read and returning the matched
-            // rows unchanged.
             let collection = self
                 .client
                 .collection_doc(&format!("{}s", T::MODEL_NAME.to_lowercase()));
 
-            // Fetch the set of matching docs BEFORE the update so we
-            // can return them (Mongo's update_many doesn't return the
-            // affected documents). For the Client API's typical code-
-            // gen path where the update is keyed on a unique column,
-            // this is at most a few documents.
-            let cursor = collection
-                .find(filter.clone(), None)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
-            let docs: Vec<Document> = cursor
-                .try_collect()
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
-
-            // Extract the $set fields from the SQL string. The Client
-            // emits "UPDATE t SET col = $1, col2 = $2 WHERE …"; parse
-            // the SET clause to bind each param to its target column.
-            let set_doc = build_set_doc(&sql, &params)
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
-
+            // Mongo's `update_many` doesn't hand back the affected
+            // documents, so we have to re-fetch. The original filter
+            // still selects the same rows post-update (the SET can't
+            // un-match them for the filters the Client API emits —
+            // we set columns, not the filter columns). One update +
+            // one find instead of three round-trips.
             if !set_doc.is_empty() {
-                let update = doc! { "$set": set_doc.clone() };
+                let update = doc! { "$set": set_doc };
                 collection
-                    .update_many(filter, update, None)
+                    .update_many(filter.clone(), update, None)
                     .await
                     .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
             }
 
-            // Re-fetch the updated docs so the returned Vec reflects
-            // post-update state, matching what Postgres/MySQL's
-            // `UPDATE ... RETURNING` produces.
-            let ids: Vec<Bson> = docs.iter().filter_map(|d| d.get("_id").cloned()).collect();
-            if ids.is_empty() {
-                return Ok(Vec::new());
-            }
-            let refetch_filter = doc! { "_id": { "$in": ids } };
             let cursor = collection
-                .find(refetch_filter, None)
+                .find(filter, None)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
             let updated: Vec<Document> = cursor
