@@ -19,17 +19,51 @@ pub struct QueryResult {
 
 impl CassandraPool {
     /// Execute a query returning rows.
-    pub async fn query(&self, _cql: &str) -> CassandraResult<QueryResult> {
-        Err(CassandraError::Query(
-            "query() not yet wired to cdrs-tokio".into(),
-        ))
+    pub async fn query(&self, cql: &str) -> CassandraResult<QueryResult> {
+        let envelope = self
+            .connection()
+            .session()
+            .query(cql)
+            .await
+            .map_err(|e| CassandraError::Query(format!("query failed: {e}")))?;
+
+        // Parse the response. SELECT responses carry a ResponseBody::Result
+        // with rows; INSERT/UPDATE/DELETE responses typically carry an
+        // empty result. LWT responses carry a single row with the
+        // `[applied]` boolean column first.
+        let body = envelope
+            .response_body()
+            .map_err(|e| CassandraError::Query(format!("response body parse: {e}")))?;
+
+        let (rows, applied) = if let Some(raw_rows) = body.into_rows() {
+            // LWT responses carry the applied-boolean as the first column
+            // of a single row. Detect that shape by checking whether the
+            // result set is exactly one row and the first column is a
+            // boolean named "[applied]".
+            let applied = raw_rows.first().and_then(|row| {
+                use cdrs_tokio::types::ByName;
+                row.by_name::<bool>("[applied]").ok().flatten()
+            });
+            let decoded: Vec<crate::row::Row> = raw_rows
+                .into_iter()
+                .map(|r| crate::row::Row::from_cdrs_row(&r))
+                .collect::<CassandraResult<_>>()?;
+            (decoded, applied)
+        } else {
+            (Vec::new(), None)
+        };
+
+        Ok(QueryResult { rows, applied })
     }
 
     /// Execute a statement not expecting rows (INSERT, UPDATE, DELETE, DDL).
-    pub async fn execute(&self, _cql: &str) -> CassandraResult<()> {
-        Err(CassandraError::Query(
-            "execute() not yet wired to cdrs-tokio".into(),
-        ))
+    pub async fn execute(&self, cql: &str) -> CassandraResult<()> {
+        self.connection()
+            .session()
+            .query(cql)
+            .await
+            .map_err(|e| CassandraError::Query(format!("execute failed: {e}")))?;
+        Ok(())
     }
 
     /// Query a single row, deserialized into T.
@@ -163,23 +197,26 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
         sql: &str,
         _params: Vec<prax_query::filter::FilterValue>,
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
-        // The prax-cassandra driver is wire-stubbed: pool.query returns
-        // an error until the cdrs-tokio integration lands. Surface the
-        // underlying stub error verbatim so callers see the same message
-        // whether they route through the Client API or the raw pool
-        // methods.
         let sql = sql.to_string();
         let pool = self.pool.clone();
         Box::pin(async move {
-            let _: QueryResult = pool
+            let result = pool
                 .query(&sql)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            // Row decoding for Cassandra lives behind the real
-            // integration — the stubbed `Row` type stores raw bytes
-            // only, so there's no RowRef bridge to hand each row to
-            // `T::from_row`. Return an empty Vec until that lands.
-            Ok(Vec::new())
+            result
+                .rows
+                .iter()
+                .filter_map(|r| r.as_cdrs())
+                .map(|cdrs_row| {
+                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
@@ -191,11 +228,22 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
         let sql = sql.to_string();
         let pool = self.pool.clone();
         Box::pin(async move {
-            let _: QueryResult = pool
+            let result = pool
                 .query(&sql)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            let cdrs_row = result
+                .rows
+                .iter()
+                .filter_map(|r| r.as_cdrs())
+                .next()
+                .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
+            let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+            let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
@@ -207,11 +255,21 @@ impl prax_query::traits::QueryEngine for CassandraEngine {
         let sql = sql.to_string();
         let pool = self.pool.clone();
         Box::pin(async move {
-            let _: QueryResult = pool
+            let result = pool
                 .query(&sql)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-            Ok(None)
+            match result.rows.iter().filter_map(|r| r.as_cdrs()).next() {
+                None => Ok(None),
+                Some(cdrs_row) => {
+                    let cols: Vec<String> = T::COLUMNS.iter().map(|s| s.to_string()).collect();
+                    let rr = crate::row_ref::CassandraRowRef::from_cdrs_with_cols(cdrs_row, &cols);
+                    Ok(Some(T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?))
+                }
+            }
         })
     }
 

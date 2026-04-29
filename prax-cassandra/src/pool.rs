@@ -51,13 +51,19 @@ impl CassandraPool {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_pool_connect_returns_error_without_cluster() {
-        let config = CassandraConfig::builder()
-            .known_nodes(["127.0.0.1:9042".to_string()])
-            .build();
-
-        let result = CassandraPool::connect(config).await;
+    #[test]
+    fn test_pool_connect_fails_fast_on_empty_nodes() {
+        // Empty known_nodes is a config-level error we surface
+        // immediately in CassandraConnection::connect, so this runs
+        // synchronously without needing a tokio runtime. The live-
+        // cluster connect path is exercised by the #[cfg(feature =
+        // "cassandra-live")] integration test.
+        let config = CassandraConfig::builder().build();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(CassandraPool::connect(config));
         assert!(result.is_err());
     }
 }

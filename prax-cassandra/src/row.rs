@@ -4,12 +4,18 @@ use crate::error::CassandraResult;
 
 /// A CQL row as returned by the cdrs-tokio driver.
 ///
-/// This is a thin newtype so prax-cassandra can evolve its row
-/// representation independently of the underlying driver.
-#[derive(Debug, Default, Clone)]
+/// Holds a clone of the underlying cdrs-tokio Row so downstream code
+/// can extract typed values by column name via [`ByName`] /
+/// [`IntoRustByName`] (re-exported from `cdrs-tokio`).
+#[derive(Debug, Clone)]
 pub struct Row {
-    /// Column name → raw CQL-encoded bytes.
-    pub(crate) columns: Vec<(String, Vec<u8>)>,
+    pub(crate) inner: Option<cdrs_tokio::types::rows::Row>,
+}
+
+impl Default for Row {
+    fn default() -> Self {
+        Self { inner: None }
+    }
 }
 
 impl Row {
@@ -18,22 +24,26 @@ impl Row {
         Self::default()
     }
 
-    /// Return the raw bytes for a named column, if present.
-    pub fn column_bytes(&self, name: &str) -> Option<&[u8]> {
-        self.columns
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, b)| b.as_slice())
+    /// Wrap an underlying cdrs-tokio row. Clones the row because the
+    /// caller typically iterates over a Vec<Row> and we need owned
+    /// storage.
+    pub fn from_cdrs_row(row: &cdrs_tokio::types::rows::Row) -> CassandraResult<Self> {
+        Ok(Self {
+            inner: Some(row.clone()),
+        })
     }
 
-    /// Number of columns in this row.
-    pub fn len(&self) -> usize {
-        self.columns.len()
+    /// Borrow the underlying cdrs-tokio row, if present.
+    pub fn as_cdrs(&self) -> Option<&cdrs_tokio::types::rows::Row> {
+        self.inner.as_ref()
     }
 
-    /// Returns true if this row has no columns.
-    pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
+    /// Check whether a column is present on this row.
+    pub fn contains_column(&self, name: &str) -> bool {
+        self.inner
+            .as_ref()
+            .map(|r| r.contains_column(name))
+            .unwrap_or(false)
     }
 }
 
@@ -50,20 +60,7 @@ mod tests {
     #[test]
     fn test_empty_row() {
         let row = Row::empty();
-        assert!(row.is_empty());
-        assert_eq!(row.len(), 0);
-    }
-
-    #[test]
-    fn test_column_bytes_lookup() {
-        let row = Row {
-            columns: vec![
-                ("id".into(), vec![1, 2, 3]),
-                ("name".into(), b"alice".to_vec()),
-            ],
-        };
-        assert_eq!(row.column_bytes("id"), Some(&[1u8, 2, 3][..]));
-        assert_eq!(row.column_bytes("name"), Some(&b"alice"[..]));
-        assert!(row.column_bytes("missing").is_none());
+        assert!(row.as_cdrs().is_none());
+        assert!(!row.contains_column("anything"));
     }
 }

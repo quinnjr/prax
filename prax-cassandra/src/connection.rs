@@ -2,61 +2,69 @@
 
 use std::sync::Arc;
 
-use crate::config::CassandraConfig;
-use crate::error::CassandraResult;
+use cdrs_tokio::authenticators::{NoneAuthenticatorProvider, StaticPasswordAuthenticatorProvider};
+use cdrs_tokio::cluster::session::{Session, SessionBuilder, TcpSessionBuilder};
+use cdrs_tokio::cluster::{NodeAddress, NodeTcpConfigBuilder, TcpConnectionManager};
+use cdrs_tokio::load_balancing::RoundRobinLoadBalancingStrategy;
+use cdrs_tokio::transport::TransportTcp;
+
+use crate::config::{CassandraAuth, CassandraConfig};
+use crate::error::{CassandraError, CassandraResult};
+
+/// Concrete cdrs-tokio session type used by prax-cassandra. We pin the
+/// load-balancing strategy to round-robin so the outer type is
+/// nameable (otherwise we'd need to box it behind `dyn Any`).
+pub(crate) type CdrsSession = Session<
+    TransportTcp,
+    TcpConnectionManager,
+    RoundRobinLoadBalancingStrategy<TransportTcp, TcpConnectionManager>,
+>;
 
 /// A handle to an established Cassandra session.
-///
-/// Wraps a cdrs-tokio Session. cdrs-tokio manages its own internal
-/// connection pool per node; this wrapper provides a stable prax-cassandra
-/// type for consumers while delegating the low-level protocol work to
-/// cdrs-tokio.
 pub struct CassandraConnection {
     config: CassandraConfig,
-    // The concrete cdrs-tokio session type requires generic parameters
-    // (LoadBalancingStrategy, ConnectionManager, etc.) that are wired up
-    // in `connect`. We erase those details behind an Arc<dyn> boundary.
-    #[allow(dead_code)]
-    session: Arc<CdrsSessionHandle>,
-}
-
-/// Internal opaque wrapper for the cdrs-tokio Session.
-///
-/// The cdrs-tokio Session is generic over three type parameters
-/// (LoadBalancingStrategy, ConnectionManager, Transport). We erase those
-/// with this wrapper so the public CassandraConnection has a stable type.
-pub(crate) struct CdrsSessionHandle {
-    // Populated in `connect` with the concrete cdrs-tokio Session.
-    // Stored as an opaque `Box<dyn Any + Send + Sync>` for type erasure.
-    #[allow(dead_code)]
-    inner: Box<dyn std::any::Any + Send + Sync>,
+    pub(crate) session: Arc<CdrsSession>,
 }
 
 impl CassandraConnection {
     /// Connect to the cluster using the provided configuration.
-    ///
-    /// Returns an error if the configuration is invalid or the cluster
-    /// is unreachable. Runs a health check (`SELECT now() FROM system.local`)
-    /// after the session is established.
     pub async fn connect(config: CassandraConfig) -> CassandraResult<Self> {
-        // cdrs-tokio connection setup:
-        //
-        // 1. Build a NodeTcpConfigBuilder from config.known_nodes
-        // 2. Attach auth (CassandraAuth::Password -> cdrs_tokio's StaticPasswordAuthenticator)
-        // 3. Build cluster config via cdrs_tokio::cluster::session::TcpSessionBuilder
-        // 4. Call .build().await to get a Session
-        // 5. Wrap session in CdrsSessionHandle
-        //
-        // The exact API requires importing from cdrs_tokio::cluster::*,
-        // cdrs_tokio::authenticators::*, cdrs_tokio::load_balancing::*,
-        // and cdrs_tokio::cluster::session::*. See cdrs-tokio docs for details.
-        //
-        // Placeholder implementation until live testing is wired up in
-        // a follow-up task.
-        Err(crate::error::CassandraError::Connection(format!(
-            "CassandraConnection::connect is not yet wired to cdrs-tokio (nodes: {:?})",
-            config.known_nodes
-        )))
+        if config.known_nodes.is_empty() {
+            return Err(CassandraError::Connection(
+                "at least one contact point is required".into(),
+            ));
+        }
+
+        let mut builder = NodeTcpConfigBuilder::new();
+        for node in &config.known_nodes {
+            let addr: NodeAddress = node.as_str().into();
+            builder = builder.with_contact_point(addr);
+        }
+        if let Some(CassandraAuth::Password { username, password }) = &config.auth {
+            builder = builder.with_authenticator_provider(Arc::new(
+                StaticPasswordAuthenticatorProvider::new(username, password),
+            ));
+        } else {
+            // Explicit no-auth is the default but make it loud so readers
+            // don't wonder why the builder skipped the auth branch.
+            builder = builder.with_authenticator_provider(Arc::new(NoneAuthenticatorProvider));
+        }
+
+        let node_config = builder
+            .build()
+            .await
+            .map_err(|e| CassandraError::Connection(format!("resolve contact points: {e}")))?;
+
+        let lb = RoundRobinLoadBalancingStrategy::<TransportTcp, TcpConnectionManager>::new();
+        let session = TcpSessionBuilder::new(lb, node_config)
+            .build()
+            .await
+            .map_err(|e| CassandraError::Connection(format!("build session: {e}")))?;
+
+        Ok(Self {
+            config,
+            session: Arc::new(session),
+        })
     }
 
     /// Borrow the configuration this connection was built from.
@@ -64,12 +72,26 @@ impl CassandraConnection {
         &self.config
     }
 
+    /// Borrow the underlying cdrs-tokio session.
+    pub(crate) fn session(&self) -> &CdrsSession {
+        &self.session
+    }
+
     /// Ping the cluster with `SELECT now() FROM system.local`.
     pub async fn ping(&self) -> CassandraResult<()> {
-        // Will execute on the wrapped session once connect() is live.
-        Err(crate::error::CassandraError::Connection(
-            "ping requires a live cdrs-tokio session".into(),
-        ))
+        self.session()
+            .query("SELECT now() FROM system.local")
+            .await
+            .map_err(|e| CassandraError::Connection(format!("ping failed: {e}")))?;
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for CassandraConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CassandraConnection")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
     }
 }
 
@@ -77,13 +99,18 @@ impl CassandraConnection {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_connect_without_live_cluster_returns_error() {
-        let config = CassandraConfig::builder()
-            .known_nodes(["127.0.0.1:9042".to_string()])
-            .build();
-
-        let result = CassandraConnection::connect(config).await;
-        assert!(result.is_err());
+    #[test]
+    fn empty_known_nodes_is_an_error() {
+        // Building a connection with no contact points should fail
+        // fast rather than wait for cdrs-tokio to complain. Keep
+        // this as a fast unit test; the live-cluster connect path
+        // is exercised by the e2e integration tests.
+        let config = CassandraConfig::builder().build();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let result = rt.block_on(CassandraConnection::connect(config));
+        assert!(result.is_err(), "expected connect to fail with no nodes");
     }
 }
