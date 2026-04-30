@@ -271,6 +271,44 @@ fn generate_client_module(
     code.push_str("        Self { engine }\n");
     code.push_str("    }\n\n");
 
+    code.push_str("    /// Borrow the underlying engine. Useful when composing\n");
+    code.push_str("    /// per-model operations directly or running raw SQL.\n");
+    code.push_str("    pub fn engine(&self) -> &E {\n");
+    code.push_str("        &self.engine\n");
+    code.push_str("    }\n\n");
+
+    code.push_str("    /// Execute a typed raw SQL query, decoding each returned\n");
+    code.push_str("    /// row as `T`. Mirrors `prax_orm::PraxClient::query_raw`.\n");
+    code.push_str("    ///\n");
+    code.push_str("    /// The typed per-model API covers the common CRUD cases;\n");
+    code.push_str("    /// use this for window functions, vendor-specific\n");
+    code.push_str("    /// extensions, CTEs, JOIN-driven row shapes, and aggregates\n");
+    code.push_str("    /// that the fluent builder doesn't model yet. `T` must\n");
+    code.push_str("    /// implement both `Model` (for the table association) and\n");
+    code.push_str("    /// `FromRow` (for row decoding); the generator emits both\n");
+    code.push_str("    /// impls on every model in this client.\n");
+    code.push_str("    pub async fn query_raw<T>(&self, sql: prax_query::raw::Sql)\n");
+    code.push_str("        -> prax_query::error::QueryResult<Vec<T>>\n");
+    code.push_str("    where\n");
+    code.push_str(
+        "        T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static,\n",
+    );
+    code.push_str("    {\n");
+    code.push_str("        let (s, p) = sql.build();\n");
+    code.push_str("        self.engine.query_many::<T>(&s, p).await\n");
+    code.push_str("    }\n\n");
+
+    code.push_str("    /// Execute a raw statement that doesn't return rows\n");
+    code.push_str("    /// (INSERT / UPDATE / DELETE / DDL). Returns the\n");
+    code.push_str("    /// driver-reported affected-row count. Mirrors\n");
+    code.push_str("    /// `prax_orm::PraxClient::execute_raw`.\n");
+    code.push_str("    pub async fn execute_raw(&self, sql: prax_query::raw::Sql)\n");
+    code.push_str("        -> prax_query::error::QueryResult<u64>\n");
+    code.push_str("    {\n");
+    code.push_str("        let (s, p) = sql.build();\n");
+    code.push_str("        self.engine.execute_raw(&s, p).await\n");
+    code.push_str("    }\n\n");
+
     for model in schema.models.values() {
         let snake_name = to_snake_case(model.name());
         code.push_str(&format!("    /// Access {} operations\n", model.name()));
