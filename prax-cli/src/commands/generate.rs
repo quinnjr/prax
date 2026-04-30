@@ -823,10 +823,17 @@ fn field_to_filter_type(field_type: &prax_schema::ast::FieldType) -> String {
             ScalarType::Time => "ScalarFilter<chrono::NaiveTime>".to_string(),
             ScalarType::Json => "ScalarFilter<serde_json::Value>".to_string(),
             ScalarType::Bytes => "ScalarFilter<Vec<u8>>".to_string(),
-            // Vector types don't have standard scalar filters
-            ScalarType::Vector(_) | ScalarType::HalfVector(_) => "VectorFilter".to_string(),
-            ScalarType::SparseVector(_) => "SparseVectorFilter".to_string(),
-            ScalarType::Bit(_) => "BitFilter".to_string(),
+            // pgvector scalars. Only `VectorFilter` exists in prax-pgvector
+            // today (for `vector(N)` and `halfvec(N)`); sparse and bit
+            // columns fall back to the raw element type under
+            // `ScalarFilter` until dedicated filter types ship upstream.
+            // Fully qualify the path so the generated filters.rs compiles
+            // without requiring the consumer to add a `use` statement.
+            ScalarType::Vector(_) | ScalarType::HalfVector(_) => {
+                "prax_pgvector::filter::VectorFilter".to_string()
+            }
+            ScalarType::SparseVector(_) => "ScalarFilter<Vec<(u32, f32)>>".to_string(),
+            ScalarType::Bit(_) => "ScalarFilter<Vec<u8>>".to_string(),
         },
         FieldType::Enum(name) => format!("ScalarFilter<{}>", name),
         _ => "Filter".to_string(),
