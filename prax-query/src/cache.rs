@@ -343,10 +343,10 @@ fn count_placeholders(sql: &str) -> usize {
                     break;
                 }
             }
-            if !num.is_empty() {
-                if let Ok(n) = num.parse::<usize>() {
-                    count = count.max(n);
-                }
+            if !num.is_empty()
+                && let Ok(n) = num.parse::<usize>()
+            {
+                count = count.max(n);
             }
         } else if c == '?' {
             // MySQL/SQLite-style
@@ -1178,11 +1178,12 @@ impl ExecutionPlanCache {
         let mut plans = self.plans.write();
         let mut key_index = self.key_index.write();
 
-        if plans.len() >= self.max_size && !plans.contains_key(&hash) {
-            if let Some((&evict_hash, _)) = plans.iter().min_by_key(|(_, p)| p.use_count()) {
-                plans.remove(&evict_hash);
-                key_index.retain(|_, &mut v| v != evict_hash);
-            }
+        if plans.len() >= self.max_size
+            && !plans.contains_key(&hash)
+            && let Some((&evict_hash, _)) = plans.iter().min_by_key(|(_, p)| p.use_count())
+        {
+            plans.remove(&evict_hash);
+            key_index.retain(|_, &mut v| v != evict_hash);
         }
 
         plans.insert(hash, Arc::clone(&plan));

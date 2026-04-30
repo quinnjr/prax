@@ -13,9 +13,10 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
     let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
     if !schema_path.exists() {
-        return Err(
-            CliError::Config(format!("Schema file not found: {}", schema_path.display())).into(),
-        );
+        return Err(CliError::Config(format!(
+            "Schema file not found: {}",
+            schema_path.display()
+        )));
     }
 
     output::kv("Schema", &schema_path.display().to_string());
@@ -63,9 +64,10 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
                     warn(warning);
                 }
             }
-            return Err(
-                CliError::Validation(format!("Found {} validation errors", errors.len())).into(),
-            );
+            return Err(CliError::Validation(format!(
+                "Found {} validation errors",
+                errors.len()
+            )));
         }
     }
 
@@ -235,18 +237,17 @@ fn validate_relation(
             .args
             .iter()
             .find(|a| a.name.as_ref().map(|n| n.as_str()) == Some("fields"))
+            && let Some(fields_str) = fields_arg.value.as_string()
         {
-            if let Some(fields_str) = fields_arg.value.as_string() {
-                let field_names: Vec<&str> = fields_str.split(',').map(|s| s.trim()).collect();
-                for field_name in &field_names {
-                    if !model.fields.contains_key(*field_name) {
-                        errors.push(format!(
-                            "Relation '{}' in model '{}' references unknown field '{}'",
-                            field.name(),
-                            model.name(),
-                            field_name
-                        ));
-                    }
+            let field_names: Vec<&str> = fields_str.split(',').map(|s| s.trim()).collect();
+            for field_name in &field_names {
+                if !model.fields.contains_key(*field_name) {
+                    errors.push(format!(
+                        "Relation '{}' in model '{}' references unknown field '{}'",
+                        field.name(),
+                        model.name(),
+                        field_name
+                    ));
                 }
             }
         }
@@ -256,20 +257,19 @@ fn validate_relation(
             .args
             .iter()
             .find(|a| a.name.as_ref().map(|n| n.as_str()) == Some("references"))
+            && let Some(refs_str) = refs_arg.value.as_string()
         {
-            if let Some(refs_str) = refs_arg.value.as_string() {
-                let ref_names: Vec<&str> = refs_str.split(',').map(|s| s.trim()).collect();
-                let target = target_model.unwrap();
-                for ref_name in &ref_names {
-                    if !target.fields.contains_key(*ref_name) {
-                        errors.push(format!(
-                            "Relation '{}' in model '{}' references unknown field '{}' in model '{}'",
-                            field.name(),
-                            model.name(),
-                            ref_name,
-                            target_type
-                        ));
-                    }
+            let ref_names: Vec<&str> = refs_str.split(',').map(|s| s.trim()).collect();
+            let target = target_model.unwrap();
+            for ref_name in &ref_names {
+                if !target.fields.contains_key(*ref_name) {
+                    errors.push(format!(
+                        "Relation '{}' in model '{}' references unknown field '{}' in model '{}'",
+                        field.name(),
+                        model.name(),
+                        ref_name,
+                        target_type
+                    ));
                 }
             }
         }

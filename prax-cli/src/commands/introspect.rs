@@ -138,15 +138,15 @@ pub mod postgres {
                 let table_name: String = row.get(0);
 
                 // Apply filters
-                if let Some(ref pattern) = options.table_filter {
-                    if !matches_pattern(&table_name, pattern) {
-                        continue;
-                    }
+                if let Some(ref pattern) = options.table_filter
+                    && !matches_pattern(&table_name, pattern)
+                {
+                    continue;
                 }
-                if let Some(ref exclude) = options.exclude_pattern {
-                    if matches_pattern(&table_name, exclude) {
-                        continue;
-                    }
+                if let Some(ref exclude) = options.exclude_pattern
+                    && matches_pattern(&table_name, exclude)
+                {
+                    continue;
                 }
 
                 let comment: Option<String> = row.try_get(1).ok();
@@ -384,13 +384,11 @@ pub mod postgres {
             return name.contains(middle);
         }
 
-        if pattern.starts_with('*') {
-            let suffix = &pattern[1..];
+        if let Some(suffix) = pattern.strip_prefix('*') {
             return name.ends_with(suffix);
         }
 
-        if pattern.ends_with('*') {
-            let prefix = &pattern[..pattern.len() - 1];
+        if let Some(prefix) = pattern.strip_suffix('*') {
             return name.starts_with(prefix);
         }
 

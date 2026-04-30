@@ -358,11 +358,10 @@ impl BatchConfig {
         let mut config = Self::for_database(db_type);
 
         // Calculate batch size based on payload limit
-        let max_rows_by_payload = if avg_row_size > 0 {
-            config.max_payload_bytes / avg_row_size
-        } else {
-            config.batch_size
-        };
+        let max_rows_by_payload = config
+            .max_payload_bytes
+            .checked_div(avg_row_size)
+            .unwrap_or(config.batch_size);
 
         // Balance: smaller batches for small datasets, larger for big ones
         let optimal_batch = if total_rows < 100 {
@@ -372,7 +371,7 @@ impl BatchConfig {
         } else {
             // For large datasets, use ~10 batches or max by payload
             let by_count = total_rows / 10;
-            by_count.min(max_rows_by_payload).min(10_000).max(100)
+            by_count.min(max_rows_by_payload).clamp(100, 10_000)
         };
 
         config.batch_size = optimal_batch;
@@ -415,7 +414,7 @@ impl BatchConfig {
 
     /// Calculate the number of batches for a given total.
     pub fn batch_count(&self, total: usize) -> usize {
-        (total + self.batch_size - 1) / self.batch_size
+        total.div_ceil(self.batch_size)
     }
 }
 

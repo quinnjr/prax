@@ -769,13 +769,13 @@ impl<'a> CteRef<'a> {
         sql.push_str(" AS ");
 
         // Materialization hint (PostgreSQL only)
-        if matches!(db_type, DatabaseType::PostgreSQL) {
-            if let Some(mat) = self.materialized {
-                if mat {
-                    sql.push_str("MATERIALIZED ");
-                } else {
-                    sql.push_str("NOT MATERIALIZED ");
-                }
+        if matches!(db_type, DatabaseType::PostgreSQL)
+            && let Some(mat) = self.materialized
+        {
+            if mat {
+                sql.push_str("MATERIALIZED ");
+            } else {
+                sql.push_str("NOT MATERIALIZED ");
             }
         }
 

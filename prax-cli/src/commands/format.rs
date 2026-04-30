@@ -13,9 +13,10 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
     let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
     if !schema_path.exists() {
-        return Err(
-            CliError::Config(format!("Schema file not found: {}", schema_path.display())).into(),
-        );
+        return Err(CliError::Config(format!(
+            "Schema file not found: {}",
+            schema_path.display()
+        )));
     }
 
     output::kv("Schema", &schema_path.display().to_string());
@@ -41,7 +42,7 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
             output::newline();
             output::error("Schema is not formatted correctly!");
             output::info("Run `prax format` to fix formatting.");
-            return Err(CliError::Format("Schema needs formatting".to_string()).into());
+            return Err(CliError::Format("Schema needs formatting".to_string()));
         } else {
             output::newline();
             success("Schema is already formatted!");

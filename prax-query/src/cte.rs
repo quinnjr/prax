@@ -159,12 +159,12 @@ impl Cte {
         sql.push_str(" AS ");
 
         // Materialization hint (PostgreSQL only)
-        if db_type == DatabaseType::PostgreSQL {
-            if let Some(mat) = self.materialized {
-                match mat {
-                    Materialized::Yes => sql.push_str("MATERIALIZED "),
-                    Materialized::No => sql.push_str("NOT MATERIALIZED "),
-                }
+        if db_type == DatabaseType::PostgreSQL
+            && let Some(mat) = self.materialized
+        {
+            match mat {
+                Materialized::Yes => sql.push_str("MATERIALIZED "),
+                Materialized::No => sql.push_str("NOT MATERIALIZED "),
             }
         }
 
@@ -670,10 +670,10 @@ pub mod mongodb {
                 lookup.insert("pipeline".to_string(), JsonValue::Array(pipeline.clone()));
             }
 
-            if let Some(ref vars) = self.let_vars {
-                if !vars.is_empty() {
-                    lookup.insert("let".to_string(), JsonValue::Object(vars.clone()));
-                }
+            if let Some(ref vars) = self.let_vars
+                && !vars.is_empty()
+            {
+                lookup.insert("let".to_string(), JsonValue::Object(vars.clone()));
             }
 
             serde_json::json!({ "$lookup": lookup })

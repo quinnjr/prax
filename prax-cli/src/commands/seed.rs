@@ -625,10 +625,10 @@ pub struct SeedData {
 /// Find seed file in common locations
 pub fn find_seed_file(cwd: &Path, config: &Config) -> Option<PathBuf> {
     // Check config first
-    if let Some(ref seed_path) = config.database.seed_path {
-        if seed_path.exists() {
-            return Some(seed_path.clone());
-        }
+    if let Some(ref seed_path) = config.database.seed_path
+        && seed_path.exists()
+    {
+        return Some(seed_path.clone());
     }
 
     // Common locations
@@ -711,14 +711,12 @@ fn parse_seed_output(line: &str) -> Option<u64> {
     ];
 
     for pattern in patterns {
-        if let Ok(re) = regex_lite::Regex::new(pattern) {
-            if let Some(caps) = re.captures(line) {
-                if let Some(m) = caps.get(1) {
-                    if let Ok(n) = m.as_str().parse() {
-                        return Some(n);
-                    }
-                }
-            }
+        if let Ok(re) = regex_lite::Regex::new(pattern)
+            && let Some(caps) = re.captures(line)
+            && let Some(m) = caps.get(1)
+            && let Ok(n) = m.as_str().parse()
+        {
+            return Some(n);
         }
     }
 
@@ -743,10 +741,10 @@ fn parse_affected_rows(output: &str) -> Option<u64> {
     for pattern in patterns {
         if let Ok(re) = regex_lite::Regex::new(pattern) {
             for caps in re.captures_iter(output) {
-                if let Some(m) = caps.get(1) {
-                    if let Ok(n) = m.as_str().parse::<u64>() {
-                        total += n;
-                    }
+                if let Some(m) = caps.get(1)
+                    && let Ok(n) = m.as_str().parse::<u64>()
+                {
+                    total += n;
                 }
             }
         }

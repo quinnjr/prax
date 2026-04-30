@@ -23,6 +23,11 @@ jobs:
   benchmark-regression:
     name: Benchmark Regression Check
     runs-on: ubuntu-latest
+    # Skip on pull_request — a full baseline save + compare run took
+    # ~98 minutes on #85 and was the long pole holding every merge.
+    # The job still runs on push to main/develop (to update the shared
+    # baseline) and on manual dispatch for ad-hoc regression checks.
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v6
         with:

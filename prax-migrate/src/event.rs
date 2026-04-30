@@ -31,6 +31,7 @@ impl EventType {
     }
 
     /// Parse from database string representation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> MigrateResult<Self> {
         match s {
             "applied" => Ok(EventType::Applied),

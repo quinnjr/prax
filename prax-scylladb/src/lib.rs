@@ -1,9 +1,9 @@
 //! # prax-scylladb
 //!
-//! ScyllaDB database driver for Prax ORM - high-performance Cassandra-compatible database.
+//! `ScyllaDB` database driver for Prax ORM - high-performance Cassandra-compatible database.
 //!
-//! ScyllaDB is a drop-in replacement for Apache Cassandra that offers significantly
-//! better performance. This driver provides async support for ScyllaDB operations
+//! `ScyllaDB` is a drop-in replacement for Apache Cassandra that offers significantly
+//! better performance. This driver provides async support for `ScyllaDB` operations
 //! within the Prax ORM ecosystem.
 //!
 //! ## Features
@@ -91,10 +91,29 @@
 //! ```
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
-#![warn(missing_docs)]
 #![warn(clippy::all)]
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+// Pedantic lints intentionally relaxed to match the rest of the workspace.
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_fields_in_debug,
+    clippy::match_same_arms,
+    clippy::large_futures,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::should_implement_trait,
+    clippy::collapsible_if,
+    clippy::collapsible_match,
+    clippy::needless_pass_by_value,
+    clippy::approx_constant,
+    dead_code,
+    missing_docs
+)]
 
 mod config;
 mod connection;

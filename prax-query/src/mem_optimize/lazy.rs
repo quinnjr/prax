@@ -137,23 +137,23 @@ impl LazySchema {
         let mut tables = self.tables.write();
 
         // Double-check (another thread may have parsed)
-        if let Some(entry) = tables.get(name) {
-            if let LazyTableEntry::Parsed(table) = entry {
-                return Some(table.clone());
-            }
+        if let Some(entry) = tables.get(name)
+            && let LazyTableEntry::Parsed(table) = entry
+        {
+            return Some(table.clone());
         }
 
         // Parse the raw data
-        if let Some(entry) = tables.remove(name) {
-            if let LazyTableEntry::Raw(raw) = entry {
-                match serde_json::from_value::<RawTable>(raw) {
-                    Ok(raw_table) => {
-                        let table = LazyTable::from_raw(raw_table);
-                        tables.insert(name.to_string(), LazyTableEntry::Parsed(table.clone()));
-                        return Some(table);
-                    }
-                    Err(_) => return None,
+        if let Some(entry) = tables.remove(name)
+            && let LazyTableEntry::Raw(raw) = entry
+        {
+            match serde_json::from_value::<RawTable>(raw) {
+                Ok(raw_table) => {
+                    let table = LazyTable::from_raw(raw_table);
+                    tables.insert(name.to_string(), LazyTableEntry::Parsed(table.clone()));
+                    return Some(table);
                 }
+                Err(_) => return None,
             }
         }
 

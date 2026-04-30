@@ -20,6 +20,15 @@
 use prax_sqlite::vector::prelude::*;
 use prax_sqlite::{SqliteConfig, SqlitePool};
 
+/// Tests below need the sqlite-vector-rs cdylib provisioned at runtime
+/// (`SQLITE_VECTOR_RS_LIB` set or the library co-located with the binary).
+/// CI runs `cargo test --workspace --all-features -- --include-ignored`,
+/// which forces ignored tests to execute, so `#[ignore]` is not enough.
+/// Skip at runtime instead so they no-op when the loader is unconfigured.
+fn vector_lib_available() -> bool {
+    std::env::var_os("SQLITE_VECTOR_RS_LIB").is_some()
+}
+
 async fn make_pool() -> SqlitePool {
     SqlitePool::new(SqliteConfig::memory()).await.unwrap()
 }
@@ -36,8 +45,11 @@ async fn test_pool_creation_succeeds_even_without_cdylib() {
 }
 
 #[tokio::test]
-#[ignore = "requires sqlite-vector-rs cdylib to be built and available"]
 async fn test_pool_autoregisters_vector_extension() {
+    if !vector_lib_available() {
+        eprintln!("skipping: SQLITE_VECTOR_RS_LIB not set");
+        return;
+    }
     let pool = make_pool().await;
     let conn = pool.get().await.unwrap();
     let dims: i64 = conn
@@ -48,7 +60,7 @@ async fn test_pool_autoregisters_vector_extension() {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+            .map_err(tokio_rusqlite::Error::Rusqlite)
         })
         .await
         .unwrap();
@@ -56,8 +68,11 @@ async fn test_pool_autoregisters_vector_extension() {
 }
 
 #[tokio::test]
-#[ignore = "requires sqlite-vector-rs cdylib to be built and available"]
 async fn test_create_virtual_table_via_vector_index_builder() {
+    if !vector_lib_available() {
+        eprintln!("skipping: SQLITE_VECTOR_RS_LIB not set");
+        return;
+    }
     let pool = make_pool().await;
     let conn = pool.get().await.unwrap();
 
@@ -76,8 +91,11 @@ async fn test_create_virtual_table_via_vector_index_builder() {
 }
 
 #[tokio::test]
-#[ignore = "requires sqlite-vector-rs cdylib to be built and available"]
 async fn test_insert_and_topk_search() {
+    if !vector_lib_available() {
+        eprintln!("skipping: SQLITE_VECTOR_RS_LIB not set");
+        return;
+    }
     let pool = make_pool().await;
     let conn = pool.get().await.unwrap();
 

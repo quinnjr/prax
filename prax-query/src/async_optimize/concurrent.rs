@@ -288,15 +288,15 @@ impl ConcurrentExecutor {
         let mut results = Vec::with_capacity(total_tasks);
 
         while let Some(result) = futures.next().await {
-            if !self.config.continue_on_error {
-                if let TaskResult::Error(ref _e) = result {
-                    // Cancel remaining futures by dropping them
-                    drop(futures);
-                    results.push(result);
+            if !self.config.continue_on_error
+                && let TaskResult::Error(ref _e) = result
+            {
+                // Cancel remaining futures by dropping them
+                drop(futures);
+                results.push(result);
 
-                    let stats = self.stats.finalize(start.elapsed());
-                    return (results, stats);
-                }
+                let stats = self.stats.finalize(start.elapsed());
+                return (results, stats);
             }
             results.push(result);
         }
@@ -426,11 +426,10 @@ impl ExecutionStatsCollector {
         let successful = self.successful.load(Ordering::SeqCst);
         let total_task_duration_ns = self.total_task_duration_ns.load(Ordering::SeqCst);
 
-        let avg_task_duration = if successful > 0 {
-            Duration::from_nanos(total_task_duration_ns / successful)
-        } else {
-            Duration::ZERO
-        };
+        let avg_task_duration = total_task_duration_ns
+            .checked_div(successful)
+            .map(Duration::from_nanos)
+            .unwrap_or(Duration::ZERO);
 
         ExecutionStats {
             total_tasks: self.total.load(Ordering::SeqCst),
@@ -652,6 +651,7 @@ mod tests {
         let config = ConcurrencyConfig::default().with_timeout(Duration::from_millis(50));
         let executor = ConcurrentExecutor::new(config);
 
+        #[allow(clippy::type_complexity)]
         let tasks: Vec<
             Box<
                 dyn FnOnce() -> std::pin::Pin<Box<dyn Future<Output = Result<i32, String>> + Send>>

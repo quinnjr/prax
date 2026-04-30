@@ -58,8 +58,10 @@ TIER_2=(
     "prax-mongodb"
     "prax-duckdb"
     "prax-scylladb"
+    "prax-cassandra"
     "prax-sqlx"
     "prax-pgvector"
+    "prax-typegen"
 )
 
 # Tier 3: Depends on Tier 1 and/or Tier 2
@@ -72,7 +74,7 @@ TIER_3=(
 
 # Tier 4: Main crate (depends on all)
 TIER_4=(
-    "prax"
+    "prax-orm"
 )
 
 # All crates in order
@@ -228,7 +230,7 @@ update_version() {
 
     # Update version in workspace.dependencies for internal crates
     for crate in "${ALL_CRATES[@]}"; do
-        if [[ "$crate" != "prax" ]]; then
+        if [[ "$crate" != "prax-orm" ]]; then
             sed -i "s/${crate} = { path = \"${crate}\", version = \".*\" }/${crate} = { path = \"${crate}\", version = \"$NEW_VERSION\" }/" Cargo.toml
         fi
     done
@@ -236,7 +238,7 @@ update_version() {
     # Update each crate's Cargo.toml if they have their own version
     for crate in "${ALL_CRATES[@]}"; do
         local crate_toml
-        if [[ "$crate" == "prax" ]]; then
+        if [[ "$crate" == "prax-orm" ]]; then
             crate_toml="Cargo.toml"
         else
             crate_toml="$crate/Cargo.toml"
@@ -258,7 +260,7 @@ publish_crate() {
     local crate_dir
     local version
 
-    if [[ "$crate" == "prax" ]]; then
+    if [[ "$crate" == "prax-orm" ]]; then
         crate_dir="."
     else
         crate_dir="$crate"
@@ -314,7 +316,7 @@ get_crate_version() {
     local crate=$1
     local crate_toml
 
-    if [[ "$crate" == "prax" ]]; then
+    if [[ "$crate" == "prax-orm" ]]; then
         crate_toml="Cargo.toml"
     else
         crate_toml="$crate/Cargo.toml"

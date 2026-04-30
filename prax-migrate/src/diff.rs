@@ -1,6 +1,6 @@
 //! Schema diffing for generating migrations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use prax_schema::Schema;
 use prax_schema::ast::{Field, FieldType, IndexType, Model, VectorOps, View};
@@ -117,6 +117,92 @@ impl SchemaDiff {
             parts.join(", ")
         }
     }
+
+    /// Return `create_models` ordered so that referenced tables appear before
+    /// the tables that reference them. Self-references and FKs that point at
+    /// tables outside this batch (i.e. tables that already exist) do not
+    /// constrain the ordering. If the FK graph contains a cycle, the remaining
+    /// models are emitted in their original order — engines that need cycles
+    /// resolved must use deferred constraints regardless of emission order.
+    pub fn ordered_create_models(&self) -> Vec<&ModelDiff> {
+        let in_batch: HashSet<&str> = self
+            .create_models
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let mut indegree: HashMap<&str, usize> = self
+            .create_models
+            .iter()
+            .map(|m| (m.table_name.as_str(), 0))
+            .collect();
+        let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for model in &self.create_models {
+            let mut seen = HashSet::new();
+            for fk in &model.foreign_keys {
+                let target = fk.referenced_table.as_str();
+                if target == model.table_name {
+                    continue;
+                }
+                if !in_batch.contains(target) {
+                    continue;
+                }
+                if !seen.insert(target) {
+                    continue;
+                }
+                deps.entry(target)
+                    .or_default()
+                    .push(model.table_name.as_str());
+                *indegree.entry(model.table_name.as_str()).or_insert(0) += 1;
+            }
+        }
+
+        let by_name: HashMap<&str, &ModelDiff> = self
+            .create_models
+            .iter()
+            .map(|m| (m.table_name.as_str(), m))
+            .collect();
+
+        let mut ready: VecDeque<&str> = self
+            .create_models
+            .iter()
+            .filter(|m| indegree.get(m.table_name.as_str()).copied().unwrap_or(0) == 0)
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let mut ordered: Vec<&ModelDiff> = Vec::with_capacity(self.create_models.len());
+        let mut emitted: HashSet<&str> = HashSet::new();
+
+        while let Some(name) = ready.pop_front() {
+            if !emitted.insert(name) {
+                continue;
+            }
+            if let Some(model) = by_name.get(name) {
+                ordered.push(*model);
+            }
+            if let Some(children) = deps.get(name) {
+                for child in children {
+                    if let Some(deg) = indegree.get_mut(child) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            ready.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ordered.len() < self.create_models.len() {
+            for model in &self.create_models {
+                if !emitted.contains(model.table_name.as_str()) {
+                    ordered.push(model);
+                }
+            }
+        }
+
+        ordered
+    }
 }
 
 /// Diff for creating a model.
@@ -201,6 +287,11 @@ pub struct FieldDiff {
     /// generators ignore this field. Populated by the schema parser when a
     /// field declares `Vector @dim(N)`.
     pub vector: Option<VectorColumnInfo>,
+    /// If this field is an enum type, the enum name; otherwise None.
+    /// Dialects can choose how to render: Postgres uses `"name"` as the column
+    /// type referencing a pre-created enum type; SQLite/MySQL/MSSQL/DuckDB use
+    /// TEXT (optionally with a CHECK constraint of valid variants).
+    pub enum_name: Option<String>,
 }
 
 /// Diff for altering a field.
@@ -409,7 +500,10 @@ impl SchemaDiffer {
         // Find models to create
         for (name, model) in &target_models {
             if !source_models.contains_key(name) {
-                result.create_models.push(model_to_diff(model));
+                let model_diff = model_to_diff(model, &self.target);
+                // Populate create_indexes from the model's indexes
+                result.create_indexes.extend(model_diff.indexes.clone());
+                result.create_models.push(model_diff);
             }
         }
 
@@ -423,7 +517,7 @@ impl SchemaDiffer {
         // Find models to alter
         for (name, target_model) in &target_models {
             if let Some(source_model) = source_models.get(name)
-                && let Some(alter) = diff_models(source_model, target_model)
+                && let Some(alter) = diff_models(source_model, target_model, &self.target)
             {
                 result.alter_models.push(alter);
             }
@@ -509,7 +603,7 @@ impl SchemaDiffer {
 }
 
 /// Convert a model to a diff for creation.
-fn model_to_diff(model: &Model) -> ModelDiff {
+fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
     let fields: Vec<FieldDiff> = model
         .fields
         .values()
@@ -524,21 +618,104 @@ fn model_to_diff(model: &Model) -> ModelDiff {
         .map(|f| f.name().to_string())
         .collect();
 
-    let foreign_keys = extract_foreign_keys(model);
+    let foreign_keys = extract_foreign_keys(model, schema);
+
+    // Extract indexes from @@index attributes
+    let mut indexes = Vec::new();
+    let mut unique_constraints = Vec::new();
+
+    for attr in &model.attributes {
+        let attr_name = attr.name();
+        if attr_name != "index" && attr_name != "unique" {
+            continue;
+        }
+
+        // Extract column list from first positional arg
+        let columns = if let Some(first_arg) = attr.first_arg() {
+            match first_arg {
+                prax_schema::ast::AttributeValue::FieldRef(col) => vec![col.to_string()],
+                prax_schema::ast::AttributeValue::FieldRefList(cols) => {
+                    cols.iter().map(|c| c.to_string()).collect()
+                }
+                _ => {
+                    eprintln!(
+                        "Warning: unexpected @@{} argument type - skipping",
+                        attr_name
+                    );
+                    continue;
+                }
+            }
+        } else {
+            eprintln!("Warning: @@{} without column list - skipping", attr_name);
+            continue;
+        };
+
+        // Map field names to column names (respecting @map)
+        let column_names: Vec<String> = columns
+            .iter()
+            .map(|field_name| {
+                model
+                    .fields
+                    .get(field_name.as_str())
+                    .and_then(|f| {
+                        f.get_attribute("map")
+                            .and_then(|a| a.first_arg())
+                            .and_then(|v| v.as_string())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_else(|| field_name.clone())
+            })
+            .collect();
+
+        // Look for custom index name via `map` or `name` named arg
+        let custom_name = attr
+            .get_arg("map")
+            .or_else(|| attr.get_arg("name"))
+            .and_then(|v: &prax_schema::ast::AttributeValue| v.as_string());
+
+        let index_name = custom_name.map(|s: &str| s.to_string()).unwrap_or_else(|| {
+            let prefix = if attr_name == "unique" { "uq" } else { "idx" };
+            format!(
+                "{}_{}_{}",
+                prefix,
+                model.table_name(),
+                column_names.join("_")
+            )
+        });
+
+        if attr_name == "unique" {
+            unique_constraints.push(UniqueConstraint {
+                name: Some(index_name),
+                columns: column_names,
+            });
+        } else {
+            indexes.push(IndexDiff {
+                name: index_name,
+                table_name: model.table_name().to_string(),
+                columns: column_names,
+                unique: false,
+                index_type: None,
+                vector_ops: None,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+                ivfflat_lists: None,
+            });
+        }
+    }
 
     ModelDiff {
         name: model.name().to_string(),
         table_name: model.table_name().to_string(),
         fields,
         primary_key,
-        indexes: Vec::new(),
-        unique_constraints: Vec::new(),
+        indexes,
+        unique_constraints,
         foreign_keys,
     }
 }
 
 /// Extract foreign key constraints from a model's relation fields.
-fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
+fn extract_foreign_keys(model: &Model, schema: &Schema) -> Vec<ForeignKeyDiff> {
     let mut fks = Vec::new();
 
     for field in model.fields.values() {
@@ -557,8 +734,21 @@ fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
         }
 
         // Resolve the referenced table name from the field's model type
+        // Use @@map-aware table name lookup
         let referenced_table = match &field.field_type {
-            FieldType::Model(name) => name.to_string(),
+            FieldType::Model(name) => {
+                schema
+                    .models
+                    .get(name.as_str())
+                    .map(|m| m.table_name().to_string())
+                    .unwrap_or_else(|| {
+                        eprintln!(
+                            "Warning: referenced model '{}' not found in schema; using model name as table name",
+                            name
+                        );
+                        name.to_string()
+                    })
+            }
             _ => continue,
         };
 
@@ -566,14 +756,10 @@ fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
         let referenced_columns: Vec<String> =
             rel.references.iter().map(|r| r.to_string()).collect();
 
-        let constraint_name = rel.map.clone().unwrap_or_else(|| {
-            format!(
-                "fk_{}_{}_{}",
-                model.table_name(),
-                columns.join("_"),
-                referenced_table
-            )
-        });
+        let constraint_name = rel
+            .map
+            .clone()
+            .unwrap_or_else(|| format!("fk_{}_{}", model.table_name(), columns.join("_")));
 
         fks.push(ForeignKeyDiff {
             constraint_name,
@@ -588,6 +774,51 @@ fn extract_foreign_keys(model: &Model) -> Vec<ForeignKeyDiff> {
     fks
 }
 
+/// Render an AttributeValue to SQL literal syntax (ANSI SQL with TRUE/FALSE/CURRENT_TIMESTAMP).
+/// SQLite generators can post-process TRUE→1, FALSE→0.
+fn render_default_sql_ansi(value: &prax_schema::ast::AttributeValue) -> Option<String> {
+    use prax_schema::ast::AttributeValue;
+
+    match value {
+        AttributeValue::Int(i) => Some(i.to_string()),
+        AttributeValue::Float(f) => Some(f.to_string()),
+        AttributeValue::Boolean(true) => Some("TRUE".to_string()),
+        AttributeValue::Boolean(false) => Some("FALSE".to_string()),
+        AttributeValue::String(s) => {
+            // SQL single-quoted literal with doubled quotes for escaping
+            Some(format!("'{}'", s.replace('\'', "''")))
+        }
+        AttributeValue::Ident(name) => {
+            // Treat as enum variant or constant - quote it
+            Some(format!("'{}'", name))
+        }
+        AttributeValue::Function(name, args) => {
+            // Map common functions to SQL builtins
+            if name == "now" && args.is_empty() {
+                Some("CURRENT_TIMESTAMP".to_string())
+            } else if name == "uuid" && args.is_empty() {
+                // UUID generation - dialect-specific; for now use a generic name
+                Some("gen_random_uuid()".to_string())
+            } else {
+                // Other functions - attempt to render recursively
+                let arg_strs: Vec<String> =
+                    args.iter().filter_map(render_default_sql_ansi).collect();
+                Some(format!("{}({})", name, arg_strs.join(", ")))
+            }
+        }
+        AttributeValue::Array(_)
+        | AttributeValue::FieldRef(_)
+        | AttributeValue::FieldRefList(_) => {
+            // Not valid in DEFAULT clauses
+            eprintln!(
+                "Warning: unsupported default value type {:?} - skipping default",
+                value
+            );
+            None
+        }
+    }
+}
+
 /// Convert a field to a diff.
 fn field_to_diff(field: &Field) -> FieldDiff {
     let sql_type = field_type_to_sql(&field.field_type);
@@ -599,7 +830,7 @@ fn field_to_diff(field: &Field) -> FieldDiff {
     let default = field
         .get_attribute("default")
         .and_then(|attr| attr.first_arg())
-        .map(|arg| format!("{:?}", arg));
+        .and_then(render_default_sql_ansi);
 
     // Get column name from @map attribute or use field name
     let column_name = field
@@ -608,6 +839,12 @@ fn field_to_diff(field: &Field) -> FieldDiff {
         .and_then(|v| v.as_string())
         .unwrap_or_else(|| field.name())
         .to_string();
+
+    // Extract enum name if this is an enum type
+    let enum_name = match &field.field_type {
+        FieldType::Enum(name) => Some(name.to_string()),
+        _ => None,
+    };
 
     FieldDiff {
         name: field.name().to_string(),
@@ -619,6 +856,7 @@ fn field_to_diff(field: &Field) -> FieldDiff {
         is_auto_increment,
         is_unique,
         vector: None,
+        enum_name,
     }
 }
 
@@ -663,14 +901,14 @@ fn field_type_to_sql(field_type: &prax_schema::ast::FieldType) -> String {
             },
         },
         FieldType::Model(name) => name.to_string(),
-        FieldType::Enum(name) => format!("\"{}\"", name),
+        FieldType::Enum(_name) => "TEXT".to_string(), // Dialects override via enum_name field
         FieldType::Composite(name) => name.to_string(),
         FieldType::Unsupported(name) => name.to_string(),
     }
 }
 
 /// Diff two models and return alterations if any.
-fn diff_models(source: &Model, target: &Model) -> Option<ModelAlterDiff> {
+fn diff_models(source: &Model, target: &Model, schema: &Schema) -> Option<ModelAlterDiff> {
     let source_fields: HashMap<&str, &Field> = source
         .fields
         .values()
@@ -713,8 +951,8 @@ fn diff_models(source: &Model, target: &Model) -> Option<ModelAlterDiff> {
     }
 
     // Diff foreign keys
-    let source_fks = extract_foreign_keys(source);
-    let target_fks = extract_foreign_keys(target);
+    let source_fks = extract_foreign_keys(source, schema);
+    let target_fks = extract_foreign_keys(target, schema);
 
     let source_fk_names: std::collections::HashSet<&str> = source_fks
         .iter()
@@ -1034,6 +1272,7 @@ mod tests {
             is_auto_increment: true,
             is_unique: false,
             vector: None,
+            enum_name: None,
         };
         assert!(f.vector.is_none());
     }
@@ -1072,5 +1311,95 @@ mod tests {
     #[test]
     fn test_index_kind_sql_strings() {
         assert_eq!(VectorIndexKind::Hnsw.as_sql(), "hnsw");
+    }
+
+    fn model_with_fks(name: &str, refs: &[&str]) -> ModelDiff {
+        ModelDiff {
+            name: name.to_string(),
+            table_name: name.to_string(),
+            fields: Vec::new(),
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: refs
+                .iter()
+                .enumerate()
+                .map(|(i, target)| ForeignKeyDiff {
+                    constraint_name: format!("{}_fk_{}", name, i),
+                    columns: vec![format!("{}_id", target)],
+                    referenced_table: (*target).to_string(),
+                    referenced_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn ordered_create_models_emits_referenced_tables_first() {
+        // Mirrors the regression: tracks/playlists reference sync_sources,
+        // but sync_sources was inserted last by HashMap iteration order.
+        let mut diff = SchemaDiff::default();
+        diff.create_models
+            .push(model_with_fks("tracks", &["sync_sources"]));
+        diff.create_models
+            .push(model_with_fks("playlists", &["sync_sources"]));
+        diff.create_models.push(model_with_fks("sync_sources", &[]));
+
+        let ordered: Vec<&str> = diff
+            .ordered_create_models()
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let pos = |name: &str| ordered.iter().position(|n| *n == name).unwrap();
+        assert!(pos("sync_sources") < pos("tracks"));
+        assert!(pos("sync_sources") < pos("playlists"));
+        assert_eq!(ordered.len(), 3);
+    }
+
+    #[test]
+    fn ordered_create_models_ignores_self_references() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("nodes", &["nodes"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].table_name, "nodes");
+    }
+
+    #[test]
+    fn ordered_create_models_ignores_external_references() {
+        // FK to a table not in this batch (already exists) should not block.
+        let mut diff = SchemaDiff::default();
+        diff.create_models
+            .push(model_with_fks("orders", &["users"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].table_name, "orders");
+    }
+
+    #[test]
+    fn ordered_create_models_handles_cycles_without_dropping_models() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("a", &["b"]));
+        diff.create_models.push(model_with_fks("b", &["a"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 2);
+    }
+
+    #[test]
+    fn ordered_create_models_handles_chain() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("c", &["b"]));
+        diff.create_models.push(model_with_fks("b", &["a"]));
+        diff.create_models.push(model_with_fks("a", &[]));
+
+        let ordered: Vec<&str> = diff
+            .ordered_create_models()
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["a", "b", "c"]);
     }
 }

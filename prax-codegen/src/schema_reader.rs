@@ -53,12 +53,11 @@ fn load_prax_config(schema_path: &Path) -> Option<PraxConfig> {
     // Search up to 5 parent directories
     for _ in 0..5 {
         let config_path = search_dir.join("prax.toml");
-        if config_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(config) = PraxConfig::from_str(&content) {
-                    return Some(config);
-                }
-            }
+        if config_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&config_path)
+            && let Ok(config) = PraxConfig::from_str(&content)
+        {
+            return Some(config);
         }
         search_dir = search_dir.parent()?;
     }

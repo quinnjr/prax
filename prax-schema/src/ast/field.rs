@@ -144,15 +144,15 @@ impl Field {
                     {
                         rel.references = refs.clone();
                     }
-                    if let Some(val) = attr.get_arg("onDelete") {
-                        if let Some(action) = val.as_ident() {
-                            rel.on_delete = super::ReferentialAction::from_str(action);
-                        }
+                    if let Some(val) = attr.get_arg("onDelete")
+                        && let Some(action) = val.as_ident()
+                    {
+                        rel.on_delete = super::ReferentialAction::from_str(action);
                     }
-                    if let Some(val) = attr.get_arg("onUpdate") {
-                        if let Some(action) = val.as_ident() {
-                            rel.on_update = super::ReferentialAction::from_str(action);
-                        }
+                    if let Some(val) = attr.get_arg("onUpdate")
+                        && let Some(action) = val.as_ident()
+                    {
+                        rel.on_update = super::ReferentialAction::from_str(action);
                     }
                     if let Some(val) = attr.get_arg("map") {
                         rel.map = val.as_string().map(String::from);
@@ -527,6 +527,9 @@ impl std::fmt::Display for Field {
 }
 
 #[cfg(test)]
+// Test names mirror the camelCase Prax validator attributes they cover
+// (e.g. `@nonEmpty`, `@creditCard`); keep the casing for readability.
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use crate::ast::{AttributeArg, AttributeValue, ReferentialAction, ScalarType};

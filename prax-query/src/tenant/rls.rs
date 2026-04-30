@@ -259,16 +259,16 @@ impl RlsManager {
         writeln!(sql).unwrap();
 
         // Create admin role if bypass is enabled
-        if self.config.allow_bypass {
-            if let Some(ref role) = self.config.application_role {
-                writeln!(sql, "-- Admin role with BYPASSRLS").unwrap();
-                writeln!(sql, "DO $$").unwrap();
-                writeln!(sql, "BEGIN").unwrap();
-                writeln!(sql, "    CREATE ROLE {}_admin WITH BYPASSRLS;", role).unwrap();
-                writeln!(sql, "EXCEPTION WHEN duplicate_object THEN NULL;").unwrap();
-                writeln!(sql, "END $$;").unwrap();
-                writeln!(sql).unwrap();
-            }
+        if self.config.allow_bypass
+            && let Some(ref role) = self.config.application_role
+        {
+            writeln!(sql, "-- Admin role with BYPASSRLS").unwrap();
+            writeln!(sql, "DO $$").unwrap();
+            writeln!(sql, "BEGIN").unwrap();
+            writeln!(sql, "    CREATE ROLE {}_admin WITH BYPASSRLS;", role).unwrap();
+            writeln!(sql, "EXCEPTION WHEN duplicate_object THEN NULL;").unwrap();
+            writeln!(sql, "END $$;").unwrap();
+            writeln!(sql).unwrap();
         }
 
         // Enable RLS and create policies for each table

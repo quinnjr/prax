@@ -1,6 +1,6 @@
 //! `prax db` commands - Direct database operations.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use crate::cli::{DbArgs, OutputFormat};
 use crate::commands::introspect::{
@@ -315,8 +315,7 @@ async fn run_execute(args: crate::cli::DbExecuteArgs) -> CliResult<()> {
     } else {
         return Err(CliError::Command(
             "Must provide SQL via --sql, --file, or --stdin".to_string(),
-        )
-        .into());
+        ));
     };
 
     output::kv(
@@ -334,12 +333,10 @@ async fn run_execute(args: crate::cli::DbExecuteArgs) -> CliResult<()> {
     output::newline();
 
     // Confirm if not forced
-    if !args.force {
-        if !output::confirm("Execute this SQL?") {
-            output::newline();
-            output::info("Execution cancelled.");
-            return Ok(());
-        }
+    if !args.force && !output::confirm("Execute this SQL?") {
+        output::newline();
+        output::info("Execution cancelled.");
+        return Ok(());
     }
 
     // Execute SQL
@@ -364,7 +361,7 @@ struct SchemaChange {
     is_destructive: bool,
 }
 
-fn load_config(cwd: &PathBuf) -> CliResult<Config> {
+fn load_config(cwd: &Path) -> CliResult<Config> {
     let config_path = cwd.join(CONFIG_FILE_NAME);
     if config_path.exists() {
         Config::load(&config_path)

@@ -56,20 +56,15 @@ use crate::sql::DatabaseType;
 use crate::traits::{BoxFuture, QueryEngine};
 
 /// Parameter direction mode for stored procedures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ParameterMode {
     /// Input parameter (default).
+    #[default]
     In,
     /// Output parameter.
     Out,
     /// Input/Output parameter.
     InOut,
-}
-
-impl Default for ParameterMode {
-    fn default() -> Self {
-        Self::In
-    }
 }
 
 /// A parameter for a stored procedure or function call.

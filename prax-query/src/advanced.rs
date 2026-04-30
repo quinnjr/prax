@@ -755,7 +755,7 @@ impl<T> BulkOperation<T> {
 
     /// Get number of batches.
     pub fn batch_count(&self) -> usize {
-        (self.items.len() + self.batch_size - 1) / self.batch_size
+        self.items.len().div_ceil(self.batch_size)
     }
 }
 

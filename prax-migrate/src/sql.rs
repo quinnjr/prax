@@ -45,9 +45,13 @@ impl PostgresSqlGenerator {
             // Reversing enum alterations is complex
         }
 
-        // Create models
-        for model in &diff.create_models {
+        // Create models in FK-dependency order (referenced tables first).
+        let ordered_creates = diff.ordered_create_models();
+        for model in &ordered_creates {
             up.push(self.create_table(model));
+        }
+        // Down migration drops in reverse order so dependent tables drop first.
+        for model in ordered_creates.iter().rev() {
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -73,13 +77,13 @@ impl PostgresSqlGenerator {
 
             // Warn about column type changes
             for field in &alter.alter_fields {
-                if let Some(_new_type) = &field.new_type {
-                    if field.old_type.is_some() {
-                        warnings.push(format!(
+                if let Some(_new_type) = &field.new_type
+                    && field.old_type.is_some()
+                {
+                    warnings.push(format!(
                             "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
                             field.name, alter.table_name
                         ));
-                    }
                 }
             }
 
@@ -249,15 +253,26 @@ impl PostgresSqlGenerator {
 
     /// Generate column definition.
     fn column_definition(&self, field: &FieldDiff) -> String {
-        let mut parts = vec![format!("\"{}\"", field.column_name), field.sql_type.clone()];
+        let mut parts = vec![format!("\"{}\"", field.column_name)];
+
+        // If this is an enum type, use the quoted enum name as the SQL type
+        let sql_type = if let Some(enum_name) = &field.enum_name {
+            format!("\"{}\"", enum_name)
+        } else {
+            field.sql_type.clone()
+        };
 
         if field.is_auto_increment {
             // Replace type with SERIAL variants
-            if field.sql_type == "INTEGER" {
-                parts[1] = "SERIAL".to_string();
-            } else if field.sql_type == "BIGINT" {
-                parts[1] = "BIGSERIAL".to_string();
+            if sql_type == "INTEGER" {
+                parts.push("SERIAL".to_string());
+            } else if sql_type == "BIGINT" {
+                parts.push("BIGSERIAL".to_string());
+            } else {
+                parts.push(sql_type);
             }
+        } else {
+            parts.push(sql_type);
         }
 
         if !field.nullable && !field.is_primary_key {
@@ -526,9 +541,13 @@ impl MySqlGenerator {
         // Create enums (MySQL uses ENUM type in column definitions)
         // Enums in MySQL are defined per-column, not as separate types
 
-        // Create models
-        for model in &diff.create_models {
+        // Create models in FK-dependency order (referenced tables first).
+        let ordered_creates = diff.ordered_create_models();
+        for model in &ordered_creates {
             up.push(self.create_table(model));
+        }
+        // Down migration drops in reverse order so dependent tables drop first.
+        for model in ordered_creates.iter().rev() {
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -553,13 +572,13 @@ impl MySqlGenerator {
 
             // Warn about column type changes
             for field in &alter.alter_fields {
-                if let Some(_new_type) = &field.new_type {
-                    if field.old_type.is_some() {
-                        warnings.push(format!(
+                if let Some(_new_type) = &field.new_type
+                    && field.old_type.is_some()
+                {
+                    warnings.push(format!(
                             "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
                             field.name, alter.table_name
                         ));
-                    }
                 }
             }
 
@@ -829,16 +848,18 @@ impl SqliteGenerator {
         let mut down = Vec::new();
         let mut warnings = Vec::new();
 
-        // Create models
-        for model in &diff.create_models {
+        // Create models in FK-dependency order (referenced tables first).
+        let ordered_creates = diff.ordered_create_models();
+        for model in &ordered_creates {
             up.push(self.create_table(model));
             if let Some(vt) = self.create_vector_virtual_table(model) {
                 up.push(vt);
             }
         }
 
-        // For down migrations, we need to drop virtual tables before main tables
-        for model in &diff.create_models {
+        // Down drops virtual tables and main tables in reverse FK order so
+        // dependent tables drop before the tables they reference.
+        for model in ordered_creates.iter().rev() {
             if let Some(dvt) = self.drop_vector_virtual_table(model) {
                 down.push(dvt);
             }
@@ -866,13 +887,13 @@ impl SqliteGenerator {
 
             // Warn about column type changes
             for field in &alter.alter_fields {
-                if let Some(_new_type) = &field.new_type {
-                    if field.old_type.is_some() {
-                        warnings.push(format!(
+                if let Some(_new_type) = &field.new_type
+                    && field.old_type.is_some()
+                {
+                    warnings.push(format!(
                             "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
                             field.name, alter.table_name
                         ));
-                    }
                 }
             }
         }
@@ -985,7 +1006,7 @@ impl SqliteGenerator {
     fn column_definition(&self, field: &FieldDiff) -> String {
         let mut parts = vec![format!("\"{}\"", field.column_name)];
 
-        // SQLite type mapping
+        // SQLite type mapping (enums are always TEXT in SQLite, ignore enum_name)
         let sql_type = match field.sql_type.as_str() {
             "INTEGER" if field.is_primary_key && field.is_auto_increment => {
                 // INTEGER PRIMARY KEY is auto-increment in SQLite
@@ -1011,7 +1032,9 @@ impl SqliteGenerator {
         }
 
         if let Some(default) = &field.default {
-            parts.push(format!("DEFAULT {}", default));
+            // SQLite uses 1/0 for TRUE/FALSE
+            let sqlite_default = default.replace("TRUE", "1").replace("FALSE", "0");
+            parts.push(format!("DEFAULT {}", sqlite_default));
         }
 
         parts.join(" ")
@@ -1146,9 +1169,13 @@ impl MssqlGenerator {
         let mut down = Vec::new();
         let mut warnings = Vec::new();
 
-        // Create models
-        for model in &diff.create_models {
+        // Create models in FK-dependency order (referenced tables first).
+        let ordered_creates = diff.ordered_create_models();
+        for model in &ordered_creates {
             up.push(self.create_table(model));
+        }
+        // Down migration drops in reverse order so dependent tables drop first.
+        for model in ordered_creates.iter().rev() {
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -1173,13 +1200,13 @@ impl MssqlGenerator {
 
             // Warn about column type changes
             for field in &alter.alter_fields {
-                if let Some(_new_type) = &field.new_type {
-                    if field.old_type.is_some() {
-                        warnings.push(format!(
+                if let Some(_new_type) = &field.new_type
+                    && field.old_type.is_some()
+                {
+                    warnings.push(format!(
                             "Changing column '{}' type in table '{}' - reverse migration may fail if data is incompatible",
                             field.name, alter.table_name
                         ));
-                    }
                 }
             }
 
@@ -1504,9 +1531,13 @@ impl DuckDbSqlGenerator {
             // Reversing enum alterations is complex
         }
 
-        // Create models
-        for model in &diff.create_models {
+        // Create models in FK-dependency order (referenced tables first).
+        let ordered_creates = diff.ordered_create_models();
+        for model in &ordered_creates {
             up.push(self.create_table(model));
+        }
+        // Down migration drops in reverse order so dependent tables drop first.
+        for model in ordered_creates.iter().rev() {
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -1943,6 +1974,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -1954,6 +1986,7 @@ mod tests {
                     is_auto_increment: false,
                     is_unique: true,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2052,6 +2085,7 @@ mod tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -2219,6 +2253,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2298,6 +2333,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2463,6 +2499,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2479,6 +2516,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2532,6 +2570,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2548,6 +2587,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "summary_vec".to_string(),
@@ -2564,6 +2604,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2602,6 +2643,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2698,6 +2740,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -3135,6 +3178,152 @@ mod tests {
         assert!(result.is_empty());
         assert!(result.warnings.is_empty());
     }
+
+    fn fk_only_model(name: &str, refs: &[&str]) -> ModelDiff {
+        ModelDiff {
+            name: name.to_string(),
+            table_name: name.to_string(),
+            fields: vec![FieldDiff {
+                name: "id".to_string(),
+                column_name: "id".to_string(),
+                sql_type: "INTEGER".to_string(),
+                nullable: false,
+                default: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                is_unique: false,
+                vector: None,
+                enum_name: None,
+            }],
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: refs
+                .iter()
+                .enumerate()
+                .map(|(i, target)| ForeignKeyDiff {
+                    constraint_name: format!("{}_fk_{}", name, i),
+                    columns: vec![format!("{}_id", target)],
+                    referenced_table: (*target).to_string(),
+                    referenced_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                })
+                .collect(),
+        }
+    }
+
+    fn create_table_position(sql: &str, table: &str, quote: &str) -> Option<usize> {
+        let needle = format!("CREATE TABLE {q}{t}{q}", q = quote, t = table);
+        sql.find(&needle)
+    }
+
+    #[test]
+    fn sqlite_emits_create_table_in_fk_dependency_order() {
+        // Reproduces the regression: tracks/playlists reference sync_sources
+        // but the differ produced sync_sources last because of HashMap ordering.
+        let mut diff = SchemaDiff::default();
+        diff.create_models
+            .push(fk_only_model("tracks", &["sync_sources"]));
+        diff.create_models
+            .push(fk_only_model("playlists", &["sync_sources"]));
+        diff.create_models.push(fk_only_model("sync_sources", &[]));
+
+        let sql = SqliteGenerator.generate(&diff);
+
+        let pos_sync = create_table_position(&sql.up, "sync_sources", "\"").unwrap();
+        let pos_tracks = create_table_position(&sql.up, "tracks", "\"").unwrap();
+        let pos_playlists = create_table_position(&sql.up, "playlists", "\"").unwrap();
+        assert!(
+            pos_sync < pos_tracks,
+            "sync_sources must precede tracks:\n{}",
+            sql.up
+        );
+        assert!(
+            pos_sync < pos_playlists,
+            "sync_sources must precede playlists:\n{}",
+            sql.up
+        );
+
+        // Down migration drops in reverse order so dependents drop before parents.
+        let drop_sync = sql.down.find("\"sync_sources\"").unwrap();
+        let drop_tracks = sql.down.find("\"tracks\"").unwrap();
+        let drop_playlists = sql.down.find("\"playlists\"").unwrap();
+        assert!(
+            drop_tracks < drop_sync,
+            "tracks must drop before sync_sources:\n{}",
+            sql.down
+        );
+        assert!(
+            drop_playlists < drop_sync,
+            "playlists must drop before sync_sources:\n{}",
+            sql.down
+        );
+    }
+
+    #[test]
+    fn postgres_emits_create_table_in_fk_dependency_order() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(fk_only_model("orders", &["users"]));
+        diff.create_models.push(fk_only_model("users", &[]));
+
+        let sql = PostgresSqlGenerator.generate(&diff);
+        let pos_users = create_table_position(&sql.up, "users", "\"").unwrap();
+        let pos_orders = create_table_position(&sql.up, "orders", "\"").unwrap();
+        assert!(
+            pos_users < pos_orders,
+            "users must precede orders:\n{}",
+            sql.up
+        );
+    }
+
+    #[test]
+    fn mysql_emits_create_table_in_fk_dependency_order() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(fk_only_model("orders", &["users"]));
+        diff.create_models.push(fk_only_model("users", &[]));
+
+        let sql = MySqlGenerator.generate(&diff);
+        let pos_users = create_table_position(&sql.up, "users", "`").unwrap();
+        let pos_orders = create_table_position(&sql.up, "orders", "`").unwrap();
+        assert!(
+            pos_users < pos_orders,
+            "users must precede orders:\n{}",
+            sql.up
+        );
+    }
+
+    #[test]
+    fn mssql_emits_create_table_in_fk_dependency_order() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(fk_only_model("orders", &["users"]));
+        diff.create_models.push(fk_only_model("users", &[]));
+
+        let sql = MssqlGenerator.generate(&diff);
+        let pos_users = sql.up.find("CREATE TABLE [users]").unwrap();
+        let pos_orders = sql.up.find("CREATE TABLE [orders]").unwrap();
+        assert!(
+            pos_users < pos_orders,
+            "users must precede orders:\n{}",
+            sql.up
+        );
+    }
+
+    #[test]
+    fn duckdb_emits_create_table_in_fk_dependency_order() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(fk_only_model("orders", &["users"]));
+        diff.create_models.push(fk_only_model("users", &[]));
+
+        let sql = DuckDbSqlGenerator.generate(&diff);
+        let pos_users = create_table_position(&sql.up, "users", "\"").unwrap();
+        let pos_orders = create_table_position(&sql.up, "orders", "\"").unwrap();
+        assert!(
+            pos_users < pos_orders,
+            "users must precede orders:\n{}",
+            sql.up
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3306,6 +3495,7 @@ mod duckdb_tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -3317,6 +3507,7 @@ mod duckdb_tests {
                     is_auto_increment: false,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3348,6 +3539,7 @@ mod duckdb_tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "tags".to_string(),
@@ -3359,6 +3551,7 @@ mod duckdb_tests {
                     is_auto_increment: false,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3400,6 +3593,7 @@ mod duckdb_tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
+                enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -3627,5 +3821,175 @@ mod duckdb_tests {
         assert!(stmts[0].contains("FOREIGN KEY (\"user_id\")"));
         assert!(stmts[0].contains("REFERENCES \"users\" (\"id\")"));
         assert!(stmts[0].contains("ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn sqlite_renders_literal_defaults_correctly() {
+        let schema_src = r#"
+            model Widget {
+                id         Int      @id @auto
+                rating     Int      @default(0)
+                active     Boolean  @default(true)
+                created_at DateTime @default(now())
+                status     String   @default("pending")
+
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(
+            sql.up.contains("\"rating\" INTEGER NOT NULL DEFAULT 0"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("\"active\" INTEGER NOT NULL DEFAULT 1"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("DEFAULT CURRENT_TIMESTAMP"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(sql.up.contains("DEFAULT 'pending'"), "actual:\n{}", sql.up);
+        // No debug leakage:
+        assert!(!sql.up.contains("Int("));
+        assert!(!sql.up.contains("Boolean("));
+        assert!(!sql.up.contains("Function("));
+        assert!(!sql.up.contains("Ident("));
+    }
+
+    #[test]
+    fn sqlite_emits_text_for_enum_columns() {
+        let schema_src = r#"
+            enum Color { red green blue }
+            model Widget {
+                id    Int   @id @auto
+                color Color @default(red)
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(
+            sql.up.contains("\"color\" TEXT NOT NULL DEFAULT 'red'"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(!sql.up.contains("\"Color\"")); // no quoted enum name as type
+    }
+
+    #[test]
+    fn sqlite_fk_uses_mapped_table_name() {
+        let schema_src = r#"
+            model User {
+                id    Int    @id @auto
+                posts Post[]
+                @@map("users")
+            }
+            model Post {
+                id        Int   @id @auto
+                author_id Int
+                author    User  @relation(fields: [author_id], references: [id], onDelete: Cascade)
+                @@map("posts")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(
+            sql.up.contains("REFERENCES \"users\""),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(!sql.up.contains("REFERENCES \"User\""));
+    }
+
+    #[test]
+    fn sqlite_emits_create_index_for_model_indexes() {
+        let schema_src = r#"
+            model Widget {
+                id     Int    @id @auto
+                name   String
+                kind   String
+
+                @@map("widgets")
+                @@index([name])
+                @@index([kind, name])
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(
+            sql.up.contains("CREATE INDEX"),
+            "no CREATE INDEX in:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("ON \"widgets\" (\"name\")")
+                || sql.up.contains("ON \"widgets\"(\"name\")"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(sql.up.contains("\"kind\"") && sql.up.contains("\"name\""));
+    }
+
+    #[test]
+    fn postgres_enum_columns_use_enum_type() {
+        let schema_src = r#"
+            enum Color { red green blue }
+            model Widget {
+                id    Int   @id @auto
+                color Color @default(red)
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = PostgresSqlGenerator.generate(&diff);
+
+        // Postgres should use the quoted enum name as the column type
+        assert!(
+            sql.up
+                .contains("\"color\" \"Color\" NOT NULL DEFAULT 'red'"),
+            "actual:\n{}",
+            sql.up
+        );
+    }
+
+    #[test]
+    fn postgres_fk_uses_mapped_table_name() {
+        let schema_src = r#"
+            model User {
+                id    Int    @id @auto
+                posts Post[]
+                @@map("users")
+            }
+            model Post {
+                id        Int   @id @auto
+                author_id Int
+                author    User  @relation(fields: [author_id], references: [id], onDelete: Cascade)
+                @@map("posts")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = PostgresSqlGenerator.generate(&diff);
+
+        assert!(
+            sql.up.contains("REFERENCES \"users\""),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(!sql.up.contains("REFERENCES \"User\""));
     }
 }

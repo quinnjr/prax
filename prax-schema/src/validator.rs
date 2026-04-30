@@ -257,8 +257,7 @@ impl Validator {
             if is_actual_relation && !field.is_list() {
                 // One-side of relation should have foreign key fields
                 let attrs = field.extract_attributes();
-                if attrs.relation.is_some() {
-                    let rel = attrs.relation.as_ref().unwrap();
+                if let Some(rel) = attrs.relation.as_ref() {
                     // Validate foreign key fields exist
                     for fk_field in &rel.fields {
                         if !schema
@@ -385,34 +384,34 @@ impl Validator {
 
             // Enum fields should have ident defaults matching a variant
             (FieldType::Enum(enum_name), AttributeValue::Ident(variant)) => {
-                if let Some(e) = schema.enums.get(enum_name.as_str()) {
-                    if e.get_variant(variant).is_none() {
-                        self.errors.push(SchemaError::invalid_field(
-                            model_name,
-                            field.name(),
-                            format!(
-                                "default value '{}' is not a valid variant of enum '{}'",
-                                variant, enum_name
-                            ),
-                        ));
-                    }
+                if let Some(e) = schema.enums.get(enum_name.as_str())
+                    && e.get_variant(variant).is_none()
+                {
+                    self.errors.push(SchemaError::invalid_field(
+                        model_name,
+                        field.name(),
+                        format!(
+                            "default value '{}' is not a valid variant of enum '{}'",
+                            variant, enum_name
+                        ),
+                    ));
                 }
             }
 
             // Model type might actually be an enum (parser treats non-scalar as Model initially)
             (FieldType::Model(type_name), AttributeValue::Ident(variant)) => {
                 // Check if this is actually an enum reference
-                if let Some(e) = schema.enums.get(type_name.as_str()) {
-                    if e.get_variant(variant).is_none() {
-                        self.errors.push(SchemaError::invalid_field(
-                            model_name,
-                            field.name(),
-                            format!(
-                                "default value '{}' is not a valid variant of enum '{}'",
-                                variant, type_name
-                            ),
-                        ));
-                    }
+                if let Some(e) = schema.enums.get(type_name.as_str())
+                    && e.get_variant(variant).is_none()
+                {
+                    self.errors.push(SchemaError::invalid_field(
+                        model_name,
+                        field.name(),
+                        format!(
+                            "default value '{}' is not a valid variant of enum '{}'",
+                            variant, type_name
+                        ),
+                    ));
                 }
                 // If it's a real model reference with an ident default, that's an error
                 // but we skip that here since it's likely a valid enum
@@ -604,19 +603,19 @@ impl Validator {
         }
 
         // Check for at least one primary server in read replica strategy
-        if let Some(strategy) = sg.strategy() {
-            if strategy == ServerGroupStrategy::ReadReplica {
-                let has_primary = sg
-                    .servers
-                    .values()
-                    .any(|s| s.role() == Some(ServerRole::Primary));
-                if !has_primary {
-                    self.errors.push(SchemaError::invalid_model(
-                        sg.name.name.as_str(),
-                        "ReadReplica strategy requires at least one server with role = \"primary\""
-                            .to_string(),
-                    ));
-                }
+        if let Some(strategy) = sg.strategy()
+            && strategy == ServerGroupStrategy::ReadReplica
+        {
+            let has_primary = sg
+                .servers
+                .values()
+                .any(|s| s.role() == Some(ServerRole::Primary));
+            if !has_primary {
+                self.errors.push(SchemaError::invalid_model(
+                    sg.name.name.as_str(),
+                    "ReadReplica strategy requires at least one server with role = \"primary\""
+                        .to_string(),
+                ));
             }
         }
     }
@@ -632,29 +631,29 @@ impl Validator {
         }
 
         // Validate weight is positive if specified
-        if let Some(weight) = server.weight() {
-            if weight == 0 {
-                self.errors.push(SchemaError::invalid_model(
-                    group_name,
-                    format!(
-                        "server '{}' weight must be greater than 0",
-                        server.name.name
-                    ),
-                ));
-            }
+        if let Some(weight) = server.weight()
+            && weight == 0
+        {
+            self.errors.push(SchemaError::invalid_model(
+                group_name,
+                format!(
+                    "server '{}' weight must be greater than 0",
+                    server.name.name
+                ),
+            ));
         }
 
         // Validate priority is positive if specified
-        if let Some(priority) = server.priority() {
-            if priority == 0 {
-                self.errors.push(SchemaError::invalid_model(
-                    group_name,
-                    format!(
-                        "server '{}' priority must be greater than 0",
-                        server.name.name
-                    ),
-                ));
-            }
+        if let Some(priority) = server.priority()
+            && priority == 0
+        {
+            self.errors.push(SchemaError::invalid_model(
+                group_name,
+                format!(
+                    "server '{}' priority must be greater than 0",
+                    server.name.name
+                ),
+            ));
         }
     }
 
@@ -668,9 +667,10 @@ impl Validator {
                         .as_string()
                         .map(|s| s.to_string())
                         .or_else(|| arg.as_ident().map(|s| s.to_string()));
-                    if let Some(val) = value_str {
-                        if ServerGroupStrategy::parse(&val).is_none() {
-                            self.errors.push(SchemaError::InvalidAttribute {
+                    if let Some(val) = value_str
+                        && ServerGroupStrategy::parse(&val).is_none()
+                    {
+                        self.errors.push(SchemaError::InvalidAttribute {
                                 attribute: "strategy".to_string(),
                                 message: format!(
                                     "invalid strategy '{}' for serverGroup '{}'. Valid values: ReadReplica, Sharding, MultiRegion, HighAvailability, Custom",
@@ -678,7 +678,6 @@ impl Validator {
                                     sg.name.name
                                 ),
                             });
-                        }
                     }
                 }
             }
@@ -689,9 +688,10 @@ impl Validator {
                         .as_string()
                         .map(|s| s.to_string())
                         .or_else(|| arg.as_ident().map(|s| s.to_string()));
-                    if let Some(val) = value_str {
-                        if LoadBalanceStrategy::parse(&val).is_none() {
-                            self.errors.push(SchemaError::InvalidAttribute {
+                    if let Some(val) = value_str
+                        && LoadBalanceStrategy::parse(&val).is_none()
+                    {
+                        self.errors.push(SchemaError::InvalidAttribute {
                                 attribute: "loadBalance".to_string(),
                                 message: format!(
                                     "invalid loadBalance '{}' for serverGroup '{}'. Valid values: RoundRobin, Random, LeastConnections, Weighted, Nearest, Sticky",
@@ -699,7 +699,6 @@ impl Validator {
                                     sg.name.name
                                 ),
                             });
-                        }
                     }
                 }
             }

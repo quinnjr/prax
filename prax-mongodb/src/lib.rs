@@ -1,3 +1,6 @@
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+
 //! # prax-mongodb
 //!
 //! MongoDB driver for the Prax ORM with document mapping and aggregation support.

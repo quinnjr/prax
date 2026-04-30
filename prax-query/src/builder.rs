@@ -64,7 +64,7 @@ use std::fmt;
 /// // From static str (zero-copy)
 /// let id: Identifier = "email".into();
 /// ```
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct Identifier(SmolStr);
 
 impl Identifier {
@@ -89,7 +89,7 @@ impl Identifier {
     /// Check if the string is stored inline (no heap allocation).
     #[inline]
     pub fn is_inline(&self) -> bool {
-        self.0.is_heap_allocated() == false
+        !self.0.is_heap_allocated()
     }
 
     /// Get the length of the identifier.
@@ -149,12 +149,6 @@ impl AsRef<str> for Identifier {
     #[inline]
     fn as_ref(&self) -> &str {
         self.as_str()
-    }
-}
-
-impl Default for Identifier {
-    fn default() -> Self {
-        Self(SmolStr::default())
     }
 }
 

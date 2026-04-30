@@ -2,13 +2,12 @@
 //!
 //! Run with: `cargo bench --package prax-query --bench mem_optimize_bench`
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::mem_optimize::{
     arena::QueryArena,
     interning::{GlobalInterner, IdentifierCache, ScopedInterner},
     lazy::LazySchema,
 };
-use std::collections::HashMap;
 use std::hint::black_box;
 
 // ============================================================================

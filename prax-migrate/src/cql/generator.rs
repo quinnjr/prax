@@ -450,12 +450,14 @@ mod tests {
     #[test]
     fn test_create_keyspace_simple_strategy() {
         let generator = CqlMigrationGenerator::new();
-        let mut diff = CqlSchemaDiff::default();
-        diff.create_keyspace = Some(KeyspaceConfig {
-            name: "myapp".into(),
-            replication: ReplicationStrategy::Simple { factor: 3 },
-            durable_writes: true,
-        });
+        let diff = CqlSchemaDiff {
+            create_keyspace: Some(KeyspaceConfig {
+                name: "myapp".into(),
+                replication: ReplicationStrategy::Simple { factor: 3 },
+                durable_writes: true,
+            }),
+            ..CqlSchemaDiff::default()
+        };
 
         let migration = generator.generate(&diff);
         assert!(
@@ -472,14 +474,16 @@ mod tests {
     #[test]
     fn test_create_keyspace_network_topology() {
         let generator = CqlMigrationGenerator::new();
-        let mut diff = CqlSchemaDiff::default();
-        diff.create_keyspace = Some(KeyspaceConfig {
-            name: "myapp".into(),
-            replication: ReplicationStrategy::NetworkTopology {
-                dc_factors: vec![("us-east".into(), 3), ("us-west".into(), 2)],
-            },
-            durable_writes: false,
-        });
+        let diff = CqlSchemaDiff {
+            create_keyspace: Some(KeyspaceConfig {
+                name: "myapp".into(),
+                replication: ReplicationStrategy::NetworkTopology {
+                    dc_factors: vec![("us-east".into(), 3), ("us-west".into(), 2)],
+                },
+                durable_writes: false,
+            }),
+            ..CqlSchemaDiff::default()
+        };
 
         let migration = generator.generate(&diff);
         assert!(migration.up.contains("'class': 'NetworkTopologyStrategy'"));
@@ -491,8 +495,10 @@ mod tests {
     #[test]
     fn test_drop_keyspace_generates_warning() {
         let generator = CqlMigrationGenerator::new();
-        let mut diff = CqlSchemaDiff::default();
-        diff.drop_keyspace = Some("legacy".into());
+        let diff = CqlSchemaDiff {
+            drop_keyspace: Some("legacy".into()),
+            ..CqlSchemaDiff::default()
+        };
 
         let migration = generator.generate(&diff);
         assert!(migration.up.contains("DROP KEYSPACE IF EXISTS \"legacy\""));

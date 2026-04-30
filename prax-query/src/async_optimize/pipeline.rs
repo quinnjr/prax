@@ -818,7 +818,7 @@ impl SimulatedExecutor {
         }
 
         let total_duration = start.elapsed();
-        let batches_used = (pipeline.len() + 999) / 1000;
+        let batches_used = pipeline.len().div_ceil(1000);
 
         PipelineResult {
             results,

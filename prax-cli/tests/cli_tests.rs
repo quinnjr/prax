@@ -32,7 +32,7 @@ fn test_version_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Version"))
-        .stdout(predicate::str::contains("0.7.3"));
+        .stdout(predicate::str::contains("0.9.0"));
 }
 
 #[test]
@@ -252,5 +252,88 @@ fn test_global_options() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.7.3"));
+        .stdout(predicate::str::contains("0.9.0"));
+}
+
+/// `prax generate` must emit the trait impls the runtime needs to round-trip
+/// rows back into model structs (`FromRow`) and to extract primary key /
+/// column values from a model instance (`ModelWithPk`). The per-model
+/// operations struct must also be named `Client<E>` so the
+/// `prax::client!(...)` macro can find `<snake_name>::Client<E>` by path
+/// — same convention as the `#[derive(Model)]` path. Without these the
+/// generated code compiles but cannot decode rows or be wired into the
+/// `client!` macro, which is the gap this test guards.
+#[test]
+fn test_generate_emits_runtime_trait_impls_and_client_struct() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = temp_dir.path().join("schema.prax");
+    let schema_content = r#"
+datasource db {
+  provider = "postgresql"
+  url = "postgres://localhost/test"
+}
+
+model User {
+  id    Int    @id @auto
+  email String @unique
+  name  String
+}
+"#;
+    fs::write(&schema_path, schema_content).unwrap();
+
+    let output_dir = temp_dir.path().join("out");
+    prax_cmd()
+        .args([
+            "generate",
+            "--schema",
+            schema_path.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let user_module = fs::read_to_string(output_dir.join("user.rs")).expect("user.rs not emitted");
+
+    // FromRow impl present and uses FromColumn to decode each scalar field.
+    assert!(
+        user_module.contains("impl prax_query::row::FromRow for User"),
+        "user.rs missing FromRow impl:\n{user_module}"
+    );
+    assert!(
+        user_module.contains("FromColumn>::from_column(row, \"email\")"),
+        "user.rs FromRow does not decode email column:\n{user_module}"
+    );
+
+    // ModelWithPk impl present with pk_value and get_column_value.
+    assert!(
+        user_module.contains("impl prax_query::traits::ModelWithPk for User"),
+        "user.rs missing ModelWithPk impl:\n{user_module}"
+    );
+    assert!(
+        user_module.contains("fn pk_value(&self)"),
+        "user.rs ModelWithPk missing pk_value:\n{user_module}"
+    );
+    assert!(
+        user_module.contains("fn get_column_value(&self, column: &str)"),
+        "user.rs ModelWithPk missing get_column_value:\n{user_module}"
+    );
+
+    // Operations struct is named `Client<E>` (not `UserOperations<E>`) so
+    // `prax::client!` can dispatch via `user::Client::new(...)`.
+    assert!(
+        user_module.contains("pub struct Client<E: prax_query::QueryEngine>"),
+        "user.rs missing per-model Client<E> struct:\n{user_module}"
+    );
+    assert!(
+        !user_module.contains("UserOperations"),
+        "user.rs still emits the legacy UserOperations<E> name:\n{user_module}"
+    );
+
+    // The top-level client accessor must call `user::Client::new(...)`.
+    let mod_rs = fs::read_to_string(output_dir.join("mod.rs")).expect("mod.rs not emitted");
+    assert!(
+        mod_rs.contains("user::Client::new(self.engine.clone())"),
+        "mod.rs accessor not routed through user::Client:\n{mod_rs}"
+    );
 }

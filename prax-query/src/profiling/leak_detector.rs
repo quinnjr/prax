@@ -133,8 +133,8 @@ impl LeakDetector {
             });
         }
 
-        // Sort by severity
-        potential_leaks.sort_by(|a, b| b.severity.cmp(&a.severity));
+        // Sort by severity (highest first).
+        potential_leaks.sort_by_key(|leak| std::cmp::Reverse(leak.severity));
 
         LeakReport {
             session_duration: stats.uptime,

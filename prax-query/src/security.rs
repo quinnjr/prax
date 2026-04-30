@@ -966,7 +966,7 @@ impl DataMask {
             ),
             MaskFunction::Null => "NULL".to_string(),
             MaskFunction::Custom(func) => format!("{}({})", func, self.column),
-            MaskFunction::Random => format!("md5(random()::text)"),
+            MaskFunction::Random => "md5(random()::text)".to_string(),
         };
 
         format!(

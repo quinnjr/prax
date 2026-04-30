@@ -1,13 +1,13 @@
-//! ScyllaDB configuration module.
+//! `ScyllaDB` configuration module.
 //!
-//! Provides configuration options for connecting to ScyllaDB clusters.
+//! Provides configuration options for connecting to `ScyllaDB` clusters.
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 use crate::error::{ScyllaError, ScyllaResult};
 
-/// Configuration for ScyllaDB connections.
+/// Configuration for `ScyllaDB` connections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScyllaConfig {
     /// Known nodes in the cluster (host:port format).
@@ -125,7 +125,7 @@ impl ScyllaConfig {
         let mut builder = ScyllaConfigBuilder::default();
 
         // Parse authentication if present
-        let (auth_rest, rest) = if let Some(at_pos) = rest.find('@') {
+        let (_auth_rest, rest) = if let Some(at_pos) = rest.find('@') {
             let auth = &rest[..at_pos];
             if let Some(colon) = auth.find(':') {
                 builder.username = Some(auth[..colon].to_string());

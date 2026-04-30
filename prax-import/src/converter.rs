@@ -1,5 +1,11 @@
 //! Common conversion utilities for transforming schemas to Prax AST.
 
+// Builder helpers (`with_documentation`, `is_id_field`) are part of the
+// internal converter API surface used by future importers; some are
+// covered by tests but not yet wired into the active prisma/diesel/seaorm
+// importers, so keep them around without tripping the dead_code lint.
+#![allow(dead_code)]
+
 use convert_case::{Case, Casing};
 use prax_schema::ast::*;
 use smol_str::SmolStr;
@@ -7,10 +13,12 @@ use smol_str::SmolStr;
 /// Helper to convert snake_case table names to PascalCase model names.
 pub fn table_name_to_model_name(table_name: &str) -> String {
     // Handle plural to singular conversion for common cases
-    let singular = if table_name.ends_with("ies") {
-        format!("{}y", &table_name[..table_name.len() - 3])
-    } else if table_name.ends_with('s') && !table_name.ends_with("ss") {
-        table_name[..table_name.len() - 1].to_string()
+    let singular = if let Some(stem) = table_name.strip_suffix("ies") {
+        format!("{}y", stem)
+    } else if let Some(stem) = table_name.strip_suffix('s')
+        && !table_name.ends_with("ss")
+    {
+        stem.to_string()
     } else {
         table_name.to_string()
     };
@@ -189,10 +197,10 @@ impl ModelBuilder {
     /// Build the final model.
     pub fn build(mut self) -> Model {
         // Add @@map attribute if db_name is set and different from model name
-        if let Some(db_name) = &self.db_name {
-            if db_name != &self.name.to_case(Case::Snake) {
-                self.add_map_attribute(db_name.clone());
-            }
+        if let Some(db_name) = &self.db_name
+            && db_name != &self.name.to_case(Case::Snake)
+        {
+            self.add_map_attribute(db_name.clone());
         }
 
         let mut model = Model::new(Ident::new(&self.name, dummy_span()), dummy_span());
@@ -394,10 +402,10 @@ impl FieldBuilder {
     pub fn build(self) -> Field {
         // Add @map attribute if db_name is set and different from field name
         let mut builder = self;
-        if let Some(db_name) = builder.db_name.clone() {
-            if db_name != builder.name.to_case(Case::Snake) {
-                builder = builder.with_map(db_name);
-            }
+        if let Some(db_name) = builder.db_name.clone()
+            && db_name != builder.name.to_case(Case::Snake)
+        {
+            builder = builder.with_map(db_name);
         }
 
         let mut field = Field::new(

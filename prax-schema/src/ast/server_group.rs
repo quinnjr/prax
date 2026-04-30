@@ -85,15 +85,15 @@ impl ServerGroup {
     /// Get the group strategy (e.g., ReadReplica, Sharding, MultiRegion).
     pub fn strategy(&self) -> Option<ServerGroupStrategy> {
         for attr in &self.attributes {
-            if attr.name.name == "strategy" {
-                if let Some(arg) = attr.args.first() {
-                    let value_str = arg
-                        .value
-                        .as_string()
-                        .map(|s| s.to_string())
-                        .or_else(|| arg.value.as_ident().map(|s| s.to_string()))?;
-                    return ServerGroupStrategy::parse(&value_str);
-                }
+            if attr.name.name == "strategy"
+                && let Some(arg) = attr.args.first()
+            {
+                let value_str = arg
+                    .value
+                    .as_string()
+                    .map(|s| s.to_string())
+                    .or_else(|| arg.value.as_ident().map(|s| s.to_string()))?;
+                return ServerGroupStrategy::parse(&value_str);
             }
         }
         None
@@ -102,15 +102,15 @@ impl ServerGroup {
     /// Get the load balancing strategy.
     pub fn load_balance(&self) -> Option<LoadBalanceStrategy> {
         for attr in &self.attributes {
-            if attr.name.name == "loadBalance" {
-                if let Some(arg) = attr.args.first() {
-                    let value_str = arg
-                        .value
-                        .as_string()
-                        .map(|s| s.to_string())
-                        .or_else(|| arg.value.as_ident().map(|s| s.to_string()))?;
-                    return LoadBalanceStrategy::parse(&value_str);
-                }
+            if attr.name.name == "loadBalance"
+                && let Some(arg) = attr.args.first()
+            {
+                let value_str = arg
+                    .value
+                    .as_string()
+                    .map(|s| s.to_string())
+                    .or_else(|| arg.value.as_ident().map(|s| s.to_string()))?;
+                return LoadBalanceStrategy::parse(&value_str);
             }
         }
         None

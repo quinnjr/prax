@@ -124,18 +124,14 @@ fn parse_entity_struct(item_struct: syn::ItemStruct) -> ImportResult<SeaOrmEntit
 /// Extract table name from sea_orm attribute.
 fn extract_table_name(attrs: &[Attribute]) -> Option<String> {
     for attr in attrs {
-        if attr.path().is_ident("sea_orm") {
-            if let Ok(meta) = attr.parse_args::<syn::Meta>() {
-                if let syn::Meta::NameValue(nv) = meta {
-                    if nv.path.is_ident("table_name") {
-                        if let syn::Expr::Lit(lit) = &nv.value {
-                            if let syn::Lit::Str(s) = &lit.lit {
-                                return Some(s.value());
-                            }
-                        }
-                    }
-                }
-            }
+        if attr.path().is_ident("sea_orm")
+            && let Ok(meta) = attr.parse_args::<syn::Meta>()
+            && let syn::Meta::NameValue(nv) = meta
+            && nv.path.is_ident("table_name")
+            && let syn::Expr::Lit(lit) = &nv.value
+            && let syn::Lit::Str(s) = &lit.lit
+        {
+            return Some(s.value());
         }
     }
     None
@@ -151,13 +147,12 @@ fn parse_field_type(ty: &Type) -> ImportResult<(SeaOrmFieldType, bool)> {
             let type_name = last_segment.ident.to_string();
 
             // Handle Option<T>
-            if type_name == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        let (inner_type, _) = parse_field_type(inner_ty)?;
-                        return Ok((inner_type, true));
-                    }
-                }
+            if type_name == "Option"
+                && let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+                && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+            {
+                let (inner_type, _) = parse_field_type(inner_ty)?;
+                return Ok((inner_type, true));
             }
 
             // Map Rust types to SeaORM types
@@ -176,16 +171,13 @@ fn parse_field_type(ty: &Type) -> ImportResult<(SeaOrmFieldType, bool)> {
                 "Uuid" => SeaOrmFieldType::Uuid,
                 "Vec" => {
                     // Check if Vec<u8>
-                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
-                        if let Some(syn::GenericArgument::Type(Type::Path(inner_path))) =
+                    if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
+                        && let Some(syn::GenericArgument::Type(Type::Path(inner_path))) =
                             args.args.first()
-                        {
-                            if let Some(seg) = inner_path.path.segments.last() {
-                                if seg.ident == "u8" {
-                                    return Ok((SeaOrmFieldType::Bytes, false));
-                                }
-                            }
-                        }
+                        && let Some(seg) = inner_path.path.segments.last()
+                        && seg.ident == "u8"
+                    {
+                        return Ok((SeaOrmFieldType::Bytes, false));
                     }
                     SeaOrmFieldType::Custom("Vec".to_string())
                 }
@@ -225,23 +217,22 @@ fn parse_field_attributes(attrs: &[Attribute]) -> ImportResult<Vec<SeaOrmFieldAt
                     syn::Meta::NameValue(nv) => {
                         // Key-value pairs like column_name = "..."
                         if nv.path.is_ident("column_name") {
-                            if let syn::Expr::Lit(lit) = &nv.value {
-                                if let syn::Lit::Str(s) = &lit.lit {
-                                    attributes.push(SeaOrmFieldAttribute::ColumnName(s.value()));
-                                }
+                            if let syn::Expr::Lit(lit) = &nv.value
+                                && let syn::Lit::Str(s) = &lit.lit
+                            {
+                                attributes.push(SeaOrmFieldAttribute::ColumnName(s.value()));
                             }
                         } else if nv.path.is_ident("column_type") {
-                            if let syn::Expr::Lit(lit) = &nv.value {
-                                if let syn::Lit::Str(s) = &lit.lit {
-                                    attributes.push(SeaOrmFieldAttribute::ColumnType(s.value()));
-                                }
+                            if let syn::Expr::Lit(lit) = &nv.value
+                                && let syn::Lit::Str(s) = &lit.lit
+                            {
+                                attributes.push(SeaOrmFieldAttribute::ColumnType(s.value()));
                             }
-                        } else if nv.path.is_ident("default_value") {
-                            if let syn::Expr::Lit(lit) = &nv.value {
-                                if let syn::Lit::Str(s) = &lit.lit {
-                                    attributes.push(SeaOrmFieldAttribute::DefaultValue(s.value()));
-                                }
-                            }
+                        } else if nv.path.is_ident("default_value")
+                            && let syn::Expr::Lit(lit) = &nv.value
+                            && let syn::Lit::Str(s) = &lit.lit
+                        {
+                            attributes.push(SeaOrmFieldAttribute::DefaultValue(s.value()));
                         }
                     }
                     _ => {}
@@ -262,12 +253,11 @@ fn parse_relation_enum(item_enum: syn::ItemEnum) -> ImportResult<Vec<SeaOrmRelat
 
         // Parse sea_orm relation attributes
         for attr in &variant.attrs {
-            if attr.path().is_ident("sea_orm") {
-                if let Ok(meta) = attr.parse_args::<syn::Meta>() {
-                    if let Some(relation) = parse_relation_attribute(name.clone(), meta)? {
-                        relations.push(relation);
-                    }
-                }
+            if attr.path().is_ident("sea_orm")
+                && let Ok(meta) = attr.parse_args::<syn::Meta>()
+                && let Some(relation) = parse_relation_attribute(name.clone(), meta)?
+            {
+                relations.push(relation);
             }
         }
     }
