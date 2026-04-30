@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-04-30
+
+Forward-ports three correctness fixes that shipped in 0.8.2 on the
+`release/0.8.1` branch but never landed on `develop` before 0.9.0
+cut. All three were required to import the Lexmata application schema
+(71 models, 33 enums) round-trippably through `prax import --from
+prisma`; each is covered by a regression test.
+
+### Fixed
+
+- **`prax-import` (Prisma) — `@default` value round-trip.** String
+  literal defaults no longer double-quote
+  (`@default("standard")` ↛ `@default(""standard"")`); bare-identifier
+  defaults on enum-typed fields map to `AttributeValue::Ident`
+  rather than `AttributeValue::String` so the emitter doesn't
+  render them as quoted strings; `dbgenerated("…")` arguments unwrap
+  their Prisma source quotes uniformly.
+- **`prax-import` (Prisma) — pgvector `Unsupported(…)`.** Prisma's
+  `Unsupported("vector(N)")` / `halfvec(N)` / `sparsevec(N)` / `bit(N)`
+  escape hatch now maps to the matching `ScalarType::Vector(…)` /
+  `HalfVector(…)` / `SparseVector(…)` / `Bit(…)` variants. The CLI
+  emitter prints the dimension via the `@dim(N)` attribute that the
+  schema parser already accepts.
+- **`prax validate` — diagnostic rendering.** Schema errors now render
+  via `miette::Report` with the source attached, so the
+  `prax::schema::invalid_field` / `unknown_type` / etc. diagnostic
+  text and location are visible. Previously every parse or validation
+  failure surfaced as a bare "syntax error in schema" string, hiding
+  the actionable detail.
+- **`prax-schema` validator — `Json` default values.** Accept
+  `String`, `Array`, `Boolean`, `Int`, and `Float` payloads as the
+  `@default` of a `Json`-typed field. Prisma encodes JSON defaults as
+  quoted text literals (`@default("[]")`, `@default("{}")`), which
+  are valid because Postgres parses the text into `jsonb` at insert
+  time — the old validator only accepted `String` defaults on
+  `String`-typed fields, rejecting every JSON default outright.
+
+### Housekeeping
+
+- `.gitignore` excludes `docs/superpowers/` and
+  `tests/qualified_test.rs` (local scratch test, broken compile) so
+  `cargo publish` doesn't require `--allow-dirty` for these
+  pre-existing artifacts.
+
 ## [0.9.0] - 2026-04-30
 
 ### Added
