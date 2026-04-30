@@ -779,28 +779,23 @@ fn field_type_to_rust_with_boxing(
 ) -> String {
     use prax_schema::ast::{FieldType, TypeModifier};
 
-    // For model references (non-list), check if boxing is needed to break cycles
+    // For model references (non-list), check if boxing is needed to break cycles.
+    // Non-list relations are always emitted as `Option<T>` regardless of the
+    // schema's required/optional modifier: the relation is "not loaded" until
+    // `.include` populates it, so the Rust struct must allow representing the
+    // un-included state. This also gives the field a `Default::default()`
+    // (== `None`), which `FromRow` relies on to construct a row that hasn't
+    // been join-decoded yet. The schema-level required-ness is a database
+    // constraint enforced by FK + NOT NULL, not a Rust struct invariant.
     if let FieldType::Model(target) = field_type
         && !matches!(modifier, TypeModifier::List)
     {
         let should_box = needs_boxing(source_model, target, relation_graph);
         let base = target.to_string();
-        return match modifier {
-            TypeModifier::Optional | TypeModifier::OptionalList => {
-                if should_box {
-                    format!("Option<Box<{}>>", base)
-                } else {
-                    format!("Option<{}>", base)
-                }
-            }
-            TypeModifier::Required => {
-                if should_box {
-                    format!("Box<{}>", base)
-                } else {
-                    base
-                }
-            }
-            TypeModifier::List => unreachable!(),
+        return if should_box {
+            format!("Option<Box<{}>>", base)
+        } else {
+            format!("Option<{}>", base)
         };
     }
 
