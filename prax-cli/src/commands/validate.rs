@@ -109,8 +109,15 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
     // Use validate_schema to ensure field types are properly resolved
     // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content)
-        .map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
+    prax_schema::validate_schema(content).map_err(|e| {
+        // `e.to_string()` returns only the top-level `#[error("...")]` template;
+        // the useful detail (which model, which field, the inner message from
+        // `SyntaxError`, or the per-error list inside `ValidationFailed`) is on
+        // sub-fields and #[related]. Format via miette so the report shows the
+        // full diagnostic chain instead of a generic "syntax error in schema".
+        let report = miette::Report::from(e).with_source_code(content.to_string());
+        CliError::Schema(format!("{report:?}"))
+    })
 }
 
 fn validate_schema(schema: &prax_schema::ast::Schema) -> Result<(), Vec<String>> {
