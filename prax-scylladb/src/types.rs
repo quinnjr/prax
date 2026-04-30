@@ -38,7 +38,7 @@ pub enum ScyllaValue {
     Blob(Vec<u8>),
     /// UUID.
     Uuid(Uuid),
-    /// TimeUUID.
+    /// `TimeUUID`.
     TimeUuid(Uuid),
     /// Date (without time).
     Date(NaiveDate),
@@ -73,8 +73,7 @@ impl ScyllaValue {
             Self::Int(v) => Ok(i64::from(*v)),
             Self::BigInt(v) => Ok(*v),
             _ => Err(ScyllaError::type_conversion(format!(
-                "Cannot convert {:?} to i64",
-                self
+                "Cannot convert {self:?} to i64"
             ))),
         }
     }
@@ -89,8 +88,7 @@ impl ScyllaValue {
             Self::Int(v) => Ok(f64::from(*v)),
             Self::BigInt(v) => Ok(*v as f64),
             _ => Err(ScyllaError::type_conversion(format!(
-                "Cannot convert {:?} to f64",
-                self
+                "Cannot convert {self:?} to f64"
             ))),
         }
     }
@@ -101,8 +99,7 @@ impl ScyllaValue {
             Self::Text(v) => Ok(v.clone()),
             Self::Uuid(v) | Self::TimeUuid(v) => Ok(v.to_string()),
             _ => Err(ScyllaError::type_conversion(format!(
-                "Cannot convert {:?} to string",
-                self
+                "Cannot convert {self:?} to string"
             ))),
         }
     }
@@ -112,8 +109,7 @@ impl ScyllaValue {
         match self {
             Self::Boolean(v) => Ok(*v),
             _ => Err(ScyllaError::type_conversion(format!(
-                "Cannot convert {:?} to bool",
-                self
+                "Cannot convert {self:?} to bool"
             ))),
         }
     }
@@ -140,7 +136,8 @@ impl ToCqlValue for FilterValue {
                 ))
             }
             FilterValue::List(arr) => {
-                let values: ScyllaResult<Vec<CqlValue>> = arr.iter().map(|v| v.to_cql()).collect();
+                let values: ScyllaResult<Vec<CqlValue>> =
+                    arr.iter().map(ToCqlValue::to_cql).collect();
                 Ok(CqlValue::List(values?))
             }
         }
@@ -180,7 +177,7 @@ impl ToCqlValue for ScyllaValue {
                 v.num_days_from_ce() as u32,
             ))),
             ScyllaValue::Time(v) => {
-                let nanos = v.num_seconds_from_midnight() as i64 * 1_000_000_000
+                let nanos = i64::from(v.num_seconds_from_midnight()) * 1_000_000_000
                     + i64::from(v.nanosecond());
                 Ok(CqlValue::Time(scylla::frame::value::CqlTime(nanos)))
             }
@@ -189,11 +186,13 @@ impl ToCqlValue for ScyllaValue {
             )),
             ScyllaValue::Duration(v) => Ok(CqlValue::Duration(*v)),
             ScyllaValue::List(v) => {
-                let values: ScyllaResult<Vec<CqlValue>> = v.iter().map(|x| x.to_cql()).collect();
+                let values: ScyllaResult<Vec<CqlValue>> =
+                    v.iter().map(ToCqlValue::to_cql).collect();
                 Ok(CqlValue::List(values?))
             }
             ScyllaValue::Set(v) => {
-                let values: ScyllaResult<Vec<CqlValue>> = v.iter().map(|x| x.to_cql()).collect();
+                let values: ScyllaResult<Vec<CqlValue>> =
+                    v.iter().map(ToCqlValue::to_cql).collect();
                 Ok(CqlValue::Set(values?))
             }
             ScyllaValue::Map(v) => {
@@ -208,7 +207,7 @@ impl ToCqlValue for ScyllaValue {
     }
 }
 
-/// Convert CqlValue to ScyllaValue.
+/// Convert `CqlValue` to `ScyllaValue`.
 impl From<CqlValue> for ScyllaValue {
     fn from(value: CqlValue) -> Self {
         match value {
@@ -237,7 +236,7 @@ impl From<CqlValue> for ScyllaValue {
     }
 }
 
-/// Convert ScyllaValue to JSON.
+/// Convert `ScyllaValue` to JSON.
 impl From<ScyllaValue> for JsonValue {
     fn from(value: ScyllaValue) -> Self {
         match value {
@@ -248,11 +247,10 @@ impl From<ScyllaValue> for JsonValue {
             ScyllaValue::Int(v) => JsonValue::Number(v.into()),
             ScyllaValue::BigInt(v) => JsonValue::Number(v.into()),
             ScyllaValue::Float(v) => serde_json::Number::from_f64(f64::from(v))
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
-            ScyllaValue::Double(v) => serde_json::Number::from_f64(v)
-                .map(JsonValue::Number)
-                .unwrap_or(JsonValue::Null),
+                .map_or(JsonValue::Null, JsonValue::Number),
+            ScyllaValue::Double(v) => {
+                serde_json::Number::from_f64(v).map_or(JsonValue::Null, JsonValue::Number)
+            }
             ScyllaValue::Decimal(v) => JsonValue::String(v.to_string()),
             ScyllaValue::Text(v) => JsonValue::String(v),
             ScyllaValue::Blob(v) => JsonValue::String(base64_encode(&v)),
@@ -289,7 +287,6 @@ impl From<ScyllaValue> for JsonValue {
 
 /// Simple base64 encoding for blob values.
 fn base64_encode(data: &[u8]) -> String {
-    use std::fmt::Write;
     let mut result = String::with_capacity(data.len() * 4 / 3 + 4);
     for chunk in data.chunks(3) {
         let mut n = 0u32;
@@ -319,13 +316,13 @@ pub trait ToCqlParams {
 
 impl<T: ToCqlValue> ToCqlParams for Vec<T> {
     fn to_cql_params(&self) -> ScyllaResult<Vec<CqlValue>> {
-        self.iter().map(|v| v.to_cql()).collect()
+        self.iter().map(ToCqlValue::to_cql).collect()
     }
 }
 
 impl<T: ToCqlValue> ToCqlParams for &[T] {
     fn to_cql_params(&self) -> ScyllaResult<Vec<CqlValue>> {
-        self.iter().map(|v| v.to_cql()).collect()
+        self.iter().map(ToCqlValue::to_cql).collect()
     }
 }
 

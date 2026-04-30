@@ -1,6 +1,6 @@
-//! ScyllaDB connection pool.
+//! `ScyllaDB` connection pool.
 //!
-//! Note: The ScyllaDB Rust driver (`scylla`) already includes built-in connection
+//! Note: The `ScyllaDB` Rust driver (`scylla`) already includes built-in connection
 //! pooling and automatic reconnection. This module provides a higher-level wrapper
 //! that integrates with the Prax ORM ecosystem.
 
@@ -15,9 +15,9 @@ use crate::engine::ScyllaEngine;
 use crate::error::ScyllaError;
 use crate::error::ScyllaResult;
 
-/// A connection pool for ScyllaDB.
+/// A connection pool for `ScyllaDB`.
 ///
-/// The ScyllaDB driver already handles connection pooling internally,
+/// The `ScyllaDB` driver already handles connection pooling internally,
 /// managing connections to all nodes in the cluster. This pool provides
 /// a higher-level interface for acquiring connections and managing
 /// prepared statements.
@@ -32,7 +32,7 @@ pub struct ScyllaPool {
 }
 
 impl ScyllaPool {
-    /// Connect to a ScyllaDB cluster and create a pool.
+    /// Connect to a `ScyllaDB` cluster and create a pool.
     pub async fn connect(config: ScyllaConfig) -> ScyllaResult<Self> {
         let connection = connect(config.clone()).await?;
 
@@ -53,7 +53,7 @@ impl ScyllaPool {
 
     /// Get a connection from the pool.
     ///
-    /// Note: This returns a clone of the shared connection since ScyllaDB
+    /// Note: This returns a clone of the shared connection since `ScyllaDB`
     /// sessions are inherently pooled and thread-safe.
     #[must_use]
     pub fn get(&self) -> ScyllaConnection {

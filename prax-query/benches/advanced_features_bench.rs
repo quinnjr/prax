@@ -1,3 +1,6 @@
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+
 //! Benchmarks for advanced query features.
 //!
 //! This benchmark suite covers the core advanced features implemented in prax-query:
@@ -547,8 +550,8 @@ fn bench_batch_throughput(c: &mut Criterion) {
             b.iter(|| {
                 let ctes: Vec<_> = (0..n)
                     .map(|i| {
-                        Cte::new(&format!("cte_{}", i))
-                            .as_query(&format!("SELECT * FROM table_{}", i))
+                        Cte::new(format!("cte_{}", i))
+                            .as_query(format!("SELECT * FROM table_{}", i))
                     })
                     .collect();
                 black_box(ctes)

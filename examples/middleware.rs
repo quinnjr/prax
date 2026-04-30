@@ -153,11 +153,10 @@ impl MetricsMiddleware {
     fn average_duration(&self) -> Duration {
         let count = self.query_count.load(Ordering::Relaxed);
         let total = self.total_duration_ms.load(Ordering::Relaxed);
-        if count > 0 {
-            Duration::from_millis(total / count)
-        } else {
-            Duration::ZERO
-        }
+        total
+            .checked_div(count)
+            .map(Duration::from_millis)
+            .unwrap_or(Duration::ZERO)
     }
 }
 

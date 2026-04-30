@@ -10,14 +10,9 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::{
     filter::{Filter, FilterValue},
-    mem_optimize::{
-        arena::QueryArena,
-        interning::{GlobalInterner, ScopedInterner},
-    },
+    mem_optimize::{arena::QueryArena, interning::GlobalInterner},
     sql::SqlBuilder,
-    types::{OrderByField, Select},
 };
-use std::sync::Arc;
 use std::time::Duration;
 
 // ============================================================================

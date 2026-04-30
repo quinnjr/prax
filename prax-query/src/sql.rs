@@ -39,8 +39,6 @@ use tracing::debug;
 /// sql.push_str(keywords::FROM);
 /// ```
 pub mod keywords {
-    //! SQL keywords as static string slices for zero-allocation usage.
-
     // DML Keywords
     pub const SELECT: &str = "SELECT";
     pub const INSERT: &str = "INSERT";
@@ -1856,7 +1854,7 @@ mod tests {
     fn test_fast_builder_in_clause_postgres() {
         let mut builder = FastSqlBuilder::postgres(QueryCapacity::Custom(128));
         builder.push_str("SELECT * FROM users WHERE id IN (");
-        let values: Vec<FilterValue> = (1..=5).map(|i| FilterValue::Int(i)).collect();
+        let values: Vec<FilterValue> = (1..=5).map(FilterValue::Int).collect();
         builder.bind_in_clause(values);
         builder.push_char(')');
 
@@ -1869,7 +1867,7 @@ mod tests {
     fn test_fast_builder_in_clause_mysql() {
         let mut builder = FastSqlBuilder::mysql(QueryCapacity::Custom(128));
         builder.push_str("SELECT * FROM users WHERE id IN (");
-        let values: Vec<FilterValue> = (1..=5).map(|i| FilterValue::Int(i)).collect();
+        let values: Vec<FilterValue> = (1..=5).map(FilterValue::Int).collect();
         builder.bind_in_clause(values);
         builder.push_char(')');
 

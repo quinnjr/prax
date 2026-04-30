@@ -306,6 +306,7 @@ async fn e2e_query_one_with_multiple_rows_behavior() {
     use prax_sqlite::SqliteEngine;
 
     #[derive(Debug)]
+    #[allow(dead_code)]
     struct Person {
         id: i32,
         email: String,

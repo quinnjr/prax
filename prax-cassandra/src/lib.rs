@@ -1,3 +1,6 @@
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+
 //! # prax-cassandra
 //!
 //! Apache Cassandra driver for Prax ORM using cdrs-tokio.

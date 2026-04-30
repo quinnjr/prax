@@ -301,7 +301,7 @@ fn get_memory_usage() -> (usize, usize) {
 /// DHAT heap profiler wrapper (requires `dhat-heap` feature).
 #[cfg(feature = "dhat-heap")]
 pub mod dhat_profiler {
-    use dhat::{Profiler, ProfilerBuilder};
+    use dhat::Profiler;
 
     /// Guard that stops profiling when dropped.
     pub struct DhatGuard {

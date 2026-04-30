@@ -1,3 +1,6 @@
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+
 //! DuckDB database driver for Prax ORM.
 //!
 //! This crate provides DuckDB support for the Prax ORM, optimized for analytical

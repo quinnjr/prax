@@ -165,9 +165,8 @@ pub fn generate_model_module_with_style(
         .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
         .map(|f| {
             let rust_field = snake_ident(f.name());
-            let rust_ty: syn::Type =
-                syn::parse2(field_type_to_rust(&f.field_type, &f.modifier).into())
-                    .expect("generated Rust type should parse");
+            let rust_ty: syn::Type = syn::parse2(field_type_to_rust(&f.field_type, &f.modifier))
+                .expect("generated Rust type should parse");
             (rust_field, rust_ty, column_name_of(f))
         })
         .collect();
@@ -180,9 +179,8 @@ pub fn generate_model_module_with_style(
         .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
         .map(|f| {
             let rust_field = snake_ident(f.name());
-            let rust_ty: syn::Type =
-                syn::parse2(field_type_to_rust(&f.field_type, &f.modifier).into())
-                    .expect("generated Rust type should parse");
+            let rust_ty: syn::Type = syn::parse2(field_type_to_rust(&f.field_type, &f.modifier))
+                .expect("generated Rust type should parse");
             (rust_field, rust_ty, column_name_of(f), f.is_id())
         })
         .collect();
@@ -297,10 +295,10 @@ pub fn generate_model_module_with_style(
 /// Get the primary key field names for a model.
 fn get_primary_key_fields(model: &Model) -> Vec<String> {
     // Check for composite @@id
-    if let Some(attr) = model.attributes.iter().find(|a| a.name() == "id") {
-        if let Some(prax_schema::ast::AttributeValue::FieldRefList(fields)) = attr.first_arg() {
-            return fields.iter().map(|s| s.to_string()).collect();
-        }
+    if let Some(attr) = model.attributes.iter().find(|a| a.name() == "id")
+        && let Some(prax_schema::ast::AttributeValue::FieldRefList(fields)) = attr.first_arg()
+    {
+        return fields.iter().map(|s| s.to_string()).collect();
     }
 
     // Otherwise, find @id field

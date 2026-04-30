@@ -1,3 +1,6 @@
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
+
 //! SQLite database driver for Prax ORM.
 //!
 //! This crate provides SQLite support for the Prax ORM, using `tokio-rusqlite`

@@ -415,15 +415,15 @@ impl FrameClause {
         let mut sql = format!("{} {}", frame_type, bounds);
 
         // Exclude clause (PostgreSQL only)
-        if db_type == DatabaseType::PostgreSQL {
-            if let Some(exclude) = self.exclude {
-                sql.push_str(match exclude {
-                    FrameExclude::CurrentRow => " EXCLUDE CURRENT ROW",
-                    FrameExclude::Group => " EXCLUDE GROUP",
-                    FrameExclude::Ties => " EXCLUDE TIES",
-                    FrameExclude::NoOthers => " EXCLUDE NO OTHERS",
-                });
-            }
+        if db_type == DatabaseType::PostgreSQL
+            && let Some(exclude) = self.exclude
+        {
+            sql.push_str(match exclude {
+                FrameExclude::CurrentRow => " EXCLUDE CURRENT ROW",
+                FrameExclude::Group => " EXCLUDE GROUP",
+                FrameExclude::Ties => " EXCLUDE TIES",
+                FrameExclude::NoOthers => " EXCLUDE NO OTHERS",
+            });
         }
 
         sql

@@ -228,7 +228,7 @@ fn bench_pipeline_construction(c: &mut Criterion) {
                         pipeline = pipeline.add_insert(
                             "INSERT INTO users (name, age) VALUES ($1, $2)",
                             vec![
-                                FilterValue::String(format!("User{}", i).into()),
+                                FilterValue::String(format!("User{}", i)),
                                 FilterValue::Int(i as i64),
                             ],
                         );
@@ -262,8 +262,8 @@ fn bench_bulk_insert_pipeline(c: &mut Criterion) {
 
                     for i in 0..num_rows {
                         pipeline.add_row(vec![
-                            FilterValue::String(format!("User{}", i).into()),
-                            FilterValue::String(format!("user{}@example.com", i).into()),
+                            FilterValue::String(format!("User{}", i)),
+                            FilterValue::String(format!("user{}@example.com", i)),
                             FilterValue::Int((i % 100) as i64),
                         ]);
                     }
@@ -369,8 +369,8 @@ fn bench_realistic_workload(c: &mut Criterion) {
 
             for i in 0..1000 {
                 pipeline.add_row(vec![
-                    FilterValue::String(format!("User{}", i).into()),
-                    FilterValue::String(format!("user{}@example.com", i).into()),
+                    FilterValue::String(format!("User{}", i)),
+                    FilterValue::String(format!("user{}@example.com", i)),
                 ]);
             }
 

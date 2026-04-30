@@ -187,28 +187,28 @@ impl ConnectionOptions {
     pub fn from_params(params: &HashMap<String, String>) -> Self {
         let mut opts = Self::default();
 
-        if let Some(timeout) = params.get("connect_timeout") {
-            if let Ok(secs) = timeout.parse::<u64>() {
-                opts.connect_timeout = Duration::from_secs(secs);
-            }
+        if let Some(timeout) = params.get("connect_timeout")
+            && let Ok(secs) = timeout.parse::<u64>()
+        {
+            opts.connect_timeout = Duration::from_secs(secs);
         }
 
-        if let Some(timeout) = params.get("read_timeout") {
-            if let Ok(secs) = timeout.parse::<u64>() {
-                opts.read_timeout = Some(Duration::from_secs(secs));
-            }
+        if let Some(timeout) = params.get("read_timeout")
+            && let Ok(secs) = timeout.parse::<u64>()
+        {
+            opts.read_timeout = Some(Duration::from_secs(secs));
         }
 
-        if let Some(timeout) = params.get("write_timeout") {
-            if let Ok(secs) = timeout.parse::<u64>() {
-                opts.write_timeout = Some(Duration::from_secs(secs));
-            }
+        if let Some(timeout) = params.get("write_timeout")
+            && let Ok(secs) = timeout.parse::<u64>()
+        {
+            opts.write_timeout = Some(Duration::from_secs(secs));
         }
 
-        if let Some(ssl) = params.get("sslmode").or_else(|| params.get("ssl")) {
-            if let Some(mode) = SslMode::parse(ssl) {
-                opts.ssl.mode = mode;
-            }
+        if let Some(ssl) = params.get("sslmode").or_else(|| params.get("ssl"))
+            && let Some(mode) = SslMode::parse(ssl)
+        {
+            opts.ssl.mode = mode;
         }
 
         if let Some(name) = params.get("application_name") {

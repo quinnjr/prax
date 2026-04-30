@@ -110,33 +110,33 @@ impl Plugin for ValidatorPlugin {
                 }
 
                 // Check for required fields
-                if !field.modifier.is_optional() {
-                    if let FieldType::Scalar(ScalarType::String) = &field.field_type {
-                        checks.push(quote! {
-                            if self.#field_name.is_empty() {
-                                errors.push(super::super::_validation::ValidationError::new(
-                                    #field_name_str,
-                                    "cannot be empty"
-                                ));
-                            }
-                        });
-                    }
+                if !field.modifier.is_optional()
+                    && let FieldType::Scalar(ScalarType::String) = &field.field_type
+                {
+                    checks.push(quote! {
+                        if self.#field_name.is_empty() {
+                            errors.push(super::super::_validation::ValidationError::new(
+                                #field_name_str,
+                                "cannot be empty"
+                            ));
+                        }
+                    });
                 }
 
                 // Check optional fields
-                if field.modifier.is_optional() {
-                    if let FieldType::Scalar(ScalarType::String) = &field.field_type {
-                        checks.push(quote! {
-                            if let Some(ref val) = self.#field_name {
-                                if val.is_empty() {
-                                    errors.push(super::super::_validation::ValidationError::new(
-                                        #field_name_str,
-                                        "if provided, cannot be empty"
-                                    ));
-                                }
+                if field.modifier.is_optional()
+                    && let FieldType::Scalar(ScalarType::String) = &field.field_type
+                {
+                    checks.push(quote! {
+                        if let Some(ref val) = self.#field_name {
+                            if val.is_empty() {
+                                errors.push(super::super::_validation::ValidationError::new(
+                                    #field_name_str,
+                                    "if provided, cannot be empty"
+                                ));
                             }
-                        });
-                    }
+                        }
+                    });
                 }
 
                 // Check for email fields (by name convention or attribute)

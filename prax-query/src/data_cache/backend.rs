@@ -160,7 +160,7 @@ pub trait CacheBackend: Send + Sync + 'static {
     {
         async move {
             for (key, value) in entries {
-                self.set(*key, *value, ttl).await?;
+                self.set(key, *value, ttl).await?;
             }
             Ok(())
         }

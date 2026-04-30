@@ -229,9 +229,10 @@ impl ReplicaSetBuilder {
 // ============================================================================
 
 /// Read preference for query routing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ReadPreference {
     /// Always read from primary.
+    #[default]
     Primary,
     /// Prefer primary, fallback to secondary.
     PrimaryPreferred,
@@ -285,12 +286,6 @@ impl ReadPreference {
     /// Check if this preference allows reading from secondary.
     pub fn allows_secondary(&self) -> bool {
         !matches!(self, Self::Primary)
-    }
-}
-
-impl Default for ReadPreference {
-    fn default() -> Self {
-        Self::Primary
     }
 }
 
@@ -498,15 +493,15 @@ impl ConnectionRouter {
                 continue;
             }
 
-            if let Some(health) = self.health.get(&replica.id) {
-                if let Some(latency) = health.latency {
-                    match &best {
-                        None => best = Some((replica, latency)),
-                        Some((_, best_latency)) if latency < *best_latency => {
-                            best = Some((replica, latency));
-                        }
-                        _ => {}
+            if let Some(health) = self.health.get(&replica.id)
+                && let Some(latency) = health.latency
+            {
+                match &best {
+                    None => best = Some((replica, latency)),
+                    Some((_, best_latency)) if latency < *best_latency => {
+                        best = Some((replica, latency));
                     }
+                    _ => {}
                 }
             }
         }

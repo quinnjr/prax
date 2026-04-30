@@ -1,6 +1,6 @@
 //! Schema diffing for generating migrations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use prax_schema::Schema;
 use prax_schema::ast::{Field, FieldType, IndexType, Model, VectorOps, View};
@@ -116,6 +116,92 @@ impl SchemaDiff {
         } else {
             parts.join(", ")
         }
+    }
+
+    /// Return `create_models` ordered so that referenced tables appear before
+    /// the tables that reference them. Self-references and FKs that point at
+    /// tables outside this batch (i.e. tables that already exist) do not
+    /// constrain the ordering. If the FK graph contains a cycle, the remaining
+    /// models are emitted in their original order — engines that need cycles
+    /// resolved must use deferred constraints regardless of emission order.
+    pub fn ordered_create_models(&self) -> Vec<&ModelDiff> {
+        let in_batch: HashSet<&str> = self
+            .create_models
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let mut indegree: HashMap<&str, usize> = self
+            .create_models
+            .iter()
+            .map(|m| (m.table_name.as_str(), 0))
+            .collect();
+        let mut deps: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for model in &self.create_models {
+            let mut seen = HashSet::new();
+            for fk in &model.foreign_keys {
+                let target = fk.referenced_table.as_str();
+                if target == model.table_name {
+                    continue;
+                }
+                if !in_batch.contains(target) {
+                    continue;
+                }
+                if !seen.insert(target) {
+                    continue;
+                }
+                deps.entry(target)
+                    .or_default()
+                    .push(model.table_name.as_str());
+                *indegree.entry(model.table_name.as_str()).or_insert(0) += 1;
+            }
+        }
+
+        let by_name: HashMap<&str, &ModelDiff> = self
+            .create_models
+            .iter()
+            .map(|m| (m.table_name.as_str(), m))
+            .collect();
+
+        let mut ready: VecDeque<&str> = self
+            .create_models
+            .iter()
+            .filter(|m| indegree.get(m.table_name.as_str()).copied().unwrap_or(0) == 0)
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let mut ordered: Vec<&ModelDiff> = Vec::with_capacity(self.create_models.len());
+        let mut emitted: HashSet<&str> = HashSet::new();
+
+        while let Some(name) = ready.pop_front() {
+            if !emitted.insert(name) {
+                continue;
+            }
+            if let Some(model) = by_name.get(name) {
+                ordered.push(*model);
+            }
+            if let Some(children) = deps.get(name) {
+                for child in children {
+                    if let Some(deg) = indegree.get_mut(child) {
+                        *deg = deg.saturating_sub(1);
+                        if *deg == 0 {
+                            ready.push_back(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        if ordered.len() < self.create_models.len() {
+            for model in &self.create_models {
+                if !emitted.contains(model.table_name.as_str()) {
+                    ordered.push(model);
+                }
+            }
+        }
+
+        ordered
     }
 }
 
@@ -552,7 +638,10 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
                     cols.iter().map(|c| c.to_string()).collect()
                 }
                 _ => {
-                    eprintln!("Warning: unexpected @@{} argument type - skipping", attr_name);
+                    eprintln!(
+                        "Warning: unexpected @@{} argument type - skipping",
+                        attr_name
+                    );
                     continue;
                 }
             }
@@ -584,17 +673,15 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
             .or_else(|| attr.get_arg("name"))
             .and_then(|v: &prax_schema::ast::AttributeValue| v.as_string());
 
-        let index_name = custom_name
-            .map(|s: &str| s.to_string())
-            .unwrap_or_else(|| {
-                let prefix = if attr_name == "unique" { "uq" } else { "idx" };
-                format!(
-                    "{}_{}_{}",
-                    prefix,
-                    model.table_name(),
-                    column_names.join("_")
-                )
-            });
+        let index_name = custom_name.map(|s: &str| s.to_string()).unwrap_or_else(|| {
+            let prefix = if attr_name == "unique" { "uq" } else { "idx" };
+            format!(
+                "{}_{}_{}",
+                prefix,
+                model.table_name(),
+                column_names.join("_")
+            )
+        });
 
         if attr_name == "unique" {
             unique_constraints.push(UniqueConstraint {
@@ -669,13 +756,10 @@ fn extract_foreign_keys(model: &Model, schema: &Schema) -> Vec<ForeignKeyDiff> {
         let referenced_columns: Vec<String> =
             rel.references.iter().map(|r| r.to_string()).collect();
 
-        let constraint_name = rel.map.clone().unwrap_or_else(|| {
-            format!(
-                "fk_{}_{}",
-                model.table_name(),
-                columns.join("_")
-            )
-        });
+        let constraint_name = rel
+            .map
+            .clone()
+            .unwrap_or_else(|| format!("fk_{}_{}", model.table_name(), columns.join("_")));
 
         fks.push(ForeignKeyDiff {
             constraint_name,
@@ -717,10 +801,8 @@ fn render_default_sql_ansi(value: &prax_schema::ast::AttributeValue) -> Option<S
                 Some("gen_random_uuid()".to_string())
             } else {
                 // Other functions - attempt to render recursively
-                let arg_strs: Vec<String> = args
-                    .iter()
-                    .filter_map(render_default_sql_ansi)
-                    .collect();
+                let arg_strs: Vec<String> =
+                    args.iter().filter_map(render_default_sql_ansi).collect();
                 Some(format!("{}({})", name, arg_strs.join(", ")))
             }
         }
@@ -748,7 +830,7 @@ fn field_to_diff(field: &Field) -> FieldDiff {
     let default = field
         .get_attribute("default")
         .and_then(|attr| attr.first_arg())
-        .and_then(|arg| render_default_sql_ansi(arg));
+        .and_then(render_default_sql_ansi);
 
     // Get column name from @map attribute or use field name
     let column_name = field
@@ -1229,5 +1311,95 @@ mod tests {
     #[test]
     fn test_index_kind_sql_strings() {
         assert_eq!(VectorIndexKind::Hnsw.as_sql(), "hnsw");
+    }
+
+    fn model_with_fks(name: &str, refs: &[&str]) -> ModelDiff {
+        ModelDiff {
+            name: name.to_string(),
+            table_name: name.to_string(),
+            fields: Vec::new(),
+            primary_key: vec!["id".to_string()],
+            indexes: Vec::new(),
+            unique_constraints: Vec::new(),
+            foreign_keys: refs
+                .iter()
+                .enumerate()
+                .map(|(i, target)| ForeignKeyDiff {
+                    constraint_name: format!("{}_fk_{}", name, i),
+                    columns: vec![format!("{}_id", target)],
+                    referenced_table: (*target).to_string(),
+                    referenced_columns: vec!["id".to_string()],
+                    on_delete: None,
+                    on_update: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn ordered_create_models_emits_referenced_tables_first() {
+        // Mirrors the regression: tracks/playlists reference sync_sources,
+        // but sync_sources was inserted last by HashMap iteration order.
+        let mut diff = SchemaDiff::default();
+        diff.create_models
+            .push(model_with_fks("tracks", &["sync_sources"]));
+        diff.create_models
+            .push(model_with_fks("playlists", &["sync_sources"]));
+        diff.create_models.push(model_with_fks("sync_sources", &[]));
+
+        let ordered: Vec<&str> = diff
+            .ordered_create_models()
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+
+        let pos = |name: &str| ordered.iter().position(|n| *n == name).unwrap();
+        assert!(pos("sync_sources") < pos("tracks"));
+        assert!(pos("sync_sources") < pos("playlists"));
+        assert_eq!(ordered.len(), 3);
+    }
+
+    #[test]
+    fn ordered_create_models_ignores_self_references() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("nodes", &["nodes"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].table_name, "nodes");
+    }
+
+    #[test]
+    fn ordered_create_models_ignores_external_references() {
+        // FK to a table not in this batch (already exists) should not block.
+        let mut diff = SchemaDiff::default();
+        diff.create_models
+            .push(model_with_fks("orders", &["users"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].table_name, "orders");
+    }
+
+    #[test]
+    fn ordered_create_models_handles_cycles_without_dropping_models() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("a", &["b"]));
+        diff.create_models.push(model_with_fks("b", &["a"]));
+        let ordered = diff.ordered_create_models();
+        assert_eq!(ordered.len(), 2);
+    }
+
+    #[test]
+    fn ordered_create_models_handles_chain() {
+        let mut diff = SchemaDiff::default();
+        diff.create_models.push(model_with_fks("c", &["b"]));
+        diff.create_models.push(model_with_fks("b", &["a"]));
+        diff.create_models.push(model_with_fks("a", &[]));
+
+        let ordered: Vec<&str> = diff
+            .ordered_create_models()
+            .iter()
+            .map(|m| m.table_name.as_str())
+            .collect();
+        assert_eq!(ordered, vec!["a", "b", "c"]);
     }
 }

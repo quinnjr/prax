@@ -210,6 +210,9 @@ impl<S> Layer<S> for PraxLayer {
 #[derive(Clone)]
 pub struct PraxMiddleware<S> {
     inner: S,
+    // Held so the client outlives any in-flight request even though the
+    // middleware itself does not currently read it.
+    #[allow(dead_code)]
     client: Arc<PraxClient>,
 }
 

@@ -9,7 +9,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::mem_optimize::{GlobalInterner, QueryArena, ScopedInterner};
-use prax_query::memory::{BufferPool, GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL, StringPool};
+use prax_query::memory::{GLOBAL_BUFFER_POOL, GLOBAL_STRING_POOL, StringPool};
 use prax_query::profiling::{
     AllocationTracker, HeapProfiler, LeakDetector, MemoryProfiler, MemorySnapshot,
 };

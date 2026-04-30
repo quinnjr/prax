@@ -1,13 +1,13 @@
-//! Error types for ScyllaDB operations.
+//! Error types for `ScyllaDB` operations.
 
 #[allow(unused_imports)]
 use std::fmt;
 use thiserror::Error;
 
-/// Result type for ScyllaDB operations.
+/// Result type for `ScyllaDB` operations.
 pub type ScyllaResult<T> = Result<T, ScyllaError>;
 
-/// Errors that can occur during ScyllaDB operations.
+/// Errors that can occur during `ScyllaDB` operations.
 #[derive(Error, Debug)]
 pub enum ScyllaError {
     /// Configuration error.

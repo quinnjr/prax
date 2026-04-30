@@ -44,8 +44,8 @@ fn missing(column: &str) -> RowError {
 impl RowRef for ScyllaRowRef {
     fn get_i32(&self, c: &str) -> Result<i32, RowError> {
         match self.values.get(c).ok_or_else(|| missing(c))? {
-            CqlValue::TinyInt(i) => Ok(*i as i32),
-            CqlValue::SmallInt(i) => Ok(*i as i32),
+            CqlValue::TinyInt(i) => Ok(i32::from(*i)),
+            CqlValue::SmallInt(i) => Ok(i32::from(*i)),
             CqlValue::Int(i) => Ok(*i),
             CqlValue::BigInt(i) => i32::try_from(*i).map_err(|_| tc(c, "i64 overflow")),
             _ => Err(tc(c, "not an integer")),
@@ -59,9 +59,9 @@ impl RowRef for ScyllaRowRef {
     }
     fn get_i64(&self, c: &str) -> Result<i64, RowError> {
         match self.values.get(c).ok_or_else(|| missing(c))? {
-            CqlValue::TinyInt(i) => Ok(*i as i64),
-            CqlValue::SmallInt(i) => Ok(*i as i64),
-            CqlValue::Int(i) => Ok(*i as i64),
+            CqlValue::TinyInt(i) => Ok(i64::from(*i)),
+            CqlValue::SmallInt(i) => Ok(i64::from(*i)),
+            CqlValue::Int(i) => Ok(i64::from(*i)),
             CqlValue::BigInt(i) => Ok(*i),
             _ => Err(tc(c, "not an integer")),
         }
@@ -74,7 +74,7 @@ impl RowRef for ScyllaRowRef {
     }
     fn get_f64(&self, c: &str) -> Result<f64, RowError> {
         match self.values.get(c).ok_or_else(|| missing(c))? {
-            CqlValue::Float(f) => Ok(*f as f64),
+            CqlValue::Float(f) => Ok(f64::from(*f)),
             CqlValue::Double(f) => Ok(*f),
             _ => Err(tc(c, "not a number")),
         }

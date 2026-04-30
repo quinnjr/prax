@@ -11,9 +11,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use prax_query::{
     filter::{Filter, FilterValue},
     sql::{DatabaseType, SqlBuilder},
-    types::{OrderByField, Select},
 };
-use std::borrow::Cow;
 use std::hint::black_box;
 
 // ============================================================================
@@ -60,7 +58,7 @@ fn bench_sql_generation_by_database(c: &mut Criterion) {
     for size in [5, 10, 50, 100] {
         for (name, _db_type) in &databases {
             group.bench_function(BenchmarkId::new(format!("in_clause_{}", size), name), |b| {
-                let values: Vec<FilterValue> = (0..size).map(|i| FilterValue::Int(i)).collect();
+                let values: Vec<FilterValue> = (0..size).map(FilterValue::Int).collect();
                 let filter = Filter::In("id".into(), values);
                 b.iter(|| {
                     let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);

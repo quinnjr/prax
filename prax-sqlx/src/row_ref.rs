@@ -21,11 +21,15 @@ enum Value {
     Bytes(Vec<u8>),
 }
 
+/// A driver-agnostic decoded row produced by the sqlx engine. Holds owned
+/// values keyed by column name so callers can access them after the row
+/// itself has been dropped.
 pub struct SqlxRowRef {
     values: HashMap<String, Value>,
 }
 
 impl SqlxRowRef {
+    /// Decode a raw sqlx row into a driver-agnostic [`SqlxRowRef`].
     pub fn from_sqlx(row: &SqlxRow) -> Result<Self, RowError> {
         let mut values = HashMap::new();
         match row {

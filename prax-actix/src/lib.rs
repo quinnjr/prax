@@ -280,7 +280,7 @@ where
     fn call(&self, req: ServiceRequest) -> Self::Future {
         debug!("PraxMiddleware handling request");
         let fut = self.service.call(req);
-        Box::pin(async move { fut.await })
+        Box::pin(fut)
     }
 }
 

@@ -291,8 +291,7 @@ mod tests {
         assert!(snapshot.timestamp > 0);
 
         // Get stats
-        let stats = profiler.stats();
-        assert!(stats.total_allocations >= 0);
+        let _stats = profiler.stats();
 
         // Generate report
         let report = profiler.report();

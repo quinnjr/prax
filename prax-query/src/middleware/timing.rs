@@ -69,12 +69,9 @@ impl TimingMiddleware {
 
     /// Get the average execution time in nanoseconds.
     pub fn avg_time_ns(&self) -> u64 {
-        let count = self.query_count();
-        if count == 0 {
-            0
-        } else {
-            self.total_time_ns() / count
-        }
+        self.total_time_ns()
+            .checked_div(self.query_count())
+            .unwrap_or(0)
     }
 
     /// Get the average execution time in microseconds.

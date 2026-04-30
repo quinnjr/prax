@@ -324,10 +324,10 @@ impl SnapshotSeries {
 
     /// Get memory growth rate (bytes per second).
     pub fn growth_rate(&self) -> f64 {
-        if let Some(diff) = self.total_diff() {
-            if diff.time_delta.as_secs_f64() > 0.0 {
-                return diff.bytes_delta as f64 / diff.time_delta.as_secs_f64();
-            }
+        if let Some(diff) = self.total_diff()
+            && diff.time_delta.as_secs_f64() > 0.0
+        {
+            return diff.bytes_delta as f64 / diff.time_delta.as_secs_f64();
         }
         0.0
     }

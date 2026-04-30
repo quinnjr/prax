@@ -423,20 +423,20 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
 
 /// Check if a type is `Option<T>`.
 fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "Option";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "Option";
     }
     false
 }
 
 /// Check if a type is `Vec<T>`.
 fn is_vec_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            return segment.ident == "Vec";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.first()
+    {
+        return segment.ident == "Vec";
     }
     false
 }
@@ -458,15 +458,13 @@ enum TypeCategory {
 fn classify_field_type(ty: &Type) -> TypeCategory {
     // Unwrap Option<T> to get the inner type.
     let type_name = if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        // Recurse to classify the inner type.
-                        return classify_field_type(inner);
-                    }
-                }
-            }
+        if let Some(segment) = type_path.path.segments.first()
+            && segment.ident == "Option"
+            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+        {
+            // Recurse to classify the inner type.
+            return classify_field_type(inner);
         }
         // Not Option — extract the last segment as the type name.
         type_path.path.segments.last().map(|s| s.ident.to_string())
