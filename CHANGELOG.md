@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`prax-migrate` — SQLite generator correctness.** The migration
+  generator now produces valid SQLite DDL in four places where it
+  previously emitted garbage or omitted statements entirely:
+  - `DEFAULT` clauses render real SQL literals (`0`, `1`, `'value'`,
+    `CURRENT_TIMESTAMP`) instead of Rust `Debug` output
+    (`Int(0)`, `Boolean(false)`, `Ident("value")`, `Function("now", [])`).
+    A new `render_default_sql_ansi` helper in `prax-migrate/src/diff.rs`
+    converts `AttributeValue` → ANSI SQL; the SQLite generator then
+    post-processes `TRUE`/`FALSE` → `1`/`0`.
+  - Enum columns emit `TEXT` on SQLite / MySQL / MSSQL / DuckDB.
+    `FieldDiff` now carries an `enum_name: Option<String>` alongside
+    `sql_type`; Postgres consumes it to keep emitting the native enum
+    type reference (`"role"`), every other dialect ignores it and
+    uses `TEXT`. Before this fix, SQLite columns were typed as the
+    quoted enum name (`"kind" "SyncSourceKind"`), which SQLite parses
+    as a column with unrecognized affinity.
+  - Foreign-key `REFERENCES` clauses resolve `@@map` table names.
+    `extract_foreign_keys` now takes the full schema and looks up the
+    referenced model's mapped table name, so
+    `REFERENCES "sync_sources"` appears in the DDL instead of
+    `REFERENCES "SyncSource"`. Default FK constraint names dropped
+    the redundant `_ModelName` suffix.
+  - `@@index` attributes produce `CREATE INDEX` statements.
+    `model_to_diff` now extracts index/unique declarations from model
+    attributes, and `SchemaDiffer::diff` lifts them into
+    `SchemaDiff.create_indexes` so the SQL generator's existing index
+    loop actually sees them.
+- **`prax-typegen` — `z.lazy()` return-type annotation.** Generated
+  Zod schemas now compile under `"strict": true` /
+  `"noImplicitAny": true`. Model schemas that contain relation fields
+  are emitted as `export const FooSchema: z.ZodTypeAny = z.object({...})`,
+  and every `z.lazy((): z.ZodTypeAny => FooSchema)` callback carries
+  an explicit return type. Resolves TS7022 / TS7024 in consumer
+  projects with strict TypeScript.
+- **`prax-typegen` — no duplicate type re-exports.** `schemas.ts` no
+  longer emits `export type Foo = z.infer<typeof FooSchema>` for
+  models, enums, composites, or create/update inputs. Those names are
+  already exported as `interface`/`type` from `models.ts`, and the
+  duplicate exports caused TS2308 collisions in the auto-generated
+  barrel `export * from './models'; export * from './schemas';`. Use
+  the interface/type from `models.ts`; use the `XxxSchema` constant
+  from `schemas.ts` for runtime validation.
+
 ## [0.8.0] - 2026-04-30
 
 The headline of this release is the new executable **client API** —
