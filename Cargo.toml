@@ -142,7 +142,7 @@ tempfile = "3.10"
 trybuild = "1.0"
 
 # Benchmarking
-criterion = { version = "0.8.0", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
 
 # ORM Comparison (for benchmarks)
 diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
