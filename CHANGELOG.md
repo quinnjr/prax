@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-04-30
+
+### Added
+
+- **`prax-query` — blanket `FromColumn` / `ToFilterValue` for
+  `Option<T>`.** Every `T: FromColumn` now satisfies
+  `Option<T>: FromColumn` via a single blanket impl that probes
+  nullability with the new `RowRef::is_null` method. Unblocks
+  schema-generated clients from hitting the orphan rule when a
+  Prisma column is an `Enum?`: `Option<MyEnum>: FromColumn` now
+  works out of the box without the consumer crate having to write
+  its own (which orphan rules would reject). Replaced the dozen
+  concrete `Option<primitive>` impls — behavior-preserving since
+  every driver backend either honored the existing `_opt` path or
+  falls back to the new `is_null` + inner decode.
+- **`prax-query` — `FromColumn` / `ToFilterValue` for `Vec<f32>`.**
+  Pgvector-typed columns in the schema emit `Vec<f32>` on the
+  generated struct; those now decode via `RowRef::get_vector` (new
+  base method, drivers implement) and encode as
+  `FilterValue::List(Float, Float, …)`.
+- **`prax-cli generate` — enum round-trip impls.** Every enum
+  emitted by `prax generate` now carries `FromStr`, `FromColumn`,
+  and `ToFilterValue` impls alongside the existing `Display` /
+  `Default`. Schema-generated structs with enum fields
+  now compile without needing handwritten decoder code per enum.
+
+### Fixed
+
+- **`prax-cli generate` — escape Rust reserved keywords.** Columns
+  named `type`, `match`, `use`, `loop`, `move`, etc. (common —
+  `documents.type`, `notifications.type`, `email_verification.type`
+  all exist in Prisma schemas) were emitted as plain field
+  identifiers, producing output that fails to parse with
+  `expected identifier, found keyword \`type\``. Snake-cased field
+  names whose result is a Rust keyword are now prefixed with `r#`.
+  The four keywords Rust refuses as raw identifiers (`crate`,
+  `self`, `Self`, `super`) stay un-escaped — a column literally
+  named `self` still fails to compile, which is correct behavior.
+  SQL column-name strings (serde rename values,
+  `FromColumn::from_column(row, "col")` literals) use plain
+  snake_case because they're opaque text, not identifiers.
+- **`prax-cli generate` — qualify `VectorFilter` path; replace
+  unshipped filter types with `ScalarFilter<T>`.** The bare
+  `VectorFilter` reference only compiled if the consumer's
+  `filters.rs` happened to have the right import, and
+  `SparseVectorFilter` / `BitFilter` were invented names that don't
+  exist anywhere in `prax-pgvector`. Fully qualified the vector
+  filter as `prax_pgvector::filter::VectorFilter`, and swapped
+  sparse + bit to `ScalarFilter<Vec<(u32, f32)>>` /
+  `ScalarFilter<Vec<u8>>` until dedicated filters ship.
+
+### Motivation
+
+Ports the `prax generate` runtime-client output from "compiles on
+toy examples" to "compiles on real Prisma schemas." Surfaced by the
+LX-33 migration of lexmata-admin-backend's 71-model shared schema
+(33 enums, 1149 fields, pgvector + nullable-enum + reserved-keyword
+columns all represented). Every fix is covered by a regression test.
+
 ## [0.9.2] - 2026-04-30
 
 ### Fixed
