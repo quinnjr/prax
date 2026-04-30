@@ -58,7 +58,7 @@ prax-pgvector = { path = "prax-pgvector", version = "0.9.0" }
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
-convert_case = "0.6"
+convert_case = "0.10"
 pastey = "0.1"
 
 # Async runtime
