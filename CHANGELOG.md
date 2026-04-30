@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-04-30
+
+### Fixed
+
+- **`prax-codegen` — `snake_ident` escapes Rust reserved keywords.**
+  Columns named `type`, `match`, `use`, `loop`, `move`, `where`, and
+  similar (common in Prisma schemas) previously emitted verbatim as
+  field and variable identifiers, producing output that fails to parse
+  with `expected identifier, found keyword \`type\``. `snake_ident`
+  now prefixes matches with `r#` so `pub r#type: …` round-trips
+  through `rustc`. Four keywords Rust forbids as raw identifiers
+  (`crate`, `self`, `Self`, `super`) are intentionally not escaped;
+  a column literally named `self` would still fail to compile, which
+  is the correct behavior (the schema should be fixed).
+- **`prax-cli generate` — qualify `VectorFilter` path and drop
+  references to unshipped filter types.** `field_to_filter_type`
+  emitted bare `"VectorFilter"` (only compiled if the consumer's
+  `filters.rs` happened to have the right import) and referenced
+  `SparseVectorFilter` / `BitFilter` types that do not exist in
+  `prax-pgvector`. Fully qualified the vector filter path as
+  `prax_pgvector::filter::VectorFilter`, and fell back to
+  `ScalarFilter<Vec<(u32, f32)>>` / `ScalarFilter<Vec<u8>>` for
+  sparse and bit vectors until dedicated filter types ship.
+
+Both fixes surfaced porting lexmata-admin-backend's 71-model shared
+schema to the generated Prax client under LX-33. Each is covered by
+regression tests.
+
 ## [0.9.1] - 2026-04-30
 
 Forward-ports three correctness fixes that shipped in 0.8.2 on the
