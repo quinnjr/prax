@@ -379,6 +379,16 @@ impl Validator {
             // String fields should have string defaults
             (FieldType::Scalar(ScalarType::String), AttributeValue::String(_)) => {}
 
+            // Json fields accept any constant as the @default — the payload is
+            // stored as a text literal that the database parses into jsonb.
+            // Prisma writes empty objects/arrays as `@default("[]")` or
+            // `@default("{}")`, so accept string, array, and scalar primitives.
+            (FieldType::Scalar(ScalarType::Json), AttributeValue::String(_))
+            | (FieldType::Scalar(ScalarType::Json), AttributeValue::Array(_))
+            | (FieldType::Scalar(ScalarType::Json), AttributeValue::Boolean(_))
+            | (FieldType::Scalar(ScalarType::Json), AttributeValue::Int(_))
+            | (FieldType::Scalar(ScalarType::Json), AttributeValue::Float(_)) => {}
+
             // Boolean fields should have boolean defaults
             (FieldType::Scalar(ScalarType::Boolean), AttributeValue::Boolean(_)) => {}
 
