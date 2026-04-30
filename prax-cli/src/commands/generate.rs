@@ -309,6 +309,27 @@ fn generate_client_module(
     code.push_str("        self.engine.execute_raw(&s, p).await\n");
     code.push_str("    }\n\n");
 
+    code.push_str("    /// Run a closure inside a transaction. The closure receives\n");
+    code.push_str("    /// a fresh `PraxClient<E>` wrapping the transaction's engine;\n");
+    code.push_str("    /// every query issued through it participates in the same\n");
+    code.push_str("    /// transactional scope. Commits on `Ok`, rolls back on\n");
+    code.push_str("    /// `Err`. Mirrors `prax_orm::PraxClient::transaction`.\n");
+    code.push_str("    ///\n");
+    code.push_str("    /// Nested `transaction()` calls on the same engine currently\n");
+    code.push_str("    /// return `QueryError::internal(...)` until dialect-aware\n");
+    code.push_str("    /// SAVEPOINT support lands.\n");
+    code.push_str("    pub async fn transaction<R, Fut, F>(&self, f: F)\n");
+    code.push_str("        -> prax_query::error::QueryResult<R>\n");
+    code.push_str("    where\n");
+    code.push_str("        F: FnOnce(PraxClient<E>) -> Fut + Send + 'static,\n");
+    code.push_str("        Fut: ::core::future::Future<Output = prax_query::error::QueryResult<R>> + Send + 'static,\n");
+    code.push_str("        R: Send + 'static,\n");
+    code.push_str("    {\n");
+    code.push_str("        self.engine\n");
+    code.push_str("            .transaction(move |tx_engine| async move { f(PraxClient::new(tx_engine)).await })\n");
+    code.push_str("            .await\n");
+    code.push_str("    }\n\n");
+
     for model in schema.models.values() {
         let snake_name = to_snake_case(model.name());
         code.push_str(&format!("    /// Access {} operations\n", model.name()));
@@ -528,6 +549,39 @@ fn generate_model_module(
     }
     code.push_str("            _ => ::core::option::Option::None,\n");
     code.push_str("        }\n");
+    code.push_str("    }\n");
+    code.push_str("}\n\n");
+
+    // ModelRelationLoader — uniformity requirement for
+    // `FindManyOperation` / `FindUniqueOperation` / `FindFirstOperation`
+    // bounds. Schema-generated models don't currently expose the
+    // relation-accessor surface that the derive path does (no
+    // `super::super::<module>::<field>::Relation` markers), so every
+    // `.include(...)` attempt on a schema-generated model errors at
+    // runtime rather than at compile time. That's acceptable for now —
+    // plain `find_unique()` / `find_many()` without `.include()` work,
+    // which is what every current consumer of the schema-gen path uses.
+    // Adding real relation loading here is tracked as a follow-up.
+    code.push_str(&format!(
+        "impl<E: prax_query::traits::QueryEngine>\n    prax_query::traits::ModelRelationLoader<E>\n    for {}\n{{\n",
+        model.name()
+    ));
+    code.push_str("    fn load_relation<'a>(\n");
+    code.push_str("        _engine: &'a E,\n");
+    code.push_str("        _parents: &'a mut [Self],\n");
+    code.push_str("        spec: &'a prax_query::relations::IncludeSpec,\n");
+    code.push_str(
+        "    ) -> prax_query::traits::BoxFuture<'a, prax_query::error::QueryResult<()>> {\n",
+    );
+    code.push_str("        let name = spec.relation_name.clone();\n");
+    code.push_str(&format!("        let model_name = \"{}\";\n", model.name()));
+    code.push_str("        Box::pin(async move {\n");
+    code.push_str("            Err(prax_query::error::QueryError::internal(format!(\n");
+    code.push_str("                \"relation '{}' on schema-generated model '{}' is not wired for .include() — use query_raw for JOINs\",\n");
+    code.push_str("                name,\n");
+    code.push_str("                model_name,\n");
+    code.push_str("            )))\n");
+    code.push_str("        })\n");
     code.push_str("    }\n");
     code.push_str("}\n\n");
 
