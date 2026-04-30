@@ -1,2 +1,6 @@
 /target
 .worktrees/
+docs/superpowers/
+
+# Local scratch tests (not part of the workspace test suite)
+tests/qualified_test.rs
