@@ -5,18 +5,39 @@
 [advisories]
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
+#
+# Every entry must be:
+#   (a) a transitive dep we can't directly control,
+#   (b) scoped to dev-deps or a backend the user opts into, OR
+#   (c) accompanied by a written resolution path (e.g. "waiting for
+#       mongodb 3.x migration").
+#
+# When adding new entries, include the owning upstream crate, the affected
+# version range, and the expected path to removal.
 ignore = [
-    # Unmaintained transitive dependencies we can't directly control.
-    # These will be resolved when upstream crates update their dependencies.
-    { id = "RUSTSEC-2023-0071", reason = "proc-macro-error is unmaintained (via diesel), waiting for upstream fix" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (via mysql_async), waiting for upstream fix" },
-    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained (via mongodb 2.x / scylla / cdrs-tokio), waiting for upstream to migrate to derive_more" },
-    { id = "RUSTSEC-2026-0111", reason = "diesel SQLite UTF-8 corruption is in a dev-dependency used only for ORM-comparison benchmarks; not on the production path" },
-    { id = "RUSTSEC-2024-0421", reason = "idna punycode issue is transitive via url crate; waiting for url to pick up idna >= 1.0" },
-    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki name constraint for URI names — transitive via multiple driver TLS stacks; waiting for upstream bumps" },
-    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraint — transitive; waiting for upstream bumps" },
-    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic — transitive; waiting for upstream bumps" },
-    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained; transitive via cdrs-tokio. No safe upgrade available — cdrs-tokio would need to migrate to rustc-hash upstream." },
+    # --- Unmaintained transitive deps ---
+    { id = "RUSTSEC-2023-0071", reason = "proc-macro-error is unmaintained (via diesel dev-dep for ORM-comparison benchmarks); resolves when diesel drops it" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (via mysql_async); resolves when mysql_async upgrades" },
+    { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained (via mongodb 2.8.x); resolves on mongodb 3.x migration" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained (via cdrs-tokio); no safe upgrade — cdrs-tokio would need to migrate to rustc-hash upstream" },
+
+    # --- Vulnerable / unsound transitive deps scoped to backends ---
+    # Diesel SQLite UTF-8 corruption: only affects Diesel's SQLite backend.
+    # Prax uses rusqlite / sqlx for SQLite, not Diesel. Diesel is a dev-dep
+    # solely for ORM-comparison benchmarks (benches/orm_comparison.rs) and
+    # is never shipped to users.
+    { id = "RUSTSEC-2026-0111", reason = "diesel SQLite UTF-8 unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+
+    # idna 0.2.x Punycode bug: reached via trust-dns-proto 0.21 -> mongodb 2.8.
+    # mongodb 3.x drops trust-dns for hickory-resolver which uses idna 1.x.
+    { id = "RUSTSEC-2024-0421", reason = "idna 0.2.x (via trust-dns-proto via mongodb 2.8); resolves on mongodb 3.x migration" },
+
+    # rustls-webpki 0.101 name-constraint / CRL panic advisories: reached via
+    # rustls 0.21 -> mongodb 2.8 and tiberius 0.12 (MSSQL). Both upstreams
+    # need to bump rustls past 0.23 to pick up rustls-webpki 0.103+.
+    { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 URI name-constraint issue (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
+    { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 wildcard name-constraint issue (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
+    { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 CRL parsing panic (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
 ]
 
 # This section is considered when running `cargo deny check licenses`

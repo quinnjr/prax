@@ -28,6 +28,9 @@ pub enum SqliteError {
     Timeout(String),
     /// Internal error.
     Internal(String),
+    /// Vector extension error (only present with the `vector` feature).
+    #[cfg(feature = "vector")]
+    Vector(crate::vector::error::VectorError),
 }
 
 impl SqliteError {
@@ -84,6 +87,8 @@ impl fmt::Display for SqliteError {
             Self::TypeConversion(msg) => write!(f, "Type conversion error: {}", msg),
             Self::Timeout(msg) => write!(f, "Timeout error: {}", msg),
             Self::Internal(msg) => write!(f, "Internal error: {}", msg),
+            #[cfg(feature = "vector")]
+            Self::Vector(e) => write!(f, "Vector error: {}", e),
         }
     }
 }
@@ -92,6 +97,8 @@ impl std::error::Error for SqliteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(e) => Some(e),
+            #[cfg(feature = "vector")]
+            Self::Vector(e) => Some(e),
             _ => None,
         }
     }
@@ -109,6 +116,13 @@ impl From<rusqlite::Error> for SqliteError {
     }
 }
 
+#[cfg(feature = "vector")]
+impl From<crate::vector::error::VectorError> for SqliteError {
+    fn from(err: crate::vector::error::VectorError) -> Self {
+        Self::Vector(err)
+    }
+}
+
 impl From<SqliteError> for QueryError {
     fn from(err: SqliteError) -> Self {
         match err {
@@ -121,6 +135,8 @@ impl From<SqliteError> for QueryError {
             SqliteError::TypeConversion(msg) => QueryError::serialization(format!("type: {}", msg)),
             SqliteError::Timeout(_) => QueryError::timeout(5000), // Default timeout duration
             SqliteError::Internal(msg) => QueryError::internal(msg),
+            #[cfg(feature = "vector")]
+            SqliteError::Vector(e) => QueryError::database(e.to_string()),
         }
     }
 }
