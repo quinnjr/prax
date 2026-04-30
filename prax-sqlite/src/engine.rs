@@ -1,52 +1,72 @@
-//! SQLite query engine implementation.
+//! SQLite query engine implementing `prax_query::QueryEngine`.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use rusqlite::types::Value;
-use serde_json::Value as JsonValue;
-use tracing::{debug, instrument};
-
+use prax_query::error::{QueryError, QueryResult};
 use prax_query::filter::FilterValue;
-use prax_query::types::SortOrder;
+use prax_query::row::FromRow;
+use prax_query::traits::{BoxFuture, Model, QueryEngine};
+use rusqlite::types::Value as SqlValue;
+use tokio_rusqlite::Connection as RusqliteConnection;
+use tracing::trace;
 
-use crate::error::SqliteError;
+use crate::connection::SqliteConnection;
 use crate::pool::SqlitePool;
+use crate::row_ref::SqliteRowRef;
 use crate::types::filter_value_to_sqlite;
 
-/// SQLite query engine.
+/// SQLite query engine backed by `tokio_rusqlite`.
+///
+/// # Breaking changes (0.7)
+///
+/// `SqliteEngine` no longer has inherent `query` / `query_one` / `query_opt`
+/// methods that returned untyped `RowData` / `serde_json::Value`. It now
+/// implements [`prax_query::traits::QueryEngine`], whose row-returning
+/// methods are generic over `T: Model + FromRow` and return typed models.
+///
+/// Migration:
+/// - Replace `engine.query(sql, params)` with
+///   `engine.query_many::<YourType>(sql, params).await?`, where `YourType`
+///   carries `#[derive(prax_orm::Model)]` (which emits both `Model` and
+///   `FromRow`) or hand-written `impl Model + impl FromRow`.
+/// - For ad-hoc typed queries without a full `Model`, bridge through
+///   [`crate::row_ref::SqliteRowRef::from_rusqlite`] inside a custom
+///   `FromRow` impl.
+/// - For the legacy JSON-blob API, use [`crate::raw::SqliteRawEngine`] +
+///   [`crate::raw::SqliteJsonRow`].
+/// - To run side-effecting SQL that returns no rows, call
+///   [`prax_query::traits::QueryEngine::execute_raw`].
+///
+/// See `CHANGELOG.md` for the full migration guide.
+///
+/// # Transaction mode
+///
+/// `SqliteEngine` has two modes, controlled by `tx_conn`:
+///
+/// - **Pool mode** (`tx_conn == None`, default): each query acquires
+///   a fresh [`SqliteConnection`] from the pool and drops it after
+///   the call.
+/// - **Transaction mode** (`tx_conn == Some(..)`): each query routes
+///   through the same [`tokio_rusqlite::Connection`] handle so the
+///   whole BEGIN…COMMIT block serialises onto the connection's
+///   background thread in order. The `Arc<SqliteConnection>` keeps
+///   the pool permit alive for the transaction's lifetime; dropping
+///   the last clone returns the connection to the idle pool.
 #[derive(Clone)]
 pub struct SqliteEngine {
     pool: SqlitePool,
-}
-
-/// Result of a query operation.
-#[derive(Debug, Clone)]
-pub struct SqliteQueryResult {
-    /// The result data as JSON.
-    pub data: JsonValue,
-}
-
-impl SqliteQueryResult {
-    /// Create a new query result.
-    pub fn new(data: JsonValue) -> Self {
-        Self { data }
-    }
-
-    /// Get the result as JSON.
-    pub fn json(&self) -> &JsonValue {
-        &self.data
-    }
-
-    /// Convert to the inner JSON value.
-    pub fn into_json(self) -> JsonValue {
-        self.data
-    }
+    /// Present when this engine is bound to an in-flight transaction.
+    /// `None` in the normal pool-backed case.
+    tx_conn: Option<Arc<SqliteConnection>>,
 }
 
 impl SqliteEngine {
-    /// Create a new SQLite engine with the given pool.
+    /// Create a new engine with the given pool.
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tx_conn: None,
+        }
     }
 
     /// Get a reference to the connection pool.
@@ -54,642 +74,359 @@ impl SqliteEngine {
         &self.pool
     }
 
-    /// Build a SELECT query.
-    fn build_select(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-        sort: &[(String, SortOrder)],
-        limit: Option<u64>,
-        offset: Option<u64>,
-    ) -> (String, Vec<Value>) {
-        let mut sql = String::new();
-        let mut params: Vec<Value> = Vec::new();
-
-        // SELECT clause
-        let cols = if columns.is_empty() {
-            "*".to_string()
+    /// Resolve which raw [`tokio_rusqlite::Connection`] to run the
+    /// query against, along with an optional owned
+    /// [`SqliteConnection`] guard whose `Drop` returns the
+    /// connection to the idle pool once we're done with it.
+    ///
+    /// In tx mode the guard is `None` because the pinned connection
+    /// is already kept alive by the `Arc<SqliteConnection>` on
+    /// `self.tx_conn`. In pool mode we hand back a fresh guard so
+    /// the caller can clone the inner handle, drive one `call(..)`
+    /// through it, and drop the guard on the way out.
+    async fn resolve_conn(&self) -> QueryResult<(RusqliteConnection, Option<SqliteConnection>)> {
+        if let Some(tx) = &self.tx_conn {
+            Ok((tx.inner().clone(), None))
         } else {
-            columns
-                .iter()
-                .map(|c| format!("\"{}\"", c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        sql.push_str(&format!("SELECT {} FROM \"{}\"", cols, table));
-
-        // WHERE clause
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("\"{}\" IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("\"{}\" = ?", field));
-                        params.push(filter_value_to_sqlite(value));
-                    }
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
+            let conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let handle = conn.inner().clone();
+            Ok((handle, Some(conn)))
         }
+    }
 
-        // ORDER BY clause
-        if !sort.is_empty() {
-            let order_parts: Vec<String> = sort
-                .iter()
-                .map(|(col, dir)| {
-                    let direction = match dir {
-                        SortOrder::Asc => "ASC",
-                        SortOrder::Desc => "DESC",
-                    };
-                    format!("\"{}\" {}", col, direction)
+    fn bind(params: &[FilterValue]) -> Vec<SqlValue> {
+        params.iter().map(filter_value_to_sqlite).collect()
+    }
+
+    /// Decode multiple rows into typed models.
+    ///
+    /// # Short-circuit on decode error
+    ///
+    /// Uses `Result<Vec<T>, _>::collect`, which returns the first decode
+    /// error and discards every successfully-decoded row before it. A
+    /// row-level type mismatch therefore aborts the whole batch rather
+    /// than returning partial results. Callers that want per-row
+    /// recovery should manually iterate rows and handle each result.
+    async fn query_rows<T: Model + FromRow>(
+        &self,
+        sql: String,
+        params: Vec<FilterValue>,
+    ) -> QueryResult<Vec<T>> {
+        trace!(sql = %sql, "sqlite query_rows");
+        let (handle, _guard) = self.resolve_conn().await?;
+        let bound = Self::bind(&params);
+        let snapshots: Vec<SqliteRowRef> = handle
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                let mut rows = stmt.query(refs.as_slice())?;
+                let mut out = Vec::new();
+                while let Some(row) = rows.next()? {
+                    out.push(SqliteRowRef::from_rusqlite(row).map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            e.to_string(),
+                        )))
+                    })?);
+                }
+                Ok(out)
+            })
+            .await
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+        snapshots
+            .into_iter()
+            .map(|r| {
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
                 })
-                .collect();
-            sql.push_str(" ORDER BY ");
-            sql.push_str(&order_parts.join(", "));
-        }
-
-        // LIMIT and OFFSET
-        if let Some(lim) = limit {
-            sql.push_str(&format!(" LIMIT {}", lim));
-        }
-        if let Some(off) = offset {
-            sql.push_str(&format!(" OFFSET {}", off));
-        }
-
-        (sql, params)
-    }
-
-    /// Build an INSERT query.
-    fn build_insert(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut columns = Vec::new();
-        let mut placeholders = Vec::new();
-        let mut params: Vec<Value> = Vec::new();
-
-        for (col, val) in data {
-            columns.push(format!("\"{}\"", col));
-            placeholders.push("?".to_string());
-            params.push(filter_value_to_sqlite(val));
-        }
-
-        let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({})",
-            table,
-            columns.join(", "),
-            placeholders.join(", ")
-        );
-
-        (sql, params)
-    }
-
-    /// Build an UPDATE query.
-    fn build_update(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-        filters: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut params: Vec<Value> = Vec::new();
-
-        // SET clause
-        let set_parts: Vec<String> = data
-            .iter()
-            .map(|(col, val)| {
-                params.push(filter_value_to_sqlite(val));
-                format!("\"{}\" = ?", col)
             })
-            .collect();
+            .collect()
+    }
 
-        let mut sql = format!("UPDATE \"{}\" SET {}", table, set_parts.join(", "));
-
-        // WHERE clause
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("\"{}\" IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("\"{}\" = ?", field));
-                        params.push(filter_value_to_sqlite(value));
-                    }
+    /// Stop after the first row so callers that want a single row do not pay
+    /// for materializing the tail. Naively routing `query_one`/`query_optional`
+    /// through `query_rows` + `.pop()` would decode every matching row and
+    /// throw away all but one; a caller who accidentally asked for a single
+    /// row from a million-row table would allocate a million typed models.
+    async fn query_first_row<T: Model + FromRow>(
+        &self,
+        sql: String,
+        params: Vec<FilterValue>,
+    ) -> QueryResult<Option<T>> {
+        trace!(sql = %sql, "sqlite query_first_row");
+        let (handle, _guard) = self.resolve_conn().await?;
+        let bound = Self::bind(&params);
+        let snapshot: Option<SqliteRowRef> = handle
+            .call(move |c| {
+                let mut stmt = c.prepare(&sql)?;
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                let mut rows = stmt.query(refs.as_slice())?;
+                match rows.next()? {
+                    Some(row) => Ok(Some(SqliteRowRef::from_rusqlite(row).map_err(|e| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            e.to_string(),
+                        )))
+                    })?)),
+                    None => Ok(None),
                 }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        (sql, params)
-    }
-
-    /// Build a DELETE query.
-    fn build_delete(
-        &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut sql = format!("DELETE FROM \"{}\"", table);
-        let mut params: Vec<Value> = Vec::new();
-
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("\"{}\" IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("\"{}\" = ?", field));
-                        params.push(filter_value_to_sqlite(value));
-                    }
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        (sql, params)
-    }
-
-    /// Execute a query and return multiple results.
-    #[instrument(skip(self, columns, filters, sort), fields(table = %table))]
-    pub async fn query_many(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-        sort: &[(String, SortOrder)],
-        limit: Option<u64>,
-        offset: Option<u64>,
-    ) -> Result<Vec<SqliteQueryResult>, SqliteError> {
-        let (sql, params) = self.build_select(table, columns, filters, sort, limit, offset);
-        debug!(sql = %sql, "Executing query_many");
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(&sql, params).await?;
-
-        Ok(results.into_iter().map(SqliteQueryResult::new).collect())
-    }
-
-    /// Execute a query and return a single result.
-    #[instrument(skip(self, columns, filters), fields(table = %table))]
-    pub async fn query_one(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<SqliteQueryResult, SqliteError> {
-        let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_one");
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(&sql, params).await?;
-
-        results
-            .into_iter()
-            .next()
-            .map(SqliteQueryResult::new)
-            .ok_or_else(|| {
-                SqliteError::query(format!(
-                    "No row found in table '{}' with the given filters",
-                    table
-                ))
             })
+            .await
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+        snapshot
+            .map(|r| {
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })
+            })
+            .transpose()
     }
 
-    /// Execute a query and return an optional result.
-    #[instrument(skip(self, columns, filters), fields(table = %table))]
-    pub async fn query_optional(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<Option<SqliteQueryResult>, SqliteError> {
-        let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_optional");
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(&sql, params).await?;
-
-        Ok(results.into_iter().next().map(SqliteQueryResult::new))
+    async fn exec_raw(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
+        let (handle, _guard) = self.resolve_conn().await?;
+        let bound = Self::bind(&params);
+        let n = handle
+            .call(move |c| {
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                Ok(c.execute(&sql, refs.as_slice())?)
+            })
+            .await
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+        Ok(n as u64)
     }
 
-    /// Execute an INSERT and return the result.
-    #[instrument(skip(self, data), fields(table = %table))]
-    pub async fn execute_insert(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-    ) -> Result<SqliteQueryResult, SqliteError> {
-        let (sql, params) = self.build_insert(table, data);
-        debug!(sql = %sql, "Executing insert");
+    async fn count_rows(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
+        let (handle, _guard) = self.resolve_conn().await?;
+        let bound = Self::bind(&params);
+        let n = handle
+            .call(move |c| {
+                let refs: Vec<&dyn rusqlite::ToSql> =
+                    bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                let mut stmt = c.prepare(&sql)?;
+                let n: i64 = stmt.query_row(refs.as_slice(), |r| r.get(0))?;
+                Ok(n)
+            })
+            .await
+            .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+        Ok(n as u64)
+    }
+}
 
-        let conn = self.pool.get().await?;
-
-        let last_rowid = conn.execute_insert_params(&sql, params).await?;
-
-        // Return the inserted row
-        let mut result = data.clone();
-        if !result.contains_key("id") {
-            result.insert("id".to_string(), FilterValue::Int(last_rowid));
-        }
-
-        let json = result
-            .into_iter()
-            .map(|(k, v)| (k, filter_value_to_json(&v)))
-            .collect::<serde_json::Map<_, _>>();
-
-        Ok(SqliteQueryResult::new(JsonValue::Object(json)))
+impl QueryEngine for SqliteEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Sqlite
     }
 
-    /// Execute an UPDATE and return the number of affected rows.
-    #[instrument(skip(self, data, filters), fields(table = %table))]
-    pub async fn execute_update(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, SqliteError> {
-        let (sql, params) = self.build_update(table, data, filters);
-        debug!(sql = %sql, "Executing update");
-
-        let conn = self.pool.get().await?;
-
-        let affected = conn.execute_params(&sql, params).await?;
-
-        Ok(affected as u64)
-    }
-
-    /// Execute a DELETE and return the number of affected rows.
-    #[instrument(skip(self, filters), fields(table = %table))]
-    pub async fn execute_delete(
-        &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, SqliteError> {
-        let (sql, params) = self.build_delete(table, filters);
-        debug!(sql = %sql, "Executing delete");
-
-        let conn = self.pool.get().await?;
-
-        let affected = conn.execute_params(&sql, params).await?;
-
-        Ok(affected as u64)
-    }
-
-    /// Execute raw SQL and return results.
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn execute_raw(
+    fn query_many<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Vec<SqliteQueryResult>, SqliteError> {
-        debug!("Executing raw SQL");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(sql, sqlite_params).await?;
-
-        Ok(results.into_iter().map(SqliteQueryResult::new).collect())
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(self.query_rows::<T>(sql, params))
     }
 
-    // =========================================================================
-    // Raw SQL Functions
-    // =========================================================================
-
-    /// Execute a raw SQL query using the `Sql` builder from prax-query.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use prax_query::raw::Sql;
-    ///
-    /// let sql = Sql::new("SELECT * FROM users WHERE age > ")
-    ///     .bind(18)
-    ///     .push(" AND active = ")
-    ///     .bind(true);
-    ///
-    /// let results = engine.raw_sql(sql).await?;
-    /// ```
-    #[instrument(skip(self, sql))]
-    pub async fn raw_sql(
-        &self,
-        sql: prax_query::raw::Sql,
-    ) -> Result<Vec<SqliteQueryResult>, SqliteError> {
-        let (query_string, params) = sql.build();
-        debug!(sql = %query_string, "Executing raw SQL from builder");
-        self.raw_sql_query(&query_string, &params).await
-    }
-
-    /// Execute a raw SQL query string with parameters and return results.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let results = engine.raw_sql_query(
-    ///     "SELECT * FROM users WHERE age > ? AND active = ?",
-    ///     &[FilterValue::Int(18), FilterValue::Bool(true)]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_query(
+    fn query_one<T: Model + FromRow + Send + 'static>(
         &self,
         sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Vec<SqliteQueryResult>, SqliteError> {
-        debug!("Executing raw SQL query");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(sql, sqlite_params).await?;
-
-        Ok(results.into_iter().map(SqliteQueryResult::new).collect())
-    }
-
-    /// Execute a raw SQL statement and return the number of affected rows.
-    ///
-    /// Use this for INSERT, UPDATE, DELETE, or other statements that don't return rows.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let affected = engine.raw_sql_execute(
-    ///     "UPDATE users SET last_login = datetime('now') WHERE id = ?",
-    ///     &[FilterValue::Int(user_id)]
-    /// ).await?;
-    /// println!("Updated {} rows", affected);
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_execute(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<u64, SqliteError> {
-        debug!("Executing raw SQL statement");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let affected = conn.execute_params(sql, sqlite_params).await?;
-
-        Ok(affected as u64)
-    }
-
-    /// Execute a raw SQL query and return the first result.
-    ///
-    /// Returns an error if no rows are returned.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let user = engine.raw_sql_first(
-    ///     "SELECT * FROM users WHERE id = ?",
-    ///     &[FilterValue::Int(user_id)]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_first(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<SqliteQueryResult, SqliteError> {
-        debug!("Executing raw SQL first");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(sql, sqlite_params).await?;
-
-        results
-            .into_iter()
-            .next()
-            .map(SqliteQueryResult::new)
-            .ok_or_else(|| SqliteError::query("raw_sql_first returned no rows"))
-    }
-
-    /// Execute a raw SQL query and return the first result, or None if no rows.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let user = engine.raw_sql_optional(
-    ///     "SELECT * FROM users WHERE email = ?",
-    ///     &[FilterValue::String("test@example.com".into())]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_optional(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Option<SqliteQueryResult>, SqliteError> {
-        debug!("Executing raw SQL optional");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(sql, sqlite_params).await?;
-
-        Ok(results.into_iter().next().map(SqliteQueryResult::new))
-    }
-
-    /// Execute a raw SQL query and return a single scalar value.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let count: i64 = engine.raw_sql_scalar(
-    ///     "SELECT COUNT(*) FROM users WHERE active = ?",
-    ///     &[FilterValue::Bool(true)]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_scalar<T>(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<T, SqliteError>
-    where
-        T: for<'a> serde::Deserialize<'a>,
-    {
-        debug!("Executing raw SQL scalar");
-
-        let sqlite_params: Vec<Value> = params.iter().map(filter_value_to_sqlite).collect();
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(sql, sqlite_params).await?;
-
-        let row = results
-            .into_iter()
-            .next()
-            .ok_or_else(|| SqliteError::query("raw_sql_scalar returned no rows"))?;
-
-        // Get the first column value
-        let value = row
-            .as_object()
-            .and_then(|obj| obj.values().next())
-            .ok_or_else(|| SqliteError::query("raw_sql_scalar returned empty row"))?;
-
-        serde_json::from_value(value.clone()).map_err(|e| {
-            SqliteError::deserialization(format!("failed to deserialize scalar: {}", e))
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            self.query_first_row::<T>(sql, params)
+                .await?
+                .ok_or_else(|| QueryError::not_found(T::MODEL_NAME))
         })
     }
 
-    /// Execute multiple raw SQL statements in a batch.
-    ///
-    /// This is useful for running schema migrations or multiple DDL statements.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// engine.raw_sql_batch(r#"
-    ///     CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY);
-    ///     CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY);
-    /// "#).await?;
-    /// ```
-    #[instrument(skip(self), fields(sql_len = %sql.len()))]
-    pub async fn raw_sql_batch(&self, sql: &str) -> Result<(), SqliteError> {
-        debug!("Executing raw SQL batch");
-
-        let conn = self.pool.get().await?;
-
-        conn.execute_batch(sql).await
+    fn query_optional<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        Box::pin(self.query_first_row::<T>(sql, params))
     }
 
-    /// Count rows matching the filter.
-    #[instrument(skip(self, filters), fields(table = %table))]
-    pub async fn count(
+    fn execute_insert<T: Model + FromRow + Send + 'static>(
         &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, SqliteError> {
-        let mut sql = format!("SELECT COUNT(*) as count FROM \"{}\"", table);
-        let mut params: Vec<Value> = Vec::new();
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<T>> {
+        // SQLite 3.35+ supports INSERT ... RETURNING. INSERT RETURNING yields
+        // at most one row per inserted tuple; query_first_row avoids ever
+        // materializing a tail if the caller's SQL yields many (which would
+        // be a misuse, but the engine shouldn't punish it with unbounded
+        // allocation).
+        let sql = sql.to_string();
+        Box::pin(async move {
+            self.query_first_row::<T>(sql, params)
+                .await?
+                .ok_or_else(|| QueryError::not_found(T::MODEL_NAME))
+        })
+    }
 
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("\"{}\" IS NULL", field));
+    fn execute_update<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(self.query_rows::<T>(sql, params))
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.exec_raw(sql, params))
+    }
+
+    fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.exec_raw(sql, params))
+    }
+
+    fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.count_rows(sql, params))
+    }
+
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<std::collections::HashMap<String, FilterValue>>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            trace!(sql = %sql, "sqlite aggregate_query");
+            let (handle, _guard) = self.resolve_conn().await?;
+            let bound = Self::bind(&params);
+            let rows: Vec<std::collections::HashMap<String, FilterValue>> = handle
+                .call(move |c| {
+                    let mut stmt = c.prepare(&sql)?;
+                    let column_names: Vec<String> =
+                        stmt.column_names().iter().map(|s| s.to_string()).collect();
+                    let refs: Vec<&dyn rusqlite::ToSql> =
+                        bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+                    let mut rows = stmt.query(refs.as_slice())?;
+                    let mut out = Vec::new();
+                    while let Some(row) = rows.next()? {
+                        let mut map = std::collections::HashMap::new();
+                        for (i, name) in column_names.iter().enumerate() {
+                            // SQLite storage classes are dynamic per-row:
+                            // INTEGER, REAL, TEXT, BLOB, NULL. Pull each
+                            // cell as an untyped `Value` and project into
+                            // the closest `FilterValue` variant. BLOB
+                            // becomes `Null` — aggregate results never
+                            // return BLOB in practice, and surfacing raw
+                            // bytes through FilterValue doesn't buy
+                            // anything for the caller.
+                            let v: SqlValue = row.get(i).unwrap_or(SqlValue::Null);
+                            let fv = match v {
+                                SqlValue::Null => FilterValue::Null,
+                                SqlValue::Integer(n) => FilterValue::Int(n),
+                                SqlValue::Real(f) => FilterValue::Float(f),
+                                SqlValue::Text(s) => FilterValue::String(s),
+                                SqlValue::Blob(_) => FilterValue::Null,
+                            };
+                            map.insert(name.clone(), fv);
+                        }
+                        out.push(map);
                     }
-                    _ => {
-                        conditions.push(format!("\"{}\" = ?", field));
-                        params.push(filter_value_to_sqlite(value));
-                    }
+                    Ok(out)
+                })
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(rows)
+        })
+    }
+
+    fn transaction<'a, R, Fut, F>(&'a self, f: F) -> BoxFuture<'a, QueryResult<R>>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'a,
+        Fut: std::future::Future<Output = QueryResult<R>> + Send + 'a,
+        R: Send + 'a,
+        Self: Clone,
+    {
+        Box::pin(async move {
+            // Refuse nested transactions until savepoint support
+            // lands. Callers can still drive SAVEPOINT / RELEASE
+            // manually via `execute_raw` if they need it.
+            if self.tx_conn.is_some() {
+                return Err(QueryError::internal(
+                    "nested transactions not yet implemented \
+                     (call .transaction() on the outer engine only, or \
+                     issue SAVEPOINT via execute_raw)",
+                ));
+            }
+
+            // Pin a single pooled connection. Wrapping it in `Arc`
+            // keeps the pool permit alive for the whole transaction
+            // and makes every engine clone share the same
+            // `tokio_rusqlite::Connection` handle — every query
+            // dispatched through the closure's engine therefore
+            // serialises onto the same background thread as our
+            // initial `BEGIN`.
+            let conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            let handle = conn.inner().clone();
+            handle
+                .call(|c| {
+                    c.execute_batch("BEGIN")?;
+                    Ok(())
+                })
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            let tx_conn = Arc::new(conn);
+            let tx_engine = SqliteEngine {
+                pool: self.pool.clone(),
+                tx_conn: Some(tx_conn.clone()),
+            };
+
+            let result = f(tx_engine).await;
+
+            // Finalise: COMMIT on success, best-effort ROLLBACK on
+            // failure. Preserve the caller's error if ROLLBACK fails —
+            // SQLite's autocommit resumes on the next statement
+            // regardless, and dropping the connection releases any
+            // lingering tx state.
+            match result {
+                Ok(v) => {
+                    handle
+                        .call(|c| {
+                            c.execute_batch("COMMIT")?;
+                            Ok(())
+                        })
+                        .await
+                        .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let _ = handle
+                        .call(|c| {
+                            c.execute_batch("ROLLBACK")?;
+                            Ok(())
+                        })
+                        .await;
+                    Err(e)
                 }
             }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        debug!(sql = %sql, "Executing count");
-
-        let conn = self.pool.get().await?;
-
-        let results = conn.query_params(&sql, params).await?;
-
-        // Extract count from first row
-        let count = results
-            .first()
-            .and_then(|row| row.get("count"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
-
-        Ok(count as u64)
-    }
-}
-
-/// Convert a FilterValue to JSON.
-fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_filter_value_to_json() {
-        assert_eq!(filter_value_to_json(&FilterValue::Null), JsonValue::Null);
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bool(true)),
-            JsonValue::Bool(true)
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Int(42)),
-            JsonValue::Number(42.into())
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::String("test".to_string())),
-            JsonValue::String("test".to_string())
-        );
-    }
-
-    #[test]
-    fn test_build_select_simple() {
-        let sql = "SELECT * FROM \"users\"";
-        assert!(sql.contains("SELECT"));
-        assert!(sql.contains("users"));
-    }
-
-    #[test]
-    fn test_query_result() {
-        let result = SqliteQueryResult::new(JsonValue::Object(serde_json::Map::new()));
-        assert!(result.json().is_object());
-    }
-
-    #[test]
-    fn test_query_result_into_json() {
-        let json = JsonValue::Object(serde_json::Map::new());
-        let result = SqliteQueryResult::new(json.clone());
-        assert_eq!(result.into_json(), json);
-    }
-
-    #[test]
-    fn test_sql_builder_integration() {
-        use prax_query::raw::Sql;
-
-        let sql = Sql::new("SELECT * FROM users WHERE age > ")
-            .bind(18)
-            .push(" AND active = ")
-            .bind(true);
-
-        let (query, params) = sql.build();
-        assert!(query.contains("SELECT"));
-        assert!(query.contains("users"));
-        assert_eq!(params.len(), 2);
+        })
     }
 }

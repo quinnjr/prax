@@ -1,0 +1,9 @@
+error: Model must have at least one field marked with #[prax(id)]
+  --> tests/ui/missing_id.rs:8:1
+   |
+ 8 | / #[prax(table = "no_pk")]
+ 9 | | struct NoPk {
+10 | |     name: String,
+11 | |     email: String,
+12 | | }
+   | |_^

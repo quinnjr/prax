@@ -35,6 +35,7 @@ pub mod engine;
 pub mod error;
 pub mod pool;
 pub mod row;
+pub mod row_ref;
 pub mod types;
 pub mod udf;
 pub mod virtual_tables;
@@ -44,7 +45,7 @@ pub use config::{
     CassandraAuth, CassandraConfig, CassandraConfigBuilder, Consistency, RetryPolicyKind, TlsConfig,
 };
 pub use connection::CassandraConnection;
-pub use engine::{BatchBuilder, QueryResult};
+pub use engine::{BatchBuilder, CassandraEngine, QueryResult};
 pub use error::{CassandraError, CassandraResult};
 pub use pool::CassandraPool;
 pub use row::{FromRow, Row};

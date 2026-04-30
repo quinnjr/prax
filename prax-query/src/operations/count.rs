@@ -50,8 +50,11 @@ impl<E: QueryEngine, M: Model> CountOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -81,7 +84,8 @@ impl<E: QueryEngine, M: Model> CountOperation<E, M> {
 
     /// Execute the count query.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.count(&sql, params).await
     }
 }
@@ -98,6 +102,12 @@ mod tests {
         const TABLE_NAME: &'static str = "test_models";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
+    }
+
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
     }
 
     #[derive(Clone)]
@@ -118,7 +128,11 @@ mod tests {
     }
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -126,7 +140,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -134,7 +148,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -142,7 +156,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -150,7 +164,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -189,7 +203,7 @@ mod tests {
     #[test]
     fn test_count_new() {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT COUNT(*)"));
         assert!(sql.contains("FROM test_models"));
@@ -199,7 +213,7 @@ mod tests {
     #[test]
     fn test_count_basic() {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(sql, "SELECT COUNT(*) FROM test_models");
         assert!(params.is_empty());
@@ -212,10 +226,10 @@ mod tests {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("active = $1"));
+        assert!(sql.contains(r#""active" = $1"#));
         assert_eq!(params.len(), 1);
     }
 
@@ -228,7 +242,7 @@ mod tests {
             ))
             .r#where(Filter::Gte("age".into(), FilterValue::Int(18)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -243,7 +257,7 @@ mod tests {
                 Filter::Equals("role".into(), FilterValue::String("moderator".to_string())),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OR"));
         assert_eq!(params.len(), 2);
@@ -261,7 +275,7 @@ mod tests {
                 ],
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 3);
@@ -270,7 +284,7 @@ mod tests {
     #[test]
     fn test_count_without_filter() {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(params.is_empty());
@@ -281,7 +295,7 @@ mod tests {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::IsNull("deleted_at".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("IS NULL"));
@@ -293,7 +307,7 @@ mod tests {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::IsNotNull("verified_at".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IS NOT NULL"));
         assert!(params.is_empty());
@@ -305,7 +319,7 @@ mod tests {
     fn test_count_distinct() {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new()).distinct("email");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(DISTINCT email)"));
         assert!(!sql.contains("COUNT(*)"));
@@ -317,7 +331,7 @@ mod tests {
             .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)))
             .distinct("user_id");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(DISTINCT user_id)"));
         assert!(sql.contains("WHERE"));
@@ -331,7 +345,7 @@ mod tests {
             .distinct("email")
             .distinct("user_id");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(DISTINCT user_id)"));
         assert!(!sql.contains("COUNT(DISTINCT email)"));
@@ -344,7 +358,7 @@ mod tests {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let count_pos = sql.find("COUNT").unwrap();
         let from_pos = sql.find("FROM").unwrap();
@@ -357,7 +371,7 @@ mod tests {
     #[test]
     fn test_count_table_name() {
         let op = CountOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -406,7 +420,7 @@ mod tests {
             ))
             .distinct("user_id");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("COUNT(DISTINCT user_id)"));
         assert!(sql.contains("WHERE"));
@@ -424,7 +438,7 @@ mod tests {
             ),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
@@ -436,7 +450,7 @@ mod tests {
             Filter::StartsWith("name".into(), FilterValue::String("A".to_string())),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
@@ -451,7 +465,7 @@ mod tests {
             ))),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("NOT"));
         assert_eq!(params.len(), 1);

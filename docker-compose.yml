@@ -97,11 +97,58 @@ services:
       start_period: 30s
     network_mode: host
 
+  # ScyllaDB - high-throughput Cassandra-compatible DB. Binds 9042 on the host.
+  scylladb:
+    image: scylladb/scylla:5.4
+    container_name: prax-scylladb
+    # Developer mode relaxes kernel tunables Scylla normally enforces; --smp/
+    # --memory keep the footprint small in CI.
+    command:
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --overprovisioned
+      - "1"
+      - --developer-mode
+      - "1"
+    volumes:
+      - scylladb_data:/var/lib/scylla
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT now() FROM system.local' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    network_mode: host
+
+  # Apache Cassandra. Runs native transport on 9043 to avoid clashing with
+  # ScyllaDB on 9042 (both services share the host network namespace).
+  cassandra:
+    image: cassandra:5.0
+    container_name: prax-cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: PraxTestCluster
+      HEAP_NEWSIZE: 128M
+      MAX_HEAP_SIZE: 1G
+      JVM_EXTRA_OPTS: "-Dcassandra.native_transport_port=9043"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "cqlsh -e 'SELECT now() FROM system.local' localhost 9043 >/dev/null 2>&1 || exit 1"
+      interval: 15s
+      timeout: 10s
+      retries: 25
+      start_period: 90s
+    network_mode: host
+
   # ===========================================================================
   # Test Runner Services
   # ===========================================================================
 
-  # Run all tests against all databases
+  # Run all tests against all databases (including E2E integration tests)
   test:
     build:
       context: .
@@ -113,6 +160,12 @@ services:
       MSSQL_URL: "mssql://sa:Prax_Test_Password123!@localhost:1433/prax_test?TrustServerCertificate=true"
       MONGODB_URL: "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
       SQLITE_URL: file:./test.db
+      DUCKDB_URL: "duckdb::memory:"
+      SCYLLA_URL: "scylla://localhost:9042/prax_test"
+      CASSANDRA_URL: "cassandra://localhost:9043/prax_test"
+      # E2E toggle — tests skip themselves unless this is set, so the
+      # default `cargo test` outside compose stays fast and hermetic.
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
       RUST_LOG: info
     depends_on:
@@ -124,11 +177,19 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_healthy
+      scylladb:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test --workspace --all-features
+    # Note: we do NOT pass `--all-features` at the workspace level because
+    # `prax-mssql` exposes mutually-exclusive `rustls` and `native-tls`
+    # features (both cannot compile together under tiberius). Per-crate
+    # runners below opt into `--all-features` individually.
+    command: cargo test --workspace -- --include-ignored
 
   # Run PostgreSQL tests only
   test-postgres:
@@ -138,6 +199,8 @@ services:
     container_name: prax-test-postgres
     environment:
       DATABASE_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     depends_on:
       postgres:
@@ -146,7 +209,7 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test -p prax-postgres --all-features
+    command: cargo test -p prax-postgres --all-features -- --include-ignored
 
   # Run MySQL tests only
   test-mysql:
@@ -156,6 +219,8 @@ services:
     container_name: prax-test-mysql
     environment:
       DATABASE_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     depends_on:
       mysql:
@@ -164,7 +229,7 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test -p prax-mysql --all-features
+    command: cargo test -p prax-mysql --all-features -- --include-ignored
 
   # Run SQLite tests only (no external dependencies)
   test-sqlite:
@@ -174,12 +239,14 @@ services:
     container_name: prax-test-sqlite
     environment:
       DATABASE_URL: file:./test.db
+      SQLITE_URL: file:./test.db
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     volumes:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test -p prax-sqlite --all-features
+    command: cargo test -p prax-sqlite --all-features -- --include-ignored
 
   # Run MSSQL tests only
   test-mssql:
@@ -189,6 +256,8 @@ services:
     container_name: prax-test-mssql
     environment:
       DATABASE_URL: "mssql://sa:Prax_Test_Password123!@localhost:1433/prax_test?TrustServerCertificate=true"
+      MSSQL_URL: "mssql://sa:Prax_Test_Password123!@localhost:1433/prax_test?TrustServerCertificate=true"
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     depends_on:
       mssql:
@@ -197,7 +266,10 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test -p prax-mssql --all-features
+    # NOTE: `--all-features` is omitted here because the `rustls` and
+    # `native-tls` features are mutually exclusive tiberius TLS backends.
+    # Default features (`rustls`) are sufficient for E2E coverage.
+    command: cargo test -p prax-mssql -- --include-ignored
 
   # Run pgvector tests only
   test-pgvector:
@@ -207,6 +279,8 @@ services:
     container_name: prax-test-pgvector
     environment:
       DATABASE_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     depends_on:
       postgres:
@@ -225,6 +299,8 @@ services:
     container_name: prax-test-mongodb
     environment:
       DATABASE_URL: "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
+      MONGODB_URL: "mongodb://prax:prax_test_password@localhost:27017/prax_test?authSource=admin"
+      PRAX_E2E: "1"
       RUST_BACKTRACE: 1
     depends_on:
       mongodb:
@@ -233,7 +309,64 @@ services:
       - cargo_cache:/usr/local/cargo/registry
       - target_cache:/app/target
     network_mode: host
-    command: cargo test -p prax-mongodb --all-features
+    command: cargo test -p prax-mongodb --all-features -- --include-ignored
+
+  # Run DuckDB tests only — embedded, no external service needed.
+  test-duckdb:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-duckdb
+    environment:
+      DUCKDB_URL: "duckdb::memory:"
+      PRAX_E2E: "1"
+      RUST_BACKTRACE: 1
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-duckdb --all-features -- --include-ignored
+
+  # Run ScyllaDB tests only
+  test-scylladb:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-scylladb
+    environment:
+      SCYLLA_URL: "scylla://localhost:9042/prax_test"
+      PRAX_E2E: "1"
+      RUST_BACKTRACE: 1
+    depends_on:
+      scylladb:
+        condition: service_healthy
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-scylladb --all-features -- --include-ignored
+
+  # Run Cassandra tests only — gated behind the `cassandra-live` feature.
+  # NOTE: prax-cassandra's engine methods are currently stubbed (see
+  # prax-cassandra/src/engine.rs). E2E coverage today is limited to a
+  # cdrs-tokio reachability smoke test; expand once engine is wired.
+  test-cassandra:
+    build:
+      context: .
+      target: test-runner
+    container_name: prax-test-cassandra
+    environment:
+      CASSANDRA_URL: "cassandra://localhost:9043/prax_test"
+      PRAX_E2E: "1"
+      RUST_BACKTRACE: 1
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - cargo_cache:/usr/local/cargo/registry
+      - target_cache:/app/target
+    network_mode: host
+    command: cargo test -p prax-cassandra --features cassandra-live -- --include-ignored
 
   # ===========================================================================
   # Development Service
@@ -312,7 +445,7 @@ services:
       - ./coverage:/app/coverage
     network_mode: host
     command: >
-      sh -c "cargo llvm-cov --workspace --all-features --html --output-dir /app/coverage"
+      sh -c "cargo llvm-cov --workspace --html --output-dir /app/coverage"
 
 # =============================================================================
 # Volumes
@@ -327,6 +460,10 @@ volumes:
     name: prax-mssql-data
   mongodb_data:
     name: prax-mongodb-data
+  scylladb_data:
+    name: prax-scylladb-data
+  cassandra_data:
+    name: prax-cassandra-data
   cargo_cache:
     name: prax-cargo-cache
   target_cache:

@@ -261,46 +261,50 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
-            black_box(filter.to_sql(0))
+            black_box(filter.to_sql(0, &prax_query::dialect::Postgres))
         });
     });
 
     group.bench_function("interned_filter_chain", |b| {
+        // `FieldName` is a `Cow<'static, str>`, so we need owned strings
+        // from the interner. `to_cow()` gives us `Cow::Owned` which
+        // clones cheaply each iteration — the benchmark's point is
+        // measuring the interner's cost, not the downstream conversion.
         let interner = GlobalInterner::get();
-        // Copy the interned strings to owned so the Filter literals don't
-        // borrow from the local bindings (which would be dropped before the
-        // closure is called again).
-        let user_id: String = interner.intern("user_id").as_ref().to_owned();
-        let status: String = interner.intern("status").as_ref().to_owned();
-        let created_at: String = interner.intern("created_at").as_ref().to_owned();
+        let user_id = interner.intern("user_id");
+        let status = interner.intern("status");
+        let created_at = interner.intern("created_at");
 
         b.iter(|| {
             let filter = Filter::and(vec![
-                Filter::Equals(user_id.clone().into(), FilterValue::Int(1)),
-                Filter::Equals(status.clone().into(), FilterValue::String("active".into())),
+                Filter::Equals(user_id.to_cow(), FilterValue::Int(1)),
+                Filter::Equals(status.to_cow(), FilterValue::String("active".into())),
                 Filter::Gt(
-                    created_at.clone().into(),
+                    created_at.to_cow(),
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
-            black_box(filter.to_sql(0))
+            black_box(filter.to_sql(0, &prax_query::dialect::Postgres))
         });
     });
 
     group.bench_function("arena_filter_chain", |b| {
         let arena = QueryArena::new();
 
+        // `ScopedFilter<'a>` is tied to the scope's lifetime, so we can't
+        // return it out of `scope()`. Render it to owned SQL inside the
+        // scope instead — that's what real consumers would do anyway.
         b.iter(|| {
-            // ScopedFilter borrows from the arena scope, so we can't return
-            // it out of the closure. Consume it by converting to something
-            // owned (a Debug string suffices for a benchmark).
             let sql = arena.scope(|s| {
                 let filter = s.and(vec![
                     s.eq("user_id", 1),
                     s.eq("status", "active"),
                     s.gt("created_at", "2024-01-01"),
                 ]);
-                format!("{:?}", filter)
+                let mut buf = String::new();
+                let mut idx = 0;
+                filter.write_sql(&mut buf, &mut idx);
+                buf
             });
             black_box(sql)
         });
@@ -341,7 +345,7 @@ fn bench_profiler_workflow(c: &mut Criterion) {
             // Create some filters (profiling disabled)
             for i in 0..10 {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(i));
-                black_box(filter.to_sql(0));
+                black_box(filter.to_sql(0, &prax_query::dialect::Postgres));
             }
         });
     });
@@ -353,7 +357,7 @@ fn bench_profiler_workflow(c: &mut Criterion) {
             // Create some filters (profiling enabled)
             for i in 0..10 {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(i));
-                black_box(filter.to_sql(0));
+                black_box(filter.to_sql(0, &prax_query::dialect::Postgres));
             }
         });
 
@@ -405,11 +409,9 @@ fn bench_allocation_throughput(c: &mut Criterion) {
             BenchmarkId::new("interned_strings", count),
             &count,
             |b, &count| {
+                let mut interner = ScopedInterner::new();
+
                 b.iter(|| {
-                    // Rebuild the interner each iteration so the benchmark
-                    // measures the "fresh scope" cost rather than cache hits
-                    // against a previously-populated interner.
-                    let mut interner = ScopedInterner::new();
                     let mut interned = Vec::with_capacity(count);
                     for i in 0..count {
                         interned.push(interner.intern(&format!("field_{}", i % 50)));

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use deadpool_postgres::Object;
 use tokio_postgres::Row;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::error::PgResult;
 use crate::statement::PreparedStatementCache;
@@ -30,7 +30,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Vec<Row>> {
-        debug!(sql = %sql, "Executing query");
+        trace!(sql = %sql, "Executing query");
 
         // Try to get a cached prepared statement
         let stmt = self
@@ -48,7 +48,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Row> {
-        debug!(sql = %sql, "Executing query_one");
+        trace!(sql = %sql, "Executing query_one");
 
         let stmt = self
             .statement_cache
@@ -65,7 +65,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Option<Row>> {
-        debug!(sql = %sql, "Executing query_opt");
+        trace!(sql = %sql, "Executing query_opt");
 
         let stmt = self
             .statement_cache
@@ -82,7 +82,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<u64> {
-        debug!(sql = %sql, "Executing statement");
+        trace!(sql = %sql, "Executing statement");
 
         let stmt = self
             .statement_cache
@@ -95,7 +95,7 @@ impl PgConnection {
 
     /// Execute a batch of statements in a single round-trip.
     pub async fn batch_execute(&self, sql: &str) -> PgResult<()> {
-        debug!(sql = %sql, "Executing batch");
+        trace!(sql = %sql, "Executing batch");
         self.client.batch_execute(sql).await?;
         Ok(())
     }
@@ -140,7 +140,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Vec<Row>> {
-        debug!(sql = %sql, "Executing raw query (no statement cache)");
+        trace!(sql = %sql, "Executing raw query (no statement cache)");
         let rows = self.client.query(sql, params).await?;
         Ok(rows)
     }
@@ -151,7 +151,7 @@ impl PgConnection {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Option<Row>> {
-        debug!(sql = %sql, "Executing raw query_opt (no statement cache)");
+        trace!(sql = %sql, "Executing raw query_opt (no statement cache)");
         let row = self.client.query_opt(sql, params).await?;
         Ok(row)
     }
@@ -170,7 +170,7 @@ impl<'a> PgTransaction<'a> {
         sql: &str,
         params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
     ) -> PgResult<Vec<Row>> {
-        debug!(sql = %sql, "Executing query in transaction");
+        trace!(sql = %sql, "Executing query in transaction");
 
         let stmt = self
             .statement_cache

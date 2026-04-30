@@ -36,12 +36,12 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
         quote! {
             /// Order by this field ascending.
             pub fn asc() -> super::OrderByParam {
-                super::OrderByParam::#field_name_pascal(super::super::_prax_prelude::SortOrder::Asc)
+                super::OrderByParam::#field_name_pascal(::prax_orm::_prax_prelude::SortOrder::Asc)
             }
 
             /// Order by this field descending.
             pub fn desc() -> super::OrderByParam {
-                super::OrderByParam::#field_name_pascal(super::super::_prax_prelude::SortOrder::Desc)
+                super::OrderByParam::#field_name_pascal(::prax_orm::_prax_prelude::SortOrder::Desc)
             }
         }
     } else {
@@ -66,33 +66,12 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
         TokenStream::new()
     };
 
-    // Generate increment/decrement for numeric types
-    let numeric_ops = match &field.field_type {
-        FieldType::Scalar(s) if crate::types::supports_comparison(s) => {
-            if matches!(
-                s,
-                prax_schema::ast::ScalarType::Int
-                    | prax_schema::ast::ScalarType::BigInt
-                    | prax_schema::ast::ScalarType::Float
-                    | prax_schema::ast::ScalarType::Decimal
-            ) {
-                quote! {
-                    /// Increment this field by the given amount.
-                    pub fn increment(amount: #field_type) -> super::SetParam {
-                        super::SetParam::#field_name_pascal(super::#field_name::get_current_value() + amount)
-                    }
-
-                    /// Decrement this field by the given amount.
-                    pub fn decrement(amount: #field_type) -> super::SetParam {
-                        super::SetParam::#field_name_pascal(super::#field_name::get_current_value() - amount)
-                    }
-                }
-            } else {
-                TokenStream::new()
-            }
-        }
-        _ => TokenStream::new(),
-    };
+    // Increment/decrement helpers intentionally omitted — implementing them
+    // requires an atomic read-modify-write path (today's execution model is
+    // `SET col = ?`, not `SET col = col + ?`). The previous codegen emitted
+    // calls to a phantom `get_current_value()` that never existed, so the
+    // `pub mod` never compiled when a numeric field was present. Re-add once
+    // the Client exposes a proper `.increment()/.decrement()` update op.
 
     // Generate filter operations
     let filters = super::filters::generate_field_filters(field, model.name());
@@ -116,9 +95,8 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
 
             #order_by
             #set_ops
-            #numeric_ops
 
-            // Re-export filter operations
+            // Filter operations (WhereOp enum + equals/gt/... constructors)
             #filters
         }
     }
@@ -187,7 +165,7 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
         .filter(|f| !f.modifier.is_list() && !matches!(f.field_type, FieldType::Model(_)))
         .map(|f| {
             let name = pascal_ident(f.name());
-            quote! { #name(super::_prax_prelude::SortOrder) }
+            quote! { #name(::prax_orm::_prax_prelude::SortOrder) }
         })
         .collect();
 
@@ -225,7 +203,7 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
 
         impl OrderByParam {
             /// Get the column name and sort order.
-            pub fn column_and_order(&self) -> (&'static str, &super::_prax_prelude::SortOrder) {
+            pub fn column_and_order(&self) -> (&'static str, &::prax_orm::_prax_prelude::SortOrder) {
                 match self {
                     #(#column_matches,)*
                 }
@@ -235,8 +213,8 @@ pub fn generate_order_by_param(model: &Model) -> TokenStream {
             pub fn to_sql(&self) -> String {
                 let (col, order) = self.column_and_order();
                 let dir = match order {
-                    super::_prax_prelude::SortOrder::Asc => "ASC",
-                    super::_prax_prelude::SortOrder::Desc => "DESC",
+                    ::prax_orm::_prax_prelude::SortOrder::Asc => "ASC",
+                    ::prax_orm::_prax_prelude::SortOrder::Desc => "DESC",
                 };
                 format!("{} {}", col, dir)
             }

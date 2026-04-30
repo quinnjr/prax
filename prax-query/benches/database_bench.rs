@@ -35,7 +35,7 @@ fn bench_sql_generation_by_database(c: &mut Criterion) {
         group.bench_function(BenchmarkId::new("simple_select", name), |b| {
             b.iter(|| {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(1));
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 black_box((sql, params))
             });
         });
@@ -50,7 +50,7 @@ fn bench_sql_generation_by_database(c: &mut Criterion) {
                     Filter::Gt("age".into(), FilterValue::Int(18)),
                     Filter::IsNotNull("email".into()),
                 ]);
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 black_box((sql, params))
             });
         });
@@ -63,7 +63,7 @@ fn bench_sql_generation_by_database(c: &mut Criterion) {
                 let values: Vec<FilterValue> = (0..size).map(|i| FilterValue::Int(i)).collect();
                 let filter = Filter::In("id".into(), values);
                 b.iter(|| {
-                    let (sql, params) = filter.to_sql(0);
+                    let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                     black_box((sql, params))
                 });
             });
@@ -349,7 +349,7 @@ fn bench_complex_queries(c: &mut Criterion) {
                 Filter::IsNotNull("verified_at".into()),
             ]);
 
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
 
             // Build full query
             let mut query = String::with_capacity(256);

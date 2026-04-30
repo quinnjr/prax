@@ -43,6 +43,8 @@ url = { workspace = true }
 owo-colors = "4.1"
 parking_lot = { workspace = true }
 num_cpus = "1.16"
+chrono = { workspace = true }
+rust_decimal = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::Filter;
-use crate::traits::{Model, QueryEngine};
+use crate::relations::IncludeSpec;
+use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::{OrderBy, Select};
 
 /// A query operation that finds the first record matching the filter.
@@ -27,10 +28,14 @@ pub struct FindFirstOperation<E: QueryEngine, M: Model> {
     filter: Filter,
     order_by: OrderBy,
     select: Select,
+    /// Relations to eager-load alongside the first-match lookup. Same
+    /// loader dispatch path as `find_many`/`find_unique` — the
+    /// executor sees a 1-element slice when a row is found.
+    includes: Vec<IncludeSpec>,
     _model: PhantomData<M>,
 }
 
-impl<E: QueryEngine, M: Model> FindFirstOperation<E, M> {
+impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Create a new FindFirst operation.
     pub fn new(engine: E) -> Self {
         Self {
@@ -38,6 +43,7 @@ impl<E: QueryEngine, M: Model> FindFirstOperation<E, M> {
             filter: Filter::None,
             order_by: OrderBy::none(),
             select: Select::All,
+            includes: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -61,9 +67,18 @@ impl<E: QueryEngine, M: Model> FindFirstOperation<E, M> {
         self
     }
 
+    /// Eager-load a relation alongside the first-match lookup.
+    pub fn include(mut self, spec: IncludeSpec) -> Self {
+        self.includes.push(spec);
+        self
+    }
+
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -96,19 +111,36 @@ impl<E: QueryEngine, M: Model> FindFirstOperation<E, M> {
     /// Execute the query and return an optional result.
     pub async fn exec(self) -> QueryResult<Option<M>>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
-        let (sql, params) = self.build_sql();
-        self.engine.query_optional::<M>(&sql, params).await
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
+        match self.engine.query_optional::<M>(&sql, params).await? {
+            None => Ok(None),
+            Some(row) => {
+                let mut parents = vec![row];
+                for spec in &self.includes {
+                    <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec)
+                        .await?;
+                }
+                Ok(parents.into_iter().next())
+            }
+        }
     }
 
     /// Execute the query and error if not found.
     pub async fn exec_required(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
-        let (sql, params) = self.build_sql();
-        self.engine.query_one::<M>(&sql, params).await
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
+        let row = self.engine.query_one::<M>(&sql, params).await?;
+        let mut parents = vec![row];
+        for spec in &self.includes {
+            <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
+        }
+        Ok(parents.into_iter().next().expect("1-element vec"))
     }
 }
 
@@ -129,11 +161,36 @@ mod tests {
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
     }
 
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
+    }
+
+    impl crate::traits::ModelRelationLoader<MockEngine> for TestModel {
+        fn load_relation<'a>(
+            _engine: &'a MockEngine,
+            _parents: &'a mut [Self],
+            spec: &'a crate::relations::IncludeSpec,
+        ) -> crate::traits::BoxFuture<'a, QueryResult<()>> {
+            let name = spec.relation_name.clone();
+            Box::pin(async move {
+                Err(QueryError::internal(format!(
+                    "unknown relation '{name}' on TestModel (mock)",
+                )))
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -141,7 +198,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -149,7 +206,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -157,7 +214,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -165,7 +222,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -203,7 +260,7 @@ mod tests {
     #[test]
     fn test_find_first_new() {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("LIMIT 1"));
@@ -218,10 +275,10 @@ mod tests {
             Filter::Equals("status".into(), FilterValue::String("active".to_string())),
         );
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("status = $1"));
+        assert!(sql.contains(r#""status" = $1"#));
         assert_eq!(params.len(), 1);
     }
 
@@ -234,7 +291,7 @@ mod tests {
             ))
             .r#where(Filter::Gt("salary".into(), FilterValue::Int(50000)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -249,7 +306,7 @@ mod tests {
                 Filter::Equals("role".into(), FilterValue::String("superadmin".to_string())),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("OR"));
         assert_eq!(params.len(), 2);
@@ -258,7 +315,7 @@ mod tests {
     #[test]
     fn test_find_first_without_filter() {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(params.is_empty());
@@ -272,7 +329,7 @@ mod tests {
             .r#where(Filter::Gt("age".into(), FilterValue::Int(18)))
             .order_by(OrderByField::desc("created_at"));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("ORDER BY created_at DESC"));
@@ -285,7 +342,7 @@ mod tests {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine)
             .order_by(OrderByField::asc("name"));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY name ASC"));
     }
@@ -293,7 +350,7 @@ mod tests {
     #[test]
     fn test_find_first_without_order() {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("ORDER BY"));
     }
@@ -305,7 +362,7 @@ mod tests {
             .order_by(OrderByField::asc("name"))
             .order_by(OrderByField::desc("created_at"));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ORDER BY created_at DESC"));
         assert!(!sql.contains("ORDER BY name"));
@@ -318,7 +375,7 @@ mod tests {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine)
             .select(Select::fields(["id", "email"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, email FROM"));
         assert!(!sql.contains("SELECT *"));
@@ -329,7 +386,7 @@ mod tests {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine)
             .select(Select::fields(["count"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT count FROM"));
     }
@@ -343,7 +400,7 @@ mod tests {
             .order_by(OrderByField::desc("created_at"))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Check correct SQL clause ordering
         let select_pos = sql.find("SELECT").unwrap();
@@ -361,7 +418,7 @@ mod tests {
     #[test]
     fn test_find_first_table_name() {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -404,7 +461,7 @@ mod tests {
             .order_by(OrderByField::desc("created_at"))
             .select(Select::fields(["id", "name", "email"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name, email FROM"));
         assert!(sql.contains("WHERE"));
@@ -423,7 +480,7 @@ mod tests {
                 FilterValue::String("@example.com".to_string()),
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
@@ -434,7 +491,7 @@ mod tests {
         let op = FindFirstOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::IsNull("deleted_at".into()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IS NULL"));
         assert!(params.is_empty());
@@ -449,7 +506,7 @@ mod tests {
             )),
         ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("NOT"));
         assert_eq!(params.len(), 1);
@@ -465,7 +522,7 @@ mod tests {
             ],
         ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 2);

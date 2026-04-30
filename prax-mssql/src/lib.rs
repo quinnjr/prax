@@ -56,6 +56,7 @@ pub mod error;
 pub mod pool;
 pub mod rls;
 pub mod row;
+pub mod row_ref;
 pub mod types;
 
 pub use config::{MssqlConfig, MssqlConfigBuilder};

@@ -57,6 +57,7 @@ pub mod document;
 pub mod engine;
 pub mod error;
 pub mod filter;
+pub mod row_ref;
 pub mod types;
 pub mod view;
 

@@ -168,11 +168,6 @@ impl FilterValue {
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
     }
-
-    /// Convert to SQL parameter placeholder.
-    pub fn to_sql_placeholder(&self, param_index: usize) -> String {
-        format!("${}", param_index)
-    }
 }
 
 impl From<bool> for FilterValue {
@@ -223,6 +218,247 @@ impl<T: Into<FilterValue>> From<Option<T>> for FilterValue {
             Some(v) => v.into(),
             None => Self::Null,
         }
+    }
+}
+
+// Integer widenings. The derive macro's `TypeCategory::Numeric` bucket
+// emits `.gt(v)` / `.in_(vec![v])` etc. on every Rust integer type, which
+// then flows through `v.into()` to a `FilterValue::Int(i64)`. Without
+// these impls, calling `user::age::gt(18u32)` would fail to compile.
+
+impl From<i8> for FilterValue {
+    fn from(v: i8) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<i16> for FilterValue {
+    fn from(v: i16) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u8> for FilterValue {
+    fn from(v: u8) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u16> for FilterValue {
+    fn from(v: u16) -> Self {
+        Self::Int(v as i64)
+    }
+}
+impl From<u32> for FilterValue {
+    fn from(v: u32) -> Self {
+        Self::Int(v as i64)
+    }
+}
+// u64 can exceed i64::MAX; panic on overflow rather than silently
+// clamping. Silent clamping lets a filter like `user::id::equals(u64::MAX)`
+// match the wrong row (`id = i64::MAX`) — a known authorization-bypass
+// footgun. Callers with known-safe values should cast explicitly:
+// `FilterValue::from(v as i64)`.
+impl From<u64> for FilterValue {
+    fn from(v: u64) -> Self {
+        let v = i64::try_from(v).expect(
+            "u64 value exceeds i64::MAX; cast explicitly to i64 or use FilterValue::String",
+        );
+        Self::Int(v)
+    }
+}
+
+impl From<f32> for FilterValue {
+    fn from(v: f32) -> Self {
+        Self::Float(f64::from(v))
+    }
+}
+
+// Temporal and UUID types round-trip as strings — every driver's row
+// bridge already materializes them via `FilterValue::String` (see
+// `MysqlRowRef`, `SqliteRowRef`, `MssqlRowRef`), so a matching pair on
+// the parameter-binding side keeps the derive's emitted
+// `user::when::gt(dt)` chain compiling and symmetric.
+//
+// Temporal values round-trip as RFC3339/ISO-8601 strings.
+// Microsecond precision matches what Postgres/MySQL store and what the driver
+// `RowRef` bridges read. Callers that need different precision or format
+// should build their own `FilterValue::String` value.
+
+impl From<chrono::DateTime<chrono::Utc>> for FilterValue {
+    fn from(v: chrono::DateTime<chrono::Utc>) -> Self {
+        // RFC3339 with microsecond precision: 2020-01-15T10:30:00.000000Z
+        Self::String(v.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    }
+}
+impl From<chrono::NaiveDateTime> for FilterValue {
+    fn from(v: chrono::NaiveDateTime) -> Self {
+        // ISO-8601 without timezone. Six fractional-second digits for
+        // bit-parity with Postgres/MySQL microsecond storage.
+        Self::String(v.format("%Y-%m-%dT%H:%M:%S%.6f").to_string())
+    }
+}
+impl From<chrono::NaiveDate> for FilterValue {
+    fn from(v: chrono::NaiveDate) -> Self {
+        Self::String(v.format("%Y-%m-%d").to_string())
+    }
+}
+impl From<chrono::NaiveTime> for FilterValue {
+    fn from(v: chrono::NaiveTime) -> Self {
+        Self::String(v.format("%H:%M:%S%.6f").to_string())
+    }
+}
+
+impl From<uuid::Uuid> for FilterValue {
+    fn from(v: uuid::Uuid) -> Self {
+        Self::String(v.to_string())
+    }
+}
+
+impl From<rust_decimal::Decimal> for FilterValue {
+    fn from(v: rust_decimal::Decimal) -> Self {
+        Self::String(v.to_string())
+    }
+}
+
+impl From<serde_json::Value> for FilterValue {
+    fn from(v: serde_json::Value) -> Self {
+        Self::Json(v)
+    }
+}
+
+// `Vec<u8>` is already reachable via the `Vec<T: Into<FilterValue>>`
+// blanket impl — it lands as `FilterValue::List` of `FilterValue::Int`
+// bytes. Drivers that want native BYTEA binding should intercept the
+// List variant and re-interpret. We intentionally don't shadow the
+// blanket with a dedicated impl (which would be a conflict anyway).
+
+/// Reverse of [`crate::row::FromColumn`]: convert an in-memory value to
+/// a [`FilterValue`] suitable for parameter binding.
+///
+/// Used by the relation executor and [`crate::traits::ModelWithPk`] to
+/// project a fetched row's primary/foreign key into a placeholder value
+/// without going through the `From<T>` path (which consumes the value).
+///
+/// # Intentional omissions
+///
+/// `u64` is omitted by design: [`From<u64>`] panics on overflow, but
+/// `to_filter_value(&self)` takes a borrow and cannot recover or fail
+/// gracefully without hidden clamping. Callers with `u64` primary keys
+/// should cast explicitly (`(self.id as i64).to_filter_value()`) or
+/// use `FilterValue::String(self.id.to_string())` when full range
+/// preservation matters.
+pub trait ToFilterValue {
+    /// Convert this value to a [`FilterValue`] by borrowing.
+    fn to_filter_value(&self) -> FilterValue;
+}
+
+impl ToFilterValue for i8 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i16 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for i64 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self)
+    }
+}
+impl ToFilterValue for u8 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for u16 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for u32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Int(*self as i64)
+    }
+}
+impl ToFilterValue for f32 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Float(f64::from(*self))
+    }
+}
+impl ToFilterValue for f64 {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Float(*self)
+    }
+}
+impl ToFilterValue for bool {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Bool(*self)
+    }
+}
+impl ToFilterValue for String {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.clone())
+    }
+}
+impl ToFilterValue for str {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for uuid::Uuid {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for rust_decimal::Decimal {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.to_string())
+    }
+}
+impl ToFilterValue for chrono::DateTime<chrono::Utc> {
+    fn to_filter_value(&self) -> FilterValue {
+        // Mirrors From<DateTime<Utc>>: RFC3339 with microsecond precision.
+        FilterValue::String(self.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    }
+}
+impl ToFilterValue for chrono::NaiveDateTime {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%Y-%m-%dT%H:%M:%S%.6f").to_string())
+    }
+}
+impl ToFilterValue for chrono::NaiveDate {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%Y-%m-%d").to_string())
+    }
+}
+impl ToFilterValue for chrono::NaiveTime {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::String(self.format("%H:%M:%S%.6f").to_string())
+    }
+}
+impl ToFilterValue for serde_json::Value {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Json(self.clone())
+    }
+}
+impl ToFilterValue for Vec<u8> {
+    fn to_filter_value(&self) -> FilterValue {
+        // Bytes round-trip as a list of ints to match the existing
+        // `From<Vec<T>>` blanket behavior. Drivers that want native
+        // BYTEA binding intercept the List variant.
+        FilterValue::List(self.iter().map(|b| FilterValue::Int(*b as i64)).collect())
+    }
+}
+impl<T: ToFilterValue> ToFilterValue for Option<T> {
+    fn to_filter_value(&self) -> FilterValue {
+        self.as_ref()
+            .map(T::to_filter_value)
+            .unwrap_or(FilterValue::Null)
     }
 }
 
@@ -708,115 +944,141 @@ impl Filter {
 
     /// Generate SQL for this filter with parameter placeholders.
     /// Returns (sql, params) where params are the values to bind.
-    pub fn to_sql(&self, param_offset: usize) -> (String, Vec<FilterValue>) {
+    pub fn to_sql(
+        &self,
+        param_offset: usize,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut params = Vec::new();
-        let sql = self.to_sql_with_params(param_offset, &mut params);
+        let sql = self.to_sql_with_params(param_offset, &mut params, dialect);
         (sql, params)
     }
 
-    fn to_sql_with_params(&self, mut param_idx: usize, params: &mut Vec<FilterValue>) -> String {
+    fn to_sql_with_params(
+        &self,
+        mut param_idx: usize,
+        params: &mut Vec<FilterValue>,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> String {
         match self {
             Self::None => "TRUE".to_string(),
 
             Self::Equals(col, val) => {
+                let c = dialect.quote_ident(col);
                 if val.is_null() {
-                    format!("{} IS NULL", col)
+                    format!("{} IS NULL", c)
                 } else {
                     params.push(val.clone());
                     param_idx += params.len();
-                    format!("{} = ${}", col, param_idx)
+                    format!("{} = {}", c, dialect.placeholder(param_idx))
                 }
             }
             Self::NotEquals(col, val) => {
+                let c = dialect.quote_ident(col);
                 if val.is_null() {
-                    format!("{} IS NOT NULL", col)
+                    format!("{} IS NOT NULL", c)
                 } else {
                     params.push(val.clone());
                     param_idx += params.len();
-                    format!("{} != ${}", col, param_idx)
+                    format!("{} != {}", c, dialect.placeholder(param_idx))
                 }
             }
 
             Self::Lt(col, val) => {
+                let c = dialect.quote_ident(col);
                 params.push(val.clone());
                 param_idx += params.len();
-                format!("{} < ${}", col, param_idx)
+                format!("{} < {}", c, dialect.placeholder(param_idx))
             }
             Self::Lte(col, val) => {
+                let c = dialect.quote_ident(col);
                 params.push(val.clone());
                 param_idx += params.len();
-                format!("{} <= ${}", col, param_idx)
+                format!("{} <= {}", c, dialect.placeholder(param_idx))
             }
             Self::Gt(col, val) => {
+                let c = dialect.quote_ident(col);
                 params.push(val.clone());
                 param_idx += params.len();
-                format!("{} > ${}", col, param_idx)
+                format!("{} > {}", c, dialect.placeholder(param_idx))
             }
             Self::Gte(col, val) => {
+                let c = dialect.quote_ident(col);
                 params.push(val.clone());
                 param_idx += params.len();
-                format!("{} >= ${}", col, param_idx)
+                format!("{} >= {}", c, dialect.placeholder(param_idx))
             }
 
             Self::In(col, values) => {
                 if values.is_empty() {
                     return "FALSE".to_string();
                 }
+                let c = dialect.quote_ident(col);
                 let placeholders: Vec<_> = values
                     .iter()
                     .map(|v| {
                         params.push(v.clone());
                         param_idx += params.len();
-                        format!("${}", param_idx)
+                        dialect.placeholder(param_idx)
                     })
                     .collect();
-                format!("{} IN ({})", col, placeholders.join(", "))
+                format!("{} IN ({})", c, placeholders.join(", "))
             }
             Self::NotIn(col, values) => {
                 if values.is_empty() {
                     return "TRUE".to_string();
                 }
+                let c = dialect.quote_ident(col);
                 let placeholders: Vec<_> = values
                     .iter()
                     .map(|v| {
                         params.push(v.clone());
                         param_idx += params.len();
-                        format!("${}", param_idx)
+                        dialect.placeholder(param_idx)
                     })
                     .collect();
-                format!("{} NOT IN ({})", col, placeholders.join(", "))
+                format!("{} NOT IN ({})", c, placeholders.join(", "))
             }
 
             Self::Contains(col, val) => {
+                let c = dialect.quote_ident(col);
                 if let FilterValue::String(s) = val {
                     params.push(FilterValue::String(format!("%{}%", s)));
                 } else {
                     params.push(val.clone());
                 }
                 param_idx += params.len();
-                format!("{} LIKE ${}", col, param_idx)
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
             }
             Self::StartsWith(col, val) => {
+                let c = dialect.quote_ident(col);
                 if let FilterValue::String(s) = val {
                     params.push(FilterValue::String(format!("{}%", s)));
                 } else {
                     params.push(val.clone());
                 }
                 param_idx += params.len();
-                format!("{} LIKE ${}", col, param_idx)
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
             }
             Self::EndsWith(col, val) => {
+                let c = dialect.quote_ident(col);
                 if let FilterValue::String(s) = val {
                     params.push(FilterValue::String(format!("%{}", s)));
                 } else {
                     params.push(val.clone());
                 }
                 param_idx += params.len();
-                format!("{} LIKE ${}", col, param_idx)
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
             }
 
-            Self::IsNull(col) => format!("{} IS NULL", col),
-            Self::IsNotNull(col) => format!("{} IS NOT NULL", col),
+            Self::IsNull(col) => {
+                let c = dialect.quote_ident(col);
+                format!("{} IS NULL", c)
+            }
+            Self::IsNotNull(col) => {
+                let c = dialect.quote_ident(col);
+                format!("{} IS NOT NULL", c)
+            }
 
             Self::And(filters) => {
                 if filters.is_empty() {
@@ -824,7 +1086,7 @@ impl Filter {
                 }
                 let parts: Vec<_> = filters
                     .iter()
-                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params))
+                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params, dialect))
                     .collect();
                 format!("({})", parts.join(" AND "))
             }
@@ -834,12 +1096,12 @@ impl Filter {
                 }
                 let parts: Vec<_> = filters
                     .iter()
-                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params))
+                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params, dialect))
                     .collect();
                 format!("({})", parts.join(" OR "))
             }
             Self::Not(filter) => {
-                let inner = filter.to_sql_with_params(param_idx, params);
+                let inner = filter.to_sql_with_params(param_idx, params, dialect);
                 format!("NOT ({})", inner)
             }
         }
@@ -1372,8 +1634,8 @@ mod tests {
     fn test_scalar_filter_equals() {
         let filter = ScalarFilter::Equals("test@example.com".to_string()).into_filter("email");
 
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "email = $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""email" = $1"#);
         assert_eq!(params.len(), 1);
     }
 
@@ -1383,7 +1645,7 @@ mod tests {
         let f2 = Filter::Gt("age".into(), FilterValue::Int(18));
         let combined = Filter::and([f1, f2]);
 
-        let (sql, params) = combined.to_sql(0);
+        let (sql, params) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
     }
@@ -1394,7 +1656,7 @@ mod tests {
         let f2 = Filter::Equals("status".into(), "pending".into());
         let combined = Filter::or([f1, f2]);
 
-        let (sql, _) = combined.to_sql(0);
+        let (sql, _) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("OR"));
     }
 
@@ -1402,22 +1664,22 @@ mod tests {
     fn test_filter_not() {
         let filter = Filter::not(Filter::Equals("deleted".into(), FilterValue::Bool(true)));
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("NOT"));
     }
 
     #[test]
     fn test_filter_is_null() {
         let filter = Filter::IsNull("deleted_at".into());
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "deleted_at IS NULL");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""deleted_at" IS NULL"#);
         assert!(params.is_empty());
     }
 
     #[test]
     fn test_filter_in() {
         let filter = Filter::In("status".into(), vec!["active".into(), "pending".into()]);
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 2);
     }
@@ -1425,7 +1687,7 @@ mod tests {
     #[test]
     fn test_filter_contains() {
         let filter = Filter::Contains("email".into(), "example".into());
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
         if let FilterValue::String(s) = &params[0] {
@@ -1442,13 +1704,6 @@ mod tests {
         assert!(!FilterValue::Int(0).is_null());
         assert!(!FilterValue::Float(0.0).is_null());
         assert!(!FilterValue::String("".to_string()).is_null());
-    }
-
-    #[test]
-    fn test_filter_value_to_sql_placeholder() {
-        let val = FilterValue::Int(42);
-        assert_eq!(val.to_sql_placeholder(1), "$1");
-        assert_eq!(val.to_sql_placeholder(10), "$10");
     }
 
     #[test]
@@ -1501,15 +1756,15 @@ mod tests {
     #[test]
     fn test_scalar_filter_not() {
         let filter = ScalarFilter::Not(Box::new("test".to_string())).into_filter("name");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "name != $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""name" != $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_scalar_filter_in() {
         let filter = ScalarFilter::In(vec!["a".to_string(), "b".to_string()]).into_filter("status");
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("IN"));
         assert_eq!(params.len(), 2);
     }
@@ -1517,7 +1772,7 @@ mod tests {
     #[test]
     fn test_scalar_filter_not_in() {
         let filter = ScalarFilter::NotIn(vec!["x".to_string()]).into_filter("status");
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("NOT IN"));
         assert_eq!(params.len(), 1);
     }
@@ -1525,39 +1780,39 @@ mod tests {
     #[test]
     fn test_scalar_filter_lt() {
         let filter = ScalarFilter::Lt(100i32).into_filter("price");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "price < $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""price" < $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_scalar_filter_lte() {
         let filter = ScalarFilter::Lte(100i32).into_filter("price");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "price <= $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""price" <= $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_scalar_filter_gt() {
         let filter = ScalarFilter::Gt(0i32).into_filter("quantity");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "quantity > $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""quantity" > $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_scalar_filter_gte() {
         let filter = ScalarFilter::Gte(0i32).into_filter("quantity");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "quantity >= $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""quantity" >= $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_scalar_filter_starts_with() {
         let filter = ScalarFilter::StartsWith("prefix".to_string()).into_filter("name");
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
         if let FilterValue::String(s) = &params[0] {
@@ -1569,7 +1824,7 @@ mod tests {
     #[test]
     fn test_scalar_filter_ends_with() {
         let filter = ScalarFilter::EndsWith("suffix".to_string()).into_filter("name");
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
         if let FilterValue::String(s) = &params[0] {
@@ -1581,16 +1836,16 @@ mod tests {
     #[test]
     fn test_scalar_filter_is_null() {
         let filter = ScalarFilter::<String>::IsNull.into_filter("deleted_at");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "deleted_at IS NULL");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""deleted_at" IS NULL"#);
         assert!(params.is_empty());
     }
 
     #[test]
     fn test_scalar_filter_is_not_null() {
         let filter = ScalarFilter::<String>::IsNotNull.into_filter("name");
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "name IS NOT NULL");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""name" IS NOT NULL"#);
         assert!(params.is_empty());
     }
 
@@ -1600,7 +1855,7 @@ mod tests {
     fn test_filter_none() {
         let filter = Filter::none();
         assert!(filter.is_none());
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert_eq!(sql, "TRUE"); // Filter::None generates TRUE
         assert!(params.is_empty());
     }
@@ -1608,31 +1863,31 @@ mod tests {
     #[test]
     fn test_filter_not_equals() {
         let filter = Filter::NotEquals("status".into(), "deleted".into());
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "status != $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""status" != $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_filter_lte() {
         let filter = Filter::Lte("price".into(), FilterValue::Int(100));
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "price <= $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""price" <= $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_filter_gte() {
         let filter = Filter::Gte("quantity".into(), FilterValue::Int(0));
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "quantity >= $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""quantity" >= $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_filter_not_in() {
         let filter = Filter::NotIn("status".into(), vec!["deleted".into(), "archived".into()]);
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("NOT IN"));
         assert_eq!(params.len(), 2);
     }
@@ -1640,7 +1895,7 @@ mod tests {
     #[test]
     fn test_filter_starts_with() {
         let filter = Filter::StartsWith("email".into(), "admin".into());
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
     }
@@ -1648,7 +1903,7 @@ mod tests {
     #[test]
     fn test_filter_ends_with() {
         let filter = Filter::EndsWith("email".into(), "@example.com".into());
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 1);
     }
@@ -1656,8 +1911,8 @@ mod tests {
     #[test]
     fn test_filter_is_not_null() {
         let filter = Filter::IsNotNull("name".into());
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "name IS NOT NULL");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""name" IS NOT NULL"#);
         assert!(params.is_empty());
     }
 
@@ -1717,7 +1972,7 @@ mod tests {
         let f2 = Filter::Gt("age".into(), FilterValue::Int(18));
         let combined = f1.and_then(f2);
 
-        let (sql, params) = combined.to_sql(0);
+        let (sql, params) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
     }
@@ -1745,7 +2000,7 @@ mod tests {
         let f3 = Filter::Equals("c".into(), "3".into());
         let combined = f1.and_then(f2).and_then(f3);
 
-        let (sql, params) = combined.to_sql(0);
+        let (sql, params) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 3);
     }
@@ -1756,7 +2011,7 @@ mod tests {
         let f2 = Filter::Equals("status".into(), "pending".into());
         let combined = f1.or_else(f2);
 
-        let (sql, _) = combined.to_sql(0);
+        let (sql, _) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("OR"));
     }
 
@@ -1787,7 +2042,7 @@ mod tests {
         ]);
         let combined = Filter::and([f1, f2]);
 
-        let (sql, params) = combined.to_sql(0);
+        let (sql, params) = combined.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 3);
     }
@@ -1800,7 +2055,7 @@ mod tests {
         ]);
         let filter = Filter::not(inner);
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("NOT"));
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
@@ -1810,15 +2065,15 @@ mod tests {
     fn test_filter_with_json_value() {
         let json_val = serde_json::json!({"key": "value"});
         let filter = Filter::Equals("metadata".into(), FilterValue::Json(json_val));
-        let (sql, params) = filter.to_sql(0);
-        assert_eq!(sql, "metadata = $1");
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
+        assert_eq!(sql, r#""metadata" = $1"#);
         assert_eq!(params.len(), 1);
     }
 
     #[test]
     fn test_filter_in_empty_list() {
         let filter = Filter::In("status".into(), vec![]);
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         // Empty IN generates FALSE (no match possible)
         assert!(
             sql.contains("FALSE")
@@ -1833,7 +2088,7 @@ mod tests {
     fn test_filter_with_null_value() {
         // When filtering with Null value, it uses IS NULL instead of = $1
         let filter = Filter::IsNull("deleted_at".into());
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("deleted_at"));
         assert!(sql.contains("IS NULL"));
         assert!(params.is_empty());
@@ -1849,7 +2104,7 @@ mod tests {
             .push(Filter::IsNotNull("email".into()))
             .build();
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2); // score and active, IS NOT NULL has no param
     }
@@ -1907,7 +2162,7 @@ mod tests {
             ))
             .build();
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("OR"));
     }
 
@@ -1935,7 +2190,7 @@ mod tests {
             .is_not_null("email")
             .build_and();
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
     }
@@ -1947,7 +2202,7 @@ mod tests {
             .eq("role", "moderator")
             .build_or();
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("OR"));
     }
 
@@ -1962,7 +2217,7 @@ mod tests {
             .gte("e", 5)
             .build_and();
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 5);
     }
@@ -1975,7 +2230,7 @@ mod tests {
             .ends_with("domain", ".com")
             .build_and();
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
     }
 
@@ -1986,7 +2241,7 @@ mod tests {
             .is_not_null("created_at")
             .build_and();
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("IS NULL"));
         assert!(sql.contains("IS NOT NULL"));
     }
@@ -1998,7 +2253,7 @@ mod tests {
             .not_in("role", vec!["banned", "suspended"])
             .build_and();
 
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("IN"));
         assert!(sql.contains("NOT IN"));
     }
@@ -2041,7 +2296,7 @@ mod tests {
             .extend(extra_filters)
             .build();
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 3);
     }
@@ -2066,7 +2321,7 @@ mod tests {
         let filter = Filter::and2(a, b);
 
         assert!(matches!(filter, Filter::And(_)));
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 2);
     }
@@ -2102,7 +2357,7 @@ mod tests {
         let filter = Filter::or2(a, b);
 
         assert!(matches!(filter, Filter::Or(_)));
-        let (sql, _) = filter.to_sql(0);
+        let (sql, _) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("OR"));
     }
 
@@ -2128,5 +2383,354 @@ mod tests {
     fn test_or2_both_none() {
         let filter = Filter::or2(Filter::None, Filter::None);
         assert!(filter.is_none());
+    }
+
+    // ==================== SQL Injection Prevention Tests ====================
+
+    #[test]
+    fn to_sql_quotes_column_names_against_injection() {
+        use crate::dialect::{Mssql, Mysql, Postgres};
+
+        // Malicious column name attempts to break out of the identifier.
+        let filter = Filter::Equals(r#"id" OR 1=1--"#.into(), FilterValue::Int(1));
+
+        let (sql_pg, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql_pg.starts_with(r#""id"" OR 1=1--" ="#),
+            "postgres did not quote col; got: {sql_pg}"
+        );
+
+        let (sql_my, _) = filter.to_sql(0, &Mysql);
+        assert!(
+            sql_my.starts_with(r#"`id" OR 1=1--` ="#),
+            "mysql did not quote col; got: {sql_my}"
+        );
+
+        let (sql_ms, _) = filter.to_sql(0, &Mssql);
+        assert!(
+            sql_ms.starts_with(r#"[id" OR 1=1--] ="#),
+            "mssql did not quote col; got: {sql_ms}"
+        );
+    }
+
+    #[test]
+    fn to_sql_quotes_in_list_column_names() {
+        use crate::dialect::Postgres;
+        let filter = Filter::In("id".into(), vec![FilterValue::Int(1), FilterValue::Int(2)]);
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""id" IN ("#),
+            "expected quoted id on IN, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn to_sql_quotes_null_checks() {
+        use crate::dialect::Postgres;
+        let filter = Filter::IsNull("deleted_at".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert_eq!(sql, r#""deleted_at" IS NULL"#);
+    }
+
+    #[test]
+    fn to_sql_quotes_comparison_operators() {
+        use crate::dialect::Postgres;
+
+        let filter = Filter::Lt("age".into(), FilterValue::Int(18));
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(sql.starts_with(r#""age" < "#), "Lt not quoted: {sql}");
+
+        let filter = Filter::Lte("price".into(), FilterValue::Int(100));
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(sql.starts_with(r#""price" <= "#), "Lte not quoted: {sql}");
+
+        let filter = Filter::Gt("score".into(), FilterValue::Int(0));
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(sql.starts_with(r#""score" > "#), "Gt not quoted: {sql}");
+
+        let filter = Filter::Gte("quantity".into(), FilterValue::Int(1));
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""quantity" >= "#),
+            "Gte not quoted: {sql}"
+        );
+
+        let filter = Filter::NotEquals("status".into(), "deleted".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""status" != "#),
+            "NotEquals not quoted: {sql}"
+        );
+    }
+
+    #[test]
+    fn to_sql_quotes_like_operators() {
+        use crate::dialect::Postgres;
+
+        let filter = Filter::Contains("email".into(), "example".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""email" LIKE "#),
+            "Contains not quoted: {sql}"
+        );
+
+        let filter = Filter::StartsWith("name".into(), "admin".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""name" LIKE "#),
+            "StartsWith not quoted: {sql}"
+        );
+
+        let filter = Filter::EndsWith("domain".into(), ".com".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""domain" LIKE "#),
+            "EndsWith not quoted: {sql}"
+        );
+    }
+
+    #[test]
+    fn to_sql_quotes_not_in() {
+        use crate::dialect::Postgres;
+        let filter = Filter::NotIn("status".into(), vec!["deleted".into(), "archived".into()]);
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert!(
+            sql.starts_with(r#""status" NOT IN ("#),
+            "NotIn not quoted: {sql}"
+        );
+    }
+
+    #[test]
+    fn to_sql_quotes_is_not_null() {
+        use crate::dialect::Postgres;
+        let filter = Filter::IsNotNull("verified_at".into());
+        let (sql, _) = filter.to_sql(0, &Postgres);
+        assert_eq!(sql, r#""verified_at" IS NOT NULL"#);
+    }
+
+    #[test]
+    fn filter_value_from_u64_in_range() {
+        assert_eq!(FilterValue::from(42u64), FilterValue::Int(42));
+        assert_eq!(FilterValue::from(0u64), FilterValue::Int(0));
+        let max_safe = i64::MAX as u64;
+        assert_eq!(FilterValue::from(max_safe), FilterValue::Int(i64::MAX));
+    }
+
+    #[test]
+    #[should_panic(expected = "u64 value exceeds i64::MAX")]
+    fn filter_value_from_u64_overflow_panics() {
+        let _ = FilterValue::from(u64::MAX);
+    }
+
+    #[test]
+    fn filter_value_from_chrono_datetime_utc_rfc3339() {
+        use chrono::{TimeZone, Utc};
+        let dt = Utc.with_ymd_and_hms(2020, 1, 15, 10, 30, 45).unwrap();
+        let fv = FilterValue::from(dt);
+        assert_eq!(
+            fv,
+            FilterValue::String("2020-01-15T10:30:45.000000Z".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_datetime_iso() {
+        use chrono::NaiveDate;
+        let dt = NaiveDate::from_ymd_opt(2020, 1, 15)
+            .unwrap()
+            .and_hms_opt(10, 30, 45)
+            .unwrap();
+        let fv = FilterValue::from(dt);
+        assert_eq!(
+            fv,
+            FilterValue::String("2020-01-15T10:30:45.000000".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_date() {
+        use chrono::NaiveDate;
+        let d = NaiveDate::from_ymd_opt(2020, 1, 15).unwrap();
+        assert_eq!(
+            FilterValue::from(d),
+            FilterValue::String("2020-01-15".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_chrono_naive_time() {
+        use chrono::NaiveTime;
+        let t = NaiveTime::from_hms_opt(10, 30, 45).unwrap();
+        assert_eq!(
+            FilterValue::from(t),
+            FilterValue::String("10:30:45.000000".to_string())
+        );
+    }
+
+    // ==================== Extended From-impl coverage ====================
+    // Pins the tail of From<T> for FilterValue impls that weren't previously
+    // exercised. Each test guards against a specific regression a driver
+    // would surface downstream — wrong format, wrong variant, or silent
+    // precision loss.
+
+    #[test]
+    fn filter_value_from_uuid_is_lowercase_hyphenated() {
+        // Driver bridges (Postgres/MySQL/SQLite/MSSQL) all receive the
+        // 36-char hyphenated lowercase form; pinning it here prevents a
+        // hypothetical switch to simple/hyphen-less encoding from silently
+        // breaking every WHERE uuid_col = $1 binding.
+        use uuid::Uuid;
+        let u = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+        match FilterValue::from(u) {
+            FilterValue::String(ref s) => {
+                assert_eq!(s, "550e8400-e29b-41d4-a716-446655440000");
+                assert_eq!(s, &u.to_string());
+            }
+            other => panic!("expected FilterValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_uuid_nil_round_trips() {
+        use uuid::Uuid;
+        let u = Uuid::nil();
+        assert_eq!(
+            FilterValue::from(u),
+            FilterValue::String("00000000-0000-0000-0000-000000000000".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_decimal_uses_to_string_not_f64() {
+        // Critical: Decimal must NOT round-trip via f64. Using to_string()
+        // preserves precision that parsing-to-f64 loses. "3.14" stays "3.14",
+        // not "3.1400000000000001".
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let d = Decimal::from_str("3.14").unwrap();
+        assert_eq!(
+            FilterValue::from(d),
+            FilterValue::String("3.14".to_string())
+        );
+    }
+
+    #[test]
+    fn filter_value_from_decimal_high_precision_preserved() {
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        // 28-digit mantissa — would lose precision through f64.
+        let d = Decimal::from_str("1234567890.1234567890").unwrap();
+        match FilterValue::from(d) {
+            FilterValue::String(ref s) => {
+                assert_eq!(s, "1234567890.1234567890");
+            }
+            other => panic!("expected FilterValue::String, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_serde_json_value_keeps_json_variant() {
+        let v = serde_json::json!({"key": "value", "nested": [1, 2, 3]});
+        match FilterValue::from(v.clone()) {
+            FilterValue::Json(inner) => {
+                assert_eq!(inner, v);
+            }
+            other => panic!("expected FilterValue::Json, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_serde_json_null_keeps_json_variant() {
+        // `serde_json::Value::Null` must land as FilterValue::Json(Null),
+        // NOT FilterValue::Null — the JSON variant signals to the dialect
+        // bridge that this column wants JSONB/JSON binding semantics, not
+        // SQL NULL.
+        let v = serde_json::Value::Null;
+        match FilterValue::from(v) {
+            FilterValue::Json(serde_json::Value::Null) => {}
+            other => panic!("expected FilterValue::Json(Null), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_value_from_option_none_maps_to_null() {
+        // Repeats an existing test at a different call site — this is the
+        // "all integer widths flow through the same Option impl" guard.
+        let none_i32: Option<i32> = None;
+        assert_eq!(FilterValue::from(none_i32), FilterValue::Null);
+        let none_string: Option<String> = None;
+        assert_eq!(FilterValue::from(none_string), FilterValue::Null);
+    }
+
+    #[test]
+    fn filter_value_from_signed_integer_extremes() {
+        // Every integer width widens to Int(i64). Pinning MIN catches sign
+        // extension bugs (e.g. if `v as i64` were replaced with `v as u64 as i64`).
+        assert_eq!(FilterValue::from(i8::MIN), FilterValue::Int(i8::MIN as i64));
+        assert_eq!(FilterValue::from(i8::MAX), FilterValue::Int(i8::MAX as i64));
+        assert_eq!(
+            FilterValue::from(i16::MIN),
+            FilterValue::Int(i16::MIN as i64)
+        );
+        assert_eq!(
+            FilterValue::from(i16::MAX),
+            FilterValue::Int(i16::MAX as i64)
+        );
+    }
+
+    #[test]
+    fn filter_value_from_unsigned_integer_extremes() {
+        // u8/u16/u32 all fit in i64 so these never panic. u64::MAX has its
+        // own dedicated `#[should_panic]` test at filter_value_from_u64_overflow_panics.
+        assert_eq!(FilterValue::from(u8::MAX), FilterValue::Int(u8::MAX as i64));
+        assert_eq!(
+            FilterValue::from(u16::MAX),
+            FilterValue::Int(u16::MAX as i64)
+        );
+        assert_eq!(
+            FilterValue::from(u32::MAX),
+            FilterValue::Int(u32::MAX as i64)
+        );
+        // u32::MAX = 4_294_967_295, well below i64::MAX.
+        assert_eq!(FilterValue::from(u32::MAX), FilterValue::Int(4_294_967_295));
+    }
+
+    #[test]
+    fn filter_value_from_f32_widens_to_f64() {
+        // f32 -> f64 widening must happen via `f64::from(v)`, NOT `v as f64`
+        // — the cast form is fine for IEEE-754 normal values but we pin it
+        // here to document intent. 1.5f32 is exactly representable so no
+        // precision loss either way.
+        let v: f32 = 1.5;
+        assert_eq!(FilterValue::from(v), FilterValue::Float(1.5));
+    }
+
+    // ==================== ToFilterValue tests ====================
+    // These pin the reverse-of-FromColumn projection used by the relation
+    // loader and `ModelWithPk`. Each case guards against a drift from the
+    // matching `From<T>` impl above; the relation executor relies on them
+    // producing byte-identical values to the parameter-binding path.
+
+    #[test]
+    fn to_filter_value_option_some_some() {
+        let v: Option<i32> = Some(42);
+        assert_eq!(v.to_filter_value(), FilterValue::Int(42));
+    }
+
+    #[test]
+    fn to_filter_value_option_none_is_null() {
+        let v: Option<i32> = None;
+        assert_eq!(v.to_filter_value(), FilterValue::Null);
+    }
+
+    #[test]
+    fn to_filter_value_uuid_is_string() {
+        let id = uuid::Uuid::nil();
+        assert_eq!(id.to_filter_value(), FilterValue::String(id.to_string()));
+    }
+
+    #[test]
+    fn to_filter_value_bool_is_bool() {
+        assert_eq!(true.to_filter_value(), FilterValue::Bool(true));
     }
 }

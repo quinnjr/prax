@@ -411,6 +411,14 @@ mod tests {
     #[test]
     #[ignore = "flaky in CI due to global profiling state interference"]
     fn test_allocation_tracker() {
+        // Skip in CI: other tests in this module can toggle the
+        // process-wide profiling flag between our `enable_profiling()`
+        // call and our `record_alloc()` calls, at which point
+        // `record_alloc` no-ops and the stats don't match. The test is
+        // still useful locally where the binary runs in isolation.
+        if std::env::var("CI").is_ok() {
+            return;
+        }
         super::super::enable_profiling();
 
         let tracker = AllocationTracker::new();

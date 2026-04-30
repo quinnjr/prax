@@ -19,6 +19,7 @@ ignore = [
     { id = "RUSTSEC-2023-0071", reason = "proc-macro-error is unmaintained (via diesel dev-dep for ORM-comparison benchmarks); resolves when diesel drops it" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (via mysql_async); resolves when mysql_async upgrades" },
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained (via mongodb 2.8.x); resolves on mongodb 3.x migration" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained (via cdrs-tokio); no safe upgrade — cdrs-tokio would need to migrate to rustc-hash upstream" },
 
     # --- Vulnerable / unsound transitive deps scoped to backends ---
     # Diesel SQLite UTF-8 corruption: only affects Diesel's SQLite backend.

@@ -56,7 +56,7 @@ fn bench_config_builder(c: &mut Criterion) {
                 .local_datacenter("dc1")
                 .ssl_enabled(true)
                 .compression("lz4")
-                .consistency(prax_scylladb::config::ConsistencyLevel::LocalQuorum)
+                .consistency(prax_scylladb::ConsistencyLevel::LocalQuorum)
                 .build();
             black_box(config)
         })
@@ -68,7 +68,7 @@ fn bench_config_builder(c: &mut Criterion) {
 /// Benchmark type conversions
 fn bench_type_conversions(c: &mut Criterion) {
     use prax_query::filter::FilterValue;
-    use prax_scylladb::types::ToCqlValue;
+    use prax_scylladb::ToCqlValue;
 
     let mut group = c.benchmark_group("scylladb_types");
 
@@ -89,7 +89,7 @@ fn bench_type_conversions(c: &mut Criterion) {
     });
 
     group.bench_function("array_to_cql", |b| {
-        let value = FilterValue::Array(vec![
+        let value = FilterValue::List(vec![
             FilterValue::Int(1),
             FilterValue::Int(2),
             FilterValue::Int(3),

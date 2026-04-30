@@ -531,6 +531,189 @@ impl DuckDbEngine {
     }
 }
 
+// -----------------------------------------------------------------------------
+// QueryEngine impl
+// -----------------------------------------------------------------------------
+//
+// DuckDB's SQL surface is Postgres-compatible — same placeholder syntax,
+// `RETURNING`, `ON CONFLICT (...) DO UPDATE`, and identifier quoting — so
+// the Postgres dialect builder emits valid DuckDB statements. Aggregate
+// queries and transactions fall back to the trait defaults (`unsupported`
+// and pass-through respectively); a richer wiring lives behind the
+// follow-up tracked in CHANGELOG.
+
+impl DuckDbEngine {
+    /// Shared row-fetch path used by every QueryEngine method that
+    /// returns typed models. Factored out of the trait impl so the
+    /// trait-method bodies don't collide with DuckDbEngine's
+    /// inherent `query_many` (which takes a different signature and
+    /// returns untyped JSON).
+    async fn fetch_typed<T: prax_query::traits::Model + prax_query::row::FromRow>(
+        &self,
+        sql: &str,
+        params: &[FilterValue],
+    ) -> prax_query::QueryResult<Vec<T>> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| prax_query::QueryError::connection(e.to_string()).with_source(e))?;
+        let snapshots = conn
+            .query_rows(sql, params)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        snapshots
+            .into_iter()
+            .map(|r| {
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    prax_query::QueryError::deserialization(msg).with_source(e)
+                })
+            })
+            .collect()
+    }
+
+    async fn fetch_affected(
+        &self,
+        sql: &str,
+        params: &[FilterValue],
+    ) -> prax_query::QueryResult<u64> {
+        let conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| prax_query::QueryError::connection(e.to_string()).with_source(e))?;
+        let affected = conn
+            .execute(sql, params)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        Ok(affected as u64)
+    }
+}
+
+impl prax_query::traits::QueryEngine for DuckDbEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Postgres
+    }
+
+    fn query_many<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_typed::<T>(&sql, &params).await })
+    }
+
+    fn query_one<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
+        })
+    }
+
+    fn query_optional<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            Ok(rows.drain(..).next())
+        })
+    }
+
+    fn execute_insert<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::deserialization(
+                    "INSERT ... RETURNING produced no row".to_string(),
+                ))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
+        })
+    }
+
+    fn execute_update<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_typed::<T>(&sql, &params).await })
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn execute_raw(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn count(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
+            let snapshots = conn
+                .query_rows(&sql, &params)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let first = snapshots.into_iter().next().ok_or_else(|| {
+                prax_query::QueryError::deserialization("count returned no row".to_string())
+            })?;
+            // COUNT(*) in DuckDB returns BigInt, whose column name is
+            // usually `count_star()` unless aliased. Probe the RowRef by
+            // ordinal (the generic builder emits an unaliased COUNT) by
+            // reading the one-and-only column as i64.
+            use prax_query::row::RowRef;
+            if let Ok(n) = first.get_i64("count") {
+                return Ok(n as u64);
+            }
+            if let Ok(n) = first.get_i64("count_star()") {
+                return Ok(n as u64);
+            }
+            Err(prax_query::QueryError::deserialization(
+                "count column missing from DuckDB result".to_string(),
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

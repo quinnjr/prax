@@ -7,19 +7,275 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-04-30
+
+The headline of this release is the new executable **client API** —
+Prisma-style `PraxClient<E>` with per-model accessors that run
+(`client.user().find_many()...`) through a typed `QueryEngine`
+instead of returning inert SQL strings. The driver layer was rewritten
+from scratch to back it: typed row decoding via `FromRow`/`RowRef`
+bridges on all four SQL drivers, a `SqlDialect` abstraction so filter
+SQL emits the right placeholder/quoting/upsert syntax per backend,
+real transactions, aggregate/group_by execution, cross-dialect
+upsert, and a typed `query_raw`/`execute_raw` escape hatch on
+`PraxClient`.
+
 ### Added
 
-- **TypeScript Generator** (`prax-typegen` v0.1.0) - Standalone crate for generating TypeScript from Prax schemas
-  - TypeScript interface generation for models, enums, composite types, and views
-  - Zod schema generation with runtime validation and inferred types
-  - `CreateInput` and `UpdateInput` variants for each model
-  - Lazy `z.lazy()` references for relation fields
-  - CLI binary installable via `cargo install prax-typegen`
-- **Schema Generator Blocks** (`prax-schema`) - First-class `generator` block support in `.prax` files
-  - `generate = env("VAR")` toggle: enable/disable generators via environment variables
-  - `generate = true/false` literal toggle
-  - Parsed into `Generator` AST with `provider`, `output`, `generate`, and arbitrary properties
-  - `Schema::enabled_generators()` for runtime filtering
+- **`PraxClient<E>` and `prax::client!(Model, ...)` macro** — top-level
+  client grouping per-model accessors. The macro emits a sealed
+  `PraxClientExt` trait and implements it for `PraxClient<E>` so
+  callers write `client.user()` / `client.post()` without inherent
+  `impl` blocks on a foreign type.
+- **Per-model `Client<E>` emitted by `#[derive(Model)]` and by
+  `prax_schema!`** — exposes `find_many`, `find_unique`, `find_first`,
+  `create`, `create_many`, `update`, `update_many`, `upsert`, `delete`,
+  `delete_many`, `count`, `aggregate`, `group_by`. Each accessor clones
+  the engine and hands it to the matching operation builder.
+- **`prax-query::dialect::SqlDialect` trait** — new module with
+  `Postgres` / `Sqlite` / `Mysql` / `Mssql` / `NotSql` implementations.
+  Attached to `QueryEngine::dialect()`. Each dialect drives placeholder
+  syntax (`$1` / `?` / `?N` / `@P1`), `RETURNING` vs `OUTPUT INSERTED`,
+  upsert clause shape, transaction statements, and identifier quoting.
+  Marked `#[non_exhaustive]` so additional dialects can be added
+  without a breaking release.
+- **`ToFilterValue` trait + `ModelWithPk`** — reverse of `FromColumn`
+  used by the relation executor and by upsert to extract PK/FK values.
+- **`RelationMeta` + per-relation codegen modules**
+  (`user::posts::fetch()`, `user::posts::Relation`) — declarative
+  relation metadata emitted from
+  `#[prax(relation(target = ..., foreign_key = ...))]`.
+- **`.include(spec)` on `find_many` / `find_unique` / `find_first`** —
+  eager-loads BelongsTo / HasOne / HasMany relations with one
+  follow-up `IN (…)` query per relation.
+- **Real transactions on all four SQL drivers**:
+  `PraxClient::transaction(|tx| async { ... }).await` commits on `Ok`
+  and rolls back on `Err`. Nested `transaction()` on the same engine
+  currently returns `QueryError::internal(...)` until dialect-aware
+  SAVEPOINT support lands.
+- **Cross-dialect upsert**: `ON CONFLICT ... DO UPDATE`
+  (Postgres / SQLite) / `ON DUPLICATE KEY UPDATE` (MySQL). Routed
+  through the engine with the dialect's conflict clause spliced in
+  by the builder.
+- **Cross-dialect aggregate + group_by execution** via
+  `QueryEngine::aggregate_query`.
+- **Nested writes**: `.create().with(user::posts::create(vec![...]))`
+  issues child inserts inside an implicit transaction.
+- **Typed raw SQL escape hatch**: `PraxClient::query_raw<T>(Sql)` and
+  `PraxClient::execute_raw(Sql)`. Rows route through the same
+  `FromRow` bridge the derived models use, so the result stays typed.
+- **`prax-query::row::FromRow` + `RowRef`** — expanded with
+  default-erroring getters for `chrono::DateTime<Utc>`,
+  `chrono::NaiveDateTime`, `chrono::NaiveDate`, `chrono::NaiveTime`,
+  `uuid::Uuid`, `rust_decimal::Decimal`, `serde_json::Value` and their
+  `Option<T>` variants. Drivers override the ones they support
+  natively.
+- **`prax-query::row::into_row_error`** — helper for driver `RowRef`
+  bridges that maps any `Display` error into a
+  `RowError::TypeConversion`.
+- **`prax-{postgres,sqlite,mysql,mssql}` row_ref modules** — typed row
+  bridges (`PgRow`, `SqliteRowRef`, `MysqlRowRef`, `MssqlRowRef`).
+- **`prax-{postgres,sqlite,mysql,mssql}::*Engine`** — implement
+  `QueryEngine` trait with typed row decoding via `FromRow`.
+- **`#[derive(Model)]`** — emits `impl prax_query::traits::Model` and
+  `impl prax_query::row::FromRow` alongside the legacy `PraxModel`
+  marker. Also emits per-field filter operator constructors
+  (`user::age::gt(18)`, etc.) that classify field types into
+  Numeric / String / Boolean / Other buckets.
+- **`FilterValue` `From` impls** — signed and unsigned integer widths,
+  `f32`, `chrono::DateTime<Utc>`, `chrono::NaiveDateTime`,
+  `chrono::NaiveDate`, `chrono::NaiveTime`, `uuid::Uuid`,
+  `rust_decimal::Decimal`, `serde_json::Value`.
+- **Integration tests against live Postgres, MySQL, SQLite, and MSSQL
+  containers**, gated on `PRAX_E2E=1` + `#[ignore]` so the default
+  `cargo test` run stays fast. Covers CRUD, upsert, aggregate,
+  transaction commit/rollback, and select projection.
+- **`examples/client_crud_postgres.rs`** — runnable end-to-end demo
+  that walks the full CRUD cycle against docker-compose Postgres.
+- **TypeScript Generator** (`prax-typegen` v0.1.0) — standalone crate
+  for generating TypeScript from Prax schemas.
+  - TypeScript interface generation for models, enums, composite
+    types, and views.
+  - Zod schema generation with runtime validation and inferred types.
+  - `CreateInput` and `UpdateInput` variants for each model.
+  - Lazy `z.lazy()` references for relation fields.
+  - CLI binary installable via `cargo install prax-typegen`.
+- **Schema Generator Blocks** (`prax-schema`) — first-class `generator`
+  block support in `.prax` files.
+  - `generate = env("VAR")` toggle: enable/disable generators via
+    environment variables.
+  - `generate = true/false` literal toggle.
+  - Parsed into `Generator` AST with `provider`, `output`, `generate`,
+    and arbitrary properties.
+  - `Schema::enabled_generators()` for runtime filtering.
+
+### Changed (BREAKING)
+
+- **`prax-query::traits::QueryEngine`** — row-returning methods now
+  require `T: FromRow`. Add `#[derive(Model)]` (which emits `FromRow`)
+  or a hand-written `impl FromRow for MyModel`. Every operation
+  builder propagates the bound. Driver impls route rows through the
+  `RowRef` bridge instead of JSON.
+- **`prax-query::traits::QueryEngine`** — new `dialect()` method on the
+  trait. Has a default returning the inert `NotSql` dialect, so
+  existing implementors continue to compile — but every SQL-backed
+  engine must override it or SQL building will panic at runtime.
+- **`prax-query::filter::Filter::to_sql`** — signature gained a
+  `dialect: &dyn SqlDialect` parameter. Callers must pass their
+  engine's dialect (or a literal `&prax_query::dialect::Postgres` if
+  wedded to that backend).
+- **`prax-query::filter::Filter::to_sql`** — column names are now
+  quoted through `dialect.quote_ident` before being interpolated into
+  SQL (SQL-injection fix). Generated SQL now reads `"col" = $1` on
+  Postgres (was `col = $1`), `` `col` = ? `` on MySQL, `[col] = @P1`
+  on MSSQL. Tests that matched the unquoted form need updating.
+- **`prax-mysql` / `prax-sqlite` engines** — rewritten to return typed
+  rows (`T: FromRow`) instead of JSON blobs. The legacy JSON surface
+  moved to `prax_mysql::raw::MysqlRawEngine` +
+  `prax_mysql::raw::MysqlJsonRow` (and the equivalent for SQLite).
+  Callers that wanted JSON: `use prax_{mysql,sqlite}::raw::{MysqlRawEngine, MysqlJsonRow}`.
+- **`prax-mysql::MysqlEngine` inherent methods removed** — the old
+  `query(sql, params) -> Vec<RowData>`,
+  `query_one(sql, params) -> RowData`,
+  `query_opt(sql, params) -> Option<RowData>` no longer exist. They
+  are replaced by the `QueryEngine` trait methods `query_many::<T>`,
+  `query_one::<T>`, `query_optional::<T>`, each of which requires
+  `T: Model + FromRow`. Callers consuming raw `RowData` /
+  `serde_json::Value` must either migrate to a typed model via
+  `#[derive(Model)]`, bridge through `prax_mysql::row_ref::MysqlRowRef`
+  in a hand-written `FromRow`, or switch to
+  `prax_mysql::raw::MysqlRawEngine` for the legacy JSON API.
+  Side-effecting SQL that returns no rows should call
+  `QueryEngine::execute_raw`.
+- **`prax-sqlite::SqliteEngine` inherent methods removed** — same
+  breakage as `MysqlEngine`. The old `query` / `query_one` /
+  `query_opt` are gone; use `query_many::<T>` / `query_one::<T>` /
+  `query_optional::<T>` with `T: Model + FromRow`, bridge via
+  `prax_sqlite::row_ref::SqliteRowRef::from_rusqlite` for ad-hoc typed
+  rows, or fall back to `prax_sqlite::raw::SqliteRawEngine` for the
+  JSON API.
+- **`prax-mysql::MysqlQueryResult` / `prax-sqlite::SqliteQueryResult`**
+  — types removed from public re-exports. Renamed to
+  `prax_{mysql,sqlite}::raw::{MysqlJsonRow, SqliteJsonRow}`.
+- **`#[derive(Model)]` now emits `FromRow` in addition to `Model`** —
+  the derive expands to *both* `impl prax_query::traits::Model for …`
+  and `impl prax_query::row::FromRow for …`. If you had a
+  hand-written `impl Model for …` or `impl FromRow for …` for a type
+  that also carries the derive, the two impls will conflict (`E0119`).
+  Delete the hand-written impl and rely on the derive, or drop the
+  derive and keep the hand-written impls.
+- **`#[derive(Model)]` now emits a lowercase-struct module** —
+  alongside the per-field filter constructors, the derive emits
+  `mod <lowercase_struct_name> { pub mod <field> { fn equals, gt, lt, … } }`.
+  Crates that already define a module named the same as the lowercase
+  form of a derived struct (e.g., a struct `User` plus a local
+  `mod user { … }`) will see an `E0428` duplicate-definition error.
+  Rename one of them.
+- **`FilterValue::from::<u64>`** — values greater than `i64::MAX` now
+  panic instead of silently clamping (previously an auth-bypass
+  footgun). Callers that pass untrusted `u64` inputs must validate
+  the range before conversion, or switch to
+  `FilterValue::Int(value as i64)` with their own clamp policy.
+- **Postgres driver integer width narrowing** — `FilterValue::Int` is
+  narrowed to the target column width at bind time (INT2 / INT4 /
+  INT8). Eliminates `WrongType { postgres: Int4, rust: "i64" }`
+  errors when filtering on integer PKs.
+- **MSSQL `OUTPUT INSERTED.*` clause order** — rearranged into the
+  correct T-SQL position (between `(cols)` and `VALUES` on
+  `INSERT`; between `SET` and `WHERE` on `UPDATE`).
+- **MySQL stopped emitting `RETURNING`** — MySQL 8.0 doesn't support
+  it (that's a MariaDB extension). The engine now re-`SELECT`s after
+  `INSERT` via `LAST_INSERT_ID()`.
+
+### Removed
+
+- **Legacy `Actions` / `Query` inert helpers** emitted by the codegen
+  — they returned SQL strings without an attached engine and are
+  fully subsumed by the new executable `Client<E>`.
+- **`#[derive(Model)]` phantom `increment` / `decrement` helpers** —
+  the derive no longer emits helpers that called a non-existent
+  `super::<field>::get_current_value()` function.
+
+### Migration Guide
+
+If you implement `QueryEngine` for a custom SQL backend:
+1. Add `fn dialect(&self) -> &dyn SqlDialect { &prax_query::dialect::Postgres }` (or the dialect you target).
+2. Ensure every type passed to `query_many::<T>`, `query_one::<T>`, etc. implements `FromRow`. Use `#[derive(Model)]`.
+
+If you use `prax-mysql` or `prax-sqlite`:
+- For typed rows (new default): no change — your `find_many::<User>()` etc. now return typed models.
+- For JSON blobs (legacy): import `MysqlRawEngine` / `SqliteRawEngine` from the `raw` module.
+
+If you call `Filter::to_sql` directly:
+- Update to `filter.to_sql(offset, &prax_query::dialect::Postgres)` (or your dialect).
+
+If you called `MysqlEngine`/`SqliteEngine` inherent methods directly:
+
+```rust
+// BEFORE (0.6)
+let rows: Vec<RowData> = engine.query("SELECT * FROM users", vec![]).await?;
+
+// AFTER (0.7) — with #[derive(Model)]
+#[derive(prax_orm::Model)]
+#[prax(table = "users")]
+struct User {
+    #[prax(id)]
+    id: i32,
+    email: String,
+}
+
+let rows: Vec<User> = engine
+    .query_many::<User>("SELECT id, email FROM users", vec![])
+    .await?;
+
+// AFTER (0.7) — ad-hoc typed row without the Model derive
+use prax_mysql::row_ref::MysqlRowRef;
+use prax_query::row::{FromRow, RowError, RowRef};
+use prax_query::traits::Model;
+
+struct UserSummary { id: i32, email: String }
+
+impl Model for UserSummary {
+    const MODEL_NAME: &'static str = "UserSummary";
+    const TABLE_NAME: &'static str = "users";
+    // … fill in the remaining associated items per the trait …
+}
+
+impl FromRow for UserSummary {
+    fn from_row(row: &dyn RowRef) -> Result<Self, RowError> {
+        Ok(Self {
+            id: row.get_i32("id")?,
+            email: row.get_string("email")?,
+        })
+    }
+}
+
+let rows: Vec<UserSummary> = engine
+    .query_many::<UserSummary>("SELECT id, email FROM users", vec![])
+    .await?;
+```
+
+The SQLite bridge is identical apart from the row-ref import:
+`use prax_sqlite::row_ref::SqliteRowRef;` and, inside a raw-row
+callback, build the ref via `SqliteRowRef::from_rusqlite(&row)`.
+
+If you need the old untyped JSON-blob behavior, switch to
+`prax_mysql::raw::MysqlRawEngine` / `prax_sqlite::raw::SqliteRawEngine`;
+those retain the legacy API.
+
+`QueryEngine::query_one` behavior when the SQL returns 2+ rows is driver-dependent: Postgres errors (strict), while MySQL/SQLite/MSSQL silently return the first row. Callers that require "exactly one row or error" should add `LIMIT 2` (or `TOP 2` on MSSQL) and check the row count themselves, or use `count`/`query_many` + assert `len() == 1`.
+
+`find_many().select([...])` (and `find_first` / `find_unique`) now narrows
+the emitted SQL column list instead of always sending `SELECT *`. The
+returned rows are still decoded as whole `T` structs, so every
+non-`Option` field on `T` must appear in the SELECT list — otherwise
+you'll see `RowError::ColumnNotFound` (or a driver-level "column does not
+exist" surfaced through `RowError::TypeConversion`) when `FromRow` tries
+to read the missing column. Proper partial hydration (per-field
+`Option<T>` decoding that treats absent columns as `None`) is a
+follow-up; this change gets the easy 50% (narrower bandwidth) with no
+partial-struct complexity. Leave `.select(...)` unset to keep the old
+`SELECT *` behavior.
 
 ## [0.6.0] - 2026-02-13
 

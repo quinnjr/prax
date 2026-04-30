@@ -1,16 +1,59 @@
 //! Type conversions for PostgreSQL.
 
 use prax_query::filter::FilterValue;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{IsNull, ToSql, Type};
 
 use crate::error::{PgError, PgResult};
+
+/// Polymorphic integer binding. `FilterValue::Int` always carries an i64
+/// (the widest scalar variant), but Postgres strictly validates client
+/// bindings against column types: binding an i64 to an `INT4` column
+/// fails with `WrongType { postgres: Int4, rust: "i64" }`. This wrapper
+/// inspects the target column type at bind time and narrows to i16 /
+/// i32 / i64 with a bounds check before forwarding to tokio-postgres'
+/// own impls.
+#[derive(Debug)]
+struct PgInt(i64);
+
+impl ToSql for PgInt {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match *ty {
+            Type::INT2 => {
+                let v: i16 = self
+                    .0
+                    .try_into()
+                    .map_err(|_| format!("value {} overflows INT2", self.0))?;
+                v.to_sql(ty, out)
+            }
+            Type::INT4 => {
+                let v: i32 = self
+                    .0
+                    .try_into()
+                    .map_err(|_| format!("value {} overflows INT4", self.0))?;
+                v.to_sql(ty, out)
+            }
+            Type::INT8 => self.0.to_sql(ty, out),
+            _ => Err(format!("cannot bind integer to postgres type {ty:?}").into()),
+        }
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::INT2 | Type::INT4 | Type::INT8)
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
 
 /// Convert a FilterValue to a type that can be used as a PostgreSQL parameter.
 pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync + Send>> {
     match value {
         FilterValue::Null => Ok(Box::new(Option::<String>::None)),
         FilterValue::Bool(b) => Ok(Box::new(*b)),
-        FilterValue::Int(i) => Ok(Box::new(*i)),
+        FilterValue::Int(i) => Ok(Box::new(PgInt(*i))),
         FilterValue::Float(f) => Ok(Box::new(*f)),
         FilterValue::String(s) => Ok(Box::new(s.clone())),
         FilterValue::Json(j) => Ok(Box::new(j.clone())),

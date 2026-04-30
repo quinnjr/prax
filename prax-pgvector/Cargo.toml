@@ -19,6 +19,9 @@ prax-postgres = { workspace = true }
 # pgvector types
 pgvector = { workspace = true }
 
+# f16 type for halfvec feature
+half = { version = "2", optional = true }
+
 # PostgreSQL driver (for ToSql/FromSql implementations)
 tokio-postgres = { workspace = true }
 postgres-types = { workspace = true }
@@ -42,4 +45,4 @@ pretty_assertions = { workspace = true }
 
 [features]
 default = []
-halfvec = ["pgvector/halfvec"]
+halfvec = ["pgvector/halfvec", "dep:half"]

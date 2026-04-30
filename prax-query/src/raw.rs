@@ -298,7 +298,7 @@ where
 
 impl<M, E> RawQueryOperation<M, E>
 where
-    M: Model + Send + 'static,
+    M: Model + crate::row::FromRow + Send + 'static,
     E: QueryEngine,
 {
     /// Create a new raw query operation.

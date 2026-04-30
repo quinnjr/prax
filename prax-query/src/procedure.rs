@@ -422,26 +422,37 @@ impl<E: QueryEngine> ProcedureCallOperation<E> {
     /// Execute the procedure and return typed results.
     pub async fn exec_returning<T>(self) -> QueryResult<Vec<T>>
     where
-        T: crate::traits::Model + Send + 'static,
+        T: crate::traits::Model + crate::row::FromRow + Send + 'static,
     {
         let (sql, params) = self.call.to_sql()?;
         self.engine.query_many(&sql, params).await
     }
 
     /// Execute a function and return a single value.
+    ///
+    /// Routes through [`QueryEngine::aggregate_query`] so the scalar
+    /// return lands in the first column of the first row as a
+    /// [`FilterValue`]. The caller's `T: TryFrom<FilterValue>` impl
+    /// handles the final type coercion — e.g., `T = i64` succeeds on
+    /// `FilterValue::Int`, errors on `FilterValue::String`.
     pub async fn exec_scalar<T>(self) -> QueryResult<T>
     where
         T: TryFrom<FilterValue, Error = String> + Send + 'static,
     {
         let (sql, params) = self.call.to_sql()?;
-        let result = self.engine.execute_raw(&sql, params).await?;
-
-        // For scalar functions, the result is in the first column
-        // This is a simplified implementation - real impl would parse the actual result
-        Err(QueryError::internal(format!(
-            "Scalar function result parsing not yet implemented (affected: {})",
-            result
-        )))
+        let mut rows = self.engine.aggregate_query(&sql, params).await?;
+        let first = rows
+            .drain(..)
+            .next()
+            .ok_or_else(|| QueryError::not_found("scalar function returned no row".to_string()))?;
+        // Take any value from the map — scalar functions produce a
+        // single column, but the column name is driver-dependent.
+        let value = first.into_values().next().ok_or_else(|| {
+            QueryError::deserialization(
+                "scalar function returned a row with no columns".to_string(),
+            )
+        })?;
+        T::try_from(value).map_err(QueryError::deserialization)
     }
 }
 

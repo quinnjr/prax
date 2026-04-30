@@ -67,10 +67,31 @@ pub struct UdaDefinition {
 impl CassandraPool {
     /// Create a user-defined function.
     pub async fn create_function(&self, def: &UdfDefinition) -> CassandraResult<()> {
-        let _ = def;
-        Err(crate::error::CassandraError::Query(
-            "create_function not yet wired to cdrs-tokio".into(),
-        ))
+        let args = def
+            .arguments
+            .iter()
+            .map(|(n, t)| format!("{n} {t}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let null_behavior = if def.called_on_null {
+            "CALLED ON NULL INPUT"
+        } else {
+            "RETURNS NULL ON NULL INPUT"
+        };
+        let cql = format!(
+            "CREATE OR REPLACE FUNCTION {}.{}({}) \
+             {null_behavior} \
+             RETURNS {} \
+             LANGUAGE {} \
+             AS '{}'",
+            def.keyspace,
+            def.name,
+            args,
+            def.return_type,
+            def.language.as_str(),
+            def.body.replace('\'', "''"),
+        );
+        self.execute(&cql).await
     }
 
     /// Drop a user-defined function.
@@ -80,18 +101,41 @@ impl CassandraPool {
         name: &str,
         arg_types: &[&str],
     ) -> CassandraResult<()> {
-        let _ = (keyspace, name, arg_types);
-        Err(crate::error::CassandraError::Query(
-            "drop_function not yet wired to cdrs-tokio".into(),
-        ))
+        let cql = format!(
+            "DROP FUNCTION IF EXISTS {}.{}({})",
+            keyspace,
+            name,
+            arg_types.join(", "),
+        );
+        self.execute(&cql).await
     }
 
     /// Create a user-defined aggregate.
     pub async fn create_aggregate(&self, def: &UdaDefinition) -> CassandraResult<()> {
-        let _ = def;
-        Err(crate::error::CassandraError::Query(
-            "create_aggregate not yet wired to cdrs-tokio".into(),
-        ))
+        let arg_list = def.arg_types.join(", ");
+        let final_clause = def
+            .final_function
+            .as_ref()
+            .map(|f| format!(" FINALFUNC {f}"))
+            .unwrap_or_default();
+        let initial_clause = def
+            .initial_condition
+            .as_ref()
+            .map(|c| format!(" INITCOND {c}"))
+            .unwrap_or_default();
+        let cql = format!(
+            "CREATE OR REPLACE AGGREGATE {}.{}({}) \
+             SFUNC {} \
+             STYPE {}{}{}",
+            def.keyspace,
+            def.name,
+            arg_list,
+            def.state_function,
+            def.state_type,
+            final_clause,
+            initial_clause,
+        );
+        self.execute(&cql).await
     }
 
     /// Drop a user-defined aggregate.
@@ -101,10 +145,13 @@ impl CassandraPool {
         name: &str,
         arg_types: &[&str],
     ) -> CassandraResult<()> {
-        let _ = (keyspace, name, arg_types);
-        Err(crate::error::CassandraError::Query(
-            "drop_aggregate not yet wired to cdrs-tokio".into(),
-        ))
+        let cql = format!(
+            "DROP AGGREGATE IF EXISTS {}.{}({})",
+            keyspace,
+            name,
+            arg_types.join(", "),
+        );
+        self.execute(&cql).await
     }
 }
 

@@ -1,52 +1,72 @@
-//! MySQL query engine implementation.
+//! MySQL query engine implementing `prax_query::QueryEngine`.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use mysql_async::prelude::*;
-use mysql_async::{Params, Row, Value};
-use serde_json::Value as JsonValue;
-use tracing::{debug, instrument};
-
+use mysql_async::{Params, Row as MyRow, Value as MyValue};
+use prax_query::error::{QueryError, QueryResult};
 use prax_query::filter::FilterValue;
-use prax_query::types::SortOrder;
+use prax_query::row::FromRow;
+use prax_query::traits::{BoxFuture, Model, QueryEngine};
+use tokio::sync::Mutex;
+use tracing::trace;
 
-use crate::error::MysqlError;
+use crate::connection::MysqlConnection;
 use crate::pool::MysqlPool;
-use crate::types::{filter_value_to_mysql, from_mysql_value};
+use crate::row_ref::MysqlRowRef;
+use crate::types::filter_value_to_mysql;
 
-/// MySQL query engine.
+/// MySQL query engine backed by `mysql_async`.
+///
+/// # Breaking changes (0.7)
+///
+/// `MysqlEngine` no longer has inherent `query` / `query_one` / `query_opt`
+/// methods that returned untyped `RowData` / `serde_json::Value`. It now
+/// implements [`prax_query::traits::QueryEngine`], whose row-returning
+/// methods are generic over `T: Model + FromRow` and return typed models.
+///
+/// Migration:
+/// - Replace `engine.query(sql, params)` with
+///   `engine.query_many::<YourType>(sql, params).await?`, where `YourType`
+///   carries `#[derive(prax_orm::Model)]` (which emits both `Model` and
+///   `FromRow`) or hand-written `impl Model + impl FromRow`.
+/// - For ad-hoc typed queries without a full `Model`, bridge through
+///   [`crate::row_ref::MysqlRowRef::from_row`] inside a custom `FromRow`
+///   impl.
+/// - For the legacy JSON-blob API, use [`crate::raw::MysqlRawEngine`] +
+///   [`crate::raw::MysqlJsonRow`].
+/// - To run side-effecting SQL that returns no rows, call
+///   [`prax_query::traits::QueryEngine::execute_raw`].
+///
+/// See `CHANGELOG.md` for the full migration guide.
+///
+/// # Transaction mode
+///
+/// `MysqlEngine` has two modes, controlled by `tx_conn`:
+///
+/// - **Pool mode** (`tx_conn == None`, default): each query acquires
+///   a fresh connection from the pool and drops it after the call.
+/// - **Transaction mode** (`tx_conn == Some(..)`): each query pins
+///   the same [`MysqlConnection`] through an `Arc<Mutex<_>>` so
+///   `BEGIN`, every closure-emitted query, and `COMMIT`/`ROLLBACK`
+///   all land on the same physical connection. The mutex is
+///   `tokio::sync::Mutex` because `mysql_async` calls are async and
+///   the lock has to span `.await`.
+#[derive(Clone)]
 pub struct MysqlEngine {
     pool: MysqlPool,
-}
-
-/// Result of a query operation.
-#[derive(Debug, Clone)]
-pub struct MysqlQueryResult {
-    /// The result data as JSON.
-    pub data: JsonValue,
-}
-
-impl MysqlQueryResult {
-    /// Create a new query result.
-    pub fn new(data: JsonValue) -> Self {
-        Self { data }
-    }
-
-    /// Get the result as JSON.
-    pub fn json(&self) -> &JsonValue {
-        &self.data
-    }
-
-    /// Convert to the inner JSON value.
-    pub fn into_json(self) -> JsonValue {
-        self.data
-    }
+    /// Present when this engine is bound to an in-flight transaction.
+    /// `None` in the normal pool-backed case.
+    tx_conn: Option<Arc<Mutex<MysqlConnection>>>,
 }
 
 impl MysqlEngine {
-    /// Create a new MySQL engine with the given pool.
+    /// Create a new engine with the given pool.
     pub fn new(pool: MysqlPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            tx_conn: None,
+        }
     }
 
     /// Get a reference to the connection pool.
@@ -54,698 +74,589 @@ impl MysqlEngine {
         &self.pool
     }
 
-    /// Build a SELECT query.
-    fn build_select(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-        sort: &[(String, SortOrder)],
-        limit: Option<u64>,
-        offset: Option<u64>,
-    ) -> (String, Vec<Value>) {
-        let mut sql = String::new();
-        let mut params: Vec<Value> = Vec::new();
+    fn bind(params: &[FilterValue]) -> Vec<MyValue> {
+        params.iter().map(filter_value_to_mysql).collect()
+    }
 
-        // SELECT clause
-        let cols = if columns.is_empty() {
-            "*".to_string()
+    /// Decode multiple rows into typed models.
+    ///
+    /// # Short-circuit on decode error
+    ///
+    /// Uses `Result<Vec<T>, _>::collect`, which returns the first decode
+    /// error and discards every successfully-decoded row before it. A
+    /// row-level type mismatch therefore aborts the whole batch rather
+    /// than returning partial results. Callers that want per-row
+    /// recovery should manually iterate rows and handle each result.
+    async fn query_rows<T: Model + FromRow>(
+        &self,
+        sql: String,
+        params: Vec<FilterValue>,
+    ) -> QueryResult<Vec<T>> {
+        trace!(sql = %sql, "mysql query_rows");
+        let bound = Self::bind(&params);
+        let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+            // Tx mode: drive the pinned connection so the query lands
+            // inside the same BEGIN…COMMIT block as every sibling call.
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
         } else {
-            columns
-                .iter()
-                .map(|c| format!("`{}`", c))
-                .collect::<Vec<_>>()
-                .join(", ")
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
         };
-        sql.push_str(&format!("SELECT {} FROM `{}`", cols, table));
 
-        // WHERE clause
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("`{}` IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("`{}` = ?", field));
-                        params.push(filter_value_to_mysql(value));
-                    }
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        // ORDER BY clause
-        if !sort.is_empty() {
-            let order_parts: Vec<String> = sort
-                .iter()
-                .map(|(col, dir)| {
-                    let direction = match dir {
-                        SortOrder::Asc => "ASC",
-                        SortOrder::Desc => "DESC",
-                    };
-                    format!("`{}` {}", col, direction)
+        rows.into_iter()
+            .map(|row| {
+                let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
+                T::from_row(&rr).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
                 })
-                .collect();
-            sql.push_str(" ORDER BY ");
-            sql.push_str(&order_parts.join(", "));
-        }
-
-        // LIMIT and OFFSET
-        if let Some(lim) = limit {
-            sql.push_str(&format!(" LIMIT {}", lim));
-        }
-        if let Some(off) = offset {
-            sql.push_str(&format!(" OFFSET {}", off));
-        }
-
-        (sql, params)
-    }
-
-    /// Build an INSERT query.
-    fn build_insert(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut columns = Vec::new();
-        let mut placeholders = Vec::new();
-        let mut params: Vec<Value> = Vec::new();
-
-        for (col, val) in data {
-            columns.push(format!("`{}`", col));
-            placeholders.push("?".to_string());
-            params.push(filter_value_to_mysql(val));
-        }
-
-        let sql = format!(
-            "INSERT INTO `{}` ({}) VALUES ({})",
-            table,
-            columns.join(", "),
-            placeholders.join(", ")
-        );
-
-        (sql, params)
-    }
-
-    /// Build an UPDATE query.
-    fn build_update(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-        filters: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut params: Vec<Value> = Vec::new();
-
-        // SET clause
-        let set_parts: Vec<String> = data
-            .iter()
-            .map(|(col, val)| {
-                params.push(filter_value_to_mysql(val));
-                format!("`{}` = ?", col)
             })
-            .collect();
-
-        let mut sql = format!("UPDATE `{}` SET {}", table, set_parts.join(", "));
-
-        // WHERE clause
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("`{}` IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("`{}` = ?", field));
-                        params.push(filter_value_to_mysql(value));
-                    }
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        (sql, params)
+            .collect()
     }
 
-    /// Build a DELETE query.
-    fn build_delete(
+    /// Stop after the first row so callers that want a single row do not pay
+    /// for materializing the tail. Naively routing `query_one`/`query_optional`
+    /// through `query_rows` + `.pop()` would decode every matching row and
+    /// throw away all but one; a caller who accidentally asked for a single
+    /// row from a million-row table would allocate a million typed models.
+    async fn query_first_row<T: Model + FromRow>(
         &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> (String, Vec<Value>) {
-        let mut sql = format!("DELETE FROM `{}`", table);
-        let mut params: Vec<Value> = Vec::new();
-
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("`{}` IS NULL", field));
-                    }
-                    _ => {
-                        conditions.push(format!("`{}` = ?", field));
-                        params.push(filter_value_to_mysql(value));
-                    }
-                }
-            }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        (sql, params)
-    }
-
-    /// Convert a MySQL row to a JSON object.
-    fn row_to_json(&self, row: &Row) -> JsonValue {
-        let mut map = serde_json::Map::new();
-
-        for (i, column) in row.columns_ref().iter().enumerate() {
-            let name = column.name_str().to_string();
-            let value: Option<Value> = row.get(i);
-            map.insert(name, from_mysql_value(value.unwrap_or(Value::NULL)));
-        }
-
-        JsonValue::Object(map)
-    }
-
-    /// Execute a query and return multiple results.
-    #[instrument(skip(self, columns, filters, sort), fields(table = %table))]
-    pub async fn query_many(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-        sort: &[(String, SortOrder)],
-        limit: Option<u64>,
-        offset: Option<u64>,
-    ) -> Result<Vec<MysqlQueryResult>, MysqlError> {
-        let (sql, params) = self.build_select(table, columns, filters, sort, limit, offset);
-        debug!(sql = %sql, "Executing query_many");
-
-        let mut conn = self.pool.get().await?;
-
-        let rows: Vec<Row> = conn
-            .inner_mut()
-            .exec(&sql, Params::Positional(params))
-            .await?;
-
-        let results: Vec<MysqlQueryResult> = rows
-            .iter()
-            .map(|row| MysqlQueryResult::new(self.row_to_json(row)))
-            .collect();
-
-        Ok(results)
-    }
-
-    /// Execute a query and return a single result.
-    #[instrument(skip(self, columns, filters), fields(table = %table))]
-    pub async fn query_one(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<MysqlQueryResult, MysqlError> {
-        let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_one");
-
-        let mut conn = self.pool.get().await?;
-
-        let row: Option<Row> = conn
-            .inner_mut()
-            .exec_first(&sql, Params::Positional(params))
-            .await?;
-
-        match row {
-            Some(r) => Ok(MysqlQueryResult::new(self.row_to_json(&r))),
-            None => Err(MysqlError::query(format!(
-                "No row found in table '{}' with the given filters",
-                table
-            ))),
-        }
-    }
-
-    /// Execute a query and return an optional result.
-    #[instrument(skip(self, columns, filters), fields(table = %table))]
-    pub async fn query_optional(
-        &self,
-        table: &str,
-        columns: &[String],
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<Option<MysqlQueryResult>, MysqlError> {
-        let (sql, params) = self.build_select(table, columns, filters, &[], Some(1), None);
-        debug!(sql = %sql, "Executing query_optional");
-
-        let mut conn = self.pool.get().await?;
-
-        let row: Option<Row> = conn
-            .inner_mut()
-            .exec_first(&sql, Params::Positional(params))
-            .await?;
-
-        Ok(row.map(|r| MysqlQueryResult::new(self.row_to_json(&r))))
-    }
-
-    /// Execute an INSERT and return the result.
-    #[instrument(skip(self, data), fields(table = %table))]
-    pub async fn execute_insert(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-    ) -> Result<MysqlQueryResult, MysqlError> {
-        let (sql, params) = self.build_insert(table, data);
-        debug!(sql = %sql, "Executing insert");
-
-        let mut conn = self.pool.get().await?;
-
-        conn.inner_mut()
-            .exec_drop(&sql, Params::Positional(params))
-            .await?;
-
-        let last_insert_id = conn.inner().last_insert_id().unwrap_or(0);
-
-        // Return the inserted row
-        let mut result = data.clone();
-        if !result.contains_key("id") {
-            result.insert("id".to_string(), FilterValue::Int(last_insert_id as i64));
-        }
-
-        let json = result
-            .into_iter()
-            .map(|(k, v)| (k, filter_value_to_json(&v)))
-            .collect::<serde_json::Map<_, _>>();
-
-        Ok(MysqlQueryResult::new(JsonValue::Object(json)))
-    }
-
-    /// Execute an UPDATE and return the number of affected rows.
-    #[instrument(skip(self, data, filters), fields(table = %table))]
-    pub async fn execute_update(
-        &self,
-        table: &str,
-        data: &HashMap<String, FilterValue>,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, MysqlError> {
-        let (sql, params) = self.build_update(table, data, filters);
-        debug!(sql = %sql, "Executing update");
-
-        let mut conn = self.pool.get().await?;
-
-        conn.inner_mut()
-            .exec_drop(&sql, Params::Positional(params))
-            .await?;
-
-        Ok(conn.inner().affected_rows())
-    }
-
-    /// Execute a DELETE and return the number of affected rows.
-    #[instrument(skip(self, filters), fields(table = %table))]
-    pub async fn execute_delete(
-        &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, MysqlError> {
-        let (sql, params) = self.build_delete(table, filters);
-        debug!(sql = %sql, "Executing delete");
-
-        let mut conn = self.pool.get().await?;
-
-        conn.inner_mut()
-            .exec_drop(&sql, Params::Positional(params))
-            .await?;
-
-        Ok(conn.inner().affected_rows())
-    }
-
-    /// Execute raw SQL and return results.
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn execute_raw(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Vec<MysqlQueryResult>, MysqlError> {
-        debug!("Executing raw SQL");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        let rows: Vec<Row> = conn
-            .inner_mut()
-            .exec(sql, Params::Positional(mysql_params))
-            .await?;
-
-        let results: Vec<MysqlQueryResult> = rows
-            .iter()
-            .map(|row| MysqlQueryResult::new(self.row_to_json(row)))
-            .collect();
-
-        Ok(results)
-    }
-
-    // =========================================================================
-    // Raw SQL Functions
-    // =========================================================================
-
-    /// Execute a raw SQL query using the `Sql` builder from prax-query.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// use prax_query::raw::Sql;
-    ///
-    /// let sql = Sql::new("SELECT * FROM users WHERE age > ")
-    ///     .bind(18)
-    ///     .push(" AND active = ")
-    ///     .bind(true);
-    ///
-    /// let results = engine.raw_sql(sql).await?;
-    /// ```
-    #[instrument(skip(self, sql))]
-    pub async fn raw_sql(
-        &self,
-        sql: prax_query::raw::Sql,
-    ) -> Result<Vec<MysqlQueryResult>, MysqlError> {
-        let (query_string, params) = sql.build();
-        debug!(sql = %query_string, "Executing raw SQL from builder");
-        self.raw_sql_query(&query_string, &params).await
-    }
-
-    /// Execute a raw SQL query string with parameters and return results.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let results = engine.raw_sql_query(
-    ///     "SELECT * FROM users WHERE age > ? AND active = ?",
-    ///     &[FilterValue::Int(18), FilterValue::Bool(true)]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_query(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Vec<MysqlQueryResult>, MysqlError> {
-        debug!("Executing raw SQL query");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        let rows: Vec<Row> = conn
-            .inner_mut()
-            .exec(sql, Params::Positional(mysql_params))
-            .await?;
-
-        let results: Vec<MysqlQueryResult> = rows
-            .iter()
-            .map(|row| MysqlQueryResult::new(self.row_to_json(row)))
-            .collect();
-
-        Ok(results)
-    }
-
-    /// Execute a raw SQL statement and return the number of affected rows.
-    ///
-    /// Use this for INSERT, UPDATE, DELETE, or other statements that don't return rows.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let affected = engine.raw_sql_execute(
-    ///     "UPDATE users SET last_login = NOW() WHERE id = ?",
-    ///     &[FilterValue::Int(user_id)]
-    /// ).await?;
-    /// println!("Updated {} rows", affected);
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_execute(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<u64, MysqlError> {
-        debug!("Executing raw SQL statement");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        conn.inner_mut()
-            .exec_drop(sql, Params::Positional(mysql_params))
-            .await?;
-
-        Ok(conn.inner().affected_rows())
-    }
-
-    /// Execute a raw SQL query and return the first result.
-    ///
-    /// Returns an error if no rows are returned.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let user = engine.raw_sql_first(
-    ///     "SELECT * FROM users WHERE id = ?",
-    ///     &[FilterValue::Int(user_id)]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_first(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<MysqlQueryResult, MysqlError> {
-        debug!("Executing raw SQL first");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        let row: Option<Row> = conn
-            .inner_mut()
-            .exec_first(sql, Params::Positional(mysql_params))
-            .await?;
-
-        match row {
-            Some(r) => Ok(MysqlQueryResult::new(self.row_to_json(&r))),
-            None => Err(MysqlError::query("raw_sql_first returned no rows")),
-        }
-    }
-
-    /// Execute a raw SQL query and return the first result, or None if no rows.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let user = engine.raw_sql_optional(
-    ///     "SELECT * FROM users WHERE email = ?",
-    ///     &[FilterValue::String("test@example.com".into())]
-    /// ).await?;
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_optional(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<Option<MysqlQueryResult>, MysqlError> {
-        debug!("Executing raw SQL optional");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        let row: Option<Row> = conn
-            .inner_mut()
-            .exec_first(sql, Params::Positional(mysql_params))
-            .await?;
-
-        Ok(row.map(|r| MysqlQueryResult::new(self.row_to_json(&r))))
-    }
-
-    /// Execute a raw SQL query and return a single scalar value as JSON.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let result = engine.raw_sql_scalar(
-    ///     "SELECT COUNT(*) as count FROM users WHERE active = ?",
-    ///     &[FilterValue::Bool(true)]
-    /// ).await?;
-    /// let count = result.as_i64().unwrap_or(0);
-    /// ```
-    #[instrument(skip(self, params), fields(sql = %sql))]
-    pub async fn raw_sql_scalar(
-        &self,
-        sql: &str,
-        params: &[FilterValue],
-    ) -> Result<JsonValue, MysqlError> {
-        debug!("Executing raw SQL scalar");
-
-        let mysql_params: Vec<Value> = params.iter().map(filter_value_to_mysql).collect();
-
-        let mut conn = self.pool.get().await?;
-
-        let row: Option<Row> = conn
-            .inner_mut()
-            .exec_first(sql, Params::Positional(mysql_params))
-            .await?;
+        sql: String,
+        params: Vec<FilterValue>,
+    ) -> QueryResult<Option<T>> {
+        trace!(sql = %sql, "mysql query_first_row");
+        let bound = Self::bind(&params);
+        let row: Option<MyRow> = if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        };
 
         match row {
             Some(r) => {
-                // Get the first column value
-                if r.columns_ref().is_empty() {
-                    return Err(MysqlError::query("raw_sql_scalar returned empty row"));
-                }
-                let value: Option<Value> = r.get(0);
-                Ok(from_mysql_value(value.unwrap_or(Value::NULL)))
+                let rr = MysqlRowRef::from_row(r).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
+                let t = T::from_row(&rr).map_err(|e| {
+                    let msg = e.to_string();
+                    QueryError::deserialization(msg).with_source(e)
+                })?;
+                Ok(Some(t))
             }
-            None => Err(MysqlError::query("raw_sql_scalar returned no rows")),
+            None => Ok(None),
         }
     }
 
-    /// Execute multiple raw SQL statements in a batch (without parameters).
-    ///
-    /// Note: This does not support parameterized queries. For parameterized
-    /// queries, execute each statement individually.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// engine.raw_sql_batch(r#"
-    ///     CREATE TABLE IF NOT EXISTS users (id INT PRIMARY KEY);
-    ///     CREATE TABLE IF NOT EXISTS posts (id INT PRIMARY KEY);
-    /// "#).await?;
-    /// ```
-    #[instrument(skip(self), fields(sql_len = %sql.len()))]
-    pub async fn raw_sql_batch(&self, sql: &str) -> Result<(), MysqlError> {
-        debug!("Executing raw SQL batch");
-
-        let mut conn = self.pool.get().await?;
-
-        // MySQL doesn't support multi-statement queries by default,
-        // so we split and execute each statement individually
-        for statement in sql.split(';').filter(|s| !s.trim().is_empty()) {
-            conn.inner_mut().query_drop(statement.trim()).await?;
+    async fn exec_raw(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
+        let bound = Self::bind(&params);
+        if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(guard.inner().affected_rows())
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_drop(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+            Ok(conn.inner().affected_rows())
         }
-
-        Ok(())
     }
 
-    /// Count rows matching the filter.
-    #[instrument(skip(self, filters), fields(table = %table))]
-    pub async fn count(
+    async fn count_rows(&self, sql: String, params: Vec<FilterValue>) -> QueryResult<u64> {
+        let bound = Self::bind(&params);
+        let count: Option<(i64,)> = if let Some(tx) = &self.tx_conn {
+            let mut guard = tx.lock().await;
+            guard
+                .inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        } else {
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .exec_first(sql.as_str(), Params::Positional(bound))
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+        };
+        count.map(|(n,)| n as u64).ok_or_else(|| {
+            prax_query::QueryError::deserialization("count query returned no rows".to_string())
+        })
+    }
+}
+
+impl QueryEngine for MysqlEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Mysql
+    }
+
+    fn query_many<T: Model + FromRow + Send + 'static>(
         &self,
-        table: &str,
-        filters: &HashMap<String, FilterValue>,
-    ) -> Result<u64, MysqlError> {
-        let mut sql = format!("SELECT COUNT(*) as count FROM `{}`", table);
-        let mut params: Vec<Value> = Vec::new();
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(self.query_rows::<T>(sql, params))
+    }
 
-        if !filters.is_empty() {
-            let mut conditions = Vec::new();
-            for (field, value) in filters {
-                match value {
-                    FilterValue::Null => {
-                        conditions.push(format!("`{}` IS NULL", field));
+    fn query_one<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            self.query_first_row::<T>(sql, params)
+                .await?
+                .ok_or_else(|| QueryError::not_found(T::MODEL_NAME))
+        })
+    }
+
+    fn query_optional<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        Box::pin(self.query_first_row::<T>(sql, params))
+    }
+
+    fn execute_insert<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<T>> {
+        // MySQL 8.0 does NOT support `INSERT ... RETURNING` (that's a
+        // MariaDB 10.5+ extension), so `Mysql::returning_clause` emits
+        // nothing and we reconstruct the inserted row by running the
+        // INSERT, grabbing `LAST_INSERT_ID()` off the same connection,
+        // and issuing a follow-up SELECT on the primary key.
+        //
+        // The SELECT-back has to run on the same connection as the
+        // INSERT — `last_insert_id` is a per-session value, and the
+        // pool could hand a different connection to a later call. We
+        // therefore borrow the connection once and issue both
+        // statements on it.
+        let sql = sql.to_string();
+        Box::pin(async move {
+            if T::PRIMARY_KEY.len() != 1 {
+                return Err(QueryError::database(format!(
+                    "MySQL execute_insert requires a single-column primary \
+                     key on {} to look up the inserted row via \
+                     LAST_INSERT_ID(); got {} PK columns",
+                    T::MODEL_NAME,
+                    T::PRIMARY_KEY.len(),
+                )));
+            }
+            let pk = T::PRIMARY_KEY[0];
+
+            let bound = Self::bind(&params);
+            let select_sql = format!(
+                "SELECT {cols} FROM {table} WHERE {pk} = ?",
+                cols = T::COLUMNS.join(", "),
+                table = T::TABLE_NAME,
+                pk = pk,
+            );
+
+            trace!(sql = %sql, "mysql execute_insert");
+
+            // In tx mode, drive the pinned connection so INSERT,
+            // LAST_INSERT_ID and the SELECT-back all land on the same
+            // session. In pool mode, borrow a single connection for
+            // the same reason — `last_insert_id` is per-session and
+            // the pool could otherwise hand a different connection to
+            // the SELECT.
+            let row: Option<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                let last_id = guard.inner().last_insert_id().ok_or_else(|| {
+                    QueryError::database(format!(
+                        "MySQL execute_insert: no LAST_INSERT_ID after inserting \
+                         into {} — does the table have an AUTO_INCREMENT column?",
+                        T::TABLE_NAME,
+                    ))
+                })?;
+                trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
+                guard
+                    .inner_mut()
+                    .exec_first(
+                        select_sql.as_str(),
+                        Params::Positional(vec![MyValue::UInt(last_id)]),
+                    )
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                let last_id = conn.inner().last_insert_id().ok_or_else(|| {
+                    QueryError::database(format!(
+                        "MySQL execute_insert: no LAST_INSERT_ID after inserting \
+                         into {} — does the table have an AUTO_INCREMENT column?",
+                        T::TABLE_NAME,
+                    ))
+                })?;
+                trace!(sql = %select_sql, id = last_id, "mysql execute_insert select-back");
+                conn.inner_mut()
+                    .exec_first(
+                        select_sql.as_str(),
+                        Params::Positional(vec![MyValue::UInt(last_id)]),
+                    )
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
+            let row = row.ok_or_else(|| QueryError::not_found(T::MODEL_NAME))?;
+            let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                let msg = e.to_string();
+                QueryError::deserialization(msg).with_source(e)
+            })?;
+            T::from_row(&rr).map_err(|e| {
+                let msg = e.to_string();
+                QueryError::deserialization(msg).with_source(e)
+            })
+        })
+    }
+
+    fn execute_update<T: Model + FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+        // MySQL 8.0 has no `UPDATE ... RETURNING`, so the update builder
+        // emits a plain UPDATE (Mysql::returning_clause returns "").
+        // We run it, then re-run the WHERE against a SELECT on the same
+        // connection to pull back the updated rows.
+        //
+        // `sql` already has the form `UPDATE <table> SET <...> WHERE
+        // <filter>`. We reuse the `WHERE <filter>` portion by splitting
+        // on " WHERE " — every generated UPDATE always includes a WHERE
+        // clause (UpdateOperation requires `.r#where(...)`), and the
+        // WHERE parameters are bound positionally after the SET
+        // parameters so we need to extract just the WHERE-phase params
+        // to rebind on the SELECT.
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let bound = Self::bind(&params);
+
+            trace!(sql = %sql, "mysql execute_update");
+
+            // Extract the `WHERE ...` tail so we can re-SELECT with it.
+            // UpdateOperation::build_sql always produces `... WHERE <filter>`.
+            let where_idx = sql.rfind(" WHERE ").ok_or_else(|| {
+                QueryError::database(
+                    "MySQL execute_update expected a WHERE clause in the \
+                     generated SQL; got none. Cannot fetch updated rows."
+                        .to_string(),
+                )
+            })?;
+            let where_clause = &sql[where_idx..];
+
+            // The WHERE params follow the SET params in `params`. Count
+            // the `?` placeholders in the UPDATE body (before `WHERE`)
+            // to know how many to skip.
+            let set_body = &sql[..where_idx];
+            let set_param_count = set_body.matches('?').count();
+            let where_params: Vec<FilterValue> = params.into_iter().skip(set_param_count).collect();
+
+            let select_sql = format!(
+                "SELECT {cols} FROM {table}{where_clause}",
+                cols = T::COLUMNS.join(", "),
+                table = T::TABLE_NAME,
+            );
+            trace!(sql = %select_sql, "mysql execute_update select-back");
+            let where_bound = Self::bind(&where_params);
+
+            // Tx mode pins the connection so UPDATE + SELECT see the
+            // same snapshot. Pool mode borrows one connection for the
+            // same reason — otherwise MySQL's REPEATABLE READ default
+            // could let the SELECT land on a pre-UPDATE snapshot.
+            let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                guard
+                    .inner_mut()
+                    .exec(select_sql.as_str(), Params::Positional(where_bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec_drop(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec(select_sql.as_str(), Params::Positional(where_bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
+            rows.into_iter()
+                .map(|row| {
+                    let rr = MysqlRowRef::from_row(row).map_err(|e| {
+                        let msg = e.to_string();
+                        QueryError::deserialization(msg).with_source(e)
+                    })?;
+                    T::from_row(&rr).map_err(|e| {
+                        let msg = e.to_string();
+                        QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
+        })
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.exec_raw(sql, params))
+    }
+
+    fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.exec_raw(sql, params))
+    }
+
+    fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(self.count_rows(sql, params))
+    }
+
+    fn aggregate_query(
+        &self,
+        sql: &str,
+        params: Vec<FilterValue>,
+    ) -> BoxFuture<'_, QueryResult<Vec<std::collections::HashMap<String, FilterValue>>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            trace!(sql = %sql, "mysql aggregate_query");
+            let bound = Self::bind(&params);
+            let rows: Vec<MyRow> = if let Some(tx) = &self.tx_conn {
+                let mut guard = tx.lock().await;
+                guard
+                    .inner_mut()
+                    .exec(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            } else {
+                let mut conn = self
+                    .pool
+                    .get()
+                    .await
+                    .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+                conn.inner_mut()
+                    .exec(sql.as_str(), Params::Positional(bound))
+                    .await
+                    .map_err(|e| QueryError::database(e.to_string()).with_source(e))?
+            };
+
+            Ok(rows
+                .into_iter()
+                .map(|row| {
+                    let mut map = std::collections::HashMap::new();
+                    // Snapshot the column list once per row — `columns_ref`
+                    // returns an Arc<[Column]> slice which we clone out to
+                    // avoid borrowing `row` across per-column takes.
+                    let cols: Vec<(String, usize)> = row
+                        .columns_ref()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| (c.name_str().to_string(), i))
+                        .collect();
+                    for (name, idx) in cols {
+                        let value = decode_mysql_aggregate_cell(&row, idx);
+                        map.insert(name, value);
                     }
-                    _ => {
-                        conditions.push(format!("`{}` = ?", field));
-                        params.push(filter_value_to_mysql(value));
-                    }
+                    map
+                })
+                .collect())
+        })
+    }
+
+    fn transaction<'a, R, Fut, F>(&'a self, f: F) -> BoxFuture<'a, QueryResult<R>>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'a,
+        Fut: std::future::Future<Output = QueryResult<R>> + Send + 'a,
+        R: Send + 'a,
+        Self: Clone,
+    {
+        Box::pin(async move {
+            // Refuse nested transactions until dialect-aware SAVEPOINT
+            // support lands. Callers can still drive SAVEPOINT / RELEASE
+            // manually via `execute_raw` if they need it.
+            if self.tx_conn.is_some() {
+                return Err(QueryError::internal(
+                    "nested transactions not yet implemented \
+                     (call .transaction() on the outer engine only, or \
+                     issue SAVEPOINT via execute_raw)",
+                ));
+            }
+
+            // Pin a single connection for the duration of the tx.
+            // mysql_async's `Transaction<'_>` type borrows from its
+            // `Conn`, which would force a `mem::transmute` to bundle
+            // both into a heap cell. We follow the `PgEngine` fallback
+            // instead: issue raw `START TRANSACTION` and let the
+            // connection's own session state carry the transaction.
+            let mut conn = self
+                .pool
+                .get()
+                .await
+                .map_err(|e| QueryError::connection(e.to_string()).with_source(e))?;
+            conn.inner_mut()
+                .query_drop("START TRANSACTION")
+                .await
+                .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+
+            let tx_conn = Arc::new(Mutex::new(conn));
+            let tx_engine = MysqlEngine {
+                pool: self.pool.clone(),
+                tx_conn: Some(tx_conn.clone()),
+            };
+
+            // Run the caller's closure on the tx-bound engine clone.
+            let result = f(tx_engine).await;
+
+            // Finalise: COMMIT on success, best-effort ROLLBACK on
+            // failure. Preserve the caller's error if ROLLBACK fails —
+            // the connection drops in a moment either way and the
+            // server aborts the transaction on session close.
+            let mut guard = tx_conn.lock().await;
+            match result {
+                Ok(v) => {
+                    guard
+                        .inner_mut()
+                        .query_drop("COMMIT")
+                        .await
+                        .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let _ = guard.inner_mut().query_drop("ROLLBACK").await;
+                    Err(e)
                 }
             }
-            sql.push_str(" WHERE ");
-            sql.push_str(&conditions.join(" AND "));
-        }
-
-        debug!(sql = %sql, "Executing count");
-
-        let mut conn = self.pool.get().await?;
-
-        let count: Option<u64> = conn
-            .inner_mut()
-            .exec_first(&sql, Params::Positional(params))
-            .await?;
-
-        Ok(count.unwrap_or(0))
+        })
     }
 }
 
-/// Convert a FilterValue to JSON.
-fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
+/// Decode a MySQL aggregate result cell into a [`FilterValue`].
+///
+/// MySQL returns aggregates with dialect-specific widths: COUNT is
+/// BIGINT, SUM over an INT column returns DECIMAL, AVG returns
+/// DECIMAL, MIN/MAX preserves the source column's width. We can't
+/// know those in advance for arbitrary aggregate queries, so we
+/// introspect the raw `mysql_async::Value` tag and project to the
+/// closest `FilterValue`. DECIMAL arrives as `Value::Bytes` (text
+/// encoding) — we parse to f64 so the `AggregateResult` folder's
+/// `sum`/`avg` HashMap picks up a usable number.
+///
+/// `Value::NULL` maps to `FilterValue::Null`. Unknown variants fall
+/// back to their debug-text representation so a novel column type
+/// doesn't silently drop.
+fn decode_mysql_aggregate_cell(row: &MyRow, idx: usize) -> FilterValue {
+    use mysql_async::from_value_opt;
+    let raw = match row.as_ref(idx) {
+        Some(v) => v.clone(),
+        None => return FilterValue::Null,
+    };
+    match raw {
+        MyValue::NULL => FilterValue::Null,
+        MyValue::Int(n) => FilterValue::Int(n),
+        MyValue::UInt(n) => {
+            // MySQL BIGINT UNSIGNED can exceed i64::MAX; clamp to keep
+            // `FilterValue::Int` monotonic. Values in that range are
+            // rare in aggregate result sets (they come from
+            // BIGINT UNSIGNED columns only).
+            FilterValue::Int(n.min(i64::MAX as u64) as i64)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_select_simple() {
-        let sql = "SELECT * FROM `users`";
-        assert!(sql.contains("SELECT"));
-        assert!(sql.contains("users"));
-    }
-
-    #[test]
-    fn test_filter_value_to_json() {
-        assert_eq!(filter_value_to_json(&FilterValue::Null), JsonValue::Null);
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bool(true)),
-            JsonValue::Bool(true)
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Int(42)),
-            JsonValue::Number(42.into())
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::String("test".to_string())),
-            JsonValue::String("test".to_string())
-        );
-    }
-
-    #[test]
-    fn test_query_result() {
-        let result = MysqlQueryResult::new(JsonValue::Object(serde_json::Map::new()));
-        assert!(result.json().is_object());
-    }
-
-    #[test]
-    fn test_query_result_into_json() {
-        let json = JsonValue::Object(serde_json::Map::new());
-        let result = MysqlQueryResult::new(json.clone());
-        assert_eq!(result.into_json(), json);
-    }
-
-    #[test]
-    fn test_sql_builder_integration() {
-        use prax_query::raw::Sql;
-
-        let sql = Sql::new("SELECT * FROM users WHERE age > ")
-            .bind(18)
-            .push(" AND active = ")
-            .bind(true);
-
-        let (query, params) = sql.build();
-        assert!(query.contains("SELECT"));
-        assert!(query.contains("users"));
-        assert_eq!(params.len(), 2);
+        MyValue::Float(f) => FilterValue::Float(f as f64),
+        MyValue::Double(f) => FilterValue::Float(f),
+        MyValue::Bytes(ref bytes) => {
+            // Text-encoded values (VARCHAR, CHAR, DECIMAL, DATE, ...).
+            // DECIMAL arrives here; parse to f64 if it looks numeric so
+            // sum/avg accessors round-trip.
+            if let Ok(s) = std::str::from_utf8(bytes) {
+                if let Ok(n) = s.parse::<i64>() {
+                    FilterValue::Int(n)
+                } else if let Ok(f) = s.parse::<f64>() {
+                    FilterValue::Float(f)
+                } else {
+                    FilterValue::String(s.to_string())
+                }
+            } else {
+                // Non-UTF8 bytes (BINARY / BLOB). Fall back to lossy.
+                FilterValue::String(String::from_utf8_lossy(bytes).into_owned())
+            }
+        }
+        other => {
+            // Date/Time variants — re-encode as String via
+            // from_value_opt(String), which mysql_async implements for
+            // every primitive. If that fails, surface Null rather than
+            // aborting the whole aggregate.
+            from_value_opt::<String>(other)
+                .map(FilterValue::String)
+                .unwrap_or(FilterValue::Null)
+        }
     }
 }

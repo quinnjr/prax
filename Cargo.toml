@@ -24,7 +24,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
@@ -34,31 +34,32 @@ homepage = "https://github.com/quinnjr/prax"
 
 [workspace.dependencies]
 # Internal crates
-prax-schema = { path = "prax-schema", version = "0.7.3" }
-prax-codegen = { path = "prax-codegen", version = "0.7.3" }
-prax-query = { path = "prax-query", version = "0.7.3" }
-prax-postgres = { path = "prax-postgres", version = "0.7.3" }
-prax-mysql = { path = "prax-mysql", version = "0.7.3" }
-prax-sqlite = { path = "prax-sqlite", version = "0.7.3" }
-prax-mssql = { path = "prax-mssql", version = "0.7.3" }
-prax-mongodb = { path = "prax-mongodb", version = "0.7.3" }
-prax-duckdb = { path = "prax-duckdb", version = "0.7.3" }
-prax-scylladb = { path = "prax-scylladb", version = "0.7.3" }
-prax-cassandra = { path = "prax-cassandra", version = "0.7.3" }
-prax-migrate = { path = "prax-migrate", version = "0.7.3" }
-prax-orm-cli = { path = "prax-cli", version = "0.7.3" }
-prax-sqlx = { path = "prax-sqlx", version = "0.7.3" }
-prax-armature = { path = "prax-armature", version = "0.7.3" }
-prax-axum = { path = "prax-axum", version = "0.7.3" }
-prax-actix = { path = "prax-actix", version = "0.7.3" }
-prax-import = { path = "prax-import", version = "0.7.3" }
-prax-pgvector = { path = "prax-pgvector", version = "0.7.3" }
+prax-schema = { path = "prax-schema", version = "0.8.0" }
+prax-codegen = { path = "prax-codegen", version = "0.8.0" }
+prax-query = { path = "prax-query", version = "0.8.0" }
+prax-postgres = { path = "prax-postgres", version = "0.8.0" }
+prax-mysql = { path = "prax-mysql", version = "0.8.0" }
+prax-sqlite = { path = "prax-sqlite", version = "0.8.0" }
+prax-mssql = { path = "prax-mssql", version = "0.8.0" }
+prax-mongodb = { path = "prax-mongodb", version = "0.8.0" }
+prax-duckdb = { path = "prax-duckdb", version = "0.8.0" }
+prax-scylladb = { path = "prax-scylladb", version = "0.8.0" }
+prax-cassandra = { path = "prax-cassandra", version = "0.8.0" }
+prax-migrate = { path = "prax-migrate", version = "0.8.0" }
+prax-orm-cli = { path = "prax-cli", version = "0.8.0" }
+prax-sqlx = { path = "prax-sqlx", version = "0.8.0" }
+prax-armature = { path = "prax-armature", version = "0.8.0" }
+prax-axum = { path = "prax-axum", version = "0.8.0" }
+prax-actix = { path = "prax-actix", version = "0.8.0" }
+prax-import = { path = "prax-import", version = "0.8.0" }
+prax-pgvector = { path = "prax-pgvector", version = "0.8.0" }
 
 # Code generation (proc-macros)
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
 convert_case = "0.6"
+pastey = "0.1"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -183,6 +184,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 prax-schema.workspace = true
 prax-codegen.workspace = true
+pastey = { workspace = true }
+prax-query = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
@@ -197,6 +200,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+trybuild = { workspace = true }
 
 # ORM comparison benchmarks
 diesel = { workspace = true }
@@ -208,9 +214,14 @@ prax-mysql = { workspace = true }
 prax-sqlite = { workspace = true }
 prax-mssql = { workspace = true }
 prax-mongodb = { workspace = true }
+prax-sqlx = { workspace = true }
+prax-duckdb = { workspace = true }
+prax-scylladb = { workspace = true }
+prax-cassandra = { workspace = true }
 rusqlite = { workspace = true }
 bson = { workspace = true }
 futures = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "query_builder"
@@ -240,6 +251,11 @@ mysql = []
 sqlite = []
 mssql = []
 mongodb = []
+
+# trybuild UI tests for the derive macro. Gated because trybuild stderr
+# snapshots are sensitive to rustc version — run with
+# `cargo test --test derive_ui --features ui-tests` on a pinned toolchain.
+ui-tests = []
 
 # Profiling features
 profiling = ["tracing-subscriber", "tracing-flame", "tracing-chrome"]

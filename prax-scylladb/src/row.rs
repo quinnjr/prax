@@ -251,7 +251,7 @@ impl<T: DeserializeOwned> FromScyllaRow for T {
 /// A macro to implement `FromScyllaRow` for a struct with named fields.
 ///
 /// Usage:
-/// ```ignore
+/// ```text
 /// impl_from_row!(User {
 ///     id: uuid::Uuid,
 ///     email: String,

@@ -99,7 +99,7 @@ impl MongoEngine {
 use crate::error::MongoResult;
 
 impl QueryEngine for MongoEngine {
-    fn query_many<T: Model + Send + 'static>(
+    fn query_many<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -125,14 +125,19 @@ impl QueryEngine for MongoEngine {
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Would need to deserialize docs into T
-            // For now, return empty - full implementation would use serde
-            let _ = docs;
-            Ok(Vec::new())
+            docs.iter()
+                .map(|d| {
+                    let row = crate::row_ref::BsonRowRef::new(d);
+                    T::from_row(&row).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
-    fn query_one<T: Model + Send + 'static>(
+    fn query_one<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -148,20 +153,21 @@ impl QueryEngine for MongoEngine {
                 .client
                 .collection_doc(&format!("{}s", T::MODEL_NAME.to_lowercase()));
 
-            let _doc = collection
+            let doc = collection
                 .find_one(filter, None)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?
                 .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
 
-            // Would deserialize doc into T
-            Err(prax_query::QueryError::internal(
-                "deserialization not yet implemented".to_string(),
-            ))
+            let row = crate::row_ref::BsonRowRef::new(&doc);
+            T::from_row(&row).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
-    fn query_optional<T: Model + Send + 'static>(
+    fn query_optional<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -183,18 +189,19 @@ impl QueryEngine for MongoEngine {
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
             match doc {
-                Some(_doc) => {
-                    // Would deserialize doc into T
-                    Err(prax_query::QueryError::internal(
-                        "deserialization not yet implemented".to_string(),
-                    ))
+                Some(doc) => {
+                    let row = crate::row_ref::BsonRowRef::new(&doc);
+                    T::from_row(&row).map(Some).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
                 }
                 None => Ok(None),
             }
         })
     }
 
-    fn execute_insert<T: Model + Send + 'static>(
+    fn execute_insert<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
         params: Vec<FilterValue>,
@@ -203,12 +210,10 @@ impl QueryEngine for MongoEngine {
         Box::pin(async move {
             debug!(data = %sql, "Executing insert");
 
-            // For insert, the "sql" should be a JSON document to insert
             let doc: Document = if sql.starts_with('{') {
                 serde_json::from_str(&sql)
                     .map_err(|e| prax_query::QueryError::database(e.to_string()))?
             } else {
-                // Build document from params
                 let mut doc = Document::new();
                 for (i, param) in params.iter().enumerate() {
                     let bson_value = filter_value_to_bson(param)
@@ -222,42 +227,81 @@ impl QueryEngine for MongoEngine {
                 .client
                 .collection_doc(&format!("{}s", T::MODEL_NAME.to_lowercase()));
 
-            let _result = collection
-                .insert_one(doc, None)
+            let result = collection
+                .insert_one(doc.clone(), None)
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            // Would return the inserted document
-            Err(prax_query::QueryError::internal(
-                "insert returning not yet implemented".to_string(),
-            ))
+            // Re-fetch the inserted document keyed on the server-assigned
+            // `_id` (or on the client-supplied `_id` if the caller set
+            // one) so the return value is the actual persisted row,
+            // including server-generated fields.
+            let id_filter = bson::doc! { "_id": result.inserted_id };
+            let inserted = collection
+                .find_one(id_filter, None)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?
+                .ok_or_else(|| prax_query::QueryError::not_found(T::MODEL_NAME))?;
+
+            let row = crate::row_ref::BsonRowRef::new(&inserted);
+            T::from_row(&row).map_err(|e| {
+                let msg = e.to_string();
+                prax_query::QueryError::deserialization(msg).with_source(e)
+            })
         })
     }
 
-    fn execute_update<T: Model + Send + 'static>(
+    fn execute_update<T: Model + prax_query::row::FromRow + Send + 'static>(
         &self,
         sql: &str,
-        _params: Vec<FilterValue>,
+        params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
         let sql = sql.to_string();
         Box::pin(async move {
             debug!(data = %sql, "Executing update");
 
-            // For update, parse filter and update document from sql/params
+            let filter = Self::build_filter(&sql, &params)
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let set_doc = build_set_doc(&sql, &params)
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+
             let collection = self
                 .client
                 .collection_doc(&format!("{}s", T::MODEL_NAME.to_lowercase()));
 
-            // Simplified: use first half of params as filter, second half as update
-            let filter = doc! {};
-            let update = doc! { "$set": {} };
+            // Mongo's `update_many` doesn't hand back the affected
+            // documents, so we have to re-fetch. The original filter
+            // still selects the same rows post-update (the SET can't
+            // un-match them for the filters the Client API emits —
+            // we set columns, not the filter columns). One update +
+            // one find instead of three round-trips.
+            if !set_doc.is_empty() {
+                let update = doc! { "$set": set_doc };
+                collection
+                    .update_many(filter.clone(), update, None)
+                    .await
+                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            }
 
-            let _result = collection
-                .update_many(filter, update, None)
+            let cursor = collection
+                .find(filter, None)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let updated: Vec<Document> = cursor
+                .try_collect()
                 .await
                 .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
 
-            Ok(Vec::new())
+            updated
+                .iter()
+                .map(|d| {
+                    let row = crate::row_ref::BsonRowRef::new(d);
+                    T::from_row(&row).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })
+                })
+                .collect()
         })
     }
 
@@ -352,6 +396,47 @@ impl<T: Model> MongoQueryBuilder<T> {
     {
         self.engine.collection::<T>()
     }
+}
+
+/// Parse `SET col1 = $1, col2 = $2` from a SQL-ish UPDATE statement
+/// and bind each placeholder to the matching entry in `params`. Returns
+/// a BSON `$set` document suitable for [`update_many`]. Tolerant of
+/// an absent SET clause (returns empty doc, caller treats that as a
+/// filter-only "update nothing" no-op).
+fn build_set_doc(sql: &str, params: &[FilterValue]) -> MongoResult<Document> {
+    // Locate the SET … WHERE window in the SQL string.
+    let lower = sql.to_ascii_lowercase();
+    let Some(set_start) = lower.find(" set ") else {
+        return Ok(Document::new());
+    };
+    let set_body_start = set_start + " set ".len();
+    let set_body_end = lower[set_body_start..]
+        .find(" where ")
+        .map(|i| set_body_start + i)
+        .unwrap_or(sql.len());
+    let body = &sql[set_body_start..set_body_end];
+
+    let mut out = Document::new();
+    for assignment in body.split(',') {
+        let assignment = assignment.trim();
+        let Some(eq) = assignment.find('=') else {
+            continue;
+        };
+        let col = assignment[..eq].trim();
+        let rhs = assignment[eq + 1..].trim();
+        let Some(idx_str) = rhs.strip_prefix('$') else {
+            continue;
+        };
+        let Ok(idx) = idx_str.parse::<usize>() else {
+            continue;
+        };
+        if idx == 0 || idx > params.len() {
+            continue;
+        }
+        let value = filter_value_to_bson(&params[idx - 1])?;
+        out.insert(col, value);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

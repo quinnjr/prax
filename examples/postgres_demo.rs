@@ -215,8 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("   Filter structure: {:?}", filter);
 
-    // Convert to SQL
-    let (where_clause, filter_params) = filter.to_sql(1); // Start at $1
+    // Convert to SQL (Postgres dialect — $N placeholders, double-quoted idents).
+    let (where_clause, filter_params) = filter.to_sql(1, &prax_query::dialect::Postgres);
     println!("   Generated WHERE: {}", where_clause);
     println!("   Filter params: {:?}\n", filter_params);
 

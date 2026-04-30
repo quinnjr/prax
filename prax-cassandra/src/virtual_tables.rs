@@ -6,14 +6,29 @@
 
 use std::net::IpAddr;
 
+use cdrs_tokio::types::rows::Row as CdrsRow;
+use cdrs_tokio::types::{ByName, IntoRustByName};
 use uuid::Uuid;
 
-use crate::error::CassandraResult;
+use crate::error::{CassandraError, CassandraResult};
 use crate::pool::CassandraPool;
+
+/// Read a column as `T`, collapsing NULL to `T::default()` and mapping
+/// the cdrs error into our [`CassandraError::Query`]. Used by the
+/// virtual-table readers where "column missing or NULL" is equivalent
+/// to "unset".
+fn col_or_default<T>(row: &CdrsRow, name: &str) -> CassandraResult<T>
+where
+    T: Default,
+    CdrsRow: IntoRustByName<T>,
+{
+    Ok(ByName::by_name::<T>(row, name)
+        .map_err(|e| CassandraError::Query(e.to_string()))?
+        .unwrap_or_default())
+}
 
 /// Typed handle for querying virtual tables.
 pub struct VirtualTables<'a> {
-    #[allow(dead_code)]
     pool: &'a CassandraPool,
 }
 
@@ -25,23 +40,74 @@ impl<'a> VirtualTables<'a> {
 
     /// Query `system.local` for cluster information.
     pub async fn cluster_info(&self) -> CassandraResult<ClusterInfo> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::cluster_info not yet wired".into(),
-        ))
+        let result = self
+            .pool
+            .query("SELECT cluster_name, partitioner, release_version FROM system.local")
+            .await?;
+        let row = result
+            .rows
+            .first()
+            .map(|r| r.as_cdrs())
+            .ok_or_else(|| CassandraError::Query("system.local returned no row".into()))?;
+        Ok(ClusterInfo {
+            cluster_name: col_or_default(row, "cluster_name")?,
+            partitioner: col_or_default(row, "partitioner")?,
+            release_version: col_or_default(row, "release_version")?,
+        })
     }
 
-    /// Query `system.peers_v2` for peer information.
+    /// Query `system.peers_v2` for peer information. Falls back to the
+    /// legacy `system.peers` table on clusters that don't yet expose
+    /// the v2 virtual table.
     pub async fn peers(&self) -> CassandraResult<Vec<PeerInfo>> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::peers not yet wired".into(),
-        ))
+        let result = match self
+            .pool
+            .query("SELECT peer, data_center, host_id, rack, release_version FROM system.peers_v2")
+            .await
+        {
+            Ok(r) => r,
+            // Legacy clusters only have `system.peers`.
+            Err(_) => self
+                .pool
+                .query("SELECT peer, data_center, host_id, rack, release_version FROM system.peers")
+                .await?,
+        };
+        result
+            .rows
+            .iter()
+            .map(|r| r.as_cdrs())
+            .map(|row| {
+                let peer = ByName::by_name::<IpAddr>(row, "peer")
+                    .map_err(|e| CassandraError::Query(e.to_string()))?
+                    .ok_or_else(|| CassandraError::Query("peer column was null".into()))?;
+                Ok(PeerInfo {
+                    peer,
+                    data_center: col_or_default(row, "data_center")?,
+                    host_id: col_or_default::<Uuid>(row, "host_id")?,
+                    rack: col_or_default(row, "rack")?,
+                    release_version: col_or_default(row, "release_version")?,
+                })
+            })
+            .collect()
     }
 
     /// Query `system_views.settings` for runtime configuration.
     pub async fn settings(&self) -> CassandraResult<Vec<(String, String)>> {
-        Err(crate::error::CassandraError::Query(
-            "virtual_tables::settings not yet wired".into(),
-        ))
+        let result = self
+            .pool
+            .query("SELECT name, value FROM system_views.settings")
+            .await?;
+        result
+            .rows
+            .iter()
+            .map(|r| r.as_cdrs())
+            .map(|row| {
+                Ok((
+                    col_or_default::<String>(row, "name")?,
+                    col_or_default::<String>(row, "value")?,
+                ))
+            })
+            .collect()
     }
 }
 
