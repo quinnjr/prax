@@ -32,7 +32,7 @@ fn test_version_command() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Version"))
-        .stdout(predicate::str::contains("0.8.0"));
+        .stdout(predicate::str::contains("0.9.0"));
 }
 
 #[test]
@@ -252,7 +252,7 @@ fn test_global_options() {
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.8.0"));
+        .stdout(predicate::str::contains("0.9.0"));
 }
 
 /// `prax generate` must emit the trait impls the runtime needs to round-trip
