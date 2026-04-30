@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-04-30
+
+### Added
+
+- **`prax-cli generate` — emit `query_raw` / `execute_raw` / `engine()`
+  on the generated `PraxClient<E>`.** The schema-generated top-level
+  client previously exposed only per-model accessors, so consumers that
+  needed to reach beyond the fluent builder (JOINs, subqueries, CTEs,
+  multi-table aggregates, pgvector operators, window functions, vendor
+  extensions) had to reach around the generated client entirely. The
+  derive-path `prax_orm::PraxClient` already had these three methods;
+  now the generated version matches. `query_raw<T>` routes rows
+  through the same `FromRow` bridge the per-model `find_many` uses so
+  raw queries still return typed records.
+
+### Motivation
+
+Surfaced porting lexmata-admin-backend's user_view service under
+LX-33: queries like "user profile with firm summary + aggregate
+document/demand-letter counts per case" use JOINs and subqueries
+the fluent builder doesn't model, and the generated client was a
+dead end. With this release they compile through
+`client.query_raw::<Case>(Sql::new("SELECT …"))` — the same shape
+the derive-path client already supported.
+
 ## [0.9.3] - 2026-04-30
 
 ### Added
