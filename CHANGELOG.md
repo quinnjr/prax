@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-04-30
+
+### Added
+
+- **`prax-cli generate` — emit `transaction()` on the generated
+  `PraxClient<E>`.** Mirrors `prax_orm::PraxClient::transaction(|tx|
+  async { ... })`: commits on `Ok`, rolls back on `Err`, dispatches
+  through `QueryEngine::transaction`. Services ported from raw
+  tokio-postgres that did `BEGIN ... SELECT ... FOR UPDATE ...
+  UPDATE ... COMMIT` against the schema-generated client had no way
+  to express the transactional scope before.
+- **`prax-cli generate` — emit `impl ModelRelationLoader<E>` on every
+  schema-generated model.** `FindManyOperation::exec` /
+  `FindUniqueOperation::exec_optional` / `FindFirstOperation` each
+  require `M: ModelRelationLoader<E>`, so every schema-generated
+  model failed the bound without this. Shipping an always-errors
+  impl keeps the uniform requirement satisfied while leaving real
+  relation loading on the schema-gen path for a follow-up.
+
+### Motivation
+
+Surfaced by the LX-33 port of `services/core` in
+lexmata-admin-backend: `Inspectable::inspect` needs
+`find_unique().exec_optional()` (pulls in `ModelRelationLoader`);
+`Configurable::set` needs `transaction()` for the
+`SELECT … FOR UPDATE` + `UPDATE` sequence on `users.page_credits`.
+Both now compile end to end on the schema-generated client.
+
 ## [0.9.4] - 2026-04-30
 
 ### Added
