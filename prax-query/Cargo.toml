@@ -11,11 +11,13 @@ documentation = "https://docs.rs/prax-query"
 keywords = ["orm", "query-builder", "database", "sql", "async"]
 categories = ["database", "asynchronous"]
 
+# Disable the default libtest bench target. The crate has no `#[bench]`
+# items, but `cargo bench` still builds an empty libtest bench binary
+# against the lib target, and that binary does not accept the
+# `--save-baseline` flag that criterion benches use. Without this, CI's
+# `cargo bench --package prax-query -- --save-baseline ...` fails with
+# "Unrecognized option: 'save-baseline'".
 [lib]
-# Disable the default libtest bench target so `cargo bench` doesn't try
-# to run `src/lib.rs` unittests through libtest — they can't understand
-# criterion flags like `--save-baseline` and crash the Benchmark
-# Regression Check CI job.
 bench = false
 
 [dependencies]

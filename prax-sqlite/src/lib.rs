@@ -38,6 +38,9 @@ pub mod row;
 pub mod row_ref;
 pub mod types;
 
+#[cfg(feature = "vector")]
+pub mod vector;
+
 pub use config::{DatabasePath, JournalMode, SqliteConfig, SynchronousMode};
 pub use connection::SqliteConnection;
 pub use engine::SqliteEngine;
