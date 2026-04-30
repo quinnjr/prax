@@ -256,6 +256,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_filter_value_to_bson_primitives() {
         assert_eq!(
             filter_value_to_bson(&FilterValue::Int(42)).unwrap(),

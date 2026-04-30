@@ -1,6 +1,6 @@
 //! `prax migrate` commands - Database migration management.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::MigrateArgs;
 use crate::commands::seed::{SeedRunner, find_seed_file, get_database_url};
@@ -307,9 +307,9 @@ async fn run_resolve(args: crate::cli::MigrateResolveArgs) -> CliResult<()> {
         output::newline();
         success(&format!("Migration '{}' marked as applied", args.migration));
     } else {
-        return Err(
-            CliError::Command("Must specify --applied or --rolled-back".to_string()).into(),
-        );
+        return Err(CliError::Command(
+            "Must specify --applied or --rolled-back".to_string(),
+        ));
     }
 
     Ok(())
@@ -430,7 +430,7 @@ async fn run_history(args: crate::cli::MigrateHistoryArgs) -> CliResult<()> {
 // Helper Functions
 // =============================================================================
 
-fn load_config(cwd: &PathBuf) -> CliResult<Config> {
+fn load_config(cwd: &Path) -> CliResult<Config> {
     let config_path = cwd.join(CONFIG_FILE_NAME);
     if config_path.exists() {
         Config::load(&config_path)
@@ -446,7 +446,7 @@ fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
         .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
 }
 
-fn check_pending_migrations(migrations_dir: &PathBuf) -> CliResult<Vec<PathBuf>> {
+fn check_pending_migrations(migrations_dir: &Path) -> CliResult<Vec<PathBuf>> {
     let mut pending = Vec::new();
 
     if !migrations_dir.exists() {
@@ -456,10 +456,8 @@ fn check_pending_migrations(migrations_dir: &PathBuf) -> CliResult<Vec<PathBuf>>
     for entry in std::fs::read_dir(migrations_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
-            if !is_migration_applied(&path)? {
-                pending.push(path);
-            }
+        if path.is_dir() && !is_migration_applied(&path)? {
+            pending.push(path);
         }
     }
 
@@ -467,7 +465,7 @@ fn check_pending_migrations(migrations_dir: &PathBuf) -> CliResult<Vec<PathBuf>>
     Ok(pending)
 }
 
-fn is_migration_applied(migration_path: &PathBuf) -> CliResult<bool> {
+fn is_migration_applied(migration_path: &Path) -> CliResult<bool> {
     // Check for a marker file indicating the migration has been applied
     // In production, this would check the migration history table
     let marker = migration_path.join(".applied");
@@ -475,7 +473,7 @@ fn is_migration_applied(migration_path: &PathBuf) -> CliResult<bool> {
 }
 
 fn create_migration(
-    migrations_dir: &PathBuf,
+    migrations_dir: &Path,
     name: &str,
     schema: &prax_schema::ast::Schema,
 ) -> CliResult<PathBuf> {
@@ -530,7 +528,7 @@ fn generate_schema_diff(schema: &prax_schema::ast::Schema) -> CliResult<String> 
             sql.push_str(&variants.join(", "));
             sql.push_str(");\nEXCEPTION\n    WHEN duplicate_object THEN null;\nEND $$;\n\n");
         }
-        sql.push_str("\n");
+        sql.push('\n');
     }
 
     // Generate CREATE TABLE statements for each model
@@ -580,14 +578,14 @@ fn generate_schema_diff(schema: &prax_schema::ast::Schema) -> CliResult<String> 
             }
 
             // Default values
-            if let Some(default_attr) = field.get_attribute("default") {
-                if let Some(value) = default_attr.first_arg() {
-                    let value_str = format_attribute_value(value);
-                    column_def.push_str(&format!(
-                        " DEFAULT {}",
-                        sql_default_value(&value_str, &field.field_type)
-                    ));
-                }
+            if let Some(default_attr) = field.get_attribute("default")
+                && let Some(value) = default_attr.first_arg()
+            {
+                let value_str = format_attribute_value(value);
+                column_def.push_str(&format!(
+                    " DEFAULT {}",
+                    sql_default_value(&value_str, &field.field_type)
+                ));
             }
 
             columns.push(column_def);
@@ -649,7 +647,7 @@ fn generate_schema_diff(schema: &prax_schema::ast::Schema) -> CliResult<String> 
     }
 }
 
-async fn apply_migration(migration_path: &PathBuf, _config: &Config) -> CliResult<()> {
+async fn apply_migration(migration_path: &Path, _config: &Config) -> CliResult<()> {
     let sql_path = migration_path.join("migration.sql");
 
     if !sql_path.exists() {

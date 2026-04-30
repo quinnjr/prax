@@ -26,6 +26,7 @@ pub const SEEDS_DIR: &str = "prax/seeds";
 /// Prax CLI configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     /// Database configuration
     pub database: DatabaseConfig,
@@ -38,17 +39,6 @@ pub struct Config {
 
     /// Seed configuration
     pub seed: SeedConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            database: DatabaseConfig::default(),
-            generator: GeneratorConfig::default(),
-            migrations: MigrationConfig::default(),
-            seed: SeedConfig::default(),
-        }
-    }
 }
 
 impl Config {

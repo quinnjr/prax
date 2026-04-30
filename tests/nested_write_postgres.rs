@@ -116,6 +116,11 @@ async fn setup() -> Option<PraxClient<PgEngine>> {
     Some(PraxClient::new(PgEngine::new(pool)))
 }
 
+// `test_lock` returns a std::sync::MutexGuard held across `.await` to
+// serialize the two tests against the shared Postgres tables. The mutex
+// has no async contention — only this test process touches it — so the
+// await-holding-lock lint does not apply.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "requires docker-compose postgres (PRAX_E2E=1)"]
 async fn create_user_with_nested_posts() {
@@ -157,6 +162,7 @@ async fn create_user_with_nested_posts() {
     assert_eq!(titles, vec!["p1".to_string(), "p2".to_string()]);
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 #[ignore = "requires docker-compose postgres (PRAX_E2E=1)"]
 async fn nested_write_failure_rolls_back_parent() {

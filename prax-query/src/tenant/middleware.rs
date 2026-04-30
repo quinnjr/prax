@@ -217,25 +217,25 @@ impl Middleware for TenantMiddleware {
             }
 
             // Apply schema-based isolation if configured
-            if self.config.strategy.is_schema_based() {
-                if let Some(search_path) = self.apply_schema_isolation(tenant_ctx.id.as_str()) {
-                    // The search_path should be set on the connection
-                    // This is typically done by the connection manager
-                    ctx.metadata_mut().set_schema_override(Some(
-                        self.config
-                            .schema_config()
-                            .unwrap()
-                            .schema_name(tenant_ctx.id.as_str()),
-                    ));
+            if self.config.strategy.is_schema_based()
+                && let Some(search_path) = self.apply_schema_isolation(tenant_ctx.id.as_str())
+            {
+                // The search_path should be set on the connection
+                // This is typically done by the connection manager
+                ctx.metadata_mut().set_schema_override(Some(
+                    self.config
+                        .schema_config()
+                        .unwrap()
+                        .schema_name(tenant_ctx.id.as_str()),
+                ));
 
-                    // Log the schema setting
-                    if self.config.log_tenant_context {
-                        tracing::debug!(
-                            tenant_id = %tenant_ctx.id,
-                            search_path = %search_path,
-                            "Setting schema for tenant"
-                        );
-                    }
+                // Log the schema setting
+                if self.config.log_tenant_context {
+                    tracing::debug!(
+                        tenant_id = %tenant_ctx.id,
+                        search_path = %search_path,
+                        "Setting schema for tenant"
+                    );
                 }
             }
 

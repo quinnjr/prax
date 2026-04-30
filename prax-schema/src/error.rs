@@ -213,6 +213,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)]
     fn test_schema_result_type() {
         let ok_result: SchemaResult<i32> = Ok(42);
         assert!(ok_result.is_ok());

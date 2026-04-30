@@ -454,6 +454,9 @@ pub fn parse_graphql_field_config_from_tags(
 }
 
 #[cfg(test)]
+// `3.14`/`2.71` literal values are sample inputs to the SDL printer, not
+// approximations of mathematical constants.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

@@ -225,7 +225,7 @@ impl MetricsCollector for InMemoryMetricsCollector {
     fn get_metrics(&self) -> QueryMetrics {
         let total = self.total_queries.load(Ordering::SeqCst);
         let total_time = self.total_time_us.load(Ordering::SeqCst);
-        let avg = if total > 0 { total_time / total } else { 0 };
+        let avg = total_time.checked_div(total).unwrap_or(0);
         let min = self.min_time_us.load(Ordering::SeqCst);
 
         QueryMetrics {

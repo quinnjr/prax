@@ -96,21 +96,18 @@ impl CacheMetrics {
             } else {
                 0.0
             },
-            avg_hit_time: if hits > 0 {
-                Duration::from_nanos(total_hit_time_ns / hits)
-            } else {
-                Duration::ZERO
-            },
-            avg_miss_time: if misses > 0 {
-                Duration::from_nanos(total_miss_time_ns / misses)
-            } else {
-                Duration::ZERO
-            },
-            avg_write_time: if writes > 0 {
-                Duration::from_nanos(total_write_time_ns / writes)
-            } else {
-                Duration::ZERO
-            },
+            avg_hit_time: total_hit_time_ns
+                .checked_div(hits)
+                .map(Duration::from_nanos)
+                .unwrap_or(Duration::ZERO),
+            avg_miss_time: total_miss_time_ns
+                .checked_div(misses)
+                .map(Duration::from_nanos)
+                .unwrap_or(Duration::ZERO),
+            avg_write_time: total_write_time_ns
+                .checked_div(writes)
+                .map(Duration::from_nanos)
+                .unwrap_or(Duration::ZERO),
             uptime: self.created_at.elapsed(),
             entries: 0, // Filled by backend
             memory_bytes: None,

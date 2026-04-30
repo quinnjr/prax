@@ -125,12 +125,14 @@ fn test_cql_full_workflow_keyspace_udt_table_index_view() {
 
 #[test]
 fn test_cql_down_reverses_dependency_order() {
-    let mut diff = CqlSchemaDiff::default();
-    diff.create_keyspace = Some(KeyspaceConfig {
-        name: "myapp".into(),
-        replication: ReplicationStrategy::Simple { factor: 1 },
-        durable_writes: true,
-    });
+    let mut diff = CqlSchemaDiff {
+        create_keyspace: Some(KeyspaceConfig {
+            name: "myapp".into(),
+            replication: ReplicationStrategy::Simple { factor: 1 },
+            durable_writes: true,
+        }),
+        ..CqlSchemaDiff::default()
+    };
     diff.create_udts.push(UdtDiff {
         name: "my_type".into(),
         fields: vec![UdtField {

@@ -1,7 +1,7 @@
 //! `prax generate` command - Generate Rust client code from schema.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::GenerateArgs;
 use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_PATH};
@@ -28,9 +28,10 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
         .clone()
         .unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
     if !schema_path.exists() {
-        return Err(
-            CliError::Config(format!("Schema file not found: {}", schema_path.display())).into(),
-        );
+        return Err(CliError::Config(format!(
+            "Schema file not found: {}",
+            schema_path.display()
+        )));
     }
 
     // Resolve output directory
@@ -104,7 +105,7 @@ fn validate_schema(_schema: &prax_schema::Schema) -> CliResult<()> {
 /// Generate code from the schema
 fn generate_code(
     schema: &prax_schema::ast::Schema,
-    output_dir: &PathBuf,
+    output_dir: &Path,
     args: &GenerateArgs,
     config: &Config,
 ) -> CliResult<Vec<PathBuf>> {
@@ -170,10 +171,10 @@ fn build_relation_graph(schema: &prax_schema::ast::Schema) -> HashMap<String, Ha
     for model in schema.models.values() {
         let entry = graph.entry(model.name().to_string()).or_default();
         for field in model.fields.values() {
-            if let prax_schema::ast::FieldType::Model(ref target) = field.field_type {
-                if !field.is_list() {
-                    entry.insert(target.to_string());
-                }
+            if let prax_schema::ast::FieldType::Model(ref target) = field.field_type
+                && !field.is_list()
+            {
+                entry.insert(target.to_string());
             }
         }
     }
@@ -232,7 +233,7 @@ fn generate_client_module(
         code.push_str(&format!("pub mod {};\n", to_snake_case(enum_def.name())));
     }
 
-    code.push_str("\n");
+    code.push('\n');
 
     // Re-exports
     code.push_str("#[allow(unused_imports)]\npub use types::*;\n");
@@ -254,7 +255,7 @@ fn generate_client_module(
         ));
     }
 
-    code.push_str("\n");
+    code.push('\n');
 
     // Client struct with Clone bound and derive
     code.push_str("#[allow(dead_code)]\n");
@@ -327,12 +328,11 @@ fn generate_model_module(
         let field_name = to_snake_case(field.name());
 
         // Add serde rename if mapped
-        if let Some(attr) = field.get_attribute("map") {
-            if features.contains(&"serde".to_string()) {
-                if let Some(value) = attr.first_arg().and_then(|v| v.as_string()) {
-                    code.push_str(&format!("    #[serde(rename = \"{}\")]\n", value));
-                }
-            }
+        if let Some(attr) = field.get_attribute("map")
+            && features.contains(&"serde".to_string())
+            && let Some(value) = attr.first_arg().and_then(|v| v.as_string())
+        {
+            code.push_str(&format!("    #[serde(rename = \"{}\")]\n", value));
         }
 
         let rust_type = field_type_to_rust_with_boxing(
@@ -489,12 +489,12 @@ fn generate_enum_module(enum_def: &prax_schema::ast::Enum) -> CliResult<String> 
         let pascal_name = to_pascal_case(raw_name);
 
         // Check for explicit @map attribute first
-        if let Some(attr) = variant.attributes.iter().find(|a| a.is("map")) {
-            if let Some(value) = attr.first_arg().and_then(|v| v.as_string()) {
-                code.push_str(&format!("    #[serde(rename = \"{}\")]\n", value));
-                code.push_str(&format!("    {},\n", pascal_name));
-                continue;
-            }
+        if let Some(attr) = variant.attributes.iter().find(|a| a.is("map"))
+            && let Some(value) = attr.first_arg().and_then(|v| v.as_string())
+        {
+            code.push_str(&format!("    #[serde(rename = \"{}\")]\n", value));
+            code.push_str(&format!("    {},\n", pascal_name));
+            continue;
         }
 
         // If variant name differs from PascalCase form, add serde rename
@@ -548,7 +548,7 @@ fn generate_types_module(schema: &prax_schema::ast::Schema) -> CliResult<String>
     code.push_str("#[allow(unused_imports)]\npub use chrono::{DateTime, Utc};\n");
     code.push_str("#[allow(unused_imports)]\npub use uuid::Uuid;\n");
     code.push_str("#[allow(unused_imports)]\npub use serde_json::Value as Json;\n");
-    code.push_str("\n");
+    code.push('\n');
 
     // Add any custom types from composite types
     for composite in schema.types.values() {
@@ -578,10 +578,10 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
     let mut referenced_enums = HashSet::new();
     for model in schema.models.values() {
         for field in model.fields.values() {
-            if !field.is_relation() {
-                if let prax_schema::ast::FieldType::Enum(ref name) = field.field_type {
-                    referenced_enums.insert(name.to_string());
-                }
+            if !field.is_relation()
+                && let prax_schema::ast::FieldType::Enum(ref name) = field.field_type
+            {
+                referenced_enums.insert(name.to_string());
             }
         }
     }
@@ -595,7 +595,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
         ));
     }
 
-    code.push_str("\n");
+    code.push('\n');
 
     for model in schema.models.values() {
         // Where input
@@ -697,28 +697,28 @@ fn field_type_to_rust_with_boxing(
     use prax_schema::ast::{FieldType, TypeModifier};
 
     // For model references (non-list), check if boxing is needed to break cycles
-    if let FieldType::Model(target) = field_type {
-        if !matches!(modifier, TypeModifier::List) {
-            let should_box = needs_boxing(source_model, target, relation_graph);
-            let base = target.to_string();
-            return match modifier {
-                TypeModifier::Optional | TypeModifier::OptionalList => {
-                    if should_box {
-                        format!("Option<Box<{}>>", base)
-                    } else {
-                        format!("Option<{}>", base)
-                    }
+    if let FieldType::Model(target) = field_type
+        && !matches!(modifier, TypeModifier::List)
+    {
+        let should_box = needs_boxing(source_model, target, relation_graph);
+        let base = target.to_string();
+        return match modifier {
+            TypeModifier::Optional | TypeModifier::OptionalList => {
+                if should_box {
+                    format!("Option<Box<{}>>", base)
+                } else {
+                    format!("Option<{}>", base)
                 }
-                TypeModifier::Required => {
-                    if should_box {
-                        format!("Box<{}>", base)
-                    } else {
-                        base
-                    }
+            }
+            TypeModifier::Required => {
+                if should_box {
+                    format!("Box<{}>", base)
+                } else {
+                    base
                 }
-                TypeModifier::List => unreachable!(),
-            };
-        }
+            }
+            TypeModifier::List => unreachable!(),
+        };
     }
 
     // Fallback to basic conversion for non-cyclic fields

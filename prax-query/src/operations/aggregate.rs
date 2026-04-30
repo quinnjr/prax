@@ -889,8 +889,10 @@ mod tests {
 
     #[test]
     fn test_aggregate_result_clone() {
-        let mut result = AggregateResult::default();
-        result.count = Some(42);
+        let mut result = AggregateResult {
+            count: Some(42),
+            ..AggregateResult::default()
+        };
         result.sum.insert("amount".into(), 1000.0);
 
         let cloned = result.clone();

@@ -788,27 +788,27 @@ fn parse_extension_item(
     let mut ext = PostgresExtension::new(name, span);
 
     // Check for extension args like (schema: "public", version: "0.5.0")
-    if let Some(args_pair) = inner.next() {
-        if args_pair.as_rule() == Rule::extension_args {
-            for arg in args_pair.into_inner() {
-                if arg.as_rule() == Rule::extension_arg {
-                    let mut arg_inner = arg.into_inner();
-                    let arg_key = arg_inner.next().unwrap().as_str();
-                    let arg_value_pair = arg_inner.next().unwrap();
-                    let arg_value = {
-                        let s = arg_value_pair.as_str();
-                        &s[1..s.len() - 1]
-                    };
+    if let Some(args_pair) = inner.next()
+        && args_pair.as_rule() == Rule::extension_args
+    {
+        for arg in args_pair.into_inner() {
+            if arg.as_rule() == Rule::extension_arg {
+                let mut arg_inner = arg.into_inner();
+                let arg_key = arg_inner.next().unwrap().as_str();
+                let arg_value_pair = arg_inner.next().unwrap();
+                let arg_value = {
+                    let s = arg_value_pair.as_str();
+                    &s[1..s.len() - 1]
+                };
 
-                    match arg_key {
-                        "schema" => {
-                            ext = ext.with_schema(arg_value);
-                        }
-                        "version" => {
-                            ext = ext.with_version(arg_value);
-                        }
-                        _ => {}
+                match arg_key {
+                    "schema" => {
+                        ext = ext.with_schema(arg_value);
                     }
+                    "version" => {
+                        ext = ext.with_version(arg_value);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -876,11 +876,11 @@ fn parse_server_property_value(
             // Handle env("VAR") and other function calls
             let mut inner = pair.into_inner();
             let func_name = inner.next().unwrap().as_str();
-            if func_name == "env" {
-                if let Some(arg) = inner.next() {
-                    let var_name = extract_string_from_arg(arg);
-                    return Ok(ServerPropertyValue::EnvVar(var_name));
-                }
+            if func_name == "env"
+                && let Some(arg) = inner.next()
+            {
+                let var_name = extract_string_from_arg(arg);
+                return Ok(ServerPropertyValue::EnvVar(var_name));
             }
             // For other functions, store as identifier
             Ok(ServerPropertyValue::Identifier(func_name.to_string()))
@@ -965,10 +965,10 @@ fn parse_policy_item(
                 }
                 Rule::policy_command_list => {
                     for cmd_pair in inner.into_inner() {
-                        if cmd_pair.as_rule() == Rule::policy_command {
-                            if let Some(cmd) = PolicyCommand::from_str(cmd_pair.as_str()) {
-                                policy.add_command(cmd);
-                            }
+                        if cmd_pair.as_rule() == Rule::policy_command
+                            && let Some(cmd) = PolicyCommand::from_str(cmd_pair.as_str())
+                        {
+                            policy.add_command(cmd);
                         }
                     }
                 }
@@ -993,10 +993,10 @@ fn parse_policy_item(
         }
         Rule::policy_as => {
             let inner = pair.into_inner().next().unwrap();
-            if inner.as_rule() == Rule::policy_type {
-                if let Some(policy_type) = PolicyType::from_str(inner.as_str()) {
-                    policy.policy_type = policy_type;
-                }
+            if inner.as_rule() == Rule::policy_type
+                && let Some(policy_type) = PolicyType::from_str(inner.as_str())
+            {
+                policy.policy_type = policy_type;
             }
         }
         Rule::policy_using => {
@@ -1027,10 +1027,10 @@ fn parse_policy_item(
                 }
                 Rule::mssql_block_op_list => {
                     for op_pair in inner.into_inner() {
-                        if op_pair.as_rule() == Rule::mssql_block_op {
-                            if let Some(op) = MssqlBlockOperation::from_str(op_pair.as_str()) {
-                                policy.add_mssql_block_operation(op);
-                            }
+                        if op_pair.as_rule() == Rule::mssql_block_op
+                            && let Some(op) = MssqlBlockOperation::from_str(op_pair.as_str())
+                        {
+                            policy.add_mssql_block_operation(op);
                         }
                     }
                 }

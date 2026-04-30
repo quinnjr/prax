@@ -95,7 +95,7 @@ impl StringPool {
         PoolStats {
             count,
             total_bytes,
-            avg_bytes: if count > 0 { total_bytes / count } else { 0 },
+            avg_bytes: total_bytes.checked_div(count).unwrap_or(0),
         }
     }
 }

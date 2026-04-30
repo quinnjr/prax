@@ -1417,6 +1417,8 @@ fn parse_doc_tag(s: &str, span: Span) -> Option<DocTag> {
 }
 
 #[cfg(test)]
+// Float literals like `3.14` are sample validation values, not math constants.
+#[allow(clippy::approx_constant)]
 mod tests {
     use super::*;
 

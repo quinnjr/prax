@@ -213,14 +213,15 @@ impl Plugin for GraphQLPlugin {
             }
 
             // Filter fields for scalar types
-            if !meta.sensitive && !meta.hidden {
-                if let FieldType::Scalar(scalar) = &field.field_type {
-                    let filter_type = scalar_to_filter_type(scalar);
-                    if let Some(ft) = filter_type {
-                        filter_fields.push(quote! {
-                            pub #field_ident: Option<#ft>,
-                        });
-                    }
+            if !meta.sensitive
+                && !meta.hidden
+                && let FieldType::Scalar(scalar) = &field.field_type
+            {
+                let filter_type = scalar_to_filter_type(scalar);
+                if let Some(ft) = filter_type {
+                    filter_fields.push(quote! {
+                        pub #field_ident: Option<#ft>,
+                    });
                 }
             }
         }

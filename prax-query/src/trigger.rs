@@ -293,10 +293,10 @@ impl Trigger {
                 sql.push_str(" OR ");
             }
             sql.push_str(event.to_sql());
-            if *event == &TriggerEvent::Update {
-                if let Some(ref update_of) = self.update_of {
-                    sql.push_str(&update_of.to_sql());
-                }
+            if *event == &TriggerEvent::Update
+                && let Some(ref update_of) = self.update_of
+            {
+                sql.push_str(&update_of.to_sql());
             }
         }
 
@@ -458,10 +458,10 @@ impl Trigger {
         let event = self.events.iter().next().unwrap();
         sql.push_str(event.to_sql());
 
-        if *event == TriggerEvent::Update {
-            if let Some(ref update_of) = self.update_of {
-                sql.push_str(&update_of.to_sql());
-            }
+        if *event == TriggerEvent::Update
+            && let Some(ref update_of) = self.update_of
+        {
+            sql.push_str(&update_of.to_sql());
         }
 
         // Table

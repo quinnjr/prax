@@ -48,7 +48,7 @@ async fn test_pool_autoregisters_vector_extension() {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| tokio_rusqlite::Error::Rusqlite(e))
+            .map_err(tokio_rusqlite::Error::Rusqlite)
         })
         .await
         .unwrap();

@@ -1713,6 +1713,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_filter_value_from_f64() {
         assert_eq!(FilterValue::from(3.14f64), FilterValue::Float(3.14));
     }

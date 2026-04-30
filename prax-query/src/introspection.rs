@@ -944,11 +944,11 @@ fn generate_field(col: &ColumnInfo, primary_key: &[String]) -> String {
     }
 
     // Default
-    if let Some(ref default) = col.default {
-        if !col.auto_increment {
-            let default_val = simplify_default(default);
-            attrs.push(format!("@default({})", default_val));
-        }
+    if let Some(ref default) = col.default
+        && !col.auto_increment
+    {
+        let default_val = simplify_default(default);
+        attrs.push(format!("@default({})", default_val));
     }
 
     // Map if name differs
@@ -987,7 +987,7 @@ fn generate_relation(fk: &ForeignKeyInfo, all_tables: &[TableInfo]) -> String {
         camel_case(&fk.referenced_table)
     };
 
-    let mut attrs = vec![format!(
+    let mut attrs = [format!(
         "@relation(fields: [{}], references: [{}]",
         fk.columns
             .iter()

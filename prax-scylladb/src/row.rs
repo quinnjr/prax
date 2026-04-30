@@ -1,4 +1,4 @@
-//! Row deserialization for ScyllaDB results.
+//! Row deserialization for `ScyllaDB` results.
 
 use scylla::frame::response::result::{CqlValue, Row};
 use serde::de::DeserializeOwned;
@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::error::{ScyllaError, ScyllaResult};
 use crate::types::ScyllaValue;
 
-/// Trait for types that can be constructed from a ScyllaDB row.
+/// Trait for types that can be constructed from a `ScyllaDB` row.
 pub trait FromScyllaRow: Sized {
     /// Construct an instance from a row.
     fn from_row(row: &Row) -> ScyllaResult<Self>;
@@ -30,12 +30,12 @@ impl<'a> RowAccessor<'a> {
             .columns
             .get(index)
             .ok_or_else(|| {
-                ScyllaError::deserialization(format!("Column index {} out of bounds", index))
+                ScyllaError::deserialization(format!("Column index {index} out of bounds"))
             })?
             .as_ref()
             .map(|v| T::from_cql(v))
             .transpose()?
-            .ok_or_else(|| ScyllaError::deserialization(format!("Column {} is null", index)))
+            .ok_or_else(|| ScyllaError::deserialization(format!("Column {index} is null")))
     }
 
     /// Get an optional value by column index.
@@ -233,12 +233,10 @@ impl<T: DeserializeOwned> FromScyllaRow for T {
             .columns
             .iter()
             .map(|col| {
-                col.as_ref()
-                    .map(|v| {
-                        let sv: ScyllaValue = v.clone().into();
-                        sv.into()
-                    })
-                    .unwrap_or(serde_json::Value::Null)
+                col.as_ref().map_or(serde_json::Value::Null, |v| {
+                    let sv: ScyllaValue = v.clone().into();
+                    sv.into()
+                })
             })
             .collect();
 
@@ -286,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_from_cql_primitives() {
-        assert_eq!(bool::from_cql(&CqlValue::Boolean(true)).unwrap(), true);
+        assert!(bool::from_cql(&CqlValue::Boolean(true)).unwrap());
         assert_eq!(i32::from_cql(&CqlValue::Int(42)).unwrap(), 42);
         assert_eq!(i64::from_cql(&CqlValue::BigInt(100)).unwrap(), 100);
         assert!((f64::from_cql(&CqlValue::Double(3.14)).unwrap() - 3.14).abs() < f64::EPSILON);

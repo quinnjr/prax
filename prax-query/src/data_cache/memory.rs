@@ -167,7 +167,7 @@ impl CacheEntry {
     }
 
     fn is_expired(&self) -> bool {
-        self.expires_at.map_or(false, |exp| Instant::now() >= exp)
+        self.expires_at.is_some_and(|exp| Instant::now() >= exp)
     }
 
     fn touch(&mut self) {

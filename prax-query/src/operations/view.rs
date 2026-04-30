@@ -672,6 +672,10 @@ mod tests {
 
     // ========== View Trait Tests ==========
 
+    // Tests deliberately compare trait constants against expected values; the
+    // assertions look constant to clippy but exist to catch accidental flips
+    // of the trait associated constants.
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn test_view_trait_constants() {
         assert_eq!(TestView::VIEW_NAME, "TestView");
@@ -680,6 +684,7 @@ mod tests {
         assert!(!TestView::IS_MATERIALIZED);
     }
 
+    #[allow(clippy::assertions_on_constants)]
     #[test]
     fn test_materialized_view_trait_constants() {
         assert_eq!(TestMaterializedView::VIEW_NAME, "TestMaterializedView");

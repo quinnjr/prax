@@ -349,12 +349,12 @@ impl<S: Clone> StatementCache<S> {
             CacheMode::Global { .. } => self.get(key),
             CacheMode::PerTenant { .. } => {
                 let caches = self.tenant_caches.read();
-                if let Some(cache) = caches.get(tenant_id.as_str()) {
-                    if let Some(entry) = cache.get(key) {
-                        self.stats.record_hit();
-                        self.stats.add_time_saved(1);
-                        return Some(entry.statement.clone());
-                    }
+                if let Some(cache) = caches.get(tenant_id.as_str())
+                    && let Some(entry) = cache.get(key)
+                {
+                    self.stats.record_hit();
+                    self.stats.add_time_saved(1);
+                    return Some(entry.statement.clone());
                 }
                 self.stats.record_miss();
                 None
@@ -439,10 +439,10 @@ impl<S: Clone> StatementCache<S> {
             CacheMode::Global { .. } => self.record_execution(key, duration_us),
             CacheMode::PerTenant { .. } => {
                 let mut caches = self.tenant_caches.write();
-                if let Some(cache) = caches.get_mut(tenant_id.as_str()) {
-                    if let Some(entry) = cache.get_mut(key) {
-                        entry.meta.record_execution(duration_us);
-                    }
+                if let Some(cache) = caches.get_mut(tenant_id.as_str())
+                    && let Some(entry) = cache.get_mut(key)
+                {
+                    entry.meta.record_execution(duration_us);
                 }
             }
         }

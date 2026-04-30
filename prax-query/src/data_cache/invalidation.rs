@@ -192,9 +192,10 @@ impl Display for InvalidationEventType {
 }
 
 /// Strategy for cache invalidation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum InvalidationStrategy {
     /// Invalidate on every write.
+    #[default]
     Immediate,
 
     /// Invalidate after a delay (batching).
@@ -249,12 +250,6 @@ impl InvalidationStrategy {
             Self::TtlOnly => false,
             Self::Custom { .. } => true, // Let custom logic decide
         }
-    }
-}
-
-impl Default for InvalidationStrategy {
-    fn default() -> Self {
-        Self::Immediate
     }
 }
 

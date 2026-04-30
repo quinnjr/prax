@@ -384,12 +384,9 @@ fn extract_relation_name(args: &str) -> Option<String> {
     }
     // Try positional syntax: first arg is a quoted string before any named args
     // e.g. @relation("batch_file", fields: [...])
-    let trimmed = args.trim();
-    if trimmed.starts_with('"') {
-        let end = trimmed[1..].find('"').map(|i| i + 1)?;
-        return Some(trimmed[1..end].to_string());
-    }
-    None
+    let inside = args.trim().strip_prefix('"')?;
+    let end = inside.find('"')?;
+    Some(inside[..end].to_string())
 }
 
 fn extract_relation_fields(args: &str) -> Option<Vec<String>> {
@@ -435,63 +432,63 @@ fn parse_model_attributes(body: &str) -> ImportResult<Vec<PrismaModelAttribute>>
         let line = line.trim();
 
         // Parse @@id
-        if line.starts_with("@@id") {
-            if let Some(caps) = MODEL_ID_RE.captures(line) {
-                let fields = caps
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
-                attributes.push(PrismaModelAttribute::Id(fields));
-            }
+        if line.starts_with("@@id")
+            && let Some(caps) = MODEL_ID_RE.captures(line)
+        {
+            let fields = caps
+                .get(1)
+                .unwrap()
+                .as_str()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            attributes.push(PrismaModelAttribute::Id(fields));
         }
 
         // Parse @@unique
-        if line.starts_with("@@unique") {
-            if let Some(caps) = MODEL_UNIQUE_RE.captures(line) {
-                let fields = caps
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
+        if line.starts_with("@@unique")
+            && let Some(caps) = MODEL_UNIQUE_RE.captures(line)
+        {
+            let fields = caps
+                .get(1)
+                .unwrap()
+                .as_str()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
 
-                let name = ATTR_NAME_RE
-                    .captures(line)
-                    .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
+            let name = ATTR_NAME_RE
+                .captures(line)
+                .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
 
-                attributes.push(PrismaModelAttribute::Unique { fields, name });
-            }
+            attributes.push(PrismaModelAttribute::Unique { fields, name });
         }
 
         // Parse @@index
-        if line.starts_with("@@index") {
-            if let Some(caps) = MODEL_INDEX_RE.captures(line) {
-                let fields = caps
-                    .get(1)
-                    .unwrap()
-                    .as_str()
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .collect();
+        if line.starts_with("@@index")
+            && let Some(caps) = MODEL_INDEX_RE.captures(line)
+        {
+            let fields = caps
+                .get(1)
+                .unwrap()
+                .as_str()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
 
-                let name = ATTR_NAME_RE
-                    .captures(line)
-                    .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
+            let name = ATTR_NAME_RE
+                .captures(line)
+                .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()));
 
-                attributes.push(PrismaModelAttribute::Index { fields, name });
-            }
+            attributes.push(PrismaModelAttribute::Index { fields, name });
         }
 
         // Parse @@map
-        if line.starts_with("@@map") {
-            if let Some(caps) = MODEL_MAP_RE.captures(line) {
-                let map_val = caps.get(1).unwrap().as_str().to_string();
-                attributes.push(PrismaModelAttribute::Map(map_val));
-            }
+        if line.starts_with("@@map")
+            && let Some(caps) = MODEL_MAP_RE.captures(line)
+        {
+            let map_val = caps.get(1).unwrap().as_str().to_string();
+            attributes.push(PrismaModelAttribute::Map(map_val));
         }
     }
 

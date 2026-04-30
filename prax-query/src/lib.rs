@@ -1,3 +1,17 @@
+// QueryError carries diagnostic context (source location, parameter list,
+// vendor metadata) so the Result Err arm is intentionally large; boxing it
+// uniformly across the public API would be a breaking change for every caller.
+#![allow(clippy::result_large_err)]
+// Several builder types expose `new` constructors that return associated
+// builder structs rather than `Self`; this is intentional for the staged
+// builder pattern.
+#![allow(clippy::new_ret_no_self)]
+// Methods like `Filter::add`, `SqlBuilder::add` and `from_str` use vendor-named
+// methods that can collide with stdlib trait method names. They are not
+// intended as `std::ops::Add` / `FromStr` impls.
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::wrong_self_convention)]
+
 //! # prax-query
 //!
 //! Type-safe query builder for the Prax ORM.

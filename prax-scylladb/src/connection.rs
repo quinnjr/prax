@@ -1,4 +1,4 @@
-//! ScyllaDB connection management.
+//! `ScyllaDB` connection management.
 
 use scylla::Session;
 use std::sync::Arc;
@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::config::ScyllaConfig;
 use crate::error::{ScyllaError, ScyllaResult};
 
-/// A wrapper around a ScyllaDB session.
+/// A wrapper around a `ScyllaDB` session.
 #[derive(Clone)]
 pub struct ScyllaConnection {
     session: Arc<Session>,
@@ -82,7 +82,7 @@ impl std::fmt::Debug for ScyllaConnection {
     }
 }
 
-/// Connect to a ScyllaDB cluster.
+/// Connect to a `ScyllaDB` cluster.
 pub async fn connect(config: ScyllaConfig) -> ScyllaResult<ScyllaConnection> {
     use scylla::SessionBuilder;
 

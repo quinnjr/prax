@@ -450,12 +450,12 @@ impl TenantCache {
     /// Mark an entry as refreshing (to prevent thundering herd).
     pub fn mark_refreshing(&self, tenant_id: &TenantId) -> bool {
         let mut entries = self.entries.write();
-        if let Some(entry) = entries.get_mut(tenant_id.as_str()) {
-            if !entry.refreshing {
-                entry.refreshing = true;
-                self.metrics.record_background_refresh();
-                return true;
-            }
+        if let Some(entry) = entries.get_mut(tenant_id.as_str())
+            && !entry.refreshing
+        {
+            entry.refreshing = true;
+            self.metrics.record_background_refresh();
+            return true;
         }
         false
     }

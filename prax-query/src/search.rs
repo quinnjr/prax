@@ -64,11 +64,12 @@ impl SearchMode {
 }
 
 /// Text search language/configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum SearchLanguage {
     /// Simple (no stemming).
     Simple,
     /// English.
+    #[default]
     English,
     /// Spanish.
     Spanish,
@@ -100,12 +101,6 @@ impl SearchLanguage {
             Self::English => "porter unicode61",
             _ => "unicode61", // SQLite has limited language support
         }
-    }
-}
-
-impl Default for SearchLanguage {
-    fn default() -> Self {
-        Self::English
     }
 }
 
@@ -483,7 +478,7 @@ impl SearchQuery {
         );
 
         let order_by = if self.ranking.enabled {
-            Some(format!("{}", self.ranking.score_alias))
+            Some(self.ranking.score_alias.to_string())
         } else {
             None
         };
@@ -520,7 +515,7 @@ impl SearchQuery {
             SearchMode::Boolean => self.query.clone(),
         };
 
-        let select_cols = vec!["*".to_string()];
+        let select_cols = ["*".to_string()];
 
         // Add ranking (MSSQL uses CONTAINSTABLE for ranking)
         if self.ranking.enabled {

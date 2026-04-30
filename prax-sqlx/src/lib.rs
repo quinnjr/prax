@@ -47,6 +47,8 @@
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
+// QueryError is intentionally large; see prax-query/src/lib.rs.
+#![allow(clippy::result_large_err)]
 
 pub mod config;
 pub mod connection;

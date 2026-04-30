@@ -1,6 +1,6 @@
-//! ScyllaDB query engine.
+//! `ScyllaDB` query engine.
 //!
-//! Provides high-level operations for interacting with ScyllaDB.
+//! Provides high-level operations for interacting with `ScyllaDB`.
 
 use scylla::batch::Batch;
 use scylla::query::Query;
@@ -12,7 +12,7 @@ use crate::error::{ScyllaError, ScyllaResult};
 use crate::pool::ScyllaPool;
 use crate::row::FromScyllaRow;
 
-/// The ScyllaDB query engine.
+/// The `ScyllaDB` query engine.
 ///
 /// Provides methods for executing queries, managing batches, and working
 /// with prepared statements.
@@ -128,7 +128,7 @@ impl ScyllaEngine {
         where_clause: &str,
         values: V,
     ) -> ScyllaResult<()> {
-        let cql = format!("UPDATE {} SET {} WHERE {}", table, set_clause, where_clause);
+        let cql = format!("UPDATE {table} SET {set_clause} WHERE {where_clause}");
         self.execute(&cql, values).await
     }
 
@@ -139,7 +139,7 @@ impl ScyllaEngine {
         where_clause: &str,
         values: V,
     ) -> ScyllaResult<()> {
-        let cql = format!("DELETE FROM {} WHERE {}", table, where_clause);
+        let cql = format!("DELETE FROM {table} WHERE {where_clause}");
         self.execute(&cql, values).await
     }
 
@@ -184,10 +184,7 @@ impl ScyllaEngine {
         condition: &str,
         values: V,
     ) -> ScyllaResult<bool> {
-        let cql = format!(
-            "UPDATE {} SET {} WHERE {} IF {}",
-            table, set_clause, where_clause, condition
-        );
+        let cql = format!("UPDATE {table} SET {set_clause} WHERE {where_clause} IF {condition}");
 
         let result = self.pool.execute(&cql, values).await?;
 
@@ -213,8 +210,8 @@ impl ScyllaEngine {
         values: V,
     ) -> ScyllaResult<i64> {
         let cql = match where_clause {
-            Some(clause) => format!("SELECT COUNT(*) FROM {} WHERE {}", table, clause),
-            None => format!("SELECT COUNT(*) FROM {}", table),
+            Some(clause) => format!("SELECT COUNT(*) FROM {table} WHERE {clause}"),
+            None => format!("SELECT COUNT(*) FROM {table}"),
         };
 
         let result = self.pool.execute(&cql, values).await?;
@@ -242,10 +239,7 @@ impl ScyllaEngine {
         where_clause: &str,
         values: V,
     ) -> ScyllaResult<bool> {
-        let cql = format!(
-            "SELECT COUNT(*) FROM {} WHERE {} LIMIT 1",
-            table, where_clause
-        );
+        let _cql = format!("SELECT COUNT(*) FROM {table} WHERE {where_clause} LIMIT 1");
 
         let count = self.count(table, Some(where_clause), values).await?;
         Ok(count > 0)
@@ -272,10 +266,9 @@ impl ScyllaEngine {
         cql: &str,
         params: &[prax_query::filter::FilterValue],
     ) -> prax_query::QueryResult<Vec<T>> {
-        use crate::types::ToCqlValue;
         let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
             .iter()
-            .map(|v| v.to_cql())
+            .map(super::types::ToCqlValue::to_cql)
             .collect::<ScyllaResult<_>>()
             .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
         let result = self
@@ -283,11 +276,7 @@ impl ScyllaEngine {
             .execute(cql, cql_values)
             .await
             .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
-        let col_names: Vec<String> = result
-            .col_specs()
-            .iter()
-            .map(|c| c.name.to_string())
-            .collect();
+        let col_names: Vec<String> = result.col_specs().iter().map(|c| c.name.clone()).collect();
         let rows = result.rows.unwrap_or_default();
         rows.into_iter()
             .map(|row| {
@@ -309,10 +298,9 @@ impl ScyllaEngine {
         cql: &str,
         params: &[prax_query::filter::FilterValue],
     ) -> prax_query::QueryResult<u64> {
-        use crate::types::ToCqlValue;
         let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
             .iter()
-            .map(|v| v.to_cql())
+            .map(super::types::ToCqlValue::to_cql)
             .collect::<ScyllaResult<_>>()
             .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
         self.pool
@@ -409,7 +397,7 @@ impl prax_query::traits::QueryEngine for ScyllaEngine {
                         "ScyllaEngine::execute_insert: PK column {pk} not in INSERT list"
                     ))
                 })?;
-                where_parts.push(format!("{} = ?", pk));
+                where_parts.push(format!("{pk} = ?"));
                 where_params.push(params.get(idx).cloned().ok_or_else(|| {
                     prax_query::QueryError::internal(
                         "ScyllaEngine::execute_insert: param index out of range",
@@ -488,10 +476,9 @@ impl prax_query::traits::QueryEngine for ScyllaEngine {
     ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
         let sql = sql.to_string();
         Box::pin(async move {
-            use crate::types::ToCqlValue;
             let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
                 .iter()
-                .map(|v| v.to_cql())
+                .map(super::types::ToCqlValue::to_cql)
                 .collect::<ScyllaResult<_>>()
                 .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
             let result = self

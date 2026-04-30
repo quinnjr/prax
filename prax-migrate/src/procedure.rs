@@ -262,10 +262,10 @@ impl ProcedureDefinition {
     /// Check if the procedure has changed compared to another.
     pub fn has_changed(&self, other: &ProcedureDefinition) -> bool {
         // Compare checksums if available
-        if let (Some(a), Some(b)) = (&self.checksum, &other.checksum) {
-            if a != b {
-                return true;
-            }
+        if let (Some(a), Some(b)) = (&self.checksum, &other.checksum)
+            && a != b
+        {
+            return true;
         }
 
         // Compare key properties
@@ -682,7 +682,7 @@ impl ProcedureDiffer {
         }
 
         // Find procedures to drop
-        for (name, _) in &from_map {
+        for name in from_map.keys() {
             if !to_map.contains_key(name) {
                 diff.drop.push(name.clone());
             }
@@ -690,15 +690,15 @@ impl ProcedureDiffer {
 
         // Find procedures to alter
         for (name, new_proc) in &to_map {
-            if let Some(old_proc) = from_map.get(name) {
-                if old_proc.has_changed(new_proc) {
-                    let changes = detect_procedure_changes(old_proc, new_proc);
-                    diff.alter.push(ProcedureAlterDiff {
-                        old: (*old_proc).clone(),
-                        new: (*new_proc).clone(),
-                        changes,
-                    });
-                }
+            if let Some(old_proc) = from_map.get(name)
+                && old_proc.has_changed(new_proc)
+            {
+                let changes = detect_procedure_changes(old_proc, new_proc);
+                diff.alter.push(ProcedureAlterDiff {
+                    old: (*old_proc).clone(),
+                    new: (*new_proc).clone(),
+                    changes,
+                });
             }
         }
 
@@ -720,7 +720,7 @@ impl ProcedureDiffer {
         }
 
         // Find triggers to drop
-        for (name, _) in &from_map {
+        for name in from_map.keys() {
             if !to_map.contains_key(name) {
                 diff.drop_triggers.push(name.clone());
             }
@@ -728,13 +728,13 @@ impl ProcedureDiffer {
 
         // Find triggers to alter
         for (name, new_trigger) in &to_map {
-            if let Some(old_trigger) = from_map.get(name) {
-                if old_trigger != new_trigger {
-                    diff.alter_triggers.push(TriggerAlterDiff {
-                        old: (*old_trigger).clone(),
-                        new: (*new_trigger).clone(),
-                    });
-                }
+            if let Some(old_trigger) = from_map.get(name)
+                && old_trigger != new_trigger
+            {
+                diff.alter_triggers.push(TriggerAlterDiff {
+                    old: (*old_trigger).clone(),
+                    new: (*new_trigger).clone(),
+                });
             }
         }
 
@@ -1071,10 +1071,10 @@ impl ProcedureSqlGenerator {
         sql.push_str(")\n");
 
         // Return type (functions only)
-        if proc.is_function {
-            if let Some(ref ret) = proc.return_type {
-                sql.push_str(&format!("RETURNS {}\n", ret));
-            }
+        if proc.is_function
+            && let Some(ref ret) = proc.return_type
+        {
+            sql.push_str(&format!("RETURNS {}\n", ret));
         }
 
         // Characteristics
@@ -1194,10 +1194,10 @@ impl ProcedureSqlGenerator {
         sql.push_str(")\n");
 
         // Return type (functions only)
-        if proc.is_function {
-            if let Some(ref ret) = proc.return_type {
-                sql.push_str(&format!("RETURNS {}\n", ret));
-            }
+        if proc.is_function
+            && let Some(ref ret) = proc.return_type
+        {
+            sql.push_str(&format!("RETURNS {}\n", ret));
         }
 
         sql.push_str("AS\nBEGIN\n");
@@ -1371,15 +1371,14 @@ impl ProcedureStore {
 
     /// Save to file as TOML.
     pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        let content = toml::to_string_pretty(self).map_err(std::io::Error::other)?;
         std::fs::write(path, content)
     }
 
     /// Load from file as TOML.
     pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        toml::from_str(&content).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+        toml::from_str(&content).map_err(std::io::Error::other)
     }
 
     /// Add an event.

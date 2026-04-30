@@ -469,13 +469,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unnecessary_literal_unwrap)]
     fn test_sql_bind_if() {
         let filter_id = Some(42i32);
         let filter_name: Option<String> = None;
 
         let sql = Sql::new("SELECT * FROM users WHERE 1=1")
             .push_bind_if(filter_id.is_some(), " AND id = ", filter_id.unwrap_or(0))
-            .push_bind_if(filter_name.is_some(), " AND name = ", "".to_string());
+            .push_bind_if(filter_name.is_some(), " AND name = ", String::new());
 
         let (query, params) = sql.build();
         assert_eq!(query, "SELECT * FROM users WHERE 1=1 AND id = $1");
