@@ -249,15 +249,26 @@ impl PostgresSqlGenerator {
 
     /// Generate column definition.
     fn column_definition(&self, field: &FieldDiff) -> String {
-        let mut parts = vec![format!("\"{}\"", field.column_name), field.sql_type.clone()];
+        let mut parts = vec![format!("\"{}\"", field.column_name)];
+
+        // If this is an enum type, use the quoted enum name as the SQL type
+        let sql_type = if let Some(enum_name) = &field.enum_name {
+            format!("\"{}\"", enum_name)
+        } else {
+            field.sql_type.clone()
+        };
 
         if field.is_auto_increment {
             // Replace type with SERIAL variants
-            if field.sql_type == "INTEGER" {
-                parts[1] = "SERIAL".to_string();
-            } else if field.sql_type == "BIGINT" {
-                parts[1] = "BIGSERIAL".to_string();
+            if sql_type == "INTEGER" {
+                parts.push("SERIAL".to_string());
+            } else if sql_type == "BIGINT" {
+                parts.push("BIGSERIAL".to_string());
+            } else {
+                parts.push(sql_type);
             }
+        } else {
+            parts.push(sql_type);
         }
 
         if !field.nullable && !field.is_primary_key {
@@ -985,7 +996,7 @@ impl SqliteGenerator {
     fn column_definition(&self, field: &FieldDiff) -> String {
         let mut parts = vec![format!("\"{}\"", field.column_name)];
 
-        // SQLite type mapping
+        // SQLite type mapping (enums are always TEXT in SQLite, ignore enum_name)
         let sql_type = match field.sql_type.as_str() {
             "INTEGER" if field.is_primary_key && field.is_auto_increment => {
                 // INTEGER PRIMARY KEY is auto-increment in SQLite
@@ -1011,7 +1022,11 @@ impl SqliteGenerator {
         }
 
         if let Some(default) = &field.default {
-            parts.push(format!("DEFAULT {}", default));
+            // SQLite uses 1/0 for TRUE/FALSE
+            let sqlite_default = default
+                .replace("TRUE", "1")
+                .replace("FALSE", "0");
+            parts.push(format!("DEFAULT {}", sqlite_default));
         }
 
         parts.join(" ")
@@ -1943,6 +1958,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -1954,6 +1970,7 @@ mod tests {
                     is_auto_increment: false,
                     is_unique: true,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2052,6 +2069,7 @@ mod tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -2219,6 +2237,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2298,6 +2317,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2463,6 +2483,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2479,6 +2500,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2532,6 +2554,7 @@ mod tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2548,6 +2571,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "summary_vec".to_string(),
@@ -2564,6 +2588,7 @@ mod tests {
                         metric: VectorDistanceMetric::Cosine,
                         index: Some(VectorIndexKind::Hnsw),
                     }),
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2602,6 +2627,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2698,6 +2724,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -3306,6 +3333,7 @@ mod duckdb_tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -3317,6 +3345,7 @@ mod duckdb_tests {
                     is_auto_increment: false,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3348,6 +3377,7 @@ mod duckdb_tests {
                     is_auto_increment: true,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
                 FieldDiff {
                     name: "tags".to_string(),
@@ -3359,6 +3389,7 @@ mod duckdb_tests {
                     is_auto_increment: false,
                     is_unique: false,
                     vector: None,
+                    enum_name: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3400,6 +3431,7 @@ mod duckdb_tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
+                    enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -3627,5 +3659,137 @@ mod duckdb_tests {
         assert!(stmts[0].contains("FOREIGN KEY (\"user_id\")"));
         assert!(stmts[0].contains("REFERENCES \"users\" (\"id\")"));
         assert!(stmts[0].contains("ON DELETE CASCADE"));
+    }
+
+    #[test]
+    fn sqlite_renders_literal_defaults_correctly() {
+        let schema_src = r#"
+            model Widget {
+                id         Int      @id @auto
+                rating     Int      @default(0)
+                active     Boolean  @default(true)
+                created_at DateTime @default(now())
+                status     String   @default("pending")
+
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(sql.up.contains("\"rating\" INTEGER NOT NULL DEFAULT 0"), "actual:\n{}", sql.up);
+        assert!(sql.up.contains("\"active\" INTEGER NOT NULL DEFAULT 1"), "actual:\n{}", sql.up);
+        assert!(sql.up.contains("DEFAULT CURRENT_TIMESTAMP"), "actual:\n{}", sql.up);
+        assert!(sql.up.contains("DEFAULT 'pending'"), "actual:\n{}", sql.up);
+        // No debug leakage:
+        assert!(!sql.up.contains("Int("));
+        assert!(!sql.up.contains("Boolean("));
+        assert!(!sql.up.contains("Function("));
+        assert!(!sql.up.contains("Ident("));
+    }
+
+    #[test]
+    fn sqlite_emits_text_for_enum_columns() {
+        let schema_src = r#"
+            enum Color { red green blue }
+            model Widget {
+                id    Int   @id @auto
+                color Color @default(red)
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(sql.up.contains("\"color\" TEXT NOT NULL DEFAULT 'red'"), "actual:\n{}", sql.up);
+        assert!(!sql.up.contains("\"Color\""));  // no quoted enum name as type
+    }
+
+    #[test]
+    fn sqlite_fk_uses_mapped_table_name() {
+        let schema_src = r#"
+            model User {
+                id    Int    @id @auto
+                posts Post[]
+                @@map("users")
+            }
+            model Post {
+                id        Int   @id @auto
+                author_id Int
+                author    User  @relation(fields: [author_id], references: [id], onDelete: Cascade)
+                @@map("posts")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(sql.up.contains("REFERENCES \"users\""), "actual:\n{}", sql.up);
+        assert!(!sql.up.contains("REFERENCES \"User\""));
+    }
+
+    #[test]
+    fn sqlite_emits_create_index_for_model_indexes() {
+        let schema_src = r#"
+            model Widget {
+                id     Int    @id @auto
+                name   String
+                kind   String
+
+                @@map("widgets")
+                @@index([name])
+                @@index([kind, name])
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = SqliteGenerator.generate(&diff);
+
+        assert!(sql.up.contains("CREATE INDEX"), "no CREATE INDEX in:\n{}", sql.up);
+        assert!(sql.up.contains("ON \"widgets\" (\"name\")") || sql.up.contains("ON \"widgets\"(\"name\")"), "actual:\n{}", sql.up);
+        assert!(sql.up.contains("\"kind\"") && sql.up.contains("\"name\""));
+    }
+
+    #[test]
+    fn postgres_enum_columns_use_enum_type() {
+        let schema_src = r#"
+            enum Color { red green blue }
+            model Widget {
+                id    Int   @id @auto
+                color Color @default(red)
+                @@map("widgets")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = PostgresSqlGenerator.generate(&diff);
+
+        // Postgres should use the quoted enum name as the column type
+        assert!(sql.up.contains("\"color\" \"Color\" NOT NULL DEFAULT 'red'"), "actual:\n{}", sql.up);
+    }
+
+    #[test]
+    fn postgres_fk_uses_mapped_table_name() {
+        let schema_src = r#"
+            model User {
+                id    Int    @id @auto
+                posts Post[]
+                @@map("users")
+            }
+            model Post {
+                id        Int   @id @auto
+                author_id Int
+                author    User  @relation(fields: [author_id], references: [id], onDelete: Cascade)
+                @@map("posts")
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
+        let sql = PostgresSqlGenerator.generate(&diff);
+
+        assert!(sql.up.contains("REFERENCES \"users\""), "actual:\n{}", sql.up);
+        assert!(!sql.up.contains("REFERENCES \"User\""));
     }
 }
