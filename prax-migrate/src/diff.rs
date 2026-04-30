@@ -552,7 +552,10 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
                     cols.iter().map(|c| c.to_string()).collect()
                 }
                 _ => {
-                    eprintln!("Warning: unexpected @@{} argument type - skipping", attr_name);
+                    eprintln!(
+                        "Warning: unexpected @@{} argument type - skipping",
+                        attr_name
+                    );
                     continue;
                 }
             }
@@ -584,17 +587,15 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
             .or_else(|| attr.get_arg("name"))
             .and_then(|v: &prax_schema::ast::AttributeValue| v.as_string());
 
-        let index_name = custom_name
-            .map(|s: &str| s.to_string())
-            .unwrap_or_else(|| {
-                let prefix = if attr_name == "unique" { "uq" } else { "idx" };
-                format!(
-                    "{}_{}_{}",
-                    prefix,
-                    model.table_name(),
-                    column_names.join("_")
-                )
-            });
+        let index_name = custom_name.map(|s: &str| s.to_string()).unwrap_or_else(|| {
+            let prefix = if attr_name == "unique" { "uq" } else { "idx" };
+            format!(
+                "{}_{}_{}",
+                prefix,
+                model.table_name(),
+                column_names.join("_")
+            )
+        });
 
         if attr_name == "unique" {
             unique_constraints.push(UniqueConstraint {
@@ -669,13 +670,10 @@ fn extract_foreign_keys(model: &Model, schema: &Schema) -> Vec<ForeignKeyDiff> {
         let referenced_columns: Vec<String> =
             rel.references.iter().map(|r| r.to_string()).collect();
 
-        let constraint_name = rel.map.clone().unwrap_or_else(|| {
-            format!(
-                "fk_{}_{}",
-                model.table_name(),
-                columns.join("_")
-            )
-        });
+        let constraint_name = rel
+            .map
+            .clone()
+            .unwrap_or_else(|| format!("fk_{}_{}", model.table_name(), columns.join("_")));
 
         fks.push(ForeignKeyDiff {
             constraint_name,
@@ -717,10 +715,8 @@ fn render_default_sql_ansi(value: &prax_schema::ast::AttributeValue) -> Option<S
                 Some("gen_random_uuid()".to_string())
             } else {
                 // Other functions - attempt to render recursively
-                let arg_strs: Vec<String> = args
-                    .iter()
-                    .filter_map(render_default_sql_ansi)
-                    .collect();
+                let arg_strs: Vec<String> =
+                    args.iter().filter_map(render_default_sql_ansi).collect();
                 Some(format!("{}({})", name, arg_strs.join(", ")))
             }
         }

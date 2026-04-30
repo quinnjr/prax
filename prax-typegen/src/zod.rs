@@ -59,7 +59,9 @@ impl ZodGenerator {
         let has_relations = model.fields.values().any(|f| f.is_relation());
 
         if has_relations {
-            out.push_str(&format!("export const {name}Schema: z.ZodTypeAny = z.object({{\n"));
+            out.push_str(&format!(
+                "export const {name}Schema: z.ZodTypeAny = z.object({{\n"
+            ));
         } else {
             out.push_str(&format!("export const {name}Schema = z.object({{\n"));
         }

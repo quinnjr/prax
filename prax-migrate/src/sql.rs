@@ -1023,9 +1023,7 @@ impl SqliteGenerator {
 
         if let Some(default) = &field.default {
             // SQLite uses 1/0 for TRUE/FALSE
-            let sqlite_default = default
-                .replace("TRUE", "1")
-                .replace("FALSE", "0");
+            let sqlite_default = default.replace("TRUE", "1").replace("FALSE", "0");
             parts.push(format!("DEFAULT {}", sqlite_default));
         }
 
@@ -2069,7 +2067,7 @@ mod tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -2237,7 +2235,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2317,7 +2315,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2627,7 +2625,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2724,7 +2722,7 @@ mod tests {
                 is_auto_increment: true,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -3431,7 +3429,7 @@ mod duckdb_tests {
                 is_auto_increment: false,
                 is_unique: false,
                 vector: None,
-                    enum_name: None,
+                enum_name: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -3678,9 +3676,21 @@ mod duckdb_tests {
         let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
         let sql = SqliteGenerator.generate(&diff);
 
-        assert!(sql.up.contains("\"rating\" INTEGER NOT NULL DEFAULT 0"), "actual:\n{}", sql.up);
-        assert!(sql.up.contains("\"active\" INTEGER NOT NULL DEFAULT 1"), "actual:\n{}", sql.up);
-        assert!(sql.up.contains("DEFAULT CURRENT_TIMESTAMP"), "actual:\n{}", sql.up);
+        assert!(
+            sql.up.contains("\"rating\" INTEGER NOT NULL DEFAULT 0"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("\"active\" INTEGER NOT NULL DEFAULT 1"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("DEFAULT CURRENT_TIMESTAMP"),
+            "actual:\n{}",
+            sql.up
+        );
         assert!(sql.up.contains("DEFAULT 'pending'"), "actual:\n{}", sql.up);
         // No debug leakage:
         assert!(!sql.up.contains("Int("));
@@ -3703,8 +3713,12 @@ mod duckdb_tests {
         let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
         let sql = SqliteGenerator.generate(&diff);
 
-        assert!(sql.up.contains("\"color\" TEXT NOT NULL DEFAULT 'red'"), "actual:\n{}", sql.up);
-        assert!(!sql.up.contains("\"Color\""));  // no quoted enum name as type
+        assert!(
+            sql.up.contains("\"color\" TEXT NOT NULL DEFAULT 'red'"),
+            "actual:\n{}",
+            sql.up
+        );
+        assert!(!sql.up.contains("\"Color\"")); // no quoted enum name as type
     }
 
     #[test]
@@ -3726,7 +3740,11 @@ mod duckdb_tests {
         let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
         let sql = SqliteGenerator.generate(&diff);
 
-        assert!(sql.up.contains("REFERENCES \"users\""), "actual:\n{}", sql.up);
+        assert!(
+            sql.up.contains("REFERENCES \"users\""),
+            "actual:\n{}",
+            sql.up
+        );
         assert!(!sql.up.contains("REFERENCES \"User\""));
     }
 
@@ -3747,8 +3765,17 @@ mod duckdb_tests {
         let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
         let sql = SqliteGenerator.generate(&diff);
 
-        assert!(sql.up.contains("CREATE INDEX"), "no CREATE INDEX in:\n{}", sql.up);
-        assert!(sql.up.contains("ON \"widgets\" (\"name\")") || sql.up.contains("ON \"widgets\"(\"name\")"), "actual:\n{}", sql.up);
+        assert!(
+            sql.up.contains("CREATE INDEX"),
+            "no CREATE INDEX in:\n{}",
+            sql.up
+        );
+        assert!(
+            sql.up.contains("ON \"widgets\" (\"name\")")
+                || sql.up.contains("ON \"widgets\"(\"name\")"),
+            "actual:\n{}",
+            sql.up
+        );
         assert!(sql.up.contains("\"kind\"") && sql.up.contains("\"name\""));
     }
 
@@ -3767,7 +3794,12 @@ mod duckdb_tests {
         let sql = PostgresSqlGenerator.generate(&diff);
 
         // Postgres should use the quoted enum name as the column type
-        assert!(sql.up.contains("\"color\" \"Color\" NOT NULL DEFAULT 'red'"), "actual:\n{}", sql.up);
+        assert!(
+            sql.up
+                .contains("\"color\" \"Color\" NOT NULL DEFAULT 'red'"),
+            "actual:\n{}",
+            sql.up
+        );
     }
 
     #[test]
@@ -3789,7 +3821,11 @@ mod duckdb_tests {
         let diff = crate::diff::SchemaDiffer::new(schema).diff().unwrap();
         let sql = PostgresSqlGenerator.generate(&diff);
 
-        assert!(sql.up.contains("REFERENCES \"users\""), "actual:\n{}", sql.up);
+        assert!(
+            sql.up.contains("REFERENCES \"users\""),
+            "actual:\n{}",
+            sql.up
+        );
         assert!(!sql.up.contains("REFERENCES \"User\""));
     }
 }
