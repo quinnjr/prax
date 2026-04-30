@@ -153,7 +153,7 @@ sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sq
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-flame = "0.2"
 tracing-chrome = "0.7"
-pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
+pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 dhat = "0.3"
 memory-stats = "1.2"
 
