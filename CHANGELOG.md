@@ -7,50 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-04-30
+
+### Added
+
+- **`prax generate` now emits a runtime-ready client.** Generated
+  model modules carry the trait impls the runtime needs to actually
+  run queries, matching the surface produced by `#[derive(Model)]`:
+  - `impl prax_query::row::FromRow` decodes scalar columns via
+    `FromColumn` and default-initializes relation fields, so
+    `find_many` and friends round-trip rows back into the generated
+    structs at runtime.
+  - `impl prax_query::traits::ModelWithPk` exposes `pk_value()` and
+    `get_column_value()` for nested writes, upsert, and composite
+    primary keys.
+  - The per-model operations struct is named `Client<E>` (was
+    `{Name}Operations<E>`), so `prax_orm::client!(User, Post, ...)`
+    can resolve `<snake_name>::Client<E>` by path the same way it
+    does for the derive path. The full CRUD surface — `find_many`,
+    `find_unique`, `find_first`, `create`, `create_many`, `update`,
+    `update_many`, `upsert`, `delete`, `delete_many`, `count` — is
+    emitted on `Client<E>`.
+  - Non-list relation fields are emitted as `Option<T>` (or
+    `Option<Box<T>>` when boxing is needed to break a cycle)
+    regardless of the schema modifier, so the FromRow default-init
+    has a `None` to write into. The relation executor populates
+    `Some(T)` on the `.include` path.
+
 ### Fixed
 
-- **`prax-migrate` — SQLite generator correctness.** The migration
-  generator now produces valid SQLite DDL in four places where it
-  previously emitted garbage or omitted statements entirely:
-  - `DEFAULT` clauses render real SQL literals (`0`, `1`, `'value'`,
-    `CURRENT_TIMESTAMP`) instead of Rust `Debug` output
-    (`Int(0)`, `Boolean(false)`, `Ident("value")`, `Function("now", [])`).
-    A new `render_default_sql_ansi` helper in `prax-migrate/src/diff.rs`
-    converts `AttributeValue` → ANSI SQL; the SQLite generator then
-    post-processes `TRUE`/`FALSE` → `1`/`0`.
-  - Enum columns emit `TEXT` on SQLite / MySQL / MSSQL / DuckDB.
-    `FieldDiff` now carries an `enum_name: Option<String>` alongside
-    `sql_type`; Postgres consumes it to keep emitting the native enum
-    type reference (`"role"`), every other dialect ignores it and
-    uses `TEXT`. Before this fix, SQLite columns were typed as the
-    quoted enum name (`"kind" "SyncSourceKind"`), which SQLite parses
-    as a column with unrecognized affinity.
-  - Foreign-key `REFERENCES` clauses resolve `@@map` table names.
-    `extract_foreign_keys` now takes the full schema and looks up the
-    referenced model's mapped table name, so
-    `REFERENCES "sync_sources"` appears in the DDL instead of
-    `REFERENCES "SyncSource"`. Default FK constraint names dropped
-    the redundant `_ModelName` suffix.
-  - `@@index` attributes produce `CREATE INDEX` statements.
-    `model_to_diff` now extracts index/unique declarations from model
-    attributes, and `SchemaDiffer::diff` lifts them into
-    `SchemaDiff.create_indexes` so the SQL generator's existing index
-    loop actually sees them.
-- **`prax-typegen` — `z.lazy()` return-type annotation.** Generated
-  Zod schemas now compile under `"strict": true` /
-  `"noImplicitAny": true`. Model schemas that contain relation fields
-  are emitted as `export const FooSchema: z.ZodTypeAny = z.object({...})`,
-  and every `z.lazy((): z.ZodTypeAny => FooSchema)` callback carries
-  an explicit return type. Resolves TS7022 / TS7024 in consumer
-  projects with strict TypeScript.
-- **`prax-typegen` — no duplicate type re-exports.** `schemas.ts` no
-  longer emits `export type Foo = z.infer<typeof FooSchema>` for
-  models, enums, composites, or create/update inputs. Those names are
-  already exported as `interface`/`type` from `models.ts`, and the
-  duplicate exports caused TS2308 collisions in the auto-generated
-  barrel `export * from './models'; export * from './schemas';`. Use
-  the interface/type from `models.ts`; use the `XxxSchema` constant
-  from `schemas.ts` for runtime validation.
+- **`prax-migrate` — CREATE TABLE emission respects FK dependencies.**
+  Before, `SchemaDiffer` populated `create_models` by iterating a
+  HashMap, leaving the resulting CREATE TABLE order
+  non-deterministic. A schema where `tracks` and `playlists`
+  reference `sync_sources` could emit `sync_sources` last; SQLite
+  tolerated it because FK targets are resolved at row-write time,
+  but strict engines (Postgres, MySQL with FK enforcement, MSSQL)
+  and any deferred-constraint bootstrap would fail to apply the
+  migration. `SchemaDiff::ordered_create_models` now does Kahn's
+  algorithm topo sort over the FK graph: referenced tables emit
+  before their dependents, self-references and FKs that point at
+  out-of-batch tables don't constrain ordering, and cycles fall
+  back to original order. All five SQL generators (Postgres,
+  MySQL, SQLite, MSSQL, DuckDB) route through it and emit drops
+  in the reverse direction so rollbacks drop dependents before
+  parents.
+
+### Changed
+
+- **Workspace clippy gate is back online.** The husky pre-commit
+  hook had silently been bypassed in environments that override
+  `core.hookspath` with no project-local `pre-commit`; develop had
+  accumulated 200+ clippy errors under `-D warnings`. Cleared every
+  diagnostic so
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  passes again. API-shape lints (`result_large_err`,
+  `new_ret_no_self`, `should_implement_trait`, pedantic noise in
+  `prax-scylladb`) are suppressed at crate level with rationale;
+  bug-shaped lints (`manual_checked_ops`, `manual_strip`,
+  `manual_clamp`, `manual_sort_by_key`, `&PathBuf` → `&Path`,
+  `mixed_attributes_style`, `unnecessary_unwrap`) are fixed in
+  place.
+- **`prax-sqlite` — vector tests skip cleanly when the loader is
+  unconfigured.** The two unit tests in `vector/register.rs` and
+  the three integration tests in `tests/vector_integration.rs` no
+  longer fail under `cargo test -- --include-ignored` (used by CI)
+  in environments that haven't provisioned the sqlite-vector-rs
+  cdylib. They detect the missing library at runtime via
+  `SQLITE_VECTOR_RS_LIB` and bail out with a "skipping" message
+  instead of panicking on the loader error.
 
 ## [0.8.0] - 2026-04-30
 
