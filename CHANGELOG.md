@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-04-30
+
+### Fixed
+
+- **`prax-import` (Prisma) — `@default` value round-trip.** The Prisma
+  importer now emits `.prax` output that reparses. Three underlying bugs
+  were fixed together:
+  - String literal defaults (`@default("standard")`) no longer round-trip
+    as doubled quotes (`@default(""standard"")`). The source quote
+    characters are stripped before stashing in `AttributeValue::String`.
+  - Bare-identifier defaults on enum fields (`@default(PENDING)`) now map
+    to `AttributeValue::Ident` instead of `AttributeValue::String`. The
+    emitter was writing them as quoted string literals, which the parser
+    rejected on an enum-typed field.
+  - `dbgenerated("uuid_to_text(id)")` arguments are unquoted the same way
+    so they don't double-quote either.
+- **`prax-import` (Prisma) — pgvector columns.** Prisma models pgvector
+  columns via `Unsupported("vector(N)")`. The importer now recognizes
+  the four pgvector shapes (`vector(N)`, `halfvec(N)`, `sparsevec(N)`,
+  `bit(N)`) inside the `Unsupported(…)` payload and translates them to
+  the matching `ScalarType::Vector(…)` / `HalfVector(…)` / `SparseVector(…)`
+  / `Bit(…)` variants. The emitter prints the dimension via the
+  `@dim(N)` attribute that the schema parser already accepts.
+- **`prax validate` — diagnostic rendering.** The CLI now renders schema
+  errors via `miette::Report` with the source attached, so the specific
+  `prax::schema::invalid_field`, `unknown_type`, etc. diagnostic is
+  visible. Previously every parse or validation failure surfaced as the
+  same bare "syntax error in schema" string, which hid the actionable
+  detail.
+- **`prax-schema` validator — `Json` default values.** The validator now
+  accepts `String`, `Array`, `Boolean`, `Int`, and `Float` payloads as
+  the `@default` of a `Json`-typed field. Prisma encodes JSON defaults
+  as quoted text literals (`@default("[]")`, `@default("{}")`), which
+  are valid because Postgres parses the text into `jsonb` at insert
+  time — the old validator only accepted `String` defaults on
+  `String`-typed fields, rejecting every JSON default outright.
+
+### Motivation
+
+Discovered importing the Lexmata `schema.prisma` (71 models, 33 enums,
+1,149 fields, 226 relations) as part of LD-15 / LX-33 — the
+admin-backend is adopting Prax as its in-tree ORM and needed a
+committable `schema.prax` regenerated from the authoritative Prisma
+schema. The import was failing and the generic "syntax error" message
+was masking four distinct bugs; each is now a named regression test.
+
 ## [0.8.1] - 2026-04-30
 
 ### Fixed
