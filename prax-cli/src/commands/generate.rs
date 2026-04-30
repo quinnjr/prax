@@ -322,7 +322,7 @@ fn generate_model_module(
     code.push_str(&format!("pub struct {} {{\n", model.name()));
 
     for field in model.fields.values() {
-        let field_name = to_snake_case(field.name());
+        let field_name = to_field_ident(field.name());
 
         // Add serde rename if mapped
         if let Some(attr) = field.get_attribute("map")
@@ -400,7 +400,7 @@ fn generate_model_module(
     );
     code.push_str("        Ok(Self {\n");
     for field in model.fields.values() {
-        let field_name = to_snake_case(field.name());
+        let field_name = to_field_ident(field.name());
         let rust_type = field_type_to_rust_with_boxing(
             &field.field_type,
             field.modifier,
@@ -444,7 +444,7 @@ fn generate_model_module(
         code.push_str(&format!(
             "        <{} as prax_query::filter::ToFilterValue>::to_filter_value(&self.{})\n",
             field_type_to_rust_with_boxing(&f.field_type, f.modifier, model.name(), relation_graph),
-            to_snake_case(f.name())
+            to_field_ident(f.name())
         ));
     } else if id_field_objs.is_empty() {
         code.push_str("        prax_query::filter::FilterValue::Null\n");
@@ -454,7 +454,7 @@ fn generate_model_module(
             code.push_str(&format!(
                 "            <{} as prax_query::filter::ToFilterValue>::to_filter_value(&self.{}),\n",
                 field_type_to_rust_with_boxing(&f.field_type, f.modifier, model.name(), relation_graph),
-                to_snake_case(f.name())
+                to_field_ident(f.name())
             ));
         }
         code.push_str("        ])\n");
@@ -466,13 +466,17 @@ fn generate_model_module(
     );
     code.push_str("        match column {\n");
     for field in model.scalar_fields() {
-        let field_name = to_snake_case(field.name());
+        // Rust field identifier — escape reserved keywords.
+        let field_name = to_field_ident(field.name());
+        // SQL column name — use raw snake_case (no r# prefix) because the
+        // @map override or fallback feeds a string literal passed to
+        // `FromColumn::from_column(row, "...")`, not an identifier.
         let column = field
             .get_attribute("map")
             .and_then(|a| a.first_arg())
             .and_then(|v| v.as_string())
             .map(|s| s.to_string())
-            .unwrap_or_else(|| field_name.clone());
+            .unwrap_or_else(|| to_snake_case(field.name()));
         let rust_type = field_type_to_rust_with_boxing(
             &field.field_type,
             field.modifier,
@@ -617,8 +621,78 @@ fn generate_enum_module(enum_def: &prax_schema::ast::Enum) -> CliResult<String> 
             "    fn default() -> Self {{\n        Self::{}\n    }}\n",
             pascal_name
         ));
-        code.push_str("}\n");
+        code.push_str("}\n\n");
     }
+
+    // Round-trip helper: parse the DB string form back into an enum variant.
+    // Used by the `FromColumn` impls below and callable directly by
+    // consumers that need to deserialize a raw string payload.
+    code.push_str(&format!(
+        "impl std::str::FromStr for {} {{\n",
+        enum_def.name()
+    ));
+    code.push_str("    type Err = prax_query::row::RowError;\n");
+    code.push_str("    fn from_str(s: &str) -> Result<Self, Self::Err> {\n");
+    code.push_str("        match s {\n");
+    for variant in &enum_def.variants {
+        let raw_name = variant.name();
+        let pascal_name = to_pascal_case(raw_name);
+        let db_value = variant.db_value();
+        code.push_str(&format!(
+            "            \"{}\" => Ok(Self::{}),\n",
+            db_value, pascal_name
+        ));
+    }
+    code.push_str(&format!(
+        "            _ => Err(prax_query::row::RowError::TypeConversion {{\n                column: String::new(),\n                message: format!(\"unknown {} variant: {{}}\", s),\n            }}),\n",
+        enum_def.name()
+    ));
+    code.push_str("        }\n");
+    code.push_str("    }\n");
+    code.push_str("}\n\n");
+
+    // `FromColumn` — decode a string column back into the enum. Required
+    // for `find_many` / `find_unique` / any query that returns rows with
+    // this enum as a field type.
+    code.push_str(&format!(
+        "impl prax_query::row::FromColumn for {} {{\n",
+        enum_def.name()
+    ));
+    code.push_str(
+        "    fn from_column(row: &impl prax_query::row::RowRef, column: &str)\n        -> Result<Self, prax_query::row::RowError>\n    {\n",
+    );
+    code.push_str("        let raw = row.get_string(column)?;\n");
+    code.push_str("        <Self as std::str::FromStr>::from_str(&raw).map_err(|e| {\n");
+    code.push_str("            let msg = match &e {\n");
+    code.push_str(
+        "                prax_query::row::RowError::TypeConversion { message, .. } => message.clone(),\n",
+    );
+    code.push_str("                other => other.to_string(),\n");
+    code.push_str("            };\n");
+    code.push_str("            prax_query::row::RowError::TypeConversion {\n");
+    code.push_str("                column: column.to_string(),\n");
+    code.push_str("                message: msg,\n");
+    code.push_str("            }\n");
+    code.push_str("        })\n");
+    code.push_str("    }\n");
+    code.push_str("}\n\n");
+
+    // `Option<Enum>` handled by the blanket `impl<T: FromColumn>
+    // FromColumn for Option<T>` in prax-query — no per-enum Option impl
+    // needed here (the orphan rule would forbid it on the consumer side
+    // anyway).
+
+    // `ToFilterValue` — encode the enum as a string FilterValue so that
+    // `where` clauses / `ModelWithPk::pk_value` / nested writes can send
+    // it as a bind parameter.
+    code.push_str(&format!(
+        "impl prax_query::filter::ToFilterValue for {} {{\n",
+        enum_def.name()
+    ));
+    code.push_str("    fn to_filter_value(&self) -> prax_query::filter::FilterValue {\n");
+    code.push_str("        prax_query::filter::FilterValue::String(self.to_string())\n");
+    code.push_str("    }\n");
+    code.push_str("}\n");
 
     Ok(code)
 }
@@ -640,7 +714,7 @@ fn generate_types_module(schema: &prax_schema::ast::Schema) -> CliResult<String>
         code.push_str(&format!("pub struct {} {{\n", composite.name()));
         for field in composite.fields.values() {
             let rust_type = field_type_to_rust(&field.field_type, field.modifier);
-            let field_name = to_snake_case(field.name());
+            let field_name = to_field_ident(field.name());
             code.push_str(&format!("    pub {}: {},\n", field_name, rust_type));
         }
         code.push_str("}\n\n");
@@ -690,7 +764,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
         for field in model.fields.values() {
             if !field.is_relation() {
                 let filter_type = field_to_filter_type(&field.field_type);
-                let field_name = to_snake_case(field.name());
+                let field_name = to_field_ident(field.name());
                 code.push_str(&format!(
                     "    pub {}: Option<{}>,\n",
                     field_name, filter_type
@@ -714,7 +788,7 @@ fn generate_filters_module(schema: &prax_schema::ast::Schema) -> CliResult<Strin
 
         for field in model.fields.values() {
             if !field.is_relation() {
-                let field_name = to_snake_case(field.name());
+                let field_name = to_field_ident(field.name());
                 code.push_str(&format!(
                     "    pub {}: Option<prax_query::SortOrder>,\n",
                     field_name
@@ -854,6 +928,83 @@ fn to_snake_case(name: &str) -> String {
         }
     }
     result
+}
+
+/// Snake-case a name and escape it as a raw identifier if the result
+/// collides with a Rust reserved keyword. Use for any emitted Rust field
+/// or variable name; plain column-name strings (serde rename values, SQL
+/// column lookups) still use `to_snake_case` directly.
+///
+/// Schemas with columns literally named `type`, `match`, `use`, `loop`,
+/// etc. (common in Prisma — documents, notifications, email_verification
+/// all have a `type` column) otherwise produce code like `pub type: …`
+/// that fails to parse. This function emits `r#type` instead.
+///
+/// The four keywords Rust forbids as raw identifiers (`crate`, `self`,
+/// `Self`, `super`) are intentionally not escaped; a column literally
+/// named `self` would still fail to compile, which is the correct
+/// behavior (the schema should be fixed).
+fn to_field_ident(name: &str) -> String {
+    let snake = to_snake_case(name);
+    if is_rust_keyword(&snake) {
+        format!("r#{}", snake)
+    } else {
+        snake
+    }
+}
+
+fn is_rust_keyword(s: &str) -> bool {
+    matches!(
+        s,
+        "abstract"
+            | "as"
+            | "async"
+            | "await"
+            | "become"
+            | "box"
+            | "break"
+            | "const"
+            | "continue"
+            | "do"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "final"
+            | "fn"
+            | "for"
+            | "gen"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "override"
+            | "priv"
+            | "pub"
+            | "ref"
+            | "return"
+            | "static"
+            | "struct"
+            | "trait"
+            | "true"
+            | "try"
+            | "type"
+            | "typeof"
+            | "unsafe"
+            | "unsized"
+            | "use"
+            | "virtual"
+            | "where"
+            | "while"
+            | "yield"
+    )
 }
 
 /// Convert snake_case, SCREAMING_SNAKE_CASE, or any other casing to PascalCase.
