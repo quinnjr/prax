@@ -554,18 +554,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-native-tls"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d57d4cec3c647232e1094dc013546c0b33ce785d8aeb251e1f20dfaf8a9a13fe"
-dependencies = [
- "futures-util",
- "native-tls",
- "thiserror 1.0.69",
- "url",
-]
-
-[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1399,16 +1387,6 @@ name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
-dependencies = [
- "core-foundation-sys",
- "libc",
-]
-
-[[package]]
-name = "core-foundation"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
 dependencies = [
  "core-foundation-sys",
  "libc",
@@ -3716,23 +3694,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "native-tls"
-version = "0.2.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe 0.2.1",
- "openssl-sys",
- "schannel",
- "security-framework 3.7.0",
- "security-framework-sys",
- "tempfile",
-]
-
-[[package]]
 name = "nix"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3975,12 +3936,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
 
 [[package]]
-name = "openssl-probe"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
 name = "openssl-sys"
 version = "0.9.114"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4069,6 +4024,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "pastey"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35fb2e5f958ec131621fdd531e9fc186ed768cbe395337403ae56c17a74c68ec"
 
 [[package]]
 name = "pbkdf2"
@@ -4561,6 +4522,7 @@ dependencies = [
  "prax-query",
  "prax-schema",
  "pretty_assertions",
+ "rust_decimal",
  "serde",
  "serde_json",
  "smol_str",
@@ -4583,6 +4545,7 @@ dependencies = [
  "futures",
  "mysql_async 0.36.2",
  "prax-query",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4607,26 +4570,35 @@ dependencies = [
  "futures",
  "insta",
  "memory-stats",
+ "pastey",
  "pprof",
+ "prax-cassandra",
  "prax-codegen",
+ "prax-duckdb",
  "prax-mongodb",
  "prax-mssql",
  "prax-mysql",
  "prax-postgres",
  "prax-query",
  "prax-schema",
+ "prax-scylladb",
  "prax-sqlite",
+ "prax-sqlx",
  "rusqlite",
+ "rust_decimal",
  "sea-orm",
  "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-chrome",
  "tracing-flame",
  "tracing-subscriber",
+ "trybuild",
+ "uuid",
 ]
 
 [[package]]
@@ -4660,6 +4632,7 @@ dependencies = [
 name = "prax-pgvector"
 version = "0.7.3"
 dependencies = [
+ "half",
  "pgvector",
  "postgres-types",
  "prax-postgres",
@@ -4677,12 +4650,14 @@ dependencies = [
 name = "prax-postgres"
 version = "0.7.3"
 dependencies = [
+ "bytes",
  "chrono",
  "deadpool-postgres",
  "futures",
  "postgres-types",
  "prax-query",
  "pretty_assertions",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4700,6 +4675,7 @@ dependencies = [
  "async-trait",
  "bson",
  "bumpalo",
+ "chrono",
  "criterion 0.8.2",
  "dhat",
  "futures",
@@ -4709,6 +4685,7 @@ dependencies = [
  "owo-colors",
  "parking_lot",
  "pretty_assertions",
+ "rust_decimal",
  "serde",
  "serde_json",
  "smallvec",
@@ -4775,6 +4752,7 @@ dependencies = [
  "parking_lot",
  "prax-query",
  "rusqlite",
+ "rust_decimal",
  "serde",
  "serde_json",
  "tempfile",
@@ -5555,10 +5533,10 @@ version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9aace74cb666635c918e9c12bc0d348266037aa8eb599b5cba565709a8dff00"
 dependencies = [
- "openssl-probe 0.1.6",
+ "openssl-probe",
  "rustls-pemfile 1.0.4",
  "schannel",
- "security-framework 2.11.1",
+ "security-framework",
 ]
 
 [[package]]
@@ -5863,20 +5841,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
 dependencies = [
  "bitflags 2.11.1",
- "core-foundation 0.9.4",
- "core-foundation-sys",
- "libc",
- "security-framework-sys",
-]
-
-[[package]]
-name = "security-framework"
-version = "3.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
-dependencies = [
- "bitflags 2.11.1",
- "core-foundation 0.10.1",
+ "core-foundation",
  "core-foundation-sys",
  "libc",
  "security-framework-sys",
@@ -6754,7 +6719,6 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1446cb4198848d1562301a3340424b4f425ef79f35ef9ee034769a9dd92c10d"
 dependencies = [
- "async-native-tls",
  "async-trait",
  "asynchronous-codec",
  "byteorder",

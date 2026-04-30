@@ -80,6 +80,55 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      PRAX_E2E: "1"
+      POSTGRES_URL: postgres://prax:prax_test_password@localhost:5432/prax_test
+      MYSQL_URL: mysql://prax:prax_test_password@localhost:3307/prax_test
+      MSSQL_URL: "server=localhost,1433;database=master;user=sa;password=Prax_Test_Password123!;trustservercertificate=true"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: prax
+          POSTGRES_PASSWORD: prax_test_password
+          POSTGRES_DB: prax_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_password
+          MYSQL_USER: prax
+          MYSQL_PASSWORD: prax_test_password
+          MYSQL_DATABASE: prax_test
+          MYSQL_TCP_PORT: "3307"
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -proot_password"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+        ports:
+          - 3307:3307
+
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Prax_Test_Password123!
+          MSSQL_PID: Developer
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Prax_Test_Password123!' -Q 'SELECT 1' || /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'Prax_Test_Password123!' -Q 'SELECT 1' || exit 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 20
+        ports:
+          - 1433:1433
     steps:
       - uses: actions/checkout@v6
 
@@ -99,8 +148,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-
 
-      - name: Run tests
-        run: cargo test --all-features
+      - name: Wait for MSSQL
+        run: |
+          for i in $(seq 1 60); do
+            if nc -z localhost 1433; then echo "MSSQL up"; exit 0; fi
+            sleep 2
+          done
+          echo "MSSQL never came up"; exit 1
+
+      - name: Run tests (including live DB integration tests)
+        run: cargo test --workspace --all-features -- --include-ignored
 
   doc:
     name: Documentation

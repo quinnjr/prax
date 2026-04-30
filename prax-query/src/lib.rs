@@ -157,6 +157,7 @@ pub mod data;
 #[allow(dead_code, unused_imports)]
 pub mod data_cache;
 pub mod db_optimize;
+pub mod dialect;
 pub mod error;
 pub mod extension;
 pub mod filter;
@@ -201,10 +202,10 @@ pub use error::{ErrorCode, ErrorContext, QueryError, QueryResult, Suggestion};
 pub use extension::{Extension, ExtensionBuilder, Point, Polygon};
 pub use filter::{
     AndFilterBuilder, FieldName, Filter, FilterValue, FluentFilterBuilder, LargeValueList,
-    OrFilterBuilder, ScalarFilter, SmallValueList, ValueList,
+    OrFilterBuilder, ScalarFilter, SmallValueList, ToFilterValue, ValueList,
 };
 pub use json::{JsonAgg, JsonFilter, JsonIndex, JsonIndexBuilder, JsonOp, JsonPath, PathSegment};
-pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
+pub use nested::{NestedWrite, NestedWriteBuilder, NestedWriteOp, NestedWriteOperations};
 pub use operations::{
     AggregateField,
     AggregateOperation,
@@ -245,7 +246,9 @@ pub use procedure::{
 };
 pub use query::QueryBuilder;
 pub use raw::{RawExecuteOperation, RawQueryOperation, Sql};
-pub use relations::{Include, IncludeSpec, RelationLoader, RelationSpec, SelectSpec};
+pub use relations::{
+    Include, IncludeSpec, RelationKind, RelationLoader, RelationMeta, RelationSpec, SelectSpec,
+};
 pub use search::{
     FullTextIndex, FullTextIndexBuilder, FuzzyOptions, HighlightOptions, RankingOptions,
     SearchLanguage, SearchMode, SearchQuery, SearchQueryBuilder, SearchSql,
@@ -257,7 +260,8 @@ pub use security::{
 };
 pub use sequence::{OwnedBy, Sequence, SequenceBuilder};
 pub use traits::{
-    Executable, IntoFilter, MaterializedView, Model, QueryEngine, View, ViewQueryEngine,
+    Executable, IntoFilter, MaterializedView, Model, ModelRelationLoader, ModelWithPk, QueryEngine,
+    View, ViewQueryEngine,
 };
 pub use transaction::{IsolationLevel, Transaction, TransactionConfig};
 pub use trigger::{
@@ -281,6 +285,9 @@ pub use middleware::{
     MiddlewareStack, QueryContext, QueryMetadata, QueryMetrics, QueryType, RetryMiddleware,
     TimingMiddleware,
 };
+
+// Re-export dialect types
+pub use dialect::{Mssql, Mysql, NotSql, Postgres, SqlDialect, Sqlite};
 
 // Re-export connection types
 pub use connection::{
@@ -457,7 +464,9 @@ pub mod prelude {
     pub use crate::filter::{Filter, FilterValue, ScalarFilter};
     pub use crate::introspection::{DatabaseSchema, TableInfo, generate_prax_schema};
     pub use crate::json::{JsonFilter, JsonOp, JsonPath};
-    pub use crate::nested::{NestedWrite, NestedWriteBuilder, NestedWriteOperations};
+    pub use crate::nested::{
+        NestedWrite, NestedWriteBuilder, NestedWriteOp, NestedWriteOperations,
+    };
     pub use crate::operations::*;
     pub use crate::pagination::{Cursor, CursorDirection, Pagination};
     pub use crate::partition::{Partition, PartitionBuilder, PartitionType, RangeBound};

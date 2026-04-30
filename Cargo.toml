@@ -59,6 +59,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
 convert_case = "0.6"
+pastey = "0.1"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -180,6 +181,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 [dependencies]
 prax-schema.workspace = true
 prax-codegen.workspace = true
+pastey = { workspace = true }
+prax-query = { workspace = true }
 
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
@@ -194,6 +197,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 toml = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
+rust_decimal = { workspace = true }
+trybuild = { workspace = true }
 
 # ORM comparison benchmarks
 diesel = { workspace = true }
@@ -205,9 +211,14 @@ prax-mysql = { workspace = true }
 prax-sqlite = { workspace = true }
 prax-mssql = { workspace = true }
 prax-mongodb = { workspace = true }
+prax-sqlx = { workspace = true }
+prax-duckdb = { workspace = true }
+prax-scylladb = { workspace = true }
+prax-cassandra = { workspace = true }
 rusqlite = { workspace = true }
 bson = { workspace = true }
 futures = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "query_builder"
@@ -237,6 +248,11 @@ mysql = []
 sqlite = []
 mssql = []
 mongodb = []
+
+# trybuild UI tests for the derive macro. Gated because trybuild stderr
+# snapshots are sensitive to rustc version — run with
+# `cargo test --test derive_ui --features ui-tests` on a pinned toolchain.
+ui-tests = []
 
 # Profiling features
 profiling = ["tracing-subscriber", "tracing-flame", "tracing-chrome"]

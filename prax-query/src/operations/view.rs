@@ -93,8 +93,13 @@ impl<E: QueryEngine, V: View> ViewFindManyOperation<E, V> {
     }
 
     /// Build the SQL query.
+    ///
+    /// View operations do not yet accept a dialect. They emit Postgres
+    /// placeholders and `DISTINCT ON`; behaviour against other backends is
+    /// undefined until view ops inherit the dialect-threaded build_sql shape
+    /// that `FindManyOperation` and friends use.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+        let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 
         let mut sql = String::new();
 
@@ -213,8 +218,11 @@ impl<E: QueryEngine, V: View> ViewCountOperation<E, V> {
     }
 
     /// Build the SQL query.
+    ///
+    /// Same caveat as `ViewFindManyOperation::build_sql`: view ops still emit
+    /// Postgres placeholders unconditionally.
     pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+        let (where_sql, params) = self.filter.to_sql(0, &crate::dialect::Postgres);
 
         let mut sql = format!("SELECT COUNT(*) FROM {}", V::DB_VIEW_NAME);
 
@@ -403,7 +411,11 @@ mod tests {
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: crate::traits::Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -411,7 +423,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: crate::traits::Model + Send + 'static>(
+        fn query_one<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -419,7 +431,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: crate::traits::Model + Send + 'static>(
+        fn query_optional<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -427,7 +439,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: crate::traits::Model + Send + 'static>(
+        fn execute_insert<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -435,7 +447,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: crate::traits::Model + Send + 'static>(
+        fn execute_update<T: crate::traits::Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,

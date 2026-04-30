@@ -261,7 +261,7 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
-            black_box(filter.to_sql(0))
+            black_box(filter.to_sql(0, &prax_query::dialect::Postgres))
         });
     });
 
@@ -284,7 +284,7 @@ fn bench_memory_efficient_filters(c: &mut Criterion) {
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
-            black_box(filter.to_sql(0))
+            black_box(filter.to_sql(0, &prax_query::dialect::Postgres))
         });
     });
 
@@ -345,7 +345,7 @@ fn bench_profiler_workflow(c: &mut Criterion) {
             // Create some filters (profiling disabled)
             for i in 0..10 {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(i));
-                black_box(filter.to_sql(0));
+                black_box(filter.to_sql(0, &prax_query::dialect::Postgres));
             }
         });
     });
@@ -357,7 +357,7 @@ fn bench_profiler_workflow(c: &mut Criterion) {
             // Create some filters (profiling enabled)
             for i in 0..10 {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(i));
-                black_box(filter.to_sql(0));
+                black_box(filter.to_sql(0, &prax_query::dialect::Postgres));
             }
         });
 

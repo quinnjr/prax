@@ -72,6 +72,12 @@ impl<E: QueryEngine> RelationLoader<E> {
     }
 
     /// Build a query for loading a one-to-many relation.
+    ///
+    /// Emits Postgres `$N` placeholders and passes the Postgres dialect to
+    /// any nested `Filter::to_sql` call. The relation executor and its SQL
+    /// builders will adopt the full dialect-threading pattern once relation
+    /// loading is wired into the live client; against a non-Postgres engine
+    /// today, the emitted SQL is Postgres-shaped.
     pub fn build_one_to_many_query(
         &self,
         spec: &RelationSpec,
@@ -90,7 +96,8 @@ impl<E: QueryEngine> RelationLoader<E> {
 
         // Apply filter if present
         if let Some(ref filter) = include.filter {
-            let (filter_sql, filter_params) = filter.to_sql(parent_ids.len());
+            let (filter_sql, filter_params) =
+                filter.to_sql(parent_ids.len(), &crate::dialect::Postgres);
             sql.push_str(" AND ");
             sql.push_str(&filter_sql);
 
@@ -226,6 +233,10 @@ mod tests {
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
         fn query_many<T: Model + Send + 'static>(
             &self,
             _sql: &str,

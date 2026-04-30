@@ -919,4 +919,15 @@ mod tests {
         let suggestion = err.context.suggestions.last().unwrap();
         assert!(suggestion.code.is_some());
     }
+
+    #[test]
+    fn with_source_populates_std_error_source_chain() {
+        use std::error::Error;
+        let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "boom");
+        let q = QueryError::connection("could not connect").with_source(io_err);
+        let src = q
+            .source()
+            .expect("source() should return the chained error");
+        assert!(src.to_string().contains("boom"));
+    }
 }

@@ -252,3 +252,315 @@ async fn e2e_pool_is_healthy() {
     let pool = pool().await;
     assert!(pool.is_healthy().await);
 }
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_many_typed_decodes_rows() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug, PartialEq)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_typed";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("typed");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool.clone());
+
+    // Drop and create table
+    let mut conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"
+    ))
+    .await
+    .expect("drop table");
+    conn.batch_execute(&format!(
+        "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, email NVARCHAR(255) NOT NULL)"
+    ))
+    .await
+    .expect("create table");
+    conn.batch_execute(&format!(
+        "INSERT INTO dbo.{table} (email) VALUES ('a@x.com'),('b@x.com')"
+    ))
+    .await
+    .expect("insert");
+    drop(conn);
+
+    let rows = engine
+        .query_many::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .expect("query_many");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].email, "a@x.com");
+    assert_eq!(rows[1].email, "b@x.com");
+
+    drop_table(&pool, &table).await;
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_row_ref_primitive_reads() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::row_ref::MssqlRowRef;
+    use prax_query::row::RowRef;
+
+    let pool = pool().await;
+    let mut conn = pool.get().await.expect("conn");
+
+    let rows = conn
+        .query("SELECT 42 AS n, N'hello' AS s", &[])
+        .await
+        .expect("query");
+    let row = rows.into_iter().next().expect("row present");
+
+    let row_ref = MssqlRowRef::from_row(&row).expect("from_row");
+    assert_eq!(row_ref.get_i32("n").unwrap(), 42);
+    assert_eq!(row_ref.get_str("s").unwrap(), "hello");
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_row_ref_null_vs_absent_column() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::row_ref::MssqlRowRef;
+    use prax_query::row::{RowError, RowRef};
+
+    let pool = pool().await;
+    let mut conn = pool.get().await.expect("conn");
+
+    let rows = conn
+        .query(
+            "SELECT CAST(42 AS INT) AS present, CAST(NULL AS INT) AS nulled",
+            &[],
+        )
+        .await
+        .expect("query");
+    let row = rows.into_iter().next().expect("row present");
+    let r = MssqlRowRef::from_row(&row).expect("from_row");
+
+    // Present column with a value → Ok(Some(_)).
+    assert_eq!(r.get_i32_opt("present").unwrap(), Some(42));
+
+    // Present column whose value is NULL → Ok(None).
+    assert_eq!(r.get_i32_opt("nulled").unwrap(), None);
+
+    // Absent column (not in the SELECT list) → Err(ColumnNotFound).
+    let err = r.get_i32_opt("missing").unwrap_err();
+    assert!(
+        matches!(err, RowError::ColumnNotFound(ref col) if col == "missing"),
+        "expected ColumnNotFound for absent column, got {err:?}",
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_one_missing_row_returns_not_found() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::error::ErrorCode;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_typed";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(row: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: row.get_i32("id")?,
+                email: row.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("one_missing");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool);
+    engine
+        .execute_raw(
+            &format!("IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!(
+                "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, email NVARCHAR(255) NOT NULL)"
+            ),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let err = engine
+        .query_one::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} WHERE id = 999"),
+            Vec::<FilterValue>::new(),
+        )
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        err.code,
+        ErrorCode::RecordNotFound,
+        "expected NotFound for missing row, got {err:?}"
+    );
+
+    engine
+        .execute_raw(&format!("DROP TABLE dbo.{table}"), vec![])
+        .await
+        .unwrap();
+}
+
+/// Regression test for the `query_one` tail-materialization contract.
+///
+/// `query_one` nominally means "fetch exactly one row", but the driver
+/// implementations disagree on what happens when the SQL returns 2+:
+///
+/// - `tokio-postgres::query_one` errors on 0 or 2+ rows.
+/// - `mysql_async::exec_first` silently takes the first row.
+/// - `rusqlite::rows.next()` silently takes the first row.
+/// - `tiberius::query_one` (what this engine uses) silently takes the
+///   first row and discards the rest.
+///
+/// This test locks down MSSQL's "first row wins" behavior so that if
+/// someone later switches to an implementation that errors on 2+, the
+/// change surfaces here and gets a deliberate CHANGELOG / migration
+/// update rather than slipping in silently.
+#[tokio::test]
+#[ignore = "requires running MSSQL via docker-compose"]
+async fn e2e_query_one_with_multiple_rows_behavior() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    use prax_mssql::MssqlEngine;
+    use prax_query::filter::FilterValue;
+    use prax_query::row::{FromRow, RowError, RowRef};
+    use prax_query::traits::{Model, QueryEngine};
+
+    #[derive(Debug)]
+    struct Person {
+        id: i32,
+        email: String,
+    }
+    impl Model for Person {
+        const MODEL_NAME: &'static str = "Person";
+        const TABLE_NAME: &'static str = "e2e_mssql_one_multi";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const COLUMNS: &'static [&'static str] = &["id", "email"];
+    }
+    impl FromRow for Person {
+        fn from_row(r: &impl RowRef) -> Result<Self, RowError> {
+            Ok(Person {
+                id: r.get_i32("id")?,
+                email: r.get_string("email")?,
+            })
+        }
+    }
+
+    let table = unique_table("one_multi");
+    let pool = pool().await;
+    let engine = MssqlEngine::new(pool.clone());
+
+    engine
+        .execute_raw(
+            &format!("IF OBJECT_ID('dbo.{table}', 'U') IS NOT NULL DROP TABLE dbo.{table}"),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!(
+                "CREATE TABLE dbo.{table} (id INT IDENTITY(1,1) PRIMARY KEY, \
+                 email NVARCHAR(255) NOT NULL)"
+            ),
+            vec![],
+        )
+        .await
+        .unwrap();
+    engine
+        .execute_raw(
+            &format!("INSERT INTO dbo.{table} (email) VALUES ('a@x.com'),('b@x.com')"),
+            vec![],
+        )
+        .await
+        .unwrap();
+
+    let result = engine
+        .query_one::<Person>(
+            &format!("SELECT id, email FROM dbo.{table} ORDER BY id"),
+            Vec::<FilterValue>::new(),
+        )
+        .await;
+
+    // Observed: tiberius' `query_one` yields the first row and drops the
+    // rest. Callers that want Postgres-style "error on 2+" must add
+    // `TOP 2` + check the row count themselves.
+    match result {
+        Ok(p) => {
+            assert_eq!(
+                p.email, "a@x.com",
+                "MSSQL query_one should return the first row (by ORDER BY) \
+                 when 2+ rows match; this documents tiberius' 'take first' \
+                 semantics and must not regress silently."
+            );
+        }
+        Err(e) => {
+            panic!(
+                "MSSQL engine is documented to return the first row on a \
+                 multi-row query_one (tiberius::Client::query_one \
+                 semantics). If the driver has changed to erroring, update \
+                 this test, the Unreleased CHANGELOG migration guide, and \
+                 any callers that relied on the implicit 'take first' \
+                 behavior. Got: {e:?}"
+            );
+        }
+    }
+
+    drop_table(&pool, &table).await;
+}

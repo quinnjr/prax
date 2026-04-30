@@ -653,7 +653,7 @@ mod tests {
         assert!(matches!(filter, Filter::And(_)));
 
         // Generate SQL to verify correctness
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("AND"));
         assert!(sql.contains("OR"));
         assert!(sql.contains("NOT"));
@@ -671,7 +671,7 @@ mod tests {
             ])
         });
 
-        let (sql, params) = filter.to_sql(0);
+        let (sql, params) = filter.to_sql(0, &crate::dialect::Postgres);
         assert!(sql.contains("LIKE"));
         assert_eq!(params.len(), 3);
     }

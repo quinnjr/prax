@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::FilterValue;
-use crate::traits::{Model, QueryEngine};
+use crate::nested::NestedWriteOp;
+use crate::traits::{Model, ModelWithPk, QueryEngine};
 use crate::types::Select;
 
 /// A create operation for inserting a new record.
@@ -26,10 +27,14 @@ pub struct CreateOperation<E: QueryEngine, M: Model> {
     columns: Vec<String>,
     values: Vec<FilterValue>,
     select: Select,
+    /// Queued nested-write ops run after the parent INSERT inside an
+    /// implicit transaction. Populated by [`CreateOperation::with`].
+    /// Empty on the fast path (single INSERT, no transaction wrap).
+    nested: Vec<NestedWriteOp>,
     _model: PhantomData<M>,
 }
 
-impl<E: QueryEngine, M: Model> CreateOperation<E, M> {
+impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
     /// Create a new Create operation.
     pub fn new(engine: E) -> Self {
         Self {
@@ -37,6 +42,7 @@ impl<E: QueryEngine, M: Model> CreateOperation<E, M> {
             columns: Vec::new(),
             values: Vec::new(),
             select: Select::All,
+            nested: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -66,8 +72,43 @@ impl<E: QueryEngine, M: Model> CreateOperation<E, M> {
         self
     }
 
+    /// Queue a nested write to run alongside this create.
+    ///
+    /// The parent `INSERT` and every queued nested op execute inside a
+    /// single implicit transaction — any failure rolls back the parent
+    /// INSERT too. Typical use is via the codegen-emitted per-relation
+    /// helpers:
+    ///
+    /// ```rust,ignore
+    /// c.user().create()
+    ///     .set("email", "u@x.com")
+    ///     .with(user::posts::create(vec![
+    ///         vec![("title".into(), "p1".into())],
+    ///     ]))
+    ///     .exec().await?;
+    /// ```
+    pub fn with(mut self, nw: NestedWriteOp) -> Self {
+        self.nested.push(nw);
+        self
+    }
+
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
+        Self::build_insert_sql(&self.columns, &self.values, &self.select, dialect)
+    }
+
+    /// Free-function form of [`Self::build_sql`] — takes the pieces by
+    /// reference so the `exec` path can reuse it after destructuring
+    /// `self` to move the captured state into the transaction closure.
+    fn build_insert_sql(
+        columns: &[String],
+        values: &[FilterValue],
+        select: &Select,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
 
         // INSERT INTO clause
@@ -76,29 +117,69 @@ impl<E: QueryEngine, M: Model> CreateOperation<E, M> {
 
         // Columns
         sql.push_str(" (");
-        sql.push_str(&self.columns.join(", "));
+        sql.push_str(&columns.join(", "));
         sql.push(')');
 
         // VALUES
         sql.push_str(" VALUES (");
-        let placeholders: Vec<_> = (1..=self.values.len()).map(|i| format!("${}", i)).collect();
+        let placeholders: Vec<_> = (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
         sql.push_str(&placeholders.join(", "));
         sql.push(')');
 
         // RETURNING clause
-        sql.push_str(" RETURNING ");
-        sql.push_str(&self.select.to_sql());
+        sql.push_str(&dialect.returning_clause(&select.to_sql()));
 
-        (sql, self.values.clone())
+        (sql, values.to_vec())
     }
 
     /// Execute the create operation and return the created record.
+    ///
+    /// When no nested writes have been queued via [`Self::with`], this
+    /// runs a single `INSERT ... RETURNING` (or equivalent) against the
+    /// engine. When nested writes are queued, the whole operation is
+    /// wrapped in a transaction — the parent `INSERT` runs first, then
+    /// each nested op in order; if any nested op fails the parent
+    /// insert is rolled back too.
+    ///
+    /// The `ModelWithPk` bound on the transactional branch is what
+    /// gives the nested-write executor the parent's primary-key value
+    /// to splice into child rows' foreign-key columns.
     pub async fn exec(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelWithPk,
     {
-        let (sql, params) = self.build_sql();
-        self.engine.execute_insert::<M>(&sql, params).await
+        let CreateOperation {
+            engine,
+            columns,
+            values,
+            select,
+            nested,
+            _model,
+        } = self;
+
+        // Fast path: no nested writes, run the INSERT directly.
+        if nested.is_empty() {
+            let dialect = engine.dialect();
+            let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
+            return engine.execute_insert::<M>(&sql, params).await;
+        }
+
+        // Slow path: wrap the INSERT + nested writes in a transaction.
+        // `engine.transaction` clones the engine into the closure and
+        // routes every query emitted inside through the same `BEGIN`
+        // block. A non-Ok return from the closure triggers ROLLBACK.
+        engine
+            .transaction(move |tx| async move {
+                let dialect = tx.dialect();
+                let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
+                let parent: M = tx.execute_insert::<M>(&sql, params).await?;
+                let parent_pk = parent.pk_value();
+                for nw in nested {
+                    nw.execute(&tx, &parent_pk).await?;
+                }
+                Ok(parent)
+            })
+            .await
     }
 }
 
@@ -153,7 +234,10 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
         let mut all_params = Vec::new();
 
@@ -177,7 +261,7 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
                 .iter()
                 .map(|v| {
                     all_params.push(v.clone());
-                    let placeholder = format!("${}", param_idx);
+                    let placeholder = dialect.placeholder(param_idx);
                     param_idx += 1;
                     placeholder
                 })
@@ -197,7 +281,8 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
 
     /// Execute the create operation and return the number of created records.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_raw(&sql, params).await
     }
 }
@@ -214,6 +299,25 @@ mod tests {
         const TABLE_NAME: &'static str = "test_models";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
+    }
+
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
+    }
+
+    // Gate the transactional `CreateOperation::exec` path in tests:
+    // the new nested-write wiring requires `ModelWithPk` on the return
+    // type. A fixed constant PK is fine because these tests never
+    // exercise the nested path — they only need exec() to compile.
+    impl crate::traits::ModelWithPk for TestModel {
+        fn pk_value(&self) -> FilterValue {
+            FilterValue::Int(0)
+        }
+        fn get_column_value(&self, _column: &str) -> Option<FilterValue> {
+            None
+        }
     }
 
     #[derive(Clone)]
@@ -234,7 +338,11 @@ mod tests {
     }
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -242,7 +350,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -250,7 +358,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -258,7 +366,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -266,7 +374,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -305,7 +413,7 @@ mod tests {
     #[test]
     fn test_create_new() {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("RETURNING *"));
@@ -318,7 +426,7 @@ mod tests {
             .set("name", "Alice")
             .set("email", "alice@example.com");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("(name, email)"));
@@ -332,7 +440,7 @@ mod tests {
         let op =
             CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name)"));
         assert!(sql.contains("VALUES ($1)"));
@@ -348,7 +456,7 @@ mod tests {
         ];
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set_many(values);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name, email, age)"));
         assert!(sql.contains("VALUES ($1, $2, $3)"));
@@ -361,7 +469,7 @@ mod tests {
             .set("name", "Alice")
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING id, name"));
         assert!(!sql.contains("RETURNING *"));
@@ -373,7 +481,7 @@ mod tests {
             .set("name", "Alice")
             .set("nickname", FilterValue::Null);
 
-        let (_sql, params) = op.build_sql();
+        let (_sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 2);
         assert_eq!(params[1], FilterValue::Null);
@@ -384,7 +492,7 @@ mod tests {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("active", FilterValue::Bool(true));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Bool(true));
     }
@@ -395,7 +503,7 @@ mod tests {
             .set("count", FilterValue::Int(42))
             .set("price", FilterValue::Float(99.99));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Int(42));
         assert_eq!(params[1], FilterValue::Float(99.99));
@@ -407,7 +515,7 @@ mod tests {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("metadata", FilterValue::Json(json.clone()));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[0], FilterValue::Json(json));
     }
@@ -428,7 +536,7 @@ mod tests {
     #[test]
     fn test_create_many_new() {
         let op = CreateManyOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(!sql.contains("RETURNING")); // CreateMany doesn't return
@@ -442,7 +550,7 @@ mod tests {
             .row(["Alice", "alice@example.com"])
             .row(["Bob", "bob@example.com"]);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
         assert!(sql.contains("(name, email)"));
@@ -456,7 +564,7 @@ mod tests {
             .columns(["name"])
             .row(["Alice"]);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("VALUES ($1)"));
         assert_eq!(params.len(), 1);
@@ -469,7 +577,7 @@ mod tests {
             .row(["Alice", "alice@example.com"])
             .skip_duplicates();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT DO NOTHING"));
     }
@@ -480,7 +588,7 @@ mod tests {
             .columns(["name"])
             .row(["Alice"]);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("ON CONFLICT"));
     }
@@ -496,7 +604,7 @@ mod tests {
             .columns(["name", "email"])
             .rows(rows);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("VALUES ($1, $2), ($3, $4), ($5, $6)"));
         assert_eq!(params.len(), 6);
@@ -509,7 +617,7 @@ mod tests {
             .row(["1", "2"])
             .row(["3", "4"]);
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Params should be ordered: row1.a, row1.b, row2.a, row2.b
         assert_eq!(params[0], FilterValue::String("1".to_string()));
@@ -540,7 +648,7 @@ mod tests {
             .set("name", "Alice")
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let insert_pos = sql.find("INSERT INTO").unwrap();
         let columns_pos = sql.find("(name)").unwrap();
@@ -559,7 +667,7 @@ mod tests {
             .row(["Alice", "alice@test.com"])
             .skip_duplicates();
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         let insert_pos = sql.find("INSERT INTO").unwrap();
         let columns_pos = sql.find("(name, email)").unwrap();
@@ -574,7 +682,7 @@ mod tests {
     #[test]
     fn test_create_table_name() {
         let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -588,7 +696,7 @@ mod tests {
             .set("email", "alice@test.com")
             .select(Select::fields(["id", "name"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("(name, email)"));
         assert!(sql.contains("VALUES ($1, $2)"));
@@ -604,9 +712,57 @@ mod tests {
             .row(["3", "4"])
             .skip_duplicates();
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("ON CONFLICT DO NOTHING"));
         assert_eq!(params.len(), 4);
+    }
+
+    // ========== Cross-Dialect Tests ==========
+
+    #[test]
+    fn create_mssql_emits_output_inserted() {
+        let op =
+            CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
+        let (sql, _) = op.build_sql(&crate::dialect::Mssql);
+        assert!(
+            sql.contains(" OUTPUT INSERTED.*"),
+            "expected OUTPUT INSERTED.*, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn create_mssql_emits_output_inserted_for_multiple_columns() {
+        // Regression guard: the dialect-level test at
+        // `dialect::tests::returning_mssql_is_output_inserted` verifies the
+        // per-column prefix expansion of `Mssql::returning_clause`, but not
+        // the wiring from the operation builder's `Select` list into that
+        // clause. If a future refactor fails to pass the selected columns
+        // through to the dialect, that path would silently fall back to
+        // `OUTPUT INSERTED.*`. This test pins the end-to-end SQL emitted by
+        // `CreateOperation::build_sql` when a narrow column list is set.
+        let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .set("name", "Alice")
+            .set("email", "alice@example.com")
+            .select(Select::fields(["id", "email"]));
+
+        let (sql, params) = op.build_sql(&crate::dialect::Mssql);
+        assert!(
+            sql.contains(" OUTPUT INSERTED.id, INSERTED.email"),
+            "expected OUTPUT INSERTED.id, INSERTED.email, got: {sql}"
+        );
+        assert!(
+            !sql.contains("INSERTED.*"),
+            "narrow Select must not fall back to INSERTED.*: {sql}"
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn create_postgres_emits_returning() {
+        let op =
+            CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("RETURNING "), "expected RETURNING, got: {sql}");
     }
 }

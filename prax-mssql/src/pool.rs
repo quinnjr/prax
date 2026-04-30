@@ -79,6 +79,18 @@ impl MssqlPool {
         Ok(client)
     }
 
+    /// Acquire a raw bb8-owned pooled connection with a `'static`
+    /// lifetime. Needed by [`crate::engine::MssqlEngine::transaction`]
+    /// so the pinned connection can outlive any particular stack
+    /// frame — bb8's borrowed `get()` handle can't cross a closure
+    /// boundary into the engine clone we hand the transaction
+    /// closure. The usual pool-mode code path still uses
+    /// [`MssqlPool::get`].
+    pub async fn get_owned(&self) -> MssqlResult<PooledConnection<'static, ConnectionManager>> {
+        let client = self.inner.get_owned().await?;
+        Ok(client)
+    }
+
     /// Get the current pool status.
     pub fn status(&self) -> PoolStatus {
         let state = self.inner.state();

@@ -24,18 +24,23 @@
 //!     Ok(())
 //! }
 //! ```
+//!
+//! See [`MysqlEngine`]'s doc block for 0.7 breaking changes.
 
 pub mod config;
 pub mod connection;
 pub mod engine;
 pub mod error;
 pub mod pool;
+pub mod raw;
 pub mod row;
+pub mod row_ref;
 pub mod types;
 
 pub use config::MysqlConfig;
 pub use connection::MysqlConnection;
-pub use engine::{MysqlEngine, MysqlQueryResult};
+pub use engine::MysqlEngine;
 pub use error::{MysqlError, MysqlResult};
 pub use pool::{MysqlPool, MysqlPoolBuilder, PoolConfig};
+pub use raw::{MysqlJsonRow, MysqlRawEngine};
 pub use row::FromMysqlRow;

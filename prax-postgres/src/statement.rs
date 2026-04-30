@@ -5,7 +5,7 @@ use std::sync::RwLock;
 
 use deadpool_postgres::{Object, Transaction};
 use tokio_postgres::Statement;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::error::PgResult;
 
@@ -40,9 +40,9 @@ impl PreparedStatementCache {
         };
 
         if is_cached {
-            debug!(sql = %sql, "Using cached prepared statement");
+            trace!(sql = %sql, "Using cached prepared statement");
         } else {
-            debug!(sql = %sql, "Preparing new statement");
+            trace!(sql = %sql, "Preparing new statement");
 
             // Check cache size and potentially evict
             let mut cache = self.prepared_queries.write().unwrap();
@@ -75,9 +75,9 @@ impl PreparedStatementCache {
         };
 
         if is_cached {
-            debug!(sql = %sql, "Using cached prepared statement (txn)");
+            trace!(sql = %sql, "Using cached prepared statement (txn)");
         } else {
-            debug!(sql = %sql, "Preparing new statement (txn)");
+            trace!(sql = %sql, "Preparing new statement (txn)");
 
             let mut cache = self.prepared_queries.write().unwrap();
             if cache.len() >= self.max_size {

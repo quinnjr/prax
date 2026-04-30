@@ -225,7 +225,7 @@
 //!
 //! ### Filter Operations
 //!
-//! ```rust,ignore
+//! ```text
 //! // Equality
 //! user::email::equals("test@example.com")
 //!
@@ -630,6 +630,20 @@ pub mod schema {
 pub use prax_codegen::Model;
 pub use prax_codegen::prax_schema;
 
+/// Top-level `PraxClient<E>` and the `prax::client!` macro. See the
+/// [`client`](mod@client) module docs for usage.
+pub mod client;
+pub use client::PraxClient;
+// The `client!` macro is re-exported automatically by `#[macro_export]`.
+
+// Macro plumbing: the expansion of `client!` references `$crate::__paste`
+// and `$crate::__prelude`. Re-export them at the crate root so callers do
+// not have to think about where the symbols live.
+#[doc(hidden)]
+pub use client::__paste;
+#[doc(hidden)]
+pub use client::__prelude;
+
 /// Prelude module for convenient imports.
 ///
 /// Import everything you need with a single line:
@@ -643,6 +657,7 @@ pub use prax_codegen::prax_schema;
 /// - Configuration types
 /// - Common traits and types
 pub mod prelude {
+    pub use crate::client::PraxClient;
     pub use crate::schema::{PraxConfig, Schema, parse_schema, parse_schema_file};
     pub use crate::{Model, prax_schema};
 }
@@ -656,4 +671,28 @@ pub use schema::{Schema, SchemaError};
 /// errors including parsing, validation, and file I/O.
 pub mod error {
     pub use prax_schema::SchemaError;
+}
+
+/// Common types used by generated Prax models.
+///
+/// This module is referenced by the `#[derive(Model)]` proc-macro.
+#[doc(hidden)]
+pub mod _prax_prelude {
+    /// Marker trait for Prax models.
+    pub trait PraxModel {
+        /// The table name in the database.
+        const TABLE_NAME: &'static str;
+
+        /// The primary key column(s).
+        const PRIMARY_KEY: &'static [&'static str];
+    }
+
+    /// Sort direction for order by clauses.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SortOrder {
+        /// Ascending order (A-Z, 0-9).
+        Asc,
+        /// Descending order (Z-A, 9-0).
+        Desc,
+    }
 }

@@ -1,10 +1,16 @@
 //! Code generators for Prax models, enums, types, and views.
 
 mod derive;
+mod derive_client;
+mod derive_from_row;
+mod derive_model_trait;
+mod derive_model_with_pk;
+mod derive_relation_loader;
 mod enum_gen;
 mod fields;
 mod filters;
 mod model;
+mod relation_accessors;
 mod type_gen;
 mod view;
 

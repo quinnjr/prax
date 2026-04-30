@@ -3,8 +3,6 @@
 //! Provides high-level operations for interacting with ScyllaDB.
 
 use scylla::batch::Batch;
-#[allow(unused_imports)]
-use scylla::frame::response::result::Row;
 use scylla::query::Query;
 use scylla::serialize::batch::BatchValues;
 use scylla::serialize::row::SerializeRow;
@@ -264,6 +262,257 @@ impl ScyllaEngine {
     pub fn table<T: FromScyllaRow>(&self, table: &str) -> TableQuery<T> {
         TableQuery::new(self.clone(), table.to_string())
     }
+
+    /// Shared fetch path for the prax-query `QueryEngine` impl. Converts
+    /// `FilterValue` parameters to `CqlValue` via the crate's existing
+    /// `ToCqlValue` trait, extracts column names from the query result,
+    /// and hands each row to the caller's `FromRow` via `ScyllaRowRef`.
+    async fn fetch_typed<T: prax_query::traits::Model + prax_query::row::FromRow>(
+        &self,
+        cql: &str,
+        params: &[prax_query::filter::FilterValue],
+    ) -> prax_query::QueryResult<Vec<T>> {
+        use crate::types::ToCqlValue;
+        let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+            .iter()
+            .map(|v| v.to_cql())
+            .collect::<ScyllaResult<_>>()
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        let result = self
+            .pool
+            .execute(cql, cql_values)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        let col_names: Vec<String> = result
+            .col_specs()
+            .iter()
+            .map(|c| c.name.to_string())
+            .collect();
+        let rows = result.rows.unwrap_or_default();
+        rows.into_iter()
+            .map(|row| {
+                let r =
+                    crate::row_ref::ScyllaRowRef::from_scylla(row, &col_names).map_err(|e| {
+                        let msg = e.to_string();
+                        prax_query::QueryError::deserialization(msg).with_source(e)
+                    })?;
+                T::from_row(&r).map_err(|e| {
+                    let msg = e.to_string();
+                    prax_query::QueryError::deserialization(msg).with_source(e)
+                })
+            })
+            .collect()
+    }
+
+    async fn fetch_affected(
+        &self,
+        cql: &str,
+        params: &[prax_query::filter::FilterValue],
+    ) -> prax_query::QueryResult<u64> {
+        use crate::types::ToCqlValue;
+        let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+            .iter()
+            .map(|v| v.to_cql())
+            .collect::<ScyllaResult<_>>()
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        self.pool
+            .execute(cql, cql_values)
+            .await
+            .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+        // Scylla doesn't report affected-row counts for CQL statements.
+        // Returning 0 is honest; callers that need a count should issue
+        // a follow-up SELECT.
+        Ok(0)
+    }
+}
+
+impl prax_query::traits::QueryEngine for ScyllaEngine {
+    fn dialect(&self) -> &dyn prax_query::dialect::SqlDialect {
+        &prax_query::dialect::Cql
+    }
+
+    fn query_many<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_typed::<T>(&sql, &params).await })
+    }
+
+    fn query_one<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
+        })
+    }
+
+    fn query_optional<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Option<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            let mut rows: Vec<T> = self.fetch_typed::<T>(&sql, &params).await?;
+            Ok(rows.drain(..).next())
+        })
+    }
+
+    fn execute_insert<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<T>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            // CQL has no RETURNING. Run the INSERT, then issue a
+            // follow-up SELECT keyed on the PK columns extracted from
+            // the bound params. The codegen passes the columns in the
+            // same order as T::COLUMNS, so we can find the PK values
+            // by position.
+            self.fetch_affected(&sql, &params).await?;
+
+            // Extract the PK columns from COLUMNS by name match.
+            let pk_columns = T::PRIMARY_KEY;
+            if pk_columns.is_empty() {
+                return Err(prax_query::QueryError::unsupported(
+                    "ScyllaEngine::execute_insert requires Model::PRIMARY_KEY to be non-empty",
+                ));
+            }
+
+            // Parse `INSERT INTO t (col1, col2, ...) VALUES (...)` to
+            // recover the column→param index mapping. Fail loudly if
+            // we can't locate the column list — callers that bypass
+            // the generic builder get a clean error.
+            let insert_cols = parse_insert_columns(&sql).ok_or_else(|| {
+                prax_query::QueryError::internal(
+                    "ScyllaEngine::execute_insert: could not parse INSERT column list",
+                )
+            })?;
+
+            // Build WHERE clause using the PK column positions.
+            let mut where_parts = Vec::with_capacity(pk_columns.len());
+            let mut where_params = Vec::with_capacity(pk_columns.len());
+            for pk in pk_columns {
+                let idx = insert_cols.iter().position(|c| c == pk).ok_or_else(|| {
+                    prax_query::QueryError::internal(format!(
+                        "ScyllaEngine::execute_insert: PK column {pk} not in INSERT list"
+                    ))
+                })?;
+                where_parts.push(format!("{} = ?", pk));
+                where_params.push(params.get(idx).cloned().ok_or_else(|| {
+                    prax_query::QueryError::internal(
+                        "ScyllaEngine::execute_insert: param index out of range",
+                    )
+                })?);
+            }
+            let select_sql = format!(
+                "SELECT {} FROM {} WHERE {}",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME,
+                where_parts.join(" AND "),
+            );
+            let mut rows = self.fetch_typed::<T>(&select_sql, &where_params).await?;
+            if rows.is_empty() {
+                Err(prax_query::QueryError::not_found(T::MODEL_NAME))
+            } else {
+                Ok(rows.swap_remove(0))
+            }
+        })
+    }
+
+    fn execute_update<T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static>(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<Vec<T>>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            // Run the UPDATE, then re-SELECT rows that match the WHERE
+            // clause. The WHERE is extracted from the generated SQL so
+            // the follow-up SELECT sees the same filter.
+            self.fetch_affected(&sql, &params).await?;
+
+            let where_clause = extract_update_where(&sql).ok_or_else(|| {
+                prax_query::QueryError::internal(
+                    "ScyllaEngine::execute_update: could not parse WHERE clause",
+                )
+            })?;
+            // The WHERE params are the tail of `params` — the UPDATE
+            // SET clause consumes the head. Count the SET placeholders
+            // to find the split point.
+            let set_count = count_set_placeholders(&sql).unwrap_or(0);
+            let where_params: Vec<_> = params.into_iter().skip(set_count).collect();
+            let select_sql = format!(
+                "SELECT {} FROM {} WHERE {}",
+                T::COLUMNS.join(", "),
+                T::TABLE_NAME,
+                where_clause,
+            );
+            self.fetch_typed::<T>(&select_sql, &where_params).await
+        })
+    }
+
+    fn execute_delete(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn execute_raw(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move { self.fetch_affected(&sql, &params).await })
+    }
+
+    fn count(
+        &self,
+        sql: &str,
+        params: Vec<prax_query::filter::FilterValue>,
+    ) -> prax_query::traits::BoxFuture<'_, prax_query::QueryResult<u64>> {
+        let sql = sql.to_string();
+        Box::pin(async move {
+            use crate::types::ToCqlValue;
+            let cql_values: Vec<scylla::frame::response::result::CqlValue> = params
+                .iter()
+                .map(|v| v.to_cql())
+                .collect::<ScyllaResult<_>>()
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let result = self
+                .pool
+                .execute(&sql, cql_values)
+                .await
+                .map_err(|e| prax_query::QueryError::database(e.to_string()).with_source(e))?;
+            let rows = result.rows.unwrap_or_default();
+            let first = rows.into_iter().next().ok_or_else(|| {
+                prax_query::QueryError::deserialization("count returned no row".to_string())
+            })?;
+            // COUNT(*) in CQL returns a single BigInt column.
+            match first.columns.first() {
+                Some(Some(scylla::frame::response::result::CqlValue::BigInt(n))) => Ok(*n as u64),
+                Some(Some(scylla::frame::response::result::CqlValue::Int(n))) => Ok(*n as u64),
+                _ => Err(prax_query::QueryError::deserialization(
+                    "count column missing or wrong type in CQL result".to_string(),
+                )),
+            }
+        })
+    }
 }
 
 impl std::fmt::Debug for ScyllaEngine {
@@ -432,6 +681,15 @@ impl<T> std::fmt::Debug for TableQuery<T> {
             .finish()
     }
 }
+
+// SQL-string-parsing helpers live in prax_query::sql::parse — this
+// driver re-exports them under their old names for backwards
+// compatibility with earlier commits. New call sites inside the
+// driver use the shared path directly.
+use prax_query::sql::parse::{
+    count_set_placeholders, extract_insert_columns as parse_insert_columns,
+    extract_where_body as extract_update_where,
+};
 
 #[cfg(test)]
 mod tests {

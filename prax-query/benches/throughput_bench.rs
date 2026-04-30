@@ -33,7 +33,7 @@ fn bench_crud_throughput(c: &mut Criterion) {
     group.bench_function("find_by_id", |b| {
         b.iter(|| {
             let filter = Filter::Equals("id".into(), FilterValue::Int(12345));
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!("SELECT * FROM users WHERE {}", sql);
             black_box((query, params))
         });
@@ -43,7 +43,7 @@ fn bench_crud_throughput(c: &mut Criterion) {
     group.bench_function("find_many_simple", |b| {
         b.iter(|| {
             let filter = Filter::Equals("status".into(), FilterValue::String("active".into()));
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!("SELECT * FROM users WHERE {} LIMIT 100", sql);
             black_box((query, params))
         });
@@ -58,7 +58,7 @@ fn bench_crud_throughput(c: &mut Criterion) {
                 Filter::Lt("age".into(), FilterValue::Int(65)),
                 Filter::IsNotNull("email".into()),
             ]);
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!(
                 "SELECT * FROM users WHERE {} ORDER BY created_at DESC LIMIT 50",
                 sql
@@ -83,7 +83,7 @@ fn bench_crud_throughput(c: &mut Criterion) {
     group.bench_function("delete_by_id", |b| {
         b.iter(|| {
             let filter = Filter::Equals("id".into(), FilterValue::Int(12345));
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!("DELETE FROM users WHERE {}", sql);
             black_box((query, params))
         });
@@ -146,7 +146,7 @@ fn bench_batch_throughput(c: &mut Criterion) {
                 .collect();
             let filter = Filter::In("id".into(), ids);
             b.iter(|| {
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 let query = format!("SELECT * FROM users WHERE {}", sql);
                 black_box((query, params))
             });
@@ -159,7 +159,7 @@ fn bench_batch_throughput(c: &mut Criterion) {
                 .collect();
             let filter = Filter::In("id".into(), ids);
             b.iter(|| {
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 let query = format!("DELETE FROM users WHERE {}", sql);
                 black_box((query, params))
             });
@@ -182,7 +182,7 @@ fn bench_query_pattern_throughput(c: &mut Criterion) {
     group.bench_function("paginated_list", |b| {
         b.iter(|| {
             let filter = Filter::Equals("status".into(), FilterValue::String("active".into()));
-            let (where_sql, params) = filter.to_sql(0);
+            let (where_sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
 
             let query = format!(
                 "SELECT id, email, name, created_at FROM users WHERE {} ORDER BY created_at DESC LIMIT 25 OFFSET 100",
@@ -203,7 +203,7 @@ fn bench_query_pattern_throughput(c: &mut Criterion) {
                 ]),
                 Filter::Equals("status".into(), FilterValue::String("active".into())),
             ]);
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!(
                 "SELECT * FROM users WHERE {} ORDER BY relevance DESC LIMIT 20",
                 sql
@@ -273,7 +273,7 @@ fn bench_high_throughput(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..1000 {
                 let filter = Filter::Equals("id".into(), FilterValue::Int(i));
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 black_box((sql, params));
             }
         });
@@ -286,7 +286,7 @@ fn bench_high_throughput(c: &mut Criterion) {
         b.iter(|| {
             for i in 0..1000 {
                 let filter = Filter::Equals(id_field.to_cow(), FilterValue::Int(i));
-                let (sql, params) = filter.to_sql(0);
+                let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
                 black_box((sql, params));
             }
         });
@@ -333,7 +333,7 @@ fn bench_realistic_scenarios(c: &mut Criterion) {
                     ],
                 ),
             ]);
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!(
                 "SELECT * FROM products WHERE {} ORDER BY relevance DESC, price ASC LIMIT 24",
                 sql
@@ -412,7 +412,7 @@ fn bench_realistic_scenarios(c: &mut Criterion) {
                     FilterValue::String("2024-01-01".into()),
                 ),
             ]);
-            let (sql, params) = filter.to_sql(0);
+            let (sql, params) = filter.to_sql(0, &prax_query::dialect::Postgres);
             let query = format!(
                 "SELECT * FROM orders WHERE {} ORDER BY created_at DESC LIMIT 100",
                 sql

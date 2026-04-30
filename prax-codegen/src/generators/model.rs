@@ -12,6 +12,21 @@ use super::fields::{
 use super::{generate_doc_comment, pascal_ident, snake_ident};
 use crate::types::field_type_to_rust;
 
+/// Pull the `@map("col")` override for a field, falling back to its
+/// declared name. Mirrors the serde-rename logic further down — both
+/// must agree on which string names the column in SQL vs. the struct
+/// field in Rust.
+fn column_name_of(field: &prax_schema::ast::Field) -> String {
+    field
+        .attributes
+        .iter()
+        .find(|a| a.name() == "map")
+        .and_then(|a| a.first_arg())
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| field.name().to_string())
+}
+
 /// Generate the complete module for a model.
 ///
 /// When `model_style` is `GraphQL`, the generated structs will include
@@ -134,6 +149,58 @@ pub fn generate_model_module_with_style(
     // Generate relation helpers
     let relation_helpers = generate_relation_helpers(model, schema);
 
+    // Gather scalar columns + typed field tuples for the Model/FromRow impls.
+    // Relation (`Vec<Model>`-typed) fields are excluded: they are not columns
+    // and don't round-trip through FromRow.
+    let all_columns: Vec<String> = model
+        .fields
+        .values()
+        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .map(column_name_of)
+        .collect();
+    let pk_columns_owned: Vec<String> = pk_fields.clone();
+    let from_row_fields: Vec<(syn::Ident, syn::Type, String)> = model
+        .fields
+        .values()
+        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| {
+            let rust_field = snake_ident(f.name());
+            let rust_ty: syn::Type =
+                syn::parse2(field_type_to_rust(&f.field_type, &f.modifier).into())
+                    .expect("generated Rust type should parse");
+            (rust_field, rust_ty, column_name_of(f))
+        })
+        .collect();
+    // Same tuple shape plus an is_id flag. ModelWithPk's `pk_value()`
+    // reads only the id fields; `get_column_value()` routes every
+    // scalar column, so we need the same rows from_row_fields has.
+    let model_with_pk_fields: Vec<(syn::Ident, syn::Type, String, bool)> = model
+        .fields
+        .values()
+        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| {
+            let rust_field = snake_ident(f.name());
+            let rust_ty: syn::Type =
+                syn::parse2(field_type_to_rust(&f.field_type, &f.modifier).into())
+                    .expect("generated Rust type should parse");
+            (rust_field, rust_ty, column_name_of(f), f.is_id())
+        })
+        .collect();
+
+    let model_trait_impl = super::derive_model_trait::emit(
+        &model_name,
+        model.name(),
+        &table_name,
+        &pk_columns_owned,
+        &all_columns,
+    );
+    // The prax_schema! path filters `FieldType::Model(_)` relation
+    // fields out of `from_row_fields` above; pass an empty slice for
+    // relation defaults to keep the `FromRow` shape unchanged.
+    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[]);
+    let model_with_pk_impl = super::derive_model_with_pk::emit(&model_name, &model_with_pk_fields);
+    let client_impl = super::derive_client::emit(quote! { #model_name });
+
     // Generate GraphQL derives if model_style is GraphQL
     let model_name_str = model.name();
     let (model_derives, create_input_derives, update_input_derives) = if model_style.is_graphql() {
@@ -177,7 +244,7 @@ pub fn generate_model_module_with_style(
                 #(#data_fields,)*
             }
 
-            impl super::_prax_prelude::PraxModel for #model_name {
+            impl ::prax_orm::_prax_prelude::PraxModel for #model_name {
                 const TABLE_NAME: &'static str = TABLE_NAME;
                 const PRIMARY_KEY: &'static [&'static str] = PRIMARY_KEY;
             }
@@ -205,7 +272,14 @@ pub fn generate_model_module_with_style(
             #order_by_param
             #set_param
 
-            // Query builder
+            // Model, FromRow, ModelWithPk, and Client<E> — mirrors what
+            // #[derive(Model)] emits.
+            #model_trait_impl
+            #from_row_impl
+            #model_with_pk_impl
+            #client_impl
+
+            // Query/Actions pre-compiled-SQL builders (legacy, being replaced by Client<E>).
             #query_builder
 
             // Pre-compiled SQL
@@ -256,7 +330,16 @@ fn generate_where_param(model: &Model) -> TokenStream {
         .map(|field| {
             let name = pascal_ident(field.name());
             let field_mod = snake_ident(field.name());
-            quote! { Self::#name(op) => #field_mod::COLUMN }
+            quote! { Self::#name(_op) => Some(#field_mod::COLUMN) }
+        })
+        .collect();
+
+    let from_filter_arms: Vec<_> = model
+        .fields
+        .values()
+        .map(|field| {
+            let name = pascal_ident(field.name());
+            quote! { WhereParam::#name(op) => op.to_filter(), }
         })
         .collect();
 
@@ -295,6 +378,21 @@ fn generate_where_param(model: &Model) -> TokenStream {
             /// Negate a condition.
             pub fn not(condition: WhereParam) -> Self {
                 Self::Not(Box::new(condition))
+            }
+        }
+
+        impl From<WhereParam> for prax_query::filter::Filter {
+            fn from(p: WhereParam) -> Self {
+                match p {
+                    #(#from_filter_arms)*
+                    WhereParam::And(ps) => prax_query::filter::Filter::And(
+                        ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                    ),
+                    WhereParam::Or(ps) => prax_query::filter::Filter::Or(
+                        ps.into_iter().map(Into::into).collect::<Vec<_>>().into_boxed_slice()
+                    ),
+                    WhereParam::Not(p) => prax_query::filter::Filter::Not(Box::new((*p).into())),
+                }
             }
         }
     }

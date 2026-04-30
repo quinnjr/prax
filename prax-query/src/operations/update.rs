@@ -28,7 +28,7 @@ pub struct UpdateOperation<E: QueryEngine, M: Model> {
     _model: PhantomData<M>,
 }
 
-impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
+impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
     /// Create a new Update operation.
     pub fn new(engine: E) -> Self {
         Self {
@@ -78,7 +78,10 @@ impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut param_idx = 1;
@@ -94,7 +97,7 @@ impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
             .iter()
             .map(|(col, val)| {
                 params.push(val.clone());
-                let part = format!("{} = ${}", col, param_idx);
+                let part = format!("{} = {}", col, dialect.placeholder(param_idx));
                 param_idx += 1;
                 part
             })
@@ -103,15 +106,14 @@ impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
 
         // WHERE clause
         if !self.filter.is_none() {
-            let (where_sql, where_params) = self.filter.to_sql(param_idx - 1);
+            let (where_sql, where_params) = self.filter.to_sql(param_idx - 1, dialect);
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
         }
 
         // RETURNING clause
-        sql.push_str(" RETURNING ");
-        sql.push_str(&self.select.to_sql());
+        sql.push_str(&dialect.returning_clause(&self.select.to_sql()));
 
         (sql, params)
     }
@@ -121,7 +123,8 @@ impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_update::<M>(&sql, params).await
     }
 
@@ -130,7 +133,8 @@ impl<E: QueryEngine, M: Model> UpdateOperation<E, M> {
     where
         M: Send + 'static,
     {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.query_one::<M>(&sql, params).await
     }
 }
@@ -168,7 +172,10 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
     }
 
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<FilterValue>) {
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<FilterValue>) {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut param_idx = 1;
@@ -184,7 +191,7 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
             .iter()
             .map(|(col, val)| {
                 params.push(val.clone());
-                let part = format!("{} = ${}", col, param_idx);
+                let part = format!("{} = {}", col, dialect.placeholder(param_idx));
                 param_idx += 1;
                 part
             })
@@ -193,7 +200,7 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
 
         // WHERE clause
         if !self.filter.is_none() {
-            let (where_sql, where_params) = self.filter.to_sql(param_idx - 1);
+            let (where_sql, where_params) = self.filter.to_sql(param_idx - 1, dialect);
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -204,7 +211,8 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
 
     /// Execute the update and return the count of modified records.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.build_sql();
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
         self.engine.execute_raw(&sql, params).await
     }
 }
@@ -222,6 +230,12 @@ mod tests {
         const TABLE_NAME: &'static str = "test_models";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
+    }
+
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
     }
 
     #[derive(Clone)]
@@ -242,7 +256,11 @@ mod tests {
     }
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -250,7 +268,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -258,7 +276,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -266,7 +284,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -274,7 +292,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -313,7 +331,7 @@ mod tests {
     #[test]
     fn test_update_new() {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("UPDATE test_models SET"));
         assert!(sql.contains("RETURNING *"));
@@ -326,7 +344,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .set("name", "Updated");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("UPDATE test_models SET"));
         assert!(sql.contains("name = $1"));
@@ -341,7 +359,7 @@ mod tests {
             .set("name", "Updated")
             .set("email", "updated@example.com");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("name = $1"));
         assert!(sql.contains("email = $2"));
@@ -357,7 +375,7 @@ mod tests {
         ];
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set_many(updates);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("name = $1"));
         assert!(sql.contains("email = $2"));
@@ -370,7 +388,7 @@ mod tests {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .increment("counter", 5);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("counter = $1"));
         assert_eq!(params.len(), 1);
@@ -383,7 +401,7 @@ mod tests {
             .set("name", "Updated")
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("RETURNING id, name"));
     }
@@ -398,7 +416,7 @@ mod tests {
             .r#where(Filter::Gt("age".into(), FilterValue::Int(18)))
             .set("verified", FilterValue::Bool(true));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -410,7 +428,7 @@ mod tests {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("status", "updated");
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Should not have WHERE clause
         assert!(!sql.contains("WHERE"));
@@ -422,7 +440,7 @@ mod tests {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("deleted_at", FilterValue::Null);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("deleted_at = $1"));
         assert_eq!(params.len(), 1);
@@ -435,7 +453,7 @@ mod tests {
             .set("active", FilterValue::Bool(true))
             .set("verified", FilterValue::Bool(false));
 
-        let (_sql, params) = op.build_sql();
+        let (_sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], FilterValue::Bool(true));
@@ -467,7 +485,7 @@ mod tests {
     #[test]
     fn test_update_many_new() {
         let op = UpdateManyOperation::<MockEngine, TestModel>::new(MockEngine::new());
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("UPDATE test_models SET"));
         assert!(!sql.contains("RETURNING")); // UpdateMany doesn't return records
@@ -487,7 +505,7 @@ mod tests {
             ))
             .set("status", "processed");
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("UPDATE test_models SET"));
         assert!(sql.contains("status = $1"));
@@ -506,7 +524,7 @@ mod tests {
             .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)))
             .set("reviewed", FilterValue::Bool(true));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("AND"));
         assert_eq!(params.len(), 3);
@@ -517,7 +535,7 @@ mod tests {
         let op = UpdateManyOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("reset_password", FilterValue::Bool(true));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
     }
@@ -541,12 +559,12 @@ mod tests {
             .set("field2", "value2")
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         // SET params come first, then WHERE params
         assert!(sql.contains("field1 = $1"));
         assert!(sql.contains("field2 = $2"));
-        assert!(sql.contains("id = $3"));
+        assert!(sql.contains(r#""id" = $3"#));
         assert_eq!(params.len(), 3);
     }
 
@@ -556,10 +574,10 @@ mod tests {
             .set("field1", "value1")
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("field1 = $1"));
-        assert!(sql.contains("id = $2"));
+        assert!(sql.contains(r#""id" = $2"#));
         assert_eq!(params.len(), 2);
     }
 
@@ -568,7 +586,7 @@ mod tests {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("price", FilterValue::Float(99.99));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("price = $1"));
         assert_eq!(params.len(), 1);
@@ -580,7 +598,7 @@ mod tests {
         let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
             .set("metadata", FilterValue::Json(json_value.clone()));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("metadata = $1"));
         assert_eq!(params[0], FilterValue::Json(json_value));

@@ -1618,6 +1618,110 @@ impl FastSqlBuilder {
     }
 }
 
+// ==============================================================================
+// SQL string parsing helpers
+// ==============================================================================
+
+/// Helpers for recovering structured pieces (column lists, WHERE clauses,
+/// placeholder counts) from a SQL string that was built by one of the
+/// `operations/*::build_sql` paths. Driver engines need these when the
+/// dialect can't emit `RETURNING` and the driver has to run a follow-up
+/// SELECT keyed on the same WHERE/PK values the original statement used.
+///
+/// Scoped-lexer caveats: these helpers are case-insensitive token scans,
+/// not a real SQL parser. They work correctly on the generated output of
+/// `prax-query`'s own `operations/*::build_sql` — they do not try to
+/// handle arbitrary user SQL with string literals containing `?` /
+/// ` where ` / etc. Callers that accept raw user SQL must either reject
+/// malformed input up front or avoid these helpers.
+pub mod parse {
+    /// Extract the WHERE clause body (everything after the first case-
+    /// insensitive ` WHERE ` token) from an UPDATE / DELETE / SELECT.
+    /// Returns `None` if there is no WHERE clause.
+    pub fn extract_where_body(sql: &str) -> Option<String> {
+        let lower = sql.to_ascii_lowercase();
+        let i = lower.find(" where ")?;
+        Some(sql[i + " where ".len()..].trim().to_string())
+    }
+
+    /// Extract the comma-separated column list from an
+    /// `INSERT INTO tbl (col1, col2, ...) VALUES …` statement. Returns
+    /// `None` if the statement doesn't have a column list.
+    pub fn extract_insert_columns(sql: &str) -> Option<Vec<String>> {
+        let open = sql.find('(')?;
+        let close = sql[open..].find(')').map(|i| open + i)?;
+        let body = &sql[open + 1..close];
+        Some(
+            body.split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect(),
+        )
+    }
+
+    /// Count the `?` placeholders inside an UPDATE statement's SET
+    /// clause (between ` SET ` and ` WHERE `). Used to split bound
+    /// params between SET values and WHERE values for CQL drivers
+    /// that need to issue a follow-up SELECT. Returns `None` when
+    /// the SET window can't be located.
+    pub fn count_set_placeholders(sql: &str) -> Option<usize> {
+        let lower = sql.to_ascii_lowercase();
+        let set_start = lower.find(" set ")?;
+        let where_start = lower[set_start..]
+            .find(" where ")
+            .map(|i| set_start + i)
+            .unwrap_or(sql.len());
+        Some(sql[set_start..where_start].matches('?').count())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn extract_where_body_finds_lowercase_tail() {
+            assert_eq!(
+                extract_where_body("UPDATE t SET a = 1 WHERE id = 42"),
+                Some("id = 42".to_string())
+            );
+        }
+
+        #[test]
+        fn extract_where_body_case_insensitive() {
+            assert_eq!(
+                extract_where_body("update t set a = 1 where id = 42"),
+                Some("id = 42".to_string())
+            );
+        }
+
+        #[test]
+        fn extract_where_body_missing_returns_none() {
+            assert_eq!(extract_where_body("SELECT * FROM t"), None);
+        }
+
+        #[test]
+        fn extract_insert_columns_parses_list() {
+            assert_eq!(
+                extract_insert_columns("INSERT INTO users (id, email, name) VALUES ($1, $2, $3)"),
+                Some(vec!["id".into(), "email".into(), "name".into()])
+            );
+        }
+
+        #[test]
+        fn count_set_placeholders_counts_between_set_and_where() {
+            assert_eq!(
+                count_set_placeholders("UPDATE t SET a = ?, b = ? WHERE id = ?"),
+                Some(2)
+            );
+        }
+
+        #[test]
+        fn count_set_placeholders_without_where_counts_to_end() {
+            assert_eq!(count_set_placeholders("UPDATE t SET a = ?, b = ?"), Some(2));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

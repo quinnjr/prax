@@ -184,7 +184,7 @@ fn bench_filter_to_sql(c: &mut Criterion) {
 
     group.bench_function("simple_equals_to_sql", |b| {
         let filter = Filter::Equals("id".into(), FilterValue::Int(1));
-        b.iter(|| black_box(filter.to_sql(0)))
+        b.iter(|| black_box(filter.to_sql(0, &prax_query::dialect::Postgres)))
     });
 
     group.bench_function("in_filter_to_sql", |b| {
@@ -198,7 +198,7 @@ fn bench_filter_to_sql(c: &mut Criterion) {
                 FilterValue::Int(5),
             ],
         );
-        b.iter(|| black_box(filter.to_sql(0)))
+        b.iter(|| black_box(filter.to_sql(0, &prax_query::dialect::Postgres)))
     });
 
     group.bench_function("and_filter_to_sql", |b| {
@@ -206,7 +206,7 @@ fn bench_filter_to_sql(c: &mut Criterion) {
             Filter::Equals("status".into(), FilterValue::String("active".into())),
             Filter::Equals("role".into(), FilterValue::String("admin".into())),
         ]);
-        b.iter(|| black_box(filter.to_sql(0)))
+        b.iter(|| black_box(filter.to_sql(0, &prax_query::dialect::Postgres)))
     });
 
     group.bench_function("complex_filter_to_sql", |b| {
@@ -219,7 +219,7 @@ fn bench_filter_to_sql(c: &mut Criterion) {
             Filter::Gt("age".into(), FilterValue::Int(18)),
             Filter::Lt("age".into(), FilterValue::Int(65)),
         ]);
-        b.iter(|| black_box(filter.to_sql(0)))
+        b.iter(|| black_box(filter.to_sql(0, &prax_query::dialect::Postgres)))
     });
 
     group.finish();

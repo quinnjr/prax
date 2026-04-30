@@ -16,6 +16,7 @@ ignore = [
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki name constraint for URI names — transitive via multiple driver TLS stacks; waiting for upstream bumps" },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name constraint — transitive; waiting for upstream bumps" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki CRL parsing panic — transitive; waiting for upstream bumps" },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained; transitive via cdrs-tokio. No safe upgrade available — cdrs-tokio would need to migrate to rustc-hash upstream." },
 ]
 
 # This section is considered when running `cargo deny check licenses`

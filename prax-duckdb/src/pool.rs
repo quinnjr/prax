@@ -238,6 +238,22 @@ impl PooledConnection {
             .map_err(|e| DuckDbError::internal(format!("Task join error: {}", e)))?
     }
 
+    /// Query and return typed row snapshots. Drives the synchronous
+    /// `query_rows` on the inner connection from a `spawn_blocking`
+    /// so the caller's runtime isn't stalled on DuckDB's blocking API.
+    pub async fn query_rows(
+        &self,
+        sql: &str,
+        params: &[prax_query::filter::FilterValue],
+    ) -> DuckDbResult<Vec<crate::row_ref::DuckDbRowRef>> {
+        let conn = self.connection().clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        tokio::task::spawn_blocking(move || conn.query_rows(&sql, &params))
+            .await
+            .map_err(|e| DuckDbError::internal(format!("Task join error: {}", e)))?
+    }
+
     /// Execute a statement and return affected rows.
     pub async fn execute(
         &self,

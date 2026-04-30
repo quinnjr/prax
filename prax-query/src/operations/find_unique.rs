@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::Filter;
-use crate::traits::{Model, QueryEngine};
+use crate::relations::IncludeSpec;
+use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::Select;
 
 /// A query operation that finds a single record by unique constraint.
@@ -23,16 +24,21 @@ pub struct FindUniqueOperation<E: QueryEngine, M: Model> {
     engine: E,
     filter: Filter,
     select: Select,
+    /// Relations to eager-load alongside the unique lookup. Mirrors
+    /// the `find_many` include list — even though the result is a
+    /// single row, the loader operates on a 1-element slice.
+    includes: Vec<IncludeSpec>,
     _model: PhantomData<M>,
 }
 
-impl<E: QueryEngine, M: Model> FindUniqueOperation<E, M> {
+impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Create a new FindUnique operation.
     pub fn new(engine: E) -> Self {
         Self {
             engine,
             filter: Filter::None,
             select: Select::All,
+            includes: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -49,9 +55,21 @@ impl<E: QueryEngine, M: Model> FindUniqueOperation<E, M> {
         self
     }
 
+    /// Eager-load a relation alongside the unique lookup.
+    ///
+    /// Queued includes dispatch through the model's
+    /// [`ModelRelationLoader`] after the main SELECT returns.
+    pub fn include(mut self, spec: IncludeSpec) -> Self {
+        self.includes.push(spec);
+        self
+    }
+
     /// Build the SQL query.
-    pub fn build_sql(&self) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0);
+    pub fn build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> (String, Vec<crate::filter::FilterValue>) {
+        let (where_sql, params) = self.filter.to_sql(0, dialect);
 
         let mut sql = String::new();
 
@@ -78,19 +96,39 @@ impl<E: QueryEngine, M: Model> FindUniqueOperation<E, M> {
     /// Execute the query and return the result (errors if not found).
     pub async fn exec(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
-        let (sql, params) = self.build_sql();
-        self.engine.query_one::<M>(&sql, params).await
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
+        let row = self.engine.query_one::<M>(&sql, params).await?;
+        // Wrap the single row in a 1-element slice for the loader.
+        // `into_iter().next()` below reads it back out without any
+        // extra clone.
+        let mut parents = vec![row];
+        for spec in &self.includes {
+            <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
+        }
+        Ok(parents.into_iter().next().expect("1-element vec"))
     }
 
     /// Execute the query and return an optional result.
     pub async fn exec_optional(self) -> QueryResult<Option<M>>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelRelationLoader<E>,
     {
-        let (sql, params) = self.build_sql();
-        self.engine.query_optional::<M>(&sql, params).await
+        let dialect = self.engine.dialect();
+        let (sql, params) = self.build_sql(dialect);
+        match self.engine.query_optional::<M>(&sql, params).await? {
+            None => Ok(None),
+            Some(row) => {
+                let mut parents = vec![row];
+                for spec in &self.includes {
+                    <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec)
+                        .await?;
+                }
+                Ok(parents.into_iter().next())
+            }
+        }
     }
 }
 
@@ -110,11 +148,36 @@ mod tests {
         const COLUMNS: &'static [&'static str] = &["id", "name", "email"];
     }
 
+    impl crate::row::FromRow for TestModel {
+        fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
+            Ok(TestModel)
+        }
+    }
+
+    impl crate::traits::ModelRelationLoader<MockEngine> for TestModel {
+        fn load_relation<'a>(
+            _engine: &'a MockEngine,
+            _parents: &'a mut [Self],
+            spec: &'a crate::relations::IncludeSpec,
+        ) -> crate::traits::BoxFuture<'a, QueryResult<()>> {
+            let name = spec.relation_name.clone();
+            Box::pin(async move {
+                Err(QueryError::internal(format!(
+                    "unknown relation '{name}' on TestModel (mock)",
+                )))
+            })
+        }
+    }
+
     #[derive(Clone)]
     struct MockEngine;
 
     impl QueryEngine for MockEngine {
-        fn query_many<T: Model + Send + 'static>(
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -122,7 +185,7 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
 
-        fn query_one<T: Model + Send + 'static>(
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -130,7 +193,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn query_optional<T: Model + Send + 'static>(
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -138,7 +201,7 @@ mod tests {
             Box::pin(async { Ok(None) })
         }
 
-        fn execute_insert<T: Model + Send + 'static>(
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -146,7 +209,7 @@ mod tests {
             Box::pin(async { Err(QueryError::not_found("test")) })
         }
 
-        fn execute_update<T: Model + Send + 'static>(
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
             &self,
             _sql: &str,
             _params: Vec<FilterValue>,
@@ -184,7 +247,7 @@ mod tests {
     #[test]
     fn test_find_unique_new() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("LIMIT 1"));
@@ -196,11 +259,11 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM test_models"));
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("id = $1"));
+        assert!(sql.contains(r#""id" = $1"#));
         assert!(sql.contains("LIMIT 1"));
         assert_eq!(params.len(), 1);
     }
@@ -213,10 +276,10 @@ mod tests {
                 FilterValue::String("test@example.com".to_string()),
             ));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
-        assert!(sql.contains("email = $1"));
+        assert!(sql.contains(r#""email" = $1"#));
         assert_eq!(params.len(), 1);
     }
 
@@ -228,7 +291,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name FROM"));
         assert!(!sql.contains("SELECT *"));
@@ -240,7 +303,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id FROM"));
     }
@@ -251,7 +314,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::All);
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT * FROM"));
     }
@@ -269,7 +332,7 @@ mod tests {
                 Filter::Equals("tenant_id".into(), FilterValue::Int(1)),
             ]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("AND"));
@@ -279,7 +342,7 @@ mod tests {
     #[test]
     fn test_find_unique_without_filter() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(!sql.contains("WHERE"));
         assert!(params.is_empty());
@@ -290,7 +353,7 @@ mod tests {
         let op =
             FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine).r#where(Filter::None);
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Filter::None should not produce WHERE clause
         assert!(!sql.contains("WHERE"));
@@ -305,7 +368,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         // Check SQL structure order
         let select_pos = sql.find("SELECT").unwrap();
@@ -321,7 +384,7 @@ mod tests {
     #[test]
     fn test_find_unique_table_name() {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine);
-        let (sql, _) = op.build_sql();
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("test_models"));
     }
@@ -360,7 +423,7 @@ mod tests {
             Filter::Equals("name".into(), FilterValue::String("Alice".to_string())),
         );
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::String("Alice".to_string()));
@@ -371,7 +434,7 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("id".into(), FilterValue::Int(42)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::Int(42));
@@ -382,7 +445,7 @@ mod tests {
         let op = FindUniqueOperation::<MockEngine, TestModel>::new(MockEngine)
             .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::Bool(true));
@@ -397,7 +460,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .select(Select::fields(["id", "name"]));
 
-        let (sql, params) = op.build_sql();
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("SELECT id, name"));
         assert!(sql.contains("WHERE"));
@@ -411,7 +474,7 @@ mod tests {
             .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
             .r#where(Filter::Equals("id".into(), FilterValue::Int(2)));
 
-        let (_, params) = op.build_sql();
+        let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         // Should only have the second filter's param
         assert_eq!(params.len(), 1);
