@@ -275,15 +275,12 @@ fn generate_client_module(
         let snake_name = to_snake_case(model.name());
         code.push_str(&format!("    /// Access {} operations\n", model.name()));
         code.push_str(&format!(
-            "    pub fn {}(&self) -> {}::{}Operations<E> {{\n",
-            snake_name,
-            snake_name,
-            model.name()
+            "    pub fn {}(&self) -> {}::Client<E> {{\n",
+            snake_name, snake_name,
         ));
         code.push_str(&format!(
-            "        {}::{}Operations::new(self.engine.clone())\n",
+            "        {}::Client::new(self.engine.clone())\n",
             snake_name,
-            model.name()
         ));
         code.push_str("    }\n\n");
     }
@@ -389,80 +386,166 @@ fn generate_model_module(
     ));
     code.push_str("}\n\n");
 
-    // Operations struct (owned engine, no lifetime)
-    code.push_str("#[allow(dead_code)]\n");
-    code.push_str(&format!("/// Operations for the {} model\n", model.name()));
+    // FromRow — required to decode rows back into the model when an
+    // operation is run. Mirrors the emission in
+    // `prax-codegen/src/generators/derive_from_row.rs`: scalar fields
+    // decode via `FromColumn`; relation fields default-init and are
+    // filled later by the relation executor on the `.include` path.
     code.push_str(&format!(
-        "pub struct {}Operations<E: prax_query::QueryEngine> {{\n",
+        "impl prax_query::row::FromRow for {} {{\n",
         model.name()
     ));
+    code.push_str(
+        "    fn from_row(row: &impl prax_query::row::RowRef)\n        -> Result<Self, prax_query::row::RowError>\n    {\n",
+    );
+    code.push_str("        Ok(Self {\n");
+    for field in model.fields.values() {
+        let field_name = to_snake_case(field.name());
+        let rust_type = field_type_to_rust_with_boxing(
+            &field.field_type,
+            field.modifier,
+            model.name(),
+            relation_graph,
+        );
+        if field.is_relation() {
+            code.push_str(&format!(
+                "            {}: ::core::default::Default::default(),\n",
+                field_name
+            ));
+        } else {
+            let column = field
+                .get_attribute("map")
+                .and_then(|a| a.first_arg())
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| field_name.clone());
+            code.push_str(&format!(
+                "            {}: <{} as prax_query::row::FromColumn>::from_column(row, \"{}\")?,\n",
+                field_name, rust_type, column
+            ));
+        }
+    }
+    code.push_str("        })\n");
+    code.push_str("    }\n");
+    code.push_str("}\n\n");
+
+    // ModelWithPk — required by composite-key handling and by operations
+    // that need to extract the primary key from a model instance (e.g.
+    // upsert, nested writes). Mirrors
+    // `prax-codegen/src/generators/derive_model_with_pk.rs`.
+    code.push_str(&format!(
+        "impl prax_query::traits::ModelWithPk for {} {{\n",
+        model.name()
+    ));
+    code.push_str("    fn pk_value(&self) -> prax_query::filter::FilterValue {\n");
+    let id_field_objs: Vec<_> = model.id_fields();
+    if id_field_objs.len() == 1 {
+        let f = id_field_objs[0];
+        code.push_str(&format!(
+            "        <{} as prax_query::filter::ToFilterValue>::to_filter_value(&self.{})\n",
+            field_type_to_rust_with_boxing(&f.field_type, f.modifier, model.name(), relation_graph),
+            to_snake_case(f.name())
+        ));
+    } else if id_field_objs.is_empty() {
+        code.push_str("        prax_query::filter::FilterValue::Null\n");
+    } else {
+        code.push_str("        prax_query::filter::FilterValue::List(vec![\n");
+        for f in &id_field_objs {
+            code.push_str(&format!(
+                "            <{} as prax_query::filter::ToFilterValue>::to_filter_value(&self.{}),\n",
+                field_type_to_rust_with_boxing(&f.field_type, f.modifier, model.name(), relation_graph),
+                to_snake_case(f.name())
+            ));
+        }
+        code.push_str("        ])\n");
+    }
+    code.push_str("    }\n\n");
+
+    code.push_str(
+        "    fn get_column_value(&self, column: &str)\n        -> ::core::option::Option<prax_query::filter::FilterValue>\n    {\n",
+    );
+    code.push_str("        match column {\n");
+    for field in model.scalar_fields() {
+        let field_name = to_snake_case(field.name());
+        let column = field
+            .get_attribute("map")
+            .and_then(|a| a.first_arg())
+            .and_then(|v| v.as_string())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| field_name.clone());
+        let rust_type = field_type_to_rust_with_boxing(
+            &field.field_type,
+            field.modifier,
+            model.name(),
+            relation_graph,
+        );
+        code.push_str(&format!(
+            "            \"{}\" => ::core::option::Option::Some(\n                <{} as prax_query::filter::ToFilterValue>::to_filter_value(&self.{})\n            ),\n",
+            column, rust_type, field_name
+        ));
+    }
+    code.push_str("            _ => ::core::option::Option::None,\n");
+    code.push_str("        }\n");
+    code.push_str("    }\n");
+    code.push_str("}\n\n");
+
+    // Per-model `Client<E>` (named `Client`, not `{Model}Operations`, so
+    // `prax::client!(Foo, Bar, ...)` can find `foo::Client::new(...)`
+    // and `bar::Client::new(...)` by snake-cased module path — matching
+    // the shape emitted by `#[derive(Model)]`).
+    code.push_str("#[allow(dead_code)]\n");
+    code.push_str(&format!("/// Operations for the {} model\n", model.name()));
+    code.push_str("pub struct Client<E: prax_query::QueryEngine> {\n");
     code.push_str("    engine: E,\n");
     code.push_str("}\n\n");
 
-    code.push_str(&format!(
-        "impl<E: prax_query::QueryEngine> {}Operations<E> {{\n",
-        model.name()
-    ));
+    code.push_str("impl<E: prax_query::QueryEngine> Client<E> {\n");
     code.push_str("    pub fn new(engine: E) -> Self {\n");
     code.push_str("        Self { engine }\n");
     code.push_str("    }\n\n");
 
-    // CRUD methods (1-arg constructors, no lifetime on return types)
-    code.push_str("    /// Find many records\n");
-    code.push_str(&format!(
-        "    pub fn find_many(&self) -> prax_query::FindManyOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::FindManyOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Find a unique record\n");
-    code.push_str(&format!(
-        "    pub fn find_unique(&self) -> prax_query::FindUniqueOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::FindUniqueOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Find the first matching record\n");
-    code.push_str(&format!(
-        "    pub fn find_first(&self) -> prax_query::FindFirstOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::FindFirstOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Create a new record\n");
-    code.push_str(&format!(
-        "    pub fn create(&self) -> prax_query::CreateOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::CreateOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Update a record\n");
-    code.push_str(&format!(
-        "    pub fn update(&self) -> prax_query::UpdateOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::UpdateOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Delete a record\n");
-    code.push_str(&format!(
-        "    pub fn delete(&self) -> prax_query::DeleteOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::DeleteOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n\n");
-
-    code.push_str("    /// Count records\n");
-    code.push_str(&format!(
-        "    pub fn count(&self) -> prax_query::CountOperation<E, {}> {{\n",
-        model.name()
-    ));
-    code.push_str("        prax_query::CountOperation::new(self.engine.clone())\n");
-    code.push_str("    }\n");
+    let model_ty = model.name();
+    let crud_methods: &[(&str, &str, &str)] = &[
+        ("find_many", "FindManyOperation", "Find many records"),
+        ("find_unique", "FindUniqueOperation", "Find a unique record"),
+        (
+            "find_first",
+            "FindFirstOperation",
+            "Find the first matching record",
+        ),
+        ("create", "CreateOperation", "Create a new record"),
+        (
+            "create_many",
+            "CreateManyOperation",
+            "Create many records in one operation",
+        ),
+        ("update", "UpdateOperation", "Update a record"),
+        (
+            "update_many",
+            "UpdateManyOperation",
+            "Update many records matching a filter",
+        ),
+        ("upsert", "UpsertOperation", "Insert or update a record"),
+        ("delete", "DeleteOperation", "Delete a record"),
+        (
+            "delete_many",
+            "DeleteManyOperation",
+            "Delete many records matching a filter",
+        ),
+        ("count", "CountOperation", "Count records"),
+    ];
+    for (method, op_ty, doc) in crud_methods {
+        code.push_str(&format!("    /// {}\n", doc));
+        code.push_str(&format!(
+            "    pub fn {}(&self) -> prax_query::operations::{}<E, {}> {{\n",
+            method, op_ty, model_ty,
+        ));
+        code.push_str(&format!(
+            "        prax_query::operations::{}::new(self.engine.clone())\n",
+            op_ty,
+        ));
+        code.push_str("    }\n\n");
+    }
 
     code.push_str("}\n");
 
