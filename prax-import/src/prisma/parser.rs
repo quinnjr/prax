@@ -717,8 +717,18 @@ fn convert_field_type(
         PrismaFieldType::Bytes => FieldType::Scalar(ScalarType::Bytes),
         PrismaFieldType::Custom(name) => {
             if let Some(inner) = name.strip_prefix("Unsupported:") {
-                // Unsupported types become FieldType::Unsupported
-                FieldType::Unsupported(SmolStr::from(inner))
+                // Prisma's `Unsupported("vector(1024)")` escape hatch is the
+                // standard way to get a pgvector column through a Prisma
+                // schema. Prax models the pgvector extension natively as
+                // `ScalarType::Vector(Option<u32>)` — translate the common
+                // `vector(N)` / `halfvec(N)` / `sparsevec(N)` / `bit(N)`
+                // shapes into first-class scalars so the round-trip yields a
+                // valid Prax schema instead of raw `vector(1024)` text.
+                if let Some(scalar) = parse_pgvector_unsupported(inner) {
+                    FieldType::Scalar(scalar)
+                } else {
+                    FieldType::Unsupported(SmolStr::from(inner))
+                }
             } else {
                 // Could be an enum or a relation
                 FieldType::Model(SmolStr::from(name.as_str()))
@@ -736,38 +746,88 @@ fn convert_field_type(
     Ok((base_type, modifier))
 }
 
+/// Parse a pgvector type inside Prisma's `Unsupported("...")` payload.
+/// Returns `None` for anything that isn't a recognized pgvector shape.
+fn parse_pgvector_unsupported(inner: &str) -> Option<ScalarType> {
+    let trimmed = inner.trim();
+    let (name, rest) = match trimmed.find('(') {
+        Some(pos) => (&trimmed[..pos], &trimmed[pos..]),
+        None => (trimmed, ""),
+    };
+    let dim = if rest.is_empty() {
+        None
+    } else {
+        let stripped = rest.trim_start_matches('(').trim_end_matches(')').trim();
+        stripped.parse::<u32>().ok()
+    };
+    match name.trim().to_lowercase().as_str() {
+        "vector" => Some(ScalarType::Vector(dim)),
+        "halfvec" => Some(ScalarType::HalfVector(dim)),
+        "sparsevec" => Some(ScalarType::SparseVector(dim)),
+        "bit" => Some(ScalarType::Bit(dim)),
+        _ => None,
+    }
+}
+
 /// Convert Prisma default value to Prax attribute value.
 fn convert_default_value(default: PrismaDefaultValue) -> AttributeValue {
     match default {
         PrismaDefaultValue::Literal(val) => {
-            // Try to parse as different types
-            if val == "true" {
+            // `val` is the raw text between `@default(` and `)` in the Prisma
+            // source. Classify on shape:
+            //   - `"standard"`      → String (strip the outer quotes — the
+            //                         emitter re-quotes on output)
+            //   - `PENDING`         → Ident (bare identifier → enum variant)
+            //   - `42`, `3.14`      → numeric
+            //   - `true`/`false`    → Boolean
+            // Emitting a bare ident as `AttributeValue::String` was producing
+            // `@default("PENDING")` on enum-typed fields, which Prax rejects
+            // because an enum default must be an ident.
+            let trimmed = val.trim();
+            if trimmed == "true" {
                 AttributeValue::Boolean(true)
-            } else if val == "false" {
+            } else if trimmed == "false" {
                 AttributeValue::Boolean(false)
-            } else if let Ok(n) = val.parse::<i64>() {
+            } else if let Ok(n) = trimmed.parse::<i64>() {
                 AttributeValue::Int(n)
-            } else if let Ok(f) = val.parse::<f64>() {
+            } else if let Ok(f) = trimmed.parse::<f64>() {
                 AttributeValue::Float(f)
+            } else if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                AttributeValue::String(strip_wrapping_quotes(trimmed))
             } else {
-                AttributeValue::String(val)
+                AttributeValue::Ident(SmolStr::from(trimmed))
             }
         }
         PrismaDefaultValue::Function(func) => {
-            // Parse "funcName(args)" into name and arguments
+            // Parse "funcName(args)" into name and arguments. The arg body is
+            // also raw Prisma source (e.g. `dbgenerated("uuid_to_text(id)")`
+            // arrives as `"uuid_to_text(id)"` including the quotes) and needs
+            // the same unwrap before stashing in `AttributeValue::String`.
             if let Some(paren_pos) = func.find('(') {
                 let name = &func[..paren_pos];
                 let args_str = func[paren_pos + 1..].trim_end_matches(')');
                 let args = if args_str.is_empty() {
                     vec![]
                 } else {
-                    vec![AttributeValue::String(args_str.to_string())]
+                    vec![AttributeValue::String(strip_wrapping_quotes(args_str))]
                 };
                 AttributeValue::Function(SmolStr::from(name), args)
             } else {
                 AttributeValue::Function(SmolStr::from(func.as_str()), vec![])
             }
         }
+    }
+}
+
+/// Strip a single pair of matching surrounding double-quotes, if present.
+/// Called on raw bytes extracted from Prisma source (between `@default(` and `)`
+/// or inside `dbgenerated(...)`) before the text gets re-quoted by the emitter.
+fn strip_wrapping_quotes(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_string()
+    } else {
+        s.to_string()
     }
 }
 
@@ -828,5 +888,169 @@ mod tests {
 
         let prax_schema = result.unwrap();
         assert_eq!(prax_schema.models.len(), 1);
+    }
+
+    fn first_model(schema: &prax_schema::Schema) -> &prax_schema::Model {
+        schema
+            .models
+            .values()
+            .next()
+            .expect("schema has at least one model")
+    }
+
+    fn default_attribute_value(model: &prax_schema::Model, field_name: &str) -> AttributeValue {
+        let field = model
+            .fields
+            .get(field_name)
+            .unwrap_or_else(|| panic!("field {field_name} not found"));
+        field
+            .attributes
+            .iter()
+            .find(|a| a.name.as_str() == "default")
+            .and_then(|a| a.args.first())
+            .map(|arg| arg.value.clone())
+            .unwrap_or_else(|| panic!("field {field_name} has no @default"))
+    }
+
+    #[test]
+    fn import_strips_prisma_source_quotes_from_string_defaults() {
+        // Prisma source `@default("standard")` used to round-trip as
+        // `@default(""standard"")` in the Prax emitter because the raw
+        // quote characters were stored inside the AttributeValue::String
+        // payload and then re-quoted by the text emitter.
+        let schema = r#"
+        model ApiIntegration {
+            id               Int    @id @default(autoincrement())
+            integration_type String @default("standard")
+            role             String @default("editor")
+        }
+        "#;
+
+        let prax_schema = import_prisma_schema(schema).expect("import should succeed");
+        let model = first_model(&prax_schema);
+
+        assert_eq!(
+            default_attribute_value(model, "integration_type"),
+            AttributeValue::String("standard".to_string()),
+        );
+        assert_eq!(
+            default_attribute_value(model, "role"),
+            AttributeValue::String("editor".to_string()),
+        );
+    }
+
+    #[test]
+    fn import_strips_prisma_source_quotes_from_dbgenerated_args() {
+        // `dbgenerated("uuid_to_text(id)")` used to be stored with the Prisma
+        // source quotes inside the `Function` arg payload, producing
+        // `dbgenerated(""uuid_to_text(id)"")` in the output.
+        let schema = r#"
+        model Orders {
+            id      String  @id
+            id_uuid String? @default(dbgenerated("uuid_to_text(id)"))
+        }
+        "#;
+
+        let prax_schema = import_prisma_schema(schema).expect("import should succeed");
+        let model = first_model(&prax_schema);
+
+        match default_attribute_value(model, "id_uuid") {
+            AttributeValue::Function(name, args) => {
+                assert_eq!(name.as_str(), "dbgenerated");
+                assert_eq!(
+                    args,
+                    vec![AttributeValue::String("uuid_to_text(id)".to_string())],
+                );
+            }
+            other => panic!("expected Function, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn import_emits_bare_identifier_defaults_as_ident_not_string() {
+        // Prisma enum defaults appear in source as bare identifiers
+        // (`@default(PENDING)`). The importer used to stash them as
+        // `AttributeValue::String("PENDING")`, which the emitter then printed
+        // as `@default("PENDING")` — a string literal, which Prax rejects on an
+        // enum-typed field. Enum defaults must round-trip as bare idents.
+        let schema = r#"
+        enum OcrStatus {
+            PENDING
+            COMPLETE
+        }
+
+        model Job {
+            id     String    @id
+            status OcrStatus @default(PENDING)
+        }
+        "#;
+
+        let prax_schema = import_prisma_schema(schema).expect("import should succeed");
+        let model = first_model(&prax_schema);
+
+        assert_eq!(
+            default_attribute_value(model, "status"),
+            AttributeValue::Ident("PENDING".into()),
+        );
+    }
+
+    #[test]
+    fn import_maps_unsupported_pgvector_to_scalar_vector() {
+        // Prisma can't express pgvector natively, so projects write it as
+        // `Unsupported("vector(1024)")`. The importer must translate the
+        // common pgvector shapes (vector/halfvec/sparsevec/bit) into
+        // `ScalarType::Vector(…)` etc. so the output round-trips through the
+        // Prax parser. The old behavior wrote a raw `vector(1024)` field type
+        // which the parser rejected.
+        let schema = r#"
+        model Rag {
+            id              String                        @id
+            vec_embedding   Unsupported("vector(1024)")
+            half_embedding  Unsupported("halfvec(768)")
+            sparse_features Unsupported("sparsevec(10000)")
+            bit_hash        Unsupported("bit(256)")
+        }
+        "#;
+
+        let prax_schema = import_prisma_schema(schema).expect("import should succeed");
+        let model = first_model(&prax_schema);
+
+        assert_eq!(
+            model.fields.get("vec_embedding").unwrap().field_type,
+            FieldType::Scalar(ScalarType::Vector(Some(1024))),
+        );
+        assert_eq!(
+            model.fields.get("half_embedding").unwrap().field_type,
+            FieldType::Scalar(ScalarType::HalfVector(Some(768))),
+        );
+        assert_eq!(
+            model.fields.get("sparse_features").unwrap().field_type,
+            FieldType::Scalar(ScalarType::SparseVector(Some(10000))),
+        );
+        assert_eq!(
+            model.fields.get("bit_hash").unwrap().field_type,
+            FieldType::Scalar(ScalarType::Bit(Some(256))),
+        );
+    }
+
+    #[test]
+    fn import_preserves_json_literal_defaults_without_stripping() {
+        // `@default("[]")` is a JSON literal, not a bare identifier — the emitter
+        // still wraps it in quotes on output, so the stored value must NOT
+        // include the surrounding quotes.
+        let schema = r#"
+        model Doc {
+            id                String @id
+            illegible_pages   Json   @default("[]")
+        }
+        "#;
+
+        let prax_schema = import_prisma_schema(schema).expect("import should succeed");
+        let model = first_model(&prax_schema);
+
+        assert_eq!(
+            default_attribute_value(model, "illegible_pages"),
+            AttributeValue::String("[]".to_string()),
+        );
     }
 }
