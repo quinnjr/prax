@@ -50,9 +50,6 @@ impl ZodGenerator {
             "export const {name}Schema = z.enum([{}]);\n",
             variants.join(", ")
         ));
-        out.push_str(&format!(
-            "export type {name} = z.infer<typeof {name}Schema>;\n"
-        ));
     }
 
     fn write_model(out: &mut String, model: &Model, schema: &Schema) {
@@ -76,9 +73,6 @@ impl ZodGenerator {
         }
 
         out.push_str("});\n");
-        out.push_str(&format!(
-            "export type {name} = z.infer<typeof {name}Schema>;\n"
-        ));
 
         Self::write_create_schema(out, model, schema);
         Self::write_update_schema(out, model, schema);
@@ -93,9 +87,6 @@ impl ZodGenerator {
         }
 
         out.push_str("});\n");
-        out.push_str(&format!(
-            "export type {name} = z.infer<typeof {name}Schema>;\n"
-        ));
     }
 
     fn write_composite(out: &mut String, composite: &CompositeType, schema: &Schema) {
@@ -107,9 +98,6 @@ impl ZodGenerator {
         }
 
         out.push_str("});\n");
-        out.push_str(&format!(
-            "export type {name} = z.infer<typeof {name}Schema>;\n"
-        ));
     }
 
     fn write_field(out: &mut String, field: &Field, schema: &Schema) {
@@ -165,9 +153,6 @@ impl ZodGenerator {
         }
 
         out.push_str("});\n");
-        out.push_str(&format!(
-            "export type {name}CreateInput = z.infer<typeof {name}CreateSchema>;\n"
-        ));
     }
 
     fn write_update_schema(out: &mut String, model: &Model, schema: &Schema) {
@@ -191,9 +176,6 @@ impl ZodGenerator {
         }
 
         out.push_str("});\n");
-        out.push_str(&format!(
-            "export type {name}UpdateInput = z.infer<typeof {name}UpdateSchema>;\n"
-        ));
     }
 }
 
@@ -244,7 +226,10 @@ mod tests {
         assert!(output.contains("id: z.number().int(),"));
         assert!(output.contains("email: z.string(),"));
         assert!(output.contains("name: z.string().nullable(),"));
-        assert!(output.contains("export type User = z.infer<typeof UserSchema>;"));
+        assert!(
+            !output.contains("export type User = z.infer<typeof UserSchema>;"),
+            "schemas.ts must not re-export type User (collides with models.ts)"
+        );
     }
 
     #[test]
@@ -261,7 +246,10 @@ mod tests {
 
         let output = ZodGenerator::generate(&schema);
         assert!(output.contains("export const RoleSchema = z.enum(['User', 'Admin']);"));
-        assert!(output.contains("export type Role = z.infer<typeof RoleSchema>;"));
+        assert!(
+            !output.contains("export type Role = z.infer<typeof RoleSchema>;"),
+            "schemas.ts must not re-export type Role (collides with models.ts)"
+        );
     }
 
     #[test]
@@ -404,6 +392,41 @@ mod tests {
         assert!(
             output.contains("export const WidgetSchema = z.object({"),
             "non-relational model should NOT have ZodTypeAny annotation:\n{output}",
+        );
+    }
+
+    #[test]
+    fn schemas_do_not_reexport_inferred_types() {
+        let schema_src = r#"
+            enum Status { active inactive }
+            model Widget {
+                id     Int    @id @auto
+                status Status
+            }
+        "#;
+        let schema = prax_schema::validate_schema(schema_src).unwrap();
+        let output = ZodGenerator::generate(&schema);
+
+        // Schemas are still emitted
+        assert!(output.contains("export const WidgetSchema"));
+        assert!(output.contains("export const StatusSchema"));
+
+        // But no inferred-type re-exports that would collide with models.ts
+        assert!(
+            !output.contains("export type Widget ="),
+            "schemas.ts must not re-export type Widget (collides with models.ts):\n{output}",
+        );
+        assert!(
+            !output.contains("export type Status ="),
+            "schemas.ts must not re-export type Status (collides with models.ts):\n{output}",
+        );
+        assert!(
+            !output.contains("export type WidgetCreateInput ="),
+            "schemas.ts must not re-export type WidgetCreateInput:\n{output}",
+        );
+        assert!(
+            !output.contains("export type WidgetUpdateInput ="),
+            "schemas.ts must not re-export type WidgetUpdateInput:\n{output}",
         );
     }
 }
