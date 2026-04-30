@@ -171,6 +171,34 @@ pub trait RowRef {
     fn get_decimal_opt(&self, column: &str) -> Result<Option<rust_decimal::Decimal>, RowError> {
         Err(unsupported_get(column, "decimal_opt"))
     }
+
+    /// Get a pgvector column as a dense `Vec<f32>`.
+    ///
+    /// Default impl errors with `unsupported_get`; `prax-postgres`
+    /// overrides this on its `RowRef` impl to decode the on-wire
+    /// pgvector representation. Used by the blanket
+    /// `FromColumn for Vec<f32>` impl below so schema-generated
+    /// structs with a `Vector(N)` field compile out of the box.
+    fn get_vector(&self, column: &str) -> Result<Vec<f32>, RowError> {
+        Err(unsupported_get(column, "vector"))
+    }
+
+    /// Check whether the named column is NULL in this row.
+    ///
+    /// The default implementation delegates to `get_str_opt` — every
+    /// driver backend already implements that one. Drivers with a
+    /// faster null probe (e.g. postgres's `row.try_get::<_, Option<&str>>`
+    /// avoids a full string allocation) can override this method.
+    ///
+    /// Used by the blanket `impl<T: FromColumn> FromColumn for Option<T>`
+    /// to dispatch between a nullable decode and the inner type's
+    /// non-null decode, so user-defined enums and other custom types
+    /// can round-trip through a nullable column without needing a
+    /// bespoke `FromColumn for Option<MyEnum>` (which the orphan rule
+    /// would forbid the consumer crate from writing).
+    fn is_null(&self, column: &str) -> Result<bool, RowError> {
+        self.get_str_opt(column).map(|opt| opt.is_none())
+    }
 }
 
 /// Build a default `TypeConversion` error for a `RowRef::get_*` method that a
@@ -400,45 +428,9 @@ impl FromColumn for String {
     }
 }
 
-impl FromColumn for Option<i32> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_i32_opt(column)
-    }
-}
-
-impl FromColumn for Option<i64> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_i64_opt(column)
-    }
-}
-
-impl FromColumn for Option<f64> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_f64_opt(column)
-    }
-}
-
-impl FromColumn for Option<bool> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_bool_opt(column)
-    }
-}
-
-impl FromColumn for Option<String> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_string_opt(column)
-    }
-}
-
 impl FromColumn for Vec<u8> {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_bytes(column).map(|b| b.to_vec())
-    }
-}
-
-impl FromColumn for Option<Vec<u8>> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_bytes_opt(column).map(|opt| opt.map(|b| b.to_vec()))
     }
 }
 
@@ -447,19 +439,9 @@ impl FromColumn for chrono::DateTime<chrono::Utc> {
         row.get_datetime_utc(column)
     }
 }
-impl FromColumn for Option<chrono::DateTime<chrono::Utc>> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_datetime_utc_opt(column)
-    }
-}
 impl FromColumn for chrono::NaiveDateTime {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_naive_datetime(column)
-    }
-}
-impl FromColumn for Option<chrono::NaiveDateTime> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_naive_datetime_opt(column)
     }
 }
 impl FromColumn for chrono::NaiveDate {
@@ -467,19 +449,9 @@ impl FromColumn for chrono::NaiveDate {
         row.get_naive_date(column)
     }
 }
-impl FromColumn for Option<chrono::NaiveDate> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_naive_date_opt(column)
-    }
-}
 impl FromColumn for chrono::NaiveTime {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_naive_time(column)
-    }
-}
-impl FromColumn for Option<chrono::NaiveTime> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_naive_time_opt(column)
     }
 }
 impl FromColumn for uuid::Uuid {
@@ -487,19 +459,9 @@ impl FromColumn for uuid::Uuid {
         row.get_uuid(column)
     }
 }
-impl FromColumn for Option<uuid::Uuid> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_uuid_opt(column)
-    }
-}
 impl FromColumn for serde_json::Value {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_json(column)
-    }
-}
-impl FromColumn for Option<serde_json::Value> {
-    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_json_opt(column)
     }
 }
 impl FromColumn for rust_decimal::Decimal {
@@ -507,9 +469,37 @@ impl FromColumn for rust_decimal::Decimal {
         row.get_decimal(column)
     }
 }
-impl FromColumn for Option<rust_decimal::Decimal> {
+
+/// Dense pgvector columns decode into `Vec<f32>`. The schema-generated
+/// client uses this for `Vector(N)` and `HalfVector(N)` scalar fields.
+/// The underlying driver implements `RowRef::get_vector` — drivers that
+/// don't have a pgvector binding will surface an unsupported error
+/// at query time rather than at compile time.
+impl FromColumn for Vec<f32> {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
-        row.get_decimal_opt(column)
+        row.get_vector(column)
+    }
+}
+
+/// Blanket impl so every `FromColumn` type also satisfies
+/// `FromColumn` through `Option<T>` without each consumer needing a
+/// hand-written nullable wrapper — schema-generated enum types can't
+/// write their own `impl FromColumn for Option<MyEnum>` because of the
+/// orphan rule (both `Option` and `FromColumn` are foreign from the
+/// consumer crate's perspective).
+///
+/// Uses `RowRef::is_null` to short-circuit null rows to `None`; the
+/// non-null path delegates to `T::from_column`. Drivers that had a
+/// faster native `Option<primitive>` path previously now go through
+/// this blanket — the extra `is_null` round-trip is a small
+/// per-column cost in exchange for the orphan-rule unblock.
+impl<T: FromColumn> FromColumn for Option<T> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
+        if row.is_null(column)? {
+            Ok(None)
+        } else {
+            T::from_column(row, column).map(Some)
+        }
     }
 }
 

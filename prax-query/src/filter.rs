@@ -454,6 +454,14 @@ impl ToFilterValue for Vec<u8> {
         FilterValue::List(self.iter().map(|b| FilterValue::Int(*b as i64)).collect())
     }
 }
+impl ToFilterValue for Vec<f32> {
+    fn to_filter_value(&self) -> FilterValue {
+        // Pgvector columns encode as a list of floats. Drivers that want
+        // to bind the native `vector` type cast the List variant
+        // explicitly on the way out.
+        FilterValue::List(self.iter().map(|f| FilterValue::Float(*f as f64)).collect())
+    }
+}
 impl<T: ToFilterValue> ToFilterValue for Option<T> {
     fn to_filter_value(&self) -> FilterValue {
         self.as_ref()
