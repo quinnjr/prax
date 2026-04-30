@@ -57,7 +57,15 @@ impl ZodGenerator {
 
     fn write_model(out: &mut String, model: &Model, schema: &Schema) {
         let name = model.name();
-        out.push_str(&format!("export const {name}Schema = z.object({{\n"));
+
+        // Check if model has any relation fields
+        let has_relations = model.fields.values().any(|f| f.is_relation());
+
+        if has_relations {
+            out.push_str(&format!("export const {name}Schema: z.ZodTypeAny = z.object({{\n"));
+        } else {
+            out.push_str(&format!("export const {name}Schema = z.object({{\n"));
+        }
 
         for (_, field) in &model.fields {
             if field.is_relation() {
@@ -113,7 +121,7 @@ impl ZodGenerator {
     fn write_relation_field(out: &mut String, field: &Field) {
         let name = field.name().to_case(Case::Camel);
         let type_name = field.field_type.type_name();
-        let schema_ref = format!("z.lazy(() => {type_name}Schema)");
+        let schema_ref = format!("z.lazy((): z.ZodTypeAny => {type_name}Schema)");
 
         let expr = if field.modifier.is_list() {
             format!("{schema_ref}.array()")
@@ -206,7 +214,7 @@ fn resolve_zod_base(field: &Field, _schema: &Schema) -> String {
     match &field.field_type {
         FieldType::Scalar(s) => TypeMapper::zod_type(s).to_string(),
         FieldType::Enum(name) => format!("{name}Schema"),
-        FieldType::Model(name) => format!("z.lazy(() => {name}Schema)"),
+        FieldType::Model(name) => format!("z.lazy((): z.ZodTypeAny => {name}Schema)"),
         FieldType::Composite(name) => format!("{name}Schema"),
         FieldType::Unsupported(_) => "z.unknown()".to_string(),
     }
@@ -310,8 +318,8 @@ mod tests {
         .unwrap();
 
         let output = ZodGenerator::generate(&schema);
-        assert!(output.contains("posts: z.lazy(() => PostSchema).array(),"));
-        assert!(output.contains("author: z.lazy(() => UserSchema),"));
+        assert!(output.contains("posts: z.lazy((): z.ZodTypeAny => PostSchema).array(),"));
+        assert!(output.contains("author: z.lazy((): z.ZodTypeAny => UserSchema),"));
     }
 
     #[test]
@@ -344,5 +352,58 @@ mod tests {
 
         let output = ZodGenerator::generate(&schema);
         assert!(output.contains("tags: z.string().array(),"));
+    }
+
+    #[test]
+    fn model_with_relation_gets_zodtypeany_annotation() {
+        let schema = parse_schema(
+            r#"
+            model User {
+                id    Int    @id @auto
+                posts Post[]
+            }
+            model Post {
+                id        Int   @id @auto
+                author_id Int
+                author    User  @relation(fields: [author_id], references: [id])
+            }
+            "#,
+        )
+        .unwrap();
+
+        let output = ZodGenerator::generate(&schema);
+
+        assert!(
+            output.contains("export const UserSchema: z.ZodTypeAny = z.object({"),
+            "outer schema should have ZodTypeAny annotation when it contains lazy refs:\n{output}",
+        );
+        assert!(
+            output.contains("export const PostSchema: z.ZodTypeAny = z.object({"),
+            "outer schema should have ZodTypeAny annotation when it contains lazy refs:\n{output}",
+        );
+        assert!(
+            output.contains("z.lazy((): z.ZodTypeAny =>"),
+            "lazy callback should have return-type annotation:\n{output}",
+        );
+    }
+
+    #[test]
+    fn model_without_relations_has_no_annotation() {
+        let schema = parse_schema(
+            r#"
+            model Widget {
+                id   Int    @id @auto
+                name String
+            }
+            "#,
+        )
+        .unwrap();
+
+        let output = ZodGenerator::generate(&schema);
+
+        assert!(
+            output.contains("export const WidgetSchema = z.object({"),
+            "non-relational model should NOT have ZodTypeAny annotation:\n{output}",
+        );
     }
 }
