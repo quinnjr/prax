@@ -24,7 +24,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.9.6"
+version = "0.9.7"
 edition = "2024"
 rust-version = "1.89"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
@@ -34,25 +34,25 @@ homepage = "https://github.com/quinnjr/prax"
 
 [workspace.dependencies]
 # Internal crates
-prax-schema = { path = "prax-schema", version = "0.9.6" }
-prax-codegen = { path = "prax-codegen", version = "0.9.6" }
-prax-query = { path = "prax-query", version = "0.9.6" }
-prax-postgres = { path = "prax-postgres", version = "0.9.6" }
-prax-mysql = { path = "prax-mysql", version = "0.9.6" }
-prax-sqlite = { path = "prax-sqlite", version = "0.9.6" }
-prax-mssql = { path = "prax-mssql", version = "0.9.6" }
-prax-mongodb = { path = "prax-mongodb", version = "0.9.6" }
-prax-duckdb = { path = "prax-duckdb", version = "0.9.6" }
-prax-scylladb = { path = "prax-scylladb", version = "0.9.6" }
-prax-cassandra = { path = "prax-cassandra", version = "0.9.6" }
-prax-migrate = { path = "prax-migrate", version = "0.9.6" }
-prax-orm-cli = { path = "prax-cli", version = "0.9.6" }
-prax-sqlx = { path = "prax-sqlx", version = "0.9.6" }
-prax-armature = { path = "prax-armature", version = "0.9.6" }
-prax-axum = { path = "prax-axum", version = "0.9.6" }
-prax-actix = { path = "prax-actix", version = "0.9.6" }
-prax-import = { path = "prax-import", version = "0.9.6" }
-prax-pgvector = { path = "prax-pgvector", version = "0.9.6" }
+prax-schema = { path = "prax-schema", version = "0.9.7" }
+prax-codegen = { path = "prax-codegen", version = "0.9.7" }
+prax-query = { path = "prax-query", version = "0.9.7" }
+prax-postgres = { path = "prax-postgres", version = "0.9.7" }
+prax-mysql = { path = "prax-mysql", version = "0.9.7" }
+prax-sqlite = { path = "prax-sqlite", version = "0.9.7" }
+prax-mssql = { path = "prax-mssql", version = "0.9.7" }
+prax-mongodb = { path = "prax-mongodb", version = "0.9.7" }
+prax-duckdb = { path = "prax-duckdb", version = "0.9.7" }
+prax-scylladb = { path = "prax-scylladb", version = "0.9.7" }
+prax-cassandra = { path = "prax-cassandra", version = "0.9.7" }
+prax-migrate = { path = "prax-migrate", version = "0.9.7" }
+prax-orm-cli = { path = "prax-cli", version = "0.9.7" }
+prax-sqlx = { path = "prax-sqlx", version = "0.9.7" }
+prax-armature = { path = "prax-armature", version = "0.9.7" }
+prax-axum = { path = "prax-axum", version = "0.9.7" }
+prax-actix = { path = "prax-actix", version = "0.9.7" }
+prax-import = { path = "prax-import", version = "0.9.7" }
+prax-pgvector = { path = "prax-pgvector", version = "0.9.7" }
 
 # Code generation (proc-macros)
 proc-macro2 = "1.0"

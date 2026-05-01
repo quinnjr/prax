@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-05-01
+
+### Changed
+
+- **`prax-cli generate` — emit prettyplease-formatted Rust.** Every
+  `.rs` the generator writes now round-trips through
+  `syn::parse_file` → `prettyplease::unparse`, so consumer repos can
+  run `cargo fmt --check` in CI without excluding the generated
+  tree via `rustfmt.toml`. `prettyplease` (the same library rustc's
+  codegen uses) produces byte-identical output across rustfmt
+  versions — exactly the determinism codegen needs.
+
+### Fixed
+
+- **`prax-cli` tests no longer hard-code a workspace version.**
+  `test_version_command` and `test_global_options` used to pin
+  `"0.9.0"` and went red on every workspace bump. They now read
+  `env!("CARGO_PKG_VERSION")` so the assertion always reflects
+  the version the CLI actually reports.
+
 ## [0.9.6] - 2026-04-30
 
 ### Fixed
