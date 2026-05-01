@@ -27,12 +27,17 @@ fn test_help_command() {
 
 #[test]
 fn test_version_command() {
+    // The workspace version is bumped on every release (see
+    // `chore(release): bump workspace to X.Y.Z` commits). Pinning a
+    // literal here means this test goes red on every bump; instead
+    // read it from the test binary's CARGO_PKG_VERSION so the
+    // assertion always reflects the version the CLI actually reports.
     prax_cmd()
         .arg("version")
         .assert()
         .success()
         .stdout(predicate::str::contains("Version"))
-        .stdout(predicate::str::contains("0.9.0"));
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -247,12 +252,14 @@ fn test_invalid_command() {
 
 #[test]
 fn test_global_options() {
-    // Test --version flag
+    // Test --version flag. Same rationale as test_version_command:
+    // read the expected version from CARGO_PKG_VERSION so workspace
+    // bumps don't require edits to the test literal.
     prax_cmd()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("0.9.0"));
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 /// `prax generate` must emit the trait impls the runtime needs to round-trip
@@ -314,8 +321,10 @@ model User {
         user_module.contains("fn pk_value(&self)"),
         "user.rs ModelWithPk missing pk_value:\n{user_module}"
     );
+    // prettyplease wraps long signatures; match the function name +
+    // first parameter without whitespace-sensitive assertions.
     assert!(
-        user_module.contains("fn get_column_value(&self, column: &str)"),
+        user_module.contains("fn get_column_value(") && user_module.contains("column: &str"),
         "user.rs ModelWithPk missing get_column_value:\n{user_module}"
     );
 
@@ -336,4 +345,91 @@ model User {
         mod_rs.contains("user::Client::new(self.engine.clone())"),
         "mod.rs accessor not routed through user::Client:\n{mod_rs}"
     );
+}
+
+/// Consumer repos run `cargo fmt --check` in CI. Before this change
+/// the generator wrote string-concatenated Rust that did not satisfy
+/// rustfmt, forcing every consumer to either exclude the generated
+/// tree via `rustfmt.toml` or let the fmt drift surface as rework on
+/// every PR. Piping through prettyplease gives us:
+///
+///   1. Parseable output — if `syn::parse_file` rejects the string,
+///      a generator bug has landed unformatted Rust (fallback exists
+///      but is meant to be unreachable).
+///   2. Idempotent formatting — prettyplease is deterministic across
+///      rustc versions, so CI can safely gate on its output without
+///      a rustfmt-edition lock.
+///
+/// This test locks both properties by calling the CLI and asserting
+/// that every emitted file parses clean and that running prettyplease
+/// again produces the same bytes.
+#[test]
+fn test_generate_emits_prettyplease_formatted_rust() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = temp_dir.path().join("schema.prax");
+    let schema_content = r#"
+datasource db {
+  provider = "postgresql"
+  url = "postgres://localhost/test"
+}
+
+model User {
+  id    Int    @id @auto
+  email String @unique
+  name  String
+}
+
+model Post {
+  id      Int    @id @auto
+  title   String
+  userId  Int    @map("user_id")
+}
+
+enum Role {
+  Admin
+  Member
+}
+"#;
+    fs::write(&schema_path, schema_content).unwrap();
+
+    let output_dir = temp_dir.path().join("out");
+    prax_cmd()
+        .args([
+            "generate",
+            "--schema",
+            schema_path.to_str().unwrap(),
+            "--output",
+            output_dir.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Every emitted .rs must parse as a Rust file and survive a
+    // round-trip through prettyplease unchanged. If the assertion
+    // fails the generator is emitting shapes syn can't parse or
+    // strings prettyplease would re-flow — the whole point of
+    // routing through prettyplease is that the output is the
+    // canonical form on the first pass.
+    let expected_files = [
+        "mod.rs",
+        "user.rs",
+        "post.rs",
+        "role.rs",
+        "types.rs",
+        "filters.rs",
+    ];
+    for name in expected_files {
+        let path = output_dir.join(name);
+        let raw = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("expected file {} to exist: {}", name, e));
+        let parsed = syn::parse_file(&raw)
+            .unwrap_or_else(|e| panic!("{} did not parse as Rust:\n{}\nerror: {}", name, raw, e));
+        let reformatted = prettyplease::unparse(&parsed);
+        assert_eq!(
+            raw, reformatted,
+            "{} is not prettyplease-stable: the generator emitted a shape \
+             prettyplease re-flowed on the second pass",
+            name
+        );
+    }
 }

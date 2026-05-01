@@ -57,6 +57,15 @@ prax-migrate = { workspace = true }
 prax-query = { workspace = true }
 prax-import = { workspace = true }
 
+# Code pretty-printing for `prax generate` output. Using prettyplease
+# (same library rustc's own codegen uses) instead of shelling out to
+# `cargo fmt` keeps the formatting toolchain-independent: the generator
+# produces the same bytes regardless of the developer's local rustfmt
+# edition. syn parses the generator's emitted string into an AST that
+# prettyplease then serializes back.
+syn = { version = "2.0", features = ["full", "parsing"] }
+prettyplease = "0.2"
+
 # Database drivers for introspection
 tokio-postgres = { workspace = true, optional = true }
 
