@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-04-30
+
+### Fixed
+
+- **`prax-cli generate` — lint-clean generated code.** The generator
+  emits a superset of each schema's shape — every consumer only
+  touches a fraction of the per-model accessors. Added a module-level
+  `#![allow(...)]` preamble on the generated `mod.rs` covering the
+  four lint categories the current codegen consistently trips
+  (`dead_code`, `clippy::derivable_impls`, `clippy::needless_update`,
+  `clippy::too_many_arguments`) so consumers running
+  `cargo clippy -- -D warnings` don't drown in noise from code they
+  never call.
+
 ## [0.9.5] - 2026-04-30
 
 ### Added
