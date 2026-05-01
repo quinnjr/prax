@@ -128,14 +128,14 @@ fn generate_code(
     // Generate main client module
     let client_path = output_dir.join("mod.rs");
     let client_code = generate_client_module(schema, &features)?;
-    std::fs::write(&client_path, client_code)?;
+    write_formatted(&client_path, &client_code)?;
     generated_files.push(client_path);
 
     // Generate model modules
     for model in schema.models.values() {
         let model_path = output_dir.join(format!("{}.rs", to_snake_case(model.name())));
         let model_code = generate_model_module(model, &features, &relation_graph)?;
-        std::fs::write(&model_path, model_code)?;
+        write_formatted(&model_path, &model_code)?;
         generated_files.push(model_path);
     }
 
@@ -143,23 +143,54 @@ fn generate_code(
     for enum_def in schema.enums.values() {
         let enum_path = output_dir.join(format!("{}.rs", to_snake_case(enum_def.name())));
         let enum_code = generate_enum_module(enum_def)?;
-        std::fs::write(&enum_path, enum_code)?;
+        write_formatted(&enum_path, &enum_code)?;
         generated_files.push(enum_path);
     }
 
     // Generate type definitions
     let types_path = output_dir.join("types.rs");
     let types_code = generate_types_module(schema)?;
-    std::fs::write(&types_path, types_code)?;
+    write_formatted(&types_path, &types_code)?;
     generated_files.push(types_path);
 
     // Generate filters
     let filters_path = output_dir.join("filters.rs");
     let filters_code = generate_filters_module(schema)?;
-    std::fs::write(&filters_path, filters_code)?;
+    write_formatted(&filters_path, &filters_code)?;
     generated_files.push(filters_path);
 
     Ok(generated_files)
+}
+
+/// Pretty-print Rust source via `prettyplease` before writing, so
+/// `cargo fmt --check` in consumer repos can run without a
+/// `rustfmt.toml` exclusion for generated code. `prettyplease`
+/// produces byte-identical output across rustfmt versions —
+/// deliberately unlike `cargo fmt` — which is what we want for
+/// codegen: the emitter's output must not drift based on whichever
+/// rustfmt happens to be on the developer's PATH.
+///
+/// If the emitted string does not parse as a Rust file
+/// (shouldn't happen in practice — `generate_*_module` functions
+/// are exercised by the workspace's own tests), fall back to the
+/// raw string with a warning rather than blowing up. The fallback
+/// keeps `prax generate` unblocked while surfacing the formatter
+/// contract violation for whoever added the offending generator.
+fn write_formatted(path: &Path, code: &str) -> CliResult<()> {
+    let formatted = match syn::parse_file(code) {
+        Ok(file) => prettyplease::unparse(&file),
+        Err(e) => {
+            output::warn(&format!(
+                "generated code at {} did not parse; writing unformatted. \
+                 This is a codegen bug: {}",
+                path.display(),
+                e
+            ));
+            code.to_string()
+        }
+    };
+    std::fs::write(path, formatted)?;
+    Ok(())
 }
 
 /// Build a graph of model relations for cycle detection.
