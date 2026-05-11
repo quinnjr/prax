@@ -40,7 +40,7 @@ thiserror = { workspace = true }
 # Types
 chrono = { workspace = true }
 uuid = { workspace = true }
-rust_decimal = { version = "1.36", features = ["serde"] }
+rust_decimal = { version = "1.42", features = ["serde"] }
 
 # Logging
 tracing = { workspace = true }
