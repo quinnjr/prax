@@ -118,7 +118,7 @@ scylla = "0.14"
 cdrs-tokio = "9.0"
 
 # Decimal type
-rust_decimal = { version = "1.37", features = ["serde"] }
+rust_decimal = { version = "1.42", features = ["serde"] }
 
 # URL parsing
 url = "2.5"
