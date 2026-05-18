@@ -28,6 +28,5 @@ pub mod traits;
 pub use args::*;
 pub use relation::*;
 pub use scalar::*;
-#[allow(unused_imports)]
 pub use scalar_update::*;
 pub use traits::*;
