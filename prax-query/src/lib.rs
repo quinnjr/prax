@@ -176,6 +176,7 @@ pub mod dialect;
 pub mod error;
 pub mod extension;
 pub mod filter;
+pub mod inputs;
 pub mod intern;
 pub mod introspection;
 pub mod json;
