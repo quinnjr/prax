@@ -69,8 +69,10 @@ fn string_filter_from_scalar_shortcut() {
 #[allow(unused_imports)]
 use prax_query::inputs::{
     BigIntFilter, BigIntNullableFilter, BoolFilter, BoolNullableFilter, BytesFilter,
-    BytesNullableFilter, DecimalFilter, DecimalNullableFilter, FloatFilter, FloatNullableFilter,
-    IntFilter, IntNullableFilter, JsonFilter, JsonNullableFilter, UuidFilter, UuidNullableFilter,
+    BytesNullableFilter, DateFilter, DateNullableFilter, DateTimeFilter, DateTimeNullableFilter,
+    DecimalFilter, DecimalNullableFilter, EnumFilter, EnumNullableFilter, FloatFilter,
+    FloatNullableFilter, IntFilter, IntNullableFilter, JsonFilter, JsonNullableFilter, TimeFilter,
+    TimeNullableFilter, UuidFilter, UuidNullableFilter,
 };
 
 #[test]
@@ -202,4 +204,60 @@ fn bytes_filter_equals_lowers() {
         }
         other => panic!("expected Bytes Equals (base64-encoded), got {:?}", other),
     }
+}
+
+#[test]
+fn datetime_filter_equals_lowers() {
+    use chrono::{TimeZone, Utc};
+    let dt = Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap();
+    let f = DateTimeFilter::equals(dt);
+    let filter = f.into_filter("created_at");
+    // Encoded as RFC3339 string.
+    match filter {
+        Filter::Equals(col, FilterValue::String(s)) => {
+            assert_eq!(col, "created_at");
+            assert!(s.starts_with("2026-05-18T12:00:00"));
+        }
+        other => panic!("expected DateTime Equals, got {:?}", other),
+    }
+}
+
+#[test]
+fn date_filter_equals_lowers() {
+    use chrono::NaiveDate;
+    let d = NaiveDate::from_ymd_opt(2026, 5, 18).unwrap();
+    let f = DateFilter::equals(d);
+    let filter = f.into_filter("birthday");
+    match filter {
+        Filter::Equals(col, FilterValue::String(s)) => {
+            assert_eq!(col, "birthday");
+            assert_eq!(s, "2026-05-18");
+        }
+        other => panic!("expected Date Equals, got {:?}", other),
+    }
+}
+
+#[test]
+fn time_filter_equals_lowers() {
+    use chrono::NaiveTime;
+    let t = NaiveTime::from_hms_opt(13, 45, 0).unwrap();
+    let f = TimeFilter::equals(t);
+    let filter = f.into_filter("opens_at");
+    match filter {
+        Filter::Equals(col, FilterValue::String(s)) => {
+            assert_eq!(col, "opens_at");
+            assert_eq!(s, "13:45:00");
+        }
+        other => panic!("expected Time Equals, got {:?}", other),
+    }
+}
+
+#[test]
+fn enum_filter_equals_lowers() {
+    let f: EnumFilter<&str> = EnumFilter::equals("Admin");
+    let filter = f.into_filter("role");
+    assert_eq!(
+        filter,
+        Filter::Equals("role".into(), FilterValue::String("Admin".into()))
+    );
 }

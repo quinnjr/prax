@@ -549,6 +549,154 @@ impl ScalarFilter for BoolNullableFilter {
     }
 }
 
+scalar_filter!(
+    /// Filter for non-nullable `DateTime` columns (encoded RFC3339).
+    DateTimeFilter<chrono::DateTime<chrono::Utc>> => |v: chrono::DateTime<chrono::Utc>| {
+        FilterValue::String(v.to_rfc3339())
+    } as FilterValue::String,
+    /// Filter for nullable `DateTime` columns.
+    nullable DateTimeNullableFilter
+);
+
+scalar_filter!(
+    /// Filter for non-nullable `Date` columns (encoded YYYY-MM-DD).
+    DateFilter<chrono::NaiveDate> => |v: chrono::NaiveDate| {
+        FilterValue::String(v.to_string())
+    } as FilterValue::String,
+    /// Filter for nullable `Date` columns.
+    nullable DateNullableFilter
+);
+
+scalar_filter!(
+    /// Filter for non-nullable `Time` columns (encoded HH:MM:SS).
+    TimeFilter<chrono::NaiveTime> => |v: chrono::NaiveTime| {
+        FilterValue::String(v.format("%H:%M:%S").to_string())
+    } as FilterValue::String,
+    /// Filter for nullable `Time` columns.
+    nullable TimeNullableFilter
+);
+
+/// Filter operators for an enum-typed column.
+///
+/// `E` is the user-defined enum. Codegen emits `impl ToString for Role` so
+/// the macro's bare-ident shorthand (`role: Admin`) flows through.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "snake_case",
+    bound = "E: Serialize + for<'de2> Deserialize<'de2>"
+)]
+pub struct EnumFilter<E> {
+    /// `column = value`
+    pub equals: Option<E>,
+    /// Negation.
+    pub not: Option<Box<EnumFilter<E>>>,
+    /// `column IN (...)`
+    pub in_list: Option<Vec<E>>,
+    /// `column NOT IN (...)`
+    pub not_in: Option<Vec<E>>,
+}
+
+impl<E> EnumFilter<E> {
+    /// `equals: Some(value)`.
+    pub fn equals(v: E) -> Self {
+        Self {
+            equals: Some(v),
+            not: None,
+            in_list: None,
+            not_in: None,
+        }
+    }
+}
+
+impl<E: ToString> ScalarFilter for EnumFilter<E> {
+    fn into_filter(self, column: &str) -> Filter {
+        let col: crate::filter::FieldName = column.to_string().into();
+        let mut parts: Vec<Filter> = Vec::new();
+        if let Some(v) = self.equals {
+            parts.push(Filter::Equals(
+                col.clone(),
+                FilterValue::String(v.to_string()),
+            ));
+        }
+        if let Some(boxed) = self.not {
+            parts.push(Filter::Not(Box::new(boxed.into_filter(column))));
+        }
+        if let Some(values) = self.in_list {
+            let vs: Vec<FilterValue> = values
+                .into_iter()
+                .map(|v| FilterValue::String(v.to_string()))
+                .collect();
+            parts.push(Filter::In(col.clone(), vs));
+        }
+        if let Some(values) = self.not_in {
+            let vs: Vec<FilterValue> = values
+                .into_iter()
+                .map(|v| FilterValue::String(v.to_string()))
+                .collect();
+            parts.push(Filter::NotIn(col, vs));
+        }
+        match parts.len() {
+            0 => Filter::None,
+            1 => parts.into_iter().next().unwrap(),
+            _ => Filter::and(parts),
+        }
+    }
+}
+
+/// Filter operators for a nullable enum-typed column.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "snake_case",
+    bound = "E: Serialize + for<'de2> Deserialize<'de2>"
+)]
+pub struct EnumNullableFilter<E> {
+    /// `column = value`
+    pub equals: Option<E>,
+    /// Negation.
+    pub not: Option<Box<EnumNullableFilter<E>>>,
+    /// `column IN (...)`
+    pub in_list: Option<Vec<E>>,
+    /// `column NOT IN (...)`
+    pub not_in: Option<Vec<E>>,
+    /// IS NULL / IS NOT NULL.
+    pub is_null: Option<bool>,
+}
+
+impl<E: ToString> ScalarFilter for EnumNullableFilter<E> {
+    fn into_filter(self, column: &str) -> Filter {
+        let mut parts: Vec<Filter> = Vec::new();
+        if let Some(b) = self.is_null {
+            parts.push(if b {
+                Filter::IsNull(column.to_string().into())
+            } else {
+                Filter::IsNotNull(column.to_string().into())
+            });
+        }
+        let inner = EnumFilter::<E> {
+            equals: self.equals,
+            not: self.not.map(|b| {
+                Box::new(EnumFilter {
+                    equals: b.equals,
+                    in_list: b.in_list,
+                    not_in: b.not_in,
+                    not: None,
+                })
+            }),
+            in_list: self.in_list,
+            not_in: self.not_in,
+        };
+        let f = inner.into_filter(column);
+        if !matches!(f, Filter::None) {
+            parts.push(f);
+        }
+        match parts.len() {
+            0 => Filter::None,
+            1 => parts.into_iter().next().unwrap(),
+            _ => Filter::and(parts),
+        }
+    }
+}
+
 /// Filter operators for a non-nullable `Json` column.
 ///
 /// Phase 1 supports `equals`/`not`. JSON-path operators land behind
