@@ -1937,7 +1937,7 @@ wire."
 - Create: `prax-query/tests/inputs_relation.rs`
 
 `ListRelationFilter<W>` and `SingleRelationFilter<W>` lower to
-`Filter::ScalarSubquery` via a per-relation `RelationMeta` adapter that
+`Filter::ScalarSubquery` via a per-relation `RelationFilterMeta` adapter that
 phase 2's codegen will supply. Phase 1 introduces the wrappers and a
 hand-built adapter trait used in tests.
 
@@ -1948,7 +1948,7 @@ Create `prax-query/tests/inputs_relation.rs`:
 ```rust
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::inputs::{
-    relation::{LowerRelationFilter, RelationMeta, ListRelationFilter, SingleRelationFilter},
+    relation::{LowerRelationFilter, RelationFilterMeta, ListRelationFilter, SingleRelationFilter},
     StringFilter, WhereInput,
 };
 use prax_query::traits::Model;
@@ -1978,7 +1978,7 @@ impl WhereInput for PostWhereInput {
 
 // Hand-built relation meta for `User.posts` so we don't need the codegen.
 struct UserPostsMeta;
-impl RelationMeta for UserPostsMeta {
+impl RelationFilterMeta for UserPostsMeta {
     const PARENT_TABLE: &'static str = "users";
     const PARENT_PK: &'static str = "id";
     const CHILD_TABLE: &'static str = "posts";
@@ -2072,17 +2072,20 @@ Create `prax-query/src/inputs/relation.rs`:
 //! `ListRelationFilter<W>` and `SingleRelationFilter<W>` carry the
 //! Prisma operator shape (`some`/`every`/`none` for to-many;
 //! `is`/`is_not` for to-one). They lower to [`Filter::ScalarSubquery`]
-//! fragments via a per-relation [`RelationMeta`] adapter that codegen
+//! fragments via a per-relation [`RelationFilterMeta`] adapter that codegen
 //! emits (phase 2) but tests / hand-built users can supply directly.
 
 use crate::filter::{Filter, FilterValue};
 use crate::inputs::traits::WhereInput;
 
-/// Static metadata for one parent→child relation.
+/// Static metadata for one parent→child relation, used when lowering
+/// relation filters to EXISTS / NOT EXISTS subqueries.
 ///
 /// Phase 2 codegen emits one impl per relation declared in the schema.
 /// Hand-rolled callers can implement this trait themselves.
-pub trait RelationMeta {
+///
+/// Distinct from `crate::relations::RelationMeta`, which carries runtime-loader metadata.
+pub trait RelationFilterMeta {
     /// Parent SQL table name.
     const PARENT_TABLE: &'static str;
     /// Parent primary-key column name.
@@ -2116,14 +2119,14 @@ pub struct SingleRelationFilter<W> {
 }
 
 /// Lowering helper: produces `Filter::ScalarSubquery` from a relation
-/// filter + `RelationMeta`.
+/// filter + [`RelationFilterMeta`].
 ///
 /// Implemented blanket-style for any `W: WhereInput` so neither the
 /// codegen nor the macro layer needs to manually thread metadata.
 pub trait LowerRelationFilter {
     /// Lower this relation filter to a runtime [`Filter`] using the
     /// supplied metadata.
-    fn lower<M: RelationMeta>(self) -> Filter;
+    fn lower<M: RelationFilterMeta>(self) -> Filter;
 }
 
 fn render_inline_filter(
@@ -2250,7 +2253,7 @@ fn render_inline_filter(
 }
 
 impl<W: WhereInput> LowerRelationFilter for ListRelationFilter<W> {
-    fn lower<M: RelationMeta>(self) -> Filter {
+    fn lower<M: RelationFilterMeta>(self) -> Filter {
         let mut clauses: Vec<Filter> = Vec::new();
         if let Some(w) = self.some {
             let inner = w.into_ir();
@@ -2294,7 +2297,7 @@ impl<W: WhereInput> LowerRelationFilter for ListRelationFilter<W> {
 }
 
 impl<W: WhereInput> LowerRelationFilter for SingleRelationFilter<W> {
-    fn lower<M: RelationMeta>(self) -> Filter {
+    fn lower<M: RelationFilterMeta>(self) -> Filter {
         let mut clauses: Vec<Filter> = Vec::new();
         if let Some(w) = self.is {
             let inner = w.into_ir();
@@ -2340,9 +2343,9 @@ git commit -m "feat(query): add relation filter wrappers + EXISTS/NOT EXISTS low
 
 ListRelationFilter (some/every/none) and SingleRelationFilter
 (is/is_not) lower to Filter::ScalarSubquery via a per-relation
-RelationMeta adapter. Phase 1 supplies a hand-rolled inline filter
+RelationFilterMeta adapter. Phase 1 supplies a hand-rolled inline filter
 renderer scoped to the operators the scalar filters emit;
-phase 2 codegen supplies RelationMeta impls per relation."
+phase 2 codegen supplies RelationFilterMeta impls per relation."
 ```
 
 ---
@@ -3730,7 +3733,7 @@ pub use crate::inputs::{
     IntFieldUpdate, IntNullableFieldUpdate, JsonFieldUpdate, JsonNullableFieldUpdate,
     StringFieldUpdate, StringNullableFieldUpdate, UuidFieldUpdate, UuidNullableFieldUpdate,
     // Relation filters + meta.
-    relation::{ListRelationFilter, LowerRelationFilter, RelationMeta, SingleRelationFilter},
+    relation::{ListRelationFilter, LowerRelationFilter, RelationFilterMeta, SingleRelationFilter},
     // Traits.
     AggregateInput, CountSelect, CreateInput, GroupByInput, IncludeInput, OrderByInput,
     PaginationInput, SelectInput, UpdateInput, WhereInput, WhereUniqueInput,
@@ -3803,7 +3806,7 @@ The branch is ready for PR. Phase 2 (codegen of per-model input types in `prax-c
 - [ ] `prax-query/src/capabilities.rs` exposes 9 marker traits with `#[diagnostic::on_unimplemented]` messages.
 - [ ] `prax-query/src/inputs/` is structured into `traits.rs`, `scalar.rs`, `scalar_update.rs`, `relation.rs`, `args.rs`, `mod.rs`.
 - [ ] Every scalar type listed in the spec has a non-nullable + nullable filter wrapper with `into_filter(column)` lowering.
-- [ ] `ListRelationFilter` and `SingleRelationFilter` lower to `Filter::ScalarSubquery` EXISTS / NOT EXISTS fragments via `RelationMeta`.
+- [ ] `ListRelationFilter` and `SingleRelationFilter` lower to `Filter::ScalarSubquery` EXISTS / NOT EXISTS fragments via `RelationFilterMeta`.
 - [ ] Every scalar type has a `*FieldUpdate` wrapper with `From<scalar>` shortcut.
 - [ ] 13 `*Args` containers exist with the field shape promised by section 3 of the spec.
 - [ ] Every read/write/count/aggregate operation has `with_*_input` extension methods that consume the typed inputs, AND-composing where appropriate.
@@ -3816,7 +3819,7 @@ The branch is ready for PR. Phase 2 (codegen of per-model input types in `prax-c
 
 - **Spec coverage.** Phase 1 of section 8 in the spec maps to tasks 2 (Filter variant), 3 (in_transaction), 4 (capabilities), 5–11 (input types), 12–14 (ext methods), 15 (re-exports). Computed/virtual fields (spec §9), codegen (§3), macros (§4-5), and docs (§10) are out of scope for this plan and live in phase 2+.
 - **Placeholders.** Every step has either runnable commands or complete Rust source. No "TBD", no "fill in", no "similar to Task N." The `_field` skips on operations where a field doesn't yet exist are explicit, not placeholders.
-- **Type consistency.** `WhereInput::into_ir(self) -> Filter` is used uniformly across tasks 5, 6, 7, 8, 9, 12, 13, 14. `IncludeInput::into_ir(self) -> Include` is used consistently. `RelationMeta` constants are named identically across tasks 9, 10, 12. The `Args` field name `r#where` is consistent across tasks 11, 12, 13.
+- **Type consistency.** `WhereInput::into_ir(self) -> Filter` is used uniformly across tasks 5, 6, 7, 8, 9, 12, 13, 14. `IncludeInput::into_ir(self) -> Include` is used consistently. `RelationFilterMeta` constants are named identically across tasks 9, 10, 12. The `Args` field name `r#where` is consistent across tasks 11, 12, 13.
 - **YAGNI.** No phase-2+ work is preemptively wired up. The `mode: QueryMode` field is parsed but ignored at the IR level (phase 2 dialect layer consumes it). Computed/virtual field SQL emission relies on `Filter::ScalarSubquery` but the variant has no producers in this plan.
 - **TDD.** Every code-emitting task follows write-test → confirm-fail → implement → confirm-pass → commit.
 

@@ -1,7 +1,7 @@
 use prax_query::filter::{Filter, FilterValue};
 use prax_query::inputs::{
     WhereInput,
-    relation::{ListRelationFilter, LowerRelationFilter, RelationMeta, SingleRelationFilter},
+    relation::{ListRelationFilter, LowerRelationFilter, RelationFilterMeta, SingleRelationFilter},
 };
 use prax_query::traits::Model;
 
@@ -30,7 +30,7 @@ impl WhereInput for PostWhereInput {
 
 // Hand-built relation meta for `User.posts` so we don't need the codegen.
 struct UserPostsMeta;
-impl RelationMeta for UserPostsMeta {
+impl RelationFilterMeta for UserPostsMeta {
     const PARENT_TABLE: &'static str = "users";
     const PARENT_PK: &'static str = "id";
     const CHILD_TABLE: &'static str = "posts";

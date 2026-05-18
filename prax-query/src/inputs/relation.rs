@@ -3,17 +3,20 @@
 //! `ListRelationFilter<W>` and `SingleRelationFilter<W>` carry the
 //! Prisma operator shape (`some`/`every`/`none` for to-many;
 //! `is`/`is_not` for to-one). They lower to [`Filter::ScalarSubquery`]
-//! fragments via a per-relation [`RelationMeta`] adapter that codegen
+//! fragments via a per-relation [`RelationFilterMeta`] adapter that codegen
 //! emits (phase 2) but tests / hand-built users can supply directly.
 
 use crate::filter::{Filter, FilterValue};
 use crate::inputs::traits::WhereInput;
 
-/// Static metadata for one parent→child relation.
+/// Static metadata for one parent→child relation, used when lowering
+/// relation filters to EXISTS / NOT EXISTS subqueries.
 ///
 /// Phase 2 codegen emits one impl per relation declared in the schema.
 /// Hand-rolled callers can implement this trait themselves.
-pub trait RelationMeta {
+///
+/// Distinct from `crate::relations::RelationMeta`, which carries runtime-loader metadata.
+pub trait RelationFilterMeta {
     /// Parent SQL table name.
     const PARENT_TABLE: &'static str;
     /// Parent primary-key column name.
@@ -49,14 +52,14 @@ pub struct SingleRelationFilter<W> {
 }
 
 /// Lowering helper: produces `Filter::ScalarSubquery` from a relation
-/// filter + `RelationMeta`.
+/// filter + [`RelationFilterMeta`].
 ///
 /// Implemented for any `W: WhereInput` so neither the codegen nor the
 /// macro layer needs to manually thread metadata.
 pub trait LowerRelationFilter {
     /// Lower this relation filter to a runtime [`Filter`] using the
     /// supplied metadata.
-    fn lower<M: RelationMeta>(self) -> Filter;
+    fn lower<M: RelationFilterMeta>(self) -> Filter;
 }
 
 /// Walk a `Filter` tree and produce inline SQL with `{N}` placeholders.
@@ -203,7 +206,7 @@ fn write_filter(f: &Filter, sql: &mut String, params: &mut Vec<FilterValue>) {
 }
 
 impl<W: WhereInput> LowerRelationFilter for ListRelationFilter<W> {
-    fn lower<M: RelationMeta>(self) -> Filter {
+    fn lower<M: RelationFilterMeta>(self) -> Filter {
         let mut clauses: Vec<Filter> = Vec::new();
 
         if let Some(w) = self.some {
@@ -266,7 +269,7 @@ impl<W: WhereInput> LowerRelationFilter for ListRelationFilter<W> {
 }
 
 impl<W: WhereInput> LowerRelationFilter for SingleRelationFilter<W> {
-    fn lower<M: RelationMeta>(self) -> Filter {
+    fn lower<M: RelationFilterMeta>(self) -> Filter {
         let mut clauses: Vec<Filter> = Vec::new();
 
         if let Some(w) = self.is {
