@@ -165,6 +165,7 @@ pub mod async_optimize;
 pub mod batch;
 pub mod builder;
 pub mod cache;
+pub mod capabilities;
 pub mod connection;
 pub mod cte;
 pub mod data;
