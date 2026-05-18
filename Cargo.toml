@@ -117,6 +117,9 @@ scylla = "0.14"
 # Apache Cassandra driver (pure Rust)
 cdrs-tokio = "9.0"
 
+# Base64 encoding/decoding
+base64 = "0.22"
+
 # Decimal type
 rust_decimal = { version = "1.37", features = ["serde"] }
 
