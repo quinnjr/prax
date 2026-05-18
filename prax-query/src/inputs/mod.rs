@@ -26,7 +26,6 @@ pub mod traits;
 // resolve to concrete items once tasks 6-11 populate them.
 #[allow(unused_imports)]
 pub use args::*;
-#[allow(unused_imports)]
 pub use relation::*;
 pub use scalar::*;
 #[allow(unused_imports)]
