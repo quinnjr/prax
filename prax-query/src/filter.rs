@@ -612,7 +612,10 @@ pub enum Filter {
     /// in the workspace constructs it yet.
     ScalarSubquery {
         /// SQL fragment with `{N}` placeholders.
-        sql: std::borrow::Cow<'static, str>,
+        ///
+        /// Placeholders may appear in any textual order and may repeat; each
+        /// `{N}` always resolves to the dialect placeholder for `inner_params[N]`.
+        sql: Cow<'static, str>,
         /// Parameter values referenced by the `{N}` placeholders.
         params: Vec<FilterValue>,
     },
@@ -1139,6 +1142,12 @@ impl Filter {
                 // child's param_idx, so we must NOT add params.len() again here.
                 // {N} in the SQL maps to global slot (param_idx + N + 1).
                 let base = param_idx;
+                // Reserve placeholder slots up front in inner_params index order so
+                // each `{N}` always emits the correct dialect placeholder regardless
+                // of textual order or repeats.
+                for v in inner_params.iter() {
+                    params.push(v.clone());
+                }
                 let mut out = String::with_capacity(sql.len() + inner_params.len() * 4);
                 let mut chars = sql.chars().peekable();
                 while let Some(ch) = chars.next() {
@@ -1159,14 +1168,13 @@ impl Filter {
                                 digits
                             )
                         });
-                        let value = inner_params.get(n).unwrap_or_else(|| {
+                        if n >= inner_params.len() {
                             panic!(
                                 "Filter::ScalarSubquery: placeholder {{{}}} out of range (have {} params)",
                                 n,
                                 inner_params.len()
-                            )
-                        });
-                        params.push(value.clone());
+                            );
+                        }
                         out.push_str(&dialect.placeholder(base + n + 1));
                     } else {
                         out.push(ch);
@@ -2809,7 +2817,7 @@ mod tests {
     fn scalar_subquery_lowers_to_inline_sql_with_dialect_placeholders() {
         use crate::dialect::Postgres;
         let f = Filter::ScalarSubquery {
-            sql: std::borrow::Cow::Borrowed(
+            sql: Cow::Borrowed(
                 "(SELECT COUNT(*) FROM posts p WHERE p.author_id = users.id AND p.published = {0}) > {1}",
             ),
             params: vec![FilterValue::Bool(true), FilterValue::Int(5)],
@@ -2828,7 +2836,7 @@ mod tests {
         let f = Filter::and([
             Filter::Equals("active".into(), FilterValue::Bool(true)),
             Filter::ScalarSubquery {
-                sql: std::borrow::Cow::Borrowed(
+                sql: Cow::Borrowed(
                     "(SELECT COUNT(*) FROM posts p WHERE p.author_id = users.id) >= {0}",
                 ),
                 params: vec![FilterValue::Int(1)],
@@ -2841,5 +2849,19 @@ mod tests {
         assert_eq!(params.len(), 2);
         assert_eq!(params[0], FilterValue::Bool(true));
         assert_eq!(params[1], FilterValue::Int(1));
+    }
+
+    #[test]
+    fn scalar_subquery_handles_out_of_order_and_repeated_placeholders() {
+        use crate::dialect::Postgres;
+        let f = Filter::ScalarSubquery {
+            sql: Cow::Borrowed("{1} = {0} AND {1} > {0}"),
+            params: vec![FilterValue::Int(1), FilterValue::Int(2)],
+        };
+        let (sql, params) = f.to_sql(0, &Postgres);
+        // {0} → $1 (binds Int(1)), {1} → $2 (binds Int(2)), regardless of
+        // textual order or repeats.
+        assert_eq!(sql, "($2 = $1 AND $2 > $1)");
+        assert_eq!(params, vec![FilterValue::Int(1), FilterValue::Int(2)]);
     }
 }
