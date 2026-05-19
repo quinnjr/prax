@@ -23,6 +23,8 @@ pub use inputs::include_input::{IncludeField, generate as generate_include_input
 pub use inputs::order_by_input::{
     OrderByField as OrderByInputField, generate as generate_order_by_input,
 };
+#[allow(unused_imports)]
+pub use inputs::relation_meta::{RelationMetaSpec, generate as generate_relation_meta};
 pub use inputs::select_input::{SelectField, generate as generate_select_input};
 #[allow(unused_imports)]
 pub use inputs::update_input::{UpdateField, generate as generate_update_input};

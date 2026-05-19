@@ -335,6 +335,37 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let create_struct = super::inputs::create_input::generate(name, &create_fields);
     let update_struct = super::inputs::update_input::generate(name, &update_fields);
 
+    // Build RelationMetaSpec list for the relation_meta generator (Task 8).
+    // Parent PK is the first @id field's column name.
+    let parent_pk = field_infos
+        .iter()
+        .find(|f| f.is_id)
+        .map(|f| f.column_name.clone())
+        .unwrap_or_else(|| "id".to_string());
+
+    let relation_meta_specs: Vec<super::inputs::relation_meta::RelationMetaSpec> = field_infos
+        .iter()
+        .filter_map(|f| {
+            let rel = f.relation.as_ref()?;
+            // Child table name: snake_case of the target model ident.
+            let child_table = rel.target.to_string().to_case(Case::Snake);
+            Some(super::inputs::relation_meta::RelationMetaSpec {
+                meta_ident: format_ident!(
+                    "{}{}FilterMeta",
+                    name,
+                    f.name.to_string().to_case(Case::Pascal)
+                ),
+                parent_table: table_name.clone(),
+                parent_pk: parent_pk.clone(),
+                child_table,
+                child_fk: rel.foreign_key.clone(),
+            })
+        })
+        .collect();
+
+    let (relation_meta_struct, relation_meta_impl) =
+        super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
+
     // Only emit the `WhereInput` trait impl when the model struct is pub.
     // If the struct is private (e.g., in integration tests), emitting
     // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
@@ -441,6 +472,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #order_by_struct
             #create_struct
             #update_struct
+
+            // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
+            // The corresponding `impl RelationFilterMeta` blocks are emitted
+            // below at crate-root scope so the path `#module_name::#marker`
+            // resolves correctly.
+            #relation_meta_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -468,6 +505,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
         // OrderByInput trait impl — same visibility gating.
         #maybe_order_by_impl
+
+        // RelationFilterMeta impls — one per declared relation field.
+        // Each impl associates the zero-sized `<Model><Relation>FilterMeta`
+        // marker (declared in the `pub mod` above) with the parent/child table
+        // and column names required for EXISTS / NOT EXISTS lowering.
+        #relation_meta_impl
     })
 }
 
@@ -1275,6 +1318,53 @@ mod tests {
             code.contains("active"),
             "expected active field in UserCreateInput"
         );
+    }
+
+    // ── relation_meta codegen tests ───────────────────────────────────────
+
+    #[test]
+    fn user_with_posts_relation_emits_relation_filter_meta() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub posts: Vec<Post>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // Marker struct and impl must be present.
+        assert!(
+            code.contains("UserPostsFilterMeta"),
+            "expected UserPostsFilterMeta marker"
+        );
+        assert!(
+            code.contains("RelationFilterMeta"),
+            "expected RelationFilterMeta trait impl"
+        );
+        // Table + key constants.
+        assert!(
+            code.contains("\"users\""),
+            "expected \"users\" as PARENT_TABLE"
+        );
+        assert!(
+            code.contains("\"post\""),
+            "expected \"post\" as CHILD_TABLE (snake_case of target \"Post\")"
+        );
+        assert!(
+            code.contains("\"author_id\""),
+            "expected \"author_id\" as CHILD_FK"
+        );
+        assert!(code.contains("\"id\""), "expected \"id\" as PARENT_PK");
     }
 
     // ── update_input codegen tests ────────────────────────────────────────
