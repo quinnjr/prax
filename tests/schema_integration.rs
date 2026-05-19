@@ -451,7 +451,7 @@ fn test_schema_merging() {
     .expect("Failed to parse schema 2");
 
     let mut merged = schema1;
-    merged.merge(schema2);
+    merged.try_merge(schema2).expect("merge should succeed");
 
     assert_eq!(merged.model_names().count(), 2);
     assert!(merged.get_model("User").is_some());

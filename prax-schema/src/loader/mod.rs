@@ -2,8 +2,10 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multi-file-schema-design.md`.
 
+pub mod merge;
 pub mod source;
 
+pub use merge::MergeConflict;
 pub use source::{SourceFile, SourceId, SourceLoc, SourceMap};
 
 use crate::ast::Schema;
