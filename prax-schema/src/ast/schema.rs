@@ -228,6 +228,9 @@ pub struct RawSql {
     pub name: SmolStr,
     /// The raw SQL content.
     pub sql: String,
+    /// Source file this raw SQL was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl RawSql {
@@ -236,6 +239,7 @@ impl RawSql {
         Self {
             name: name.into(),
             sql: sql.into(),
+            source_id: None,
         }
     }
 }

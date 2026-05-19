@@ -53,6 +53,9 @@ pub struct ServerGroup {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this server group was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl ServerGroup {
@@ -64,6 +67,7 @@ impl ServerGroup {
             attributes: vec![],
             documentation: None,
             span,
+            source_id: None,
         }
     }
 

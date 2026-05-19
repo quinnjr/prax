@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// Opaque, dense identifier for a source file in a [`SourceMap`].
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
 
 /// A single source file (path + content) loaded into the schema.

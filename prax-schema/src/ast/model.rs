@@ -19,6 +19,9 @@ pub struct Model {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this model was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl Model {
@@ -30,6 +33,7 @@ impl Model {
             attributes: vec![],
             documentation: None,
             span,
+            source_id: None,
         }
     }
 
@@ -101,6 +105,9 @@ pub struct Enum {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this enum was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl Enum {
@@ -112,6 +119,7 @@ impl Enum {
             attributes: vec![],
             documentation: None,
             span,
+            source_id: None,
         }
     }
 
@@ -198,6 +206,9 @@ pub struct CompositeType {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this type was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl CompositeType {
@@ -208,6 +219,7 @@ impl CompositeType {
             fields: IndexMap::new(),
             documentation: None,
             span,
+            source_id: None,
         }
     }
 
@@ -246,6 +258,9 @@ pub struct View {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this view was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl View {
@@ -257,6 +272,7 @@ impl View {
             attributes: vec![],
             documentation: None,
             span,
+            source_id: None,
         }
     }
 

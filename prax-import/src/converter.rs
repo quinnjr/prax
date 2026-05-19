@@ -68,6 +68,7 @@ impl SchemaBuilder {
             extensions: vec![],
             properties: vec![],
             span: dummy_span(),
+            source_id: None,
         };
         self.schema.set_datasource(datasource);
         self
