@@ -2,9 +2,11 @@
 //!
 //! See `docs/superpowers/specs/2026-05-19-multi-file-schema-design.md`.
 
+pub mod discovery;
 pub mod merge;
 pub mod source;
 
+pub use discovery::Discovered;
 pub use merge::MergeConflict;
 pub use source::{SourceFile, SourceId, SourceLoc, SourceMap};
 
