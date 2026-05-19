@@ -3,7 +3,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use prax_schema::{ModelStyle, PraxConfig, Schema, validate_schema};
+use prax_schema::{ModelStyle, PraxConfig, Schema, load};
 
 /// Result of reading schema and config files.
 pub struct SchemaWithConfig {
@@ -14,6 +14,9 @@ pub struct SchemaWithConfig {
 }
 
 /// Read and parse a schema file, resolving the path relative to the crate root.
+///
+/// `path` may point at a single `.prax` file or a directory; in the latter case
+/// every `*.prax` is loaded recursively and merged (see `prax_schema::load`).
 #[allow(dead_code)]
 pub fn read_and_parse_schema(path: &str) -> Result<Schema, SchemaReadError> {
     let result = read_schema_with_config(path)?;
@@ -24,24 +27,20 @@ pub fn read_and_parse_schema(path: &str) -> Result<Schema, SchemaReadError> {
 pub fn read_schema_with_config(path: &str) -> Result<SchemaWithConfig, SchemaReadError> {
     let full_path = resolve_schema_path(path)?;
 
-    let content = std::fs::read_to_string(&full_path).map_err(|e| SchemaReadError::Io {
+    // load() handles both single-file and multi-file directory paths.
+    let loaded = load(&full_path).map_err(|e| SchemaReadError::Validation {
         path: full_path.display().to_string(),
-        error: e.to_string(),
+        error: e.error.to_string(),
     })?;
 
-    // validate_schema parses and validates in one step
-    let schema = validate_schema(&content).map_err(|e| SchemaReadError::Validation {
-        path: full_path.display().to_string(),
-        error: e.to_string(),
-    })?;
-
-    // Try to load prax.toml from the same directory or parent directories
+    // load_prax_config walks up from the schema path's parent looking for prax.toml,
+    // which works for both file paths and directory paths.
     let model_style = load_prax_config(&full_path)
         .map(|c| c.generator.client.model_style)
         .unwrap_or_default();
 
     Ok(SchemaWithConfig {
-        schema,
+        schema: loaded.schema,
         model_style,
     })
 }
