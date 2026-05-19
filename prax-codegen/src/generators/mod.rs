@@ -9,6 +9,7 @@ mod derive_relation_loader;
 mod enum_gen;
 mod fields;
 mod filters;
+mod inputs;
 mod model;
 mod relation_accessors;
 mod type_gen;
@@ -16,6 +17,11 @@ mod view;
 
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
+#[allow(unused_imports)]
+pub use inputs::{
+    FilterCategory, filter_category_for, filter_wrapper_ident, scalar_payload_type,
+    update_wrapper_ident,
+};
 #[allow(unused_imports)]
 pub use model::generate_model_module;
 pub use model::generate_model_module_with_style;
