@@ -22,9 +22,6 @@ pub mod scalar;
 pub mod scalar_update;
 pub mod traits;
 
-// The four sibling modules are stubs in phase 1; their pub-use lines will
-// resolve to concrete items once tasks 6-11 populate them.
-#[allow(unused_imports)]
 pub use args::*;
 pub use relation::*;
 pub use scalar::*;
