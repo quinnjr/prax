@@ -167,3 +167,18 @@ fn delete_op_with_where_input_overwrites_filter_for_unique() {
     });
     assert!(!matches!(op.filter_for_test(), Filter::None));
 }
+
+use prax_query::operations::CountOperation;
+
+#[test]
+fn count_op_with_where_input_ands() {
+    let op = CountOperation::<NoopEngine, U>::new(NoopEngine)
+        .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)))
+        .with_where_input(UWhereInput {
+            email: Some(StringFilter::contains("@x.com")),
+        });
+    match op.filter_for_test() {
+        Filter::And(parts) => assert_eq!(parts.len(), 2),
+        other => panic!("expected Filter::And, got {:?}", other),
+    }
+}

@@ -299,6 +299,16 @@ impl<M: Model, E: QueryEngine> AggregateOperation<M, E> {
         self
     }
 
+    /// Apply a typed `WhereInput`. AND-composes with any previously set filter.
+    pub fn with_where_input<W: crate::inputs::WhereInput<Model = M>>(mut self, w: W) -> Self {
+        let f = w.into_ir();
+        self.filter = Some(match self.filter.take() {
+            Some(existing) => existing.and_then(f),
+            None => f,
+        });
+        self
+    }
+
     /// Build the SQL for this operation.
     pub fn build_sql(
         &self,

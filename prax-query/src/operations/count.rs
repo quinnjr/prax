@@ -82,6 +82,19 @@ impl<E: QueryEngine, M: Model> CountOperation<E, M> {
         (sql, params)
     }
 
+    /// Apply a typed `WhereInput`. AND-composes with any previously set filter.
+    pub fn with_where_input<W: crate::inputs::WhereInput<Model = M>>(mut self, w: W) -> Self {
+        let f = w.into_ir();
+        self.filter = self.filter.and_then(f);
+        self
+    }
+
+    /// Doc-hidden accessor for the current filter.
+    #[doc(hidden)]
+    pub fn filter_for_test(&self) -> &Filter {
+        &self.filter
+    }
+
     /// Execute the count query.
     pub async fn exec(self) -> QueryResult<u64> {
         let dialect = self.engine.dialect();
