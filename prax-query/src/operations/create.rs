@@ -72,6 +72,12 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
         self
     }
 
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
     /// Queue a nested write to run alongside this create.
     ///
     /// The parent `INSERT` and every queued nested op execute inside a

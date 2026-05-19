@@ -137,6 +137,27 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
         let (sql, params) = self.build_sql(dialect);
         self.engine.query_one::<M>(&sql, params).await
     }
+
+    /// Apply a typed `WhereUniqueInput`. AND-composes with any
+    /// previously set filter so callers can combine the unique key
+    /// with side conditions when they need to.
+    pub fn with_where_input<W: crate::inputs::WhereUniqueInput<Model = M>>(mut self, w: W) -> Self {
+        let f = w.into_ir();
+        self.filter = self.filter.and_then(f);
+        self
+    }
+
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
+    /// Doc-hidden accessor for the current filter.
+    #[doc(hidden)]
+    pub fn filter_for_test(&self) -> &Filter {
+        &self.filter
+    }
 }
 
 /// Update many records at once.

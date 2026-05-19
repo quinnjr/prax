@@ -111,6 +111,25 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> DeleteOperation<E, M> {
         let (sql, params) = self.build_sql_count(dialect);
         self.engine.execute_delete(&sql, params).await
     }
+
+    /// Apply a typed `WhereUniqueInput`. Overwrites any previously set
+    /// filter — delete operations are intentionally precise.
+    pub fn with_where_input<W: crate::inputs::WhereUniqueInput<Model = M>>(mut self, w: W) -> Self {
+        self.filter = w.into_ir();
+        self
+    }
+
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
+    /// Doc-hidden accessor for the current filter.
+    #[doc(hidden)]
+    pub fn filter_for_test(&self) -> &Filter {
+        &self.filter
+    }
 }
 
 /// Delete many records at once.

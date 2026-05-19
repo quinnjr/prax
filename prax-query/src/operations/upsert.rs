@@ -105,6 +105,18 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
         self
     }
 
+    /// Apply a typed `WhereUniqueInput`. Overwrites the existing filter.
+    pub fn with_where_input<W: crate::inputs::WhereUniqueInput<Model = M>>(mut self, w: W) -> Self {
+        self.filter = w.into_ir();
+        self
+    }
+
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
     /// Build the SQL query.
     pub fn build_sql(
         &self,

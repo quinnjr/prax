@@ -144,3 +144,26 @@ fn find_first_with_where_input_ands_with_existing() {
         other => panic!("expected Filter::And, got {:?}", other),
     }
 }
+
+use prax_query::operations::{DeleteOperation, UpdateOperation};
+
+#[test]
+fn update_op_with_where_input_ands_with_existing() {
+    let op = UpdateOperation::<NoopEngine, U>::new(NoopEngine)
+        .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
+        .with_where_input(UWhereInput {
+            email: Some(StringFilter::contains("@x.com")),
+        });
+    match op.filter_for_test() {
+        Filter::And(parts) => assert_eq!(parts.len(), 2),
+        other => panic!("expected Filter::And, got {:?}", other),
+    }
+}
+
+#[test]
+fn delete_op_with_where_input_overwrites_filter_for_unique() {
+    let op = DeleteOperation::<NoopEngine, U>::new(NoopEngine).with_where_input(UWhereInput {
+        email: Some(StringFilter::equals("x@y.com")),
+    });
+    assert!(!matches!(op.filter_for_test(), Filter::None));
+}
