@@ -7,6 +7,7 @@
 //! emits (phase 2) but tests / hand-built users can supply directly.
 
 use crate::filter::{Filter, FilterValue};
+use crate::inputs::scalar::combine_filters;
 use crate::inputs::traits::WhereInput;
 
 /// Static metadata for one parent→child relation, used when lowering
@@ -65,7 +66,8 @@ pub trait LowerRelationFilter {
 /// Walk a `Filter` tree and produce inline SQL with `{N}` placeholders.
 ///
 /// Phase 1 supports the operators that the scalar filters emit.
-/// `ScalarSubquery` nesting is not expected at phase 1 and panics.
+/// `ScalarSubquery` nesting is not supported here and panics — the outer
+/// `Filter::to_sql_with_params` is the only place that splices subquery SQL.
 fn render_inline_filter(inner: Filter) -> (String, Vec<FilterValue>) {
     let mut sql = String::new();
     let mut params = Vec::<FilterValue>::new();
@@ -132,7 +134,10 @@ fn write_filter(f: &Filter, sql: &mut String, params: &mut Vec<FilterValue>) {
             sql.push_str(&format!("{} LIKE {{{}}}", c, i));
         }
         Filter::Contains(_, _) | Filter::StartsWith(_, _) | Filter::EndsWith(_, _) => {
-            panic!("phase 1 inline lowering supports only String LIKE values");
+            panic!(
+                "inline relation-filter lowering requires String values for Contains / StartsWith / EndsWith \
+                 (other FilterValue variants must be expressed via Equals / In)"
+            );
         }
         Filter::In(c, values) => {
             if values.is_empty() {
@@ -200,7 +205,10 @@ fn write_filter(f: &Filter, sql: &mut String, params: &mut Vec<FilterValue>) {
             sql.push(')');
         }
         Filter::ScalarSubquery { .. } => {
-            panic!("phase 1 does not support nesting ScalarSubquery inside relation filters");
+            panic!(
+                "inline relation-filter lowering does not support nested ScalarSubquery \
+                 (the outer to_sql_with_params handles ScalarSubquery; relation bodies must lower to leaf filters first)"
+            );
         }
     }
 }
@@ -260,11 +268,7 @@ impl<W: WhereInput> LowerRelationFilter for ListRelationFilter<W> {
             });
         }
 
-        match clauses.len() {
-            0 => Filter::None,
-            1 => clauses.into_iter().next().unwrap(),
-            _ => Filter::and(clauses),
-        }
+        combine_filters(clauses)
     }
 }
 
@@ -306,10 +310,6 @@ impl<W: WhereInput> LowerRelationFilter for SingleRelationFilter<W> {
             });
         }
 
-        match clauses.len() {
-            0 => Filter::None,
-            1 => clauses.into_iter().next().unwrap(),
-            _ => Filter::and(clauses),
-        }
+        combine_filters(clauses)
     }
 }

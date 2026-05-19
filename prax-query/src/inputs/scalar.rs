@@ -22,6 +22,22 @@ pub trait ScalarFilter {
     fn into_filter(self, column: &str) -> Filter;
 }
 
+/// Collapse a list of operator filters into a single [`Filter`].
+///
+/// Every `ScalarFilter::into_filter` impl accumulates one entry per
+/// active operator and then needs to reduce that list to a `Filter`.
+/// The reduction is identical across all of them:
+/// - empty → `Filter::None`
+/// - single → that filter unwrapped
+/// - multiple → `Filter::and(parts)`.
+pub(crate) fn combine_filters(parts: Vec<Filter>) -> Filter {
+    match parts.len() {
+        0 => Filter::None,
+        1 => parts.into_iter().next().unwrap(),
+        _ => Filter::and(parts),
+    }
+}
+
 /// Comparison mode for string filters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QueryMode {
@@ -152,11 +168,7 @@ impl ScalarFilter for StringFilter {
         // it here. The field is kept so downstream phases don't need a
         // breaking-shape change.
         let _ = self.mode;
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -254,11 +266,7 @@ impl ScalarFilter for StringNullableFilter {
         if !matches!(inner_filter, Filter::None) {
             parts.push(inner_filter);
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -269,7 +277,7 @@ impl ScalarFilter for StringNullableFilter {
 macro_rules! scalar_filter {
     (
         $(#[$nn_meta:meta])*
-        $name:ident<$rust:ty> => |$conv_v:ident: $rust2:ty| $conv:block as $fv:expr,
+        $name:ident<$rust:ty> => |$conv_v:ident| $conv:block,
         $(#[$null_meta:meta])*
         nullable $null:ident
     ) => {
@@ -320,7 +328,7 @@ macro_rules! scalar_filter {
 
         impl ScalarFilter for $name {
             fn into_filter(self, column: &str) -> Filter {
-                fn to_fv($conv_v: $rust2) -> FilterValue $conv
+                fn to_fv($conv_v: $rust) -> FilterValue $conv
                 let col: crate::filter::FieldName = column.to_string().into();
                 let mut parts: Vec<Filter> = Vec::new();
                 if let Some(v) = self.equals {
@@ -342,12 +350,7 @@ macro_rules! scalar_filter {
                 if let Some(v) = self.lte { parts.push(Filter::Lte(col.clone(), to_fv(v))); }
                 if let Some(v) = self.gt { parts.push(Filter::Gt(col.clone(), to_fv(v))); }
                 if let Some(v) = self.gte { parts.push(Filter::Gte(col, to_fv(v))); }
-                let _ = $fv;
-                match parts.len() {
-                    0 => Filter::None,
-                    1 => parts.into_iter().next().unwrap(),
-                    _ => Filter::and(parts),
-                }
+                combine_filters(parts)
             }
         }
 
@@ -400,11 +403,7 @@ macro_rules! scalar_filter {
                 };
                 let f = inner.into_filter(column);
                 if !matches!(f, Filter::None) { parts.push(f); }
-                match parts.len() {
-                    0 => Filter::None,
-                    1 => parts.into_iter().next().unwrap(),
-                    _ => Filter::and(parts),
-                }
+                combine_filters(parts)
             }
         }
     };
@@ -412,21 +411,21 @@ macro_rules! scalar_filter {
 
 scalar_filter!(
     /// Filter for non-nullable `Int` (`i32`) columns.
-    IntFilter<i32> => |v: i32| { FilterValue::Int(v as i64) } as FilterValue::Int,
+    IntFilter<i32> => |v| { FilterValue::Int(v as i64) },
     /// Filter for nullable `Int` columns.
     nullable IntNullableFilter
 );
 
 scalar_filter!(
     /// Filter for non-nullable `BigInt` (`i64`) columns.
-    BigIntFilter<i64> => |v: i64| { FilterValue::Int(v) } as FilterValue::Int,
+    BigIntFilter<i64> => |v| { FilterValue::Int(v) },
     /// Filter for nullable `BigInt` columns.
     nullable BigIntNullableFilter
 );
 
 scalar_filter!(
     /// Filter for non-nullable `Float` (`f64`) columns.
-    FloatFilter<f64> => |v: f64| { FilterValue::Float(v) } as FilterValue::Float,
+    FloatFilter<f64> => |v| { FilterValue::Float(v) },
     /// Filter for nullable `Float` columns.
     nullable FloatNullableFilter
 );
@@ -437,14 +436,14 @@ scalar_filter!(
     /// Lowered as `FilterValue::String` because the runtime IR does not
     /// have a dedicated `Decimal` variant; the driver layer parses it on
     /// the wire.
-    DecimalFilter<rust_decimal::Decimal> => |v: rust_decimal::Decimal| { FilterValue::String(v.to_string()) } as FilterValue::String,
+    DecimalFilter<rust_decimal::Decimal> => |v| { FilterValue::String(v.to_string()) },
     /// Filter for nullable `Decimal` columns.
     nullable DecimalNullableFilter
 );
 
 scalar_filter!(
     /// Filter for non-nullable `Uuid` columns.
-    UuidFilter<uuid::Uuid> => |v: uuid::Uuid| { FilterValue::String(v.to_string()) } as FilterValue::String,
+    UuidFilter<uuid::Uuid> => |v| { FilterValue::String(v.to_string()) },
     /// Filter for nullable `Uuid` columns.
     nullable UuidNullableFilter
 );
@@ -454,10 +453,10 @@ scalar_filter!(
     ///
     /// Encoded as a base64-of-bytes string in FilterValue::String. The
     /// driver layer decodes back to bytes on the wire.
-    BytesFilter<Vec<u8>> => |v: Vec<u8>| {
+    BytesFilter<Vec<u8>> => |v| {
         use base64::Engine as _;
         FilterValue::String(base64::engine::general_purpose::STANDARD.encode(&v))
-    } as FilterValue::String,
+    },
     /// Filter for nullable `Bytes` columns.
     nullable BytesNullableFilter
 );
@@ -498,11 +497,7 @@ impl ScalarFilter for BoolFilter {
         if let Some(boxed) = self.not {
             parts.push(Filter::Not(Box::new(boxed.into_filter(column))));
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -541,37 +536,33 @@ impl ScalarFilter for BoolNullableFilter {
         if !matches!(f, Filter::None) {
             parts.push(f);
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
 scalar_filter!(
     /// Filter for non-nullable `DateTime` columns (encoded RFC3339).
-    DateTimeFilter<chrono::DateTime<chrono::Utc>> => |v: chrono::DateTime<chrono::Utc>| {
+    DateTimeFilter<chrono::DateTime<chrono::Utc>> => |v| {
         FilterValue::String(v.to_rfc3339())
-    } as FilterValue::String,
+    },
     /// Filter for nullable `DateTime` columns.
     nullable DateTimeNullableFilter
 );
 
 scalar_filter!(
     /// Filter for non-nullable `Date` columns (encoded YYYY-MM-DD).
-    DateFilter<chrono::NaiveDate> => |v: chrono::NaiveDate| {
+    DateFilter<chrono::NaiveDate> => |v| {
         FilterValue::String(v.to_string())
-    } as FilterValue::String,
+    },
     /// Filter for nullable `Date` columns.
     nullable DateNullableFilter
 );
 
 scalar_filter!(
     /// Filter for non-nullable `Time` columns (encoded HH:MM:SS).
-    TimeFilter<chrono::NaiveTime> => |v: chrono::NaiveTime| {
+    TimeFilter<chrono::NaiveTime> => |v| {
         FilterValue::String(v.format("%H:%M:%S").to_string())
-    } as FilterValue::String,
+    },
     /// Filter for nullable `Time` columns.
     nullable TimeNullableFilter
 );
@@ -635,11 +626,7 @@ impl<E: ToString> ScalarFilter for EnumFilter<E> {
                 .collect();
             parts.push(Filter::NotIn(col, vs));
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -689,11 +676,7 @@ impl<E: ToString> ScalarFilter for EnumNullableFilter<E> {
         if !matches!(f, Filter::None) {
             parts.push(f);
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -720,11 +703,7 @@ impl ScalarFilter for JsonFilter {
         if let Some(boxed) = self.not {
             parts.push(Filter::Not(Box::new(boxed.into_filter(column))));
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
 
@@ -763,10 +742,6 @@ impl ScalarFilter for JsonNullableFilter {
         if !matches!(f, Filter::None) {
             parts.push(f);
         }
-        match parts.len() {
-            0 => Filter::None,
-            1 => parts.into_iter().next().unwrap(),
-            _ => Filter::and(parts),
-        }
+        combine_filters(parts)
     }
 }
