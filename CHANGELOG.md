@@ -29,6 +29,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   multi-file diagnostics. Every top-level AST item gains an additive
   `source_id: Option<SourceId>` so the renderer can resolve errors back to
   file paths.
+- **Multi-file Prisma import.** `prax import --from prisma --input <dir>`
+  now mirrors Prisma's `prismaSchemaFolder` layouts into a Prax directory
+  tree: each `.prisma` becomes a `.prax` at the matching relative path, the
+  merged AST resolves cross-file relations cleanly, and duplicate models /
+  multiple datasource blocks across files are hard errors. Default output
+  directory is `./prax/schema`; `--force` is required to overwrite an
+  existing non-empty output directory. Single-file `prax import` behavior
+  is unchanged.
 
 ### Deprecated
 
