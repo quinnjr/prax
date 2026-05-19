@@ -18,6 +18,7 @@ mod view;
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
 pub use inputs::where_input::{WhereField, WhereInputTokens, generate as generate_where_input};
+pub use inputs::where_unique_input::{UniqueColumn, generate as generate_where_unique_input};
 #[allow(unused_imports)]
 pub use inputs::{
     FilterCategory, filter_category_for, filter_wrapper_ident, scalar_payload_type,

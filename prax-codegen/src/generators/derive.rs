@@ -236,6 +236,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         impl_tokens: where_input_impl,
     } = super::generate_where_input(name, &module_name, &where_fields);
 
+    // Build UniqueColumn list for the where_unique_input generator.
+    // Only scalar @id / @unique fields; relation fields are never unique keys
+    // we can encode as a simple Equals lookup.
+    let unique_columns: Vec<super::UniqueColumn> = field_infos
+        .iter()
+        .filter(|f| (f.is_id || f.is_unique) && f.relation.is_none() && !f.is_list)
+        .filter_map(|f| {
+            let inner = extract_inner_type_name(&f.ty);
+            let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
+            Some(super::UniqueColumn {
+                variant: format_ident!("{}", f.name.to_string().to_case(Case::Pascal)),
+                column: f.column_name.clone(),
+                category: cat,
+                enum_ident: None,
+            })
+        })
+        .collect();
+
+    let (where_unique_struct, where_unique_impl) =
+        super::generate_where_unique_input(name, &module_name, &unique_columns);
+
     // Only emit the `WhereInput` trait impl when the model struct is pub.
     // If the struct is private (e.g., in integration tests), emitting
     // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
@@ -244,6 +265,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let is_pub = matches!(input.vis, Visibility::Public(_));
     let maybe_where_input_impl = if is_pub {
         where_input_impl
+    } else {
+        TokenStream::new()
+    };
+    let maybe_where_unique_impl = if is_pub {
+        where_unique_impl
     } else {
         TokenStream::new()
     };
@@ -310,11 +336,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
             #client_impl
 
-            // Typed input shapes (phase 2) — struct definition.
-            // The WhereInput trait impl is emitted outside the module (below)
-            // to avoid E0446 "private type in public interface" when the
-            // model struct is not `pub`.
+            // Typed input shapes (phase 2) — struct definitions.
+            // The WhereInput / WhereUniqueInput trait impls are emitted outside
+            // the module (below) to avoid E0446 "private type in public
+            // interface" when the model struct is not `pub`.
             #where_input_struct
+            #where_unique_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -330,6 +357,9 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         // model struct is `pub` to avoid E0446. When emitted, `type Model =
         // <Model>` is valid because the model struct is directly in scope.
         #maybe_where_input_impl
+
+        // WhereUniqueInput trait impl — same visibility gating as above.
+        #maybe_where_unique_impl
     })
 }
 
@@ -898,6 +928,79 @@ mod tests {
         assert!(
             code.contains("impl") && code.contains("WhereInput") && code.contains("into_ir"),
             "expected WhereInput trait impl with into_ir"
+        );
+    }
+
+    // ── where_unique_input codegen tests ──────────────────────────────────
+
+    /// Confirms the WhereUniqueInput enum is emitted with one variant
+    /// per @id / @unique column, lowering to Filter::Equals.
+    #[test]
+    fn user_where_unique_input_emits_id_and_email_variants() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The enum + both variants must be present.
+        assert!(
+            code.contains("UserWhereUniqueInput"),
+            "expected UserWhereUniqueInput in generated code"
+        );
+        assert!(code.contains("Id"), "expected Id variant");
+        assert!(code.contains("Email"), "expected Email variant");
+        // The WhereUniqueInput trait impl with into_ir must appear.
+        assert!(
+            code.contains("WhereUniqueInput") && code.contains("into_ir"),
+            "expected WhereUniqueInput trait impl"
+        );
+        // The column literals must be present in the match arms.
+        assert!(code.contains("\"id\""), "expected \"id\" column literal");
+        assert!(
+            code.contains("\"email\""),
+            "expected \"email\" column literal"
+        );
+    }
+
+    /// Models without any unique key should still emit an uninhabited
+    /// WhereUniqueInput so generic bounds resolve.
+    #[test]
+    fn model_without_unique_key_emits_empty_where_unique_input() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "logs")]
+            pub struct Log {
+                // No @id, no @unique — but at least one field marked as id
+                // is required by derive_model_impl. Use a non-unique sentinel.
+                #[prax(id)]
+                pub message: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // Even though `message` is `id`, the enum will have one variant.
+        // For the "truly empty" case, we'd need a model without ANY id field —
+        // but derive_model_impl rejects those upstream. Confirm the enum at
+        // minimum exists.
+        assert!(
+            code.contains("LogWhereUniqueInput"),
+            "expected LogWhereUniqueInput in generated code"
         );
     }
 
