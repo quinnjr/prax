@@ -4,7 +4,7 @@ use convert_case::{Case, Casing};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type};
+use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
 
 /// Parse and generate code for the `#[derive(Model)]` macro.
 pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
@@ -202,6 +202,52 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .collect();
     let model_relation_loader_impl = super::derive_relation_loader::emit(name, &loader_relations);
 
+    // Build WhereField list for the where_input generator.
+    // Only scalar fields (no relation attr, not a Vec) are included for now.
+    // Relation filter fields (ListRelationFilter / SingleRelationFilter) are
+    // deferred to Task 8 when `<Model><Rel>FilterMeta` types are generated;
+    // emitting them here without the corresponding FilterMeta impl would
+    // produce unresolvable references like `UserPostsFilterMeta`.
+    let where_fields: Vec<super::WhereField> = field_infos
+        .iter()
+        .filter_map(|f| {
+            if f.relation.is_some() || f.is_list {
+                // Relation fields: skip until Task 8 wires up FilterMeta.
+                None
+            } else {
+                // Scalar field: derive FilterCategory from inner type name.
+                let type_name = extract_inner_type_name(&f.ty);
+                let category =
+                    super::inputs::filter_category_for(type_name.as_deref().unwrap_or(""));
+                Some(super::WhereField {
+                    name: f.name.clone(),
+                    column: f.column_name.clone(),
+                    category,
+                    nullable: f.is_optional,
+                    relation_target_where_input: None,
+                    is_to_many: false,
+                })
+            }
+        })
+        .collect();
+
+    let super::WhereInputTokens {
+        struct_tokens: where_input_struct,
+        impl_tokens: where_input_impl,
+    } = super::generate_where_input(name, &module_name, &where_fields);
+
+    // Only emit the `WhereInput` trait impl when the model struct is pub.
+    // If the struct is private (e.g., in integration tests), emitting
+    // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
+    // triggers E0446 "private type in public interface". The struct
+    // definition is always emitted; the trait impl is gated on visibility.
+    let is_pub = matches!(input.vis, Visibility::Public(_));
+    let maybe_where_input_impl = if is_pub {
+        where_input_impl
+    } else {
+        TokenStream::new()
+    };
+
     Ok(quote! {
         /// Generated module for the #name model.
         pub mod #module_name {
@@ -263,6 +309,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             }
 
             #client_impl
+
+            // Typed input shapes (phase 2) — struct definition.
+            // The WhereInput trait impl is emitted outside the module (below)
+            // to avoid E0446 "private type in public interface" when the
+            // model struct is not `pub`.
+            #where_input_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -273,6 +325,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         // Emit ModelRelationLoader<E> so every derived model — relations
         // or not — can be used on the `.include()` path uniformly.
         #model_relation_loader_impl
+
+        // WhereInput trait impl at crate scope — only emitted when the
+        // model struct is `pub` to avoid E0446. When emitted, `type Model =
+        // <Model>` is valid because the model struct is directly in scope.
+        #maybe_where_input_impl
     })
 }
 
@@ -439,6 +496,30 @@ fn is_vec_type(ty: &Type) -> bool {
         return segment.ident == "Vec";
     }
     false
+}
+
+/// Extract the last path segment name from a `syn::Type`, unwrapping one
+/// layer of `Option<T>` if present.  Returns `None` for non-path types.
+///
+/// Used by the where_input generator to map `syn::Type` → `FilterCategory`
+/// without carrying a `type_str` field in `FieldInfo`.
+fn extract_inner_type_name(ty: &Type) -> Option<String> {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first()
+            && segment.ident == "Option"
+        {
+            // Unwrap Option<T> and recurse on the inner type.
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            {
+                return extract_inner_type_name(inner);
+            }
+        }
+        // Return the last segment as the type name (handles `chrono::DateTime<_>` → `DateTime`).
+        type_path.path.segments.last().map(|s| s.ident.to_string())
+    } else {
+        None
+    }
 }
 
 /// Field type category for conditional filter emission.
@@ -747,5 +828,108 @@ mod tests {
 
         let ty: Type = parse_quote!(i32);
         assert!(!is_vec_type(&ty));
+    }
+
+    // ── where_input codegen tests ──────────────────────────────────────────
+
+    /// Derives a User model with all fixture fields and checks that
+    /// `UserWhereInput` is present in the generated token stream with the
+    /// expected per-field entries.
+    ///
+    /// The struct is `pub` because the `WhereInput` trait impl is only
+    /// emitted for public model structs (to avoid E0446 "private type in
+    /// public interface").
+    #[test]
+    fn user_where_input_default_lowers_to_filter_none() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+                pub age: Option<i32>,
+                pub active: bool,
+                pub role: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The generated module must contain the typed where-input struct.
+        assert!(
+            code.contains("UserWhereInput"),
+            "expected UserWhereInput in generated code; got:\n{code}"
+        );
+        // Scalar fields must appear (BigInt for i64, String for email/role).
+        assert!(
+            code.contains("BigIntFilter") || code.contains("BigIntNullableFilter"),
+            "expected BigIntFilter for id field"
+        );
+        assert!(
+            code.contains("StringFilter"),
+            "expected StringFilter for email/role fields"
+        );
+        // Nullable fields must use nullable wrappers.
+        assert!(
+            code.contains("StringNullableFilter"),
+            "expected StringNullableFilter for name: Option<String>"
+        );
+        assert!(
+            code.contains("IntNullableFilter"),
+            "expected IntNullableFilter for age: Option<i32>"
+        );
+        assert!(
+            code.contains("BoolFilter"),
+            "expected BoolFilter for active: bool"
+        );
+        // Logical combinators must be present.
+        assert!(code.contains("pub and"), "expected 'and' combinator field");
+        assert!(code.contains("pub or"), "expected 'or' combinator field");
+        assert!(code.contains("pub not"), "expected 'not' combinator field");
+        // WhereInput trait impl must appear.
+        assert!(
+            code.contains("impl") && code.contains("WhereInput") && code.contains("into_ir"),
+            "expected WhereInput trait impl with into_ir"
+        );
+    }
+
+    #[test]
+    fn user_where_input_email_contains_lowers_to_contains_filter() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The lowering for email (String column) must call into_filter("email").
+        assert!(
+            code.contains("\"email\""),
+            "expected column name \"email\" in the into_ir lowering"
+        );
+        // The lowering body must check for Filter::None and push.
+        assert!(
+            code.contains("into_filter"),
+            "expected ScalarFilter::into_filter call in into_ir"
+        );
     }
 }
