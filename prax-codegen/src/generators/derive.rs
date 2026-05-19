@@ -341,7 +341,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .iter()
         .find(|f| f.is_id)
         .map(|f| f.column_name.clone())
-        .unwrap_or_else(|| "id".to_string());
+        .expect("model must have at least one #[prax(id)] field (validated upstream)");
 
     let relation_meta_specs: Vec<super::inputs::relation_meta::RelationMetaSpec> = field_infos
         .iter()

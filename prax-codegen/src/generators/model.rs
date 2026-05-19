@@ -151,17 +151,16 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
         .fields
         .values()
         .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at
-        })
         .filter_map(|f| {
+            let attrs = f.extract_attributes();
+            if attrs.is_auto || attrs.is_updated_at {
+                return None;
+            }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
                 FieldType::Enum(_) => inputs::FilterCategory::Enum,
                 _ => return None,
             };
-            let attrs = f.extract_attributes();
             Some(CreateField {
                 name: snake_ident(f.name()),
                 category: cat,
@@ -178,11 +177,11 @@ fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
         .fields
         .values()
         .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at
-        })
         .filter_map(|f| {
+            let attrs = f.extract_attributes();
+            if attrs.is_auto || attrs.is_updated_at {
+                return None;
+            }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
                 FieldType::Enum(_) => inputs::FilterCategory::Enum,
@@ -204,7 +203,7 @@ fn collect_relation_meta_specs(model: &Model, schema: &Schema) -> Vec<RelationMe
         .into_iter()
         .next()
         .map(column_name_of)
-        .unwrap_or_else(|| "id".to_string());
+        .expect("model must have at least one @id field (validated upstream)");
 
     model
         .fields

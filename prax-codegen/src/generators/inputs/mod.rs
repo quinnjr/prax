@@ -1,15 +1,10 @@
-//! Generators for the typed input shapes (phase 2 of the typed-query-traits work).
+//! Generators for the typed input shapes.
 //!
 //! Each submodule is a pure function from a parsed schema model
 //! (`prax_schema::ast::Model` or a derive-parsed `FieldInfo` list) to a
 //! `TokenStream` containing one input type per model. The `derive.rs`
 //! and `model.rs` entry points call all of these in turn and concat
 //! the streams into the per-model module.
-//!
-//! The `#[allow]` attributes below suppress dead-code / unused warnings on
-//! helpers that are wired up by subsequent tasks (Tasks 3-8). Remove them as
-//! each submodule is filled in.
-#![allow(dead_code)]
 
 pub mod create_input;
 pub mod include_input;

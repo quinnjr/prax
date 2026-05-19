@@ -9,9 +9,11 @@ pub struct OrderByField {
     pub variant: Ident,
     /// SQL column name (string literal).
     pub column: String,
-    /// Whether the column is nullable (allows NULLS FIRST/LAST). Phase 2
-    /// emits a SortOrder-only variant — NULLS handling lands with the
-    /// dialect layer in a follow-up.
+    /// Whether the column is nullable (allows NULLS FIRST/LAST). Currently
+    /// unused — NULLS handling lands with the dialect layer in a follow-up,
+    /// at which point the variant signature will carry both `SortOrder` and
+    /// an optional nulls position.
+    #[allow(dead_code)]
     pub nullable: bool,
 }
 

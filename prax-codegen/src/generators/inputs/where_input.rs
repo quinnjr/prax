@@ -120,7 +120,7 @@ pub fn generate(
         .map(|f| {
             let name = &f.name;
             let meta_ident = {
-                let pascal_rel = pascal_ident(&f.name.to_string());
+                let pascal_rel = super::super::pascal_ident(&f.name.to_string());
                 format_ident!("{}{}FilterMeta", model_ident, pascal_rel)
             };
             quote! {
@@ -198,10 +198,4 @@ pub fn generate(
         struct_tokens,
         impl_tokens,
     }
-}
-
-/// Convert a snake_case string to a PascalCase `Ident`.
-fn pascal_ident(s: &str) -> Ident {
-    use convert_case::{Case, Casing};
-    format_ident!("{}", s.to_case(Case::Pascal))
 }

@@ -17,18 +17,27 @@ mod view;
 
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
+// Per-input generators are re-exported here as the codegen-crate public API.
+// Internal callers in `derive.rs` and `model.rs` reach them via full paths
+// (`super::inputs::*::generate`), so these re-exports show as unused inside
+// the crate even though they're load-bearing for downstream consumers.
 #[allow(unused_imports)]
 pub use inputs::create_input::{CreateField, generate as generate_create_input};
+#[allow(unused_imports)]
 pub use inputs::include_input::{IncludeField, generate as generate_include_input};
+#[allow(unused_imports)]
 pub use inputs::order_by_input::{
     OrderByField as OrderByInputField, generate as generate_order_by_input,
 };
 #[allow(unused_imports)]
 pub use inputs::relation_meta::{RelationMetaSpec, generate as generate_relation_meta};
+#[allow(unused_imports)]
 pub use inputs::select_input::{SelectField, generate as generate_select_input};
 #[allow(unused_imports)]
 pub use inputs::update_input::{UpdateField, generate as generate_update_input};
+#[allow(unused_imports)]
 pub use inputs::where_input::{WhereField, WhereInputTokens, generate as generate_where_input};
+#[allow(unused_imports)]
 pub use inputs::where_unique_input::{UniqueColumn, generate as generate_where_unique_input};
 #[allow(unused_imports)]
 pub use inputs::{
