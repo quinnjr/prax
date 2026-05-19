@@ -6,16 +6,298 @@ pub mod discovery;
 pub mod merge;
 pub mod source;
 
+use std::path::Path;
+
 pub use discovery::Discovered;
 pub use merge::MergeConflict;
 pub use source::{SourceFile, SourceId, SourceLoc, SourceMap};
 
 use crate::ast::Schema;
+use crate::error::SchemaError;
+use crate::parser::parse_schema;
+use crate::validator::Validator;
+
+/// A successfully loaded multi-file (or single-file) schema, paired with the
+/// source map needed for downstream diagnostics rendering.
+#[derive(Debug, Clone)]
+pub struct LoadedSchema {
+    pub schema: Schema,
+    pub sources: SourceMap,
+}
+
+/// Error returned by [`load`], carrying the partial source map built up to the
+/// point of failure so the renderer can resolve [`SourceId`]s back to file
+/// content.
+#[derive(Debug)]
+pub struct LoadError {
+    pub error: SchemaError,
+    pub sources: SourceMap,
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for LoadError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// Load a schema from a file or directory.
+///
+/// - If `path` is a file: parse the single file.
+/// - If `path` is a directory: recursively find `*.prax`, parse each, merge
+///   with collision detection, then validate the merged AST.
+pub fn load(path: impl AsRef<Path>) -> Result<LoadedSchema, LoadError> {
+    let path = path.as_ref();
+    let meta = std::fs::metadata(path).map_err(|e| LoadError {
+        error: SchemaError::IoError {
+            path: path.display().to_string(),
+            source: e,
+        },
+        sources: SourceMap::new(),
+    })?;
+
+    if meta.is_file() {
+        load_single(path)
+    } else if meta.is_dir() {
+        load_directory(path)
+    } else {
+        Err(LoadError {
+            error: SchemaError::ConfigError {
+                message: format!(
+                    "schema path `{}` is neither a file nor a directory",
+                    path.display()
+                ),
+            },
+            sources: SourceMap::new(),
+        })
+    }
+}
+
+fn load_single(path: &Path) -> Result<LoadedSchema, LoadError> {
+    let mut sources = SourceMap::new();
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(LoadError {
+                error: SchemaError::IoError {
+                    path: path.display().to_string(),
+                    source: e,
+                },
+                sources,
+            });
+        }
+    };
+    let sid = sources.insert(path.to_path_buf(), content.clone());
+
+    let mut schema = match parse_schema(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(LoadError { error: e, sources });
+        }
+    };
+    stamp_source(&mut schema, sid);
+
+    let validated = match Validator::new().validate(schema) {
+        Ok(s) => s,
+        Err(e) => return Err(LoadError { error: e, sources }),
+    };
+
+    Ok(LoadedSchema {
+        schema: validated,
+        sources,
+    })
+}
+
+fn load_directory(root: &Path) -> Result<LoadedSchema, LoadError> {
+    let mut sources = SourceMap::new();
+
+    let files = match discovery::discover(root) {
+        Ok(v) => v,
+        Err(e) => return Err(LoadError { error: e, sources }),
+    };
+
+    if files.is_empty() {
+        return Err(LoadError {
+            error: SchemaError::EmptySchemaDirectory {
+                path: root.to_path_buf(),
+            },
+            sources,
+        });
+    }
+
+    // Phase 1: read + parse each file (fail-fast on syntax error)
+    let mut per_file: Vec<(SourceId, Schema)> = Vec::with_capacity(files.len());
+    for f in files {
+        let content = match std::fs::read_to_string(&f.absolute) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(LoadError {
+                    error: SchemaError::IoError {
+                        path: f.absolute.display().to_string(),
+                        source: e,
+                    },
+                    sources,
+                });
+            }
+        };
+        let sid = sources.insert(f.absolute.clone(), content.clone());
+
+        let mut schema_i = match parse_schema(&content) {
+            Ok(s) => s,
+            Err(inner) => {
+                return Err(LoadError {
+                    error: SchemaError::ParseInFile {
+                        source: sid,
+                        inner: Box::new(inner),
+                    },
+                    sources,
+                });
+            }
+        };
+        stamp_source(&mut schema_i, sid);
+        per_file.push((sid, schema_i));
+    }
+
+    // Phase 2: merge with conflict collection
+    let mut merged = Schema::new();
+    let mut all_conflicts: Vec<MergeConflict> = Vec::new();
+    for (_, schema_i) in per_file {
+        if let Err(conflicts) = merged.try_merge(schema_i) {
+            all_conflicts.extend(conflicts);
+        }
+    }
+
+    if !all_conflicts.is_empty() {
+        return Err(LoadError {
+            error: from_conflicts(all_conflicts),
+            sources,
+        });
+    }
+
+    // Phase 3: validate merged schema
+    let validated = match Validator::new().validate(merged) {
+        Ok(s) => s,
+        Err(e) => return Err(LoadError { error: e, sources }),
+    };
+
+    Ok(LoadedSchema {
+        schema: validated,
+        sources,
+    })
+}
+
+/// Bundle a batch of [`MergeConflict`]s into a single [`SchemaError`].
+fn from_conflicts(conflicts: Vec<MergeConflict>) -> SchemaError {
+    let mut errors: Vec<SchemaError> = conflicts.into_iter().map(conflict_to_error).collect();
+    if errors.len() == 1 {
+        errors.remove(0)
+    } else {
+        SchemaError::ValidationFailed {
+            count: errors.len(),
+            errors,
+        }
+    }
+}
+
+fn conflict_to_error(c: MergeConflict) -> SchemaError {
+    match c {
+        MergeConflict::DuplicateModel {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "model",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateEnum {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "enum",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateType {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "type",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateView {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "view",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateServerGroup {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "serverGroup",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicatePolicy {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "policy",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateGenerator {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "generator",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::DuplicateRawSql {
+            name,
+            existing,
+            incoming,
+        } => SchemaError::DuplicateAcrossFiles {
+            kind: "rawSql",
+            name: name.to_string(),
+            first: existing,
+            second: incoming,
+        },
+        MergeConflict::MultipleDatasource { existing, incoming } => {
+            SchemaError::MultipleDatasource {
+                first: existing,
+                second: incoming,
+            }
+        }
+    }
+}
 
 /// Stamp every top-level item in `schema` with `source`.
 ///
-/// Called by the loader right after parsing a per-file [`Schema`], before merging.
-#[allow(dead_code)] // wired into load() in a later task
+/// Called by [`load`] right after parsing a per-file [`Schema`], before merging.
 pub(crate) fn stamp_source(schema: &mut Schema, source: SourceId) {
     for m in schema.models.values_mut() {
         m.source_id = Some(source);
@@ -50,6 +332,60 @@ pub(crate) fn stamp_source(schema: &mut Schema, source: SourceId) {
 mod tests {
     use super::*;
     use crate::parser::parse_schema;
+
+    #[test]
+    fn load_directory_merges_files_and_resolves_cross_file_relations() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("datasource.prax"),
+            r#"datasource db { provider = "postgresql" url = "x" }"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("models/user.prax"),
+            "model User { id Int @id @auto email String @unique posts Post[] }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("models/post.prax"),
+            "model Post { id Int @id @auto author_id Int author User @relation(fields: [author_id], references: [id]) }",
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).expect("load should succeed");
+        assert!(loaded.schema.get_model("User").is_some());
+        assert!(loaded.schema.get_model("Post").is_some());
+        assert!(loaded.schema.datasource.is_some());
+        assert_eq!(loaded.sources.len(), 3);
+    }
+
+    #[test]
+    fn load_directory_duplicate_model_errors() {
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("a.prax"), "model User { id Int @id @auto }").unwrap();
+        std::fs::write(dir.path().join("b.prax"), "model User { id Int @id @auto }").unwrap();
+
+        let err = load(dir.path()).unwrap_err();
+        let msg = format!("{}", err.error);
+        assert!(msg.contains("duplicate model"), "got: {msg}");
+        assert_eq!(err.sources.len(), 2);
+    }
+
+    #[test]
+    fn load_empty_directory_errors() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let err = load(dir.path()).unwrap_err();
+        assert!(matches!(
+            err.error,
+            crate::error::SchemaError::EmptySchemaDirectory { .. }
+        ));
+    }
 
     #[test]
     fn stamp_marks_all_items() {

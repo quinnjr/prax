@@ -253,7 +253,9 @@ pub use cache::{
 };
 pub use config::{ModelStyle, PraxConfig};
 pub use error::{SchemaError, SchemaResult};
-pub use loader::{SourceFile, SourceId, SourceLoc, SourceMap};
+pub use loader::{
+    LoadError, LoadedSchema, MergeConflict, SourceFile, SourceId, SourceLoc, SourceMap, load,
+};
 pub use parser::{parse_schema, parse_schema_file};
 pub use validator::{Validator, validate_schema};
 
