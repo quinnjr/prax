@@ -551,6 +551,7 @@ impl<T: Into<FilterValue>> ScalarFilter<T> {
 #[derive(Debug, Clone, PartialEq)]
 #[repr(C)] // Ensure predictable memory layout
 #[derive(Default)]
+#[non_exhaustive]
 pub enum Filter {
     /// No filter (always true).
     #[default]
@@ -599,6 +600,25 @@ pub enum Filter {
     Or(Box<[Filter]>),
     /// Logical NOT of a filter.
     Not(Box<Filter>),
+
+    /// A pre-built scalar subquery fragment.
+    ///
+    /// Used by relation-aggregate virtual fields and nested-write child
+    /// lookups (phase 5 / 5.5). The `sql` string contains portable `{N}`
+    /// placeholders that are substituted with dialect-specific placeholders
+    /// at SQL build time; `N` is the zero-based index into `params`.
+    ///
+    /// Phase 1 introduces the variant for forward compatibility; nothing
+    /// in the workspace constructs it yet.
+    ScalarSubquery {
+        /// SQL fragment with `{N}` placeholders.
+        ///
+        /// Placeholders may appear in any textual order and may repeat; each
+        /// `{N}` always resolves to the dialect placeholder for `inner_params[N]`.
+        sql: Cow<'static, str>,
+        /// Parameter values referenced by the `{N}` placeholders.
+        params: Vec<FilterValue>,
+    },
 }
 
 impl Filter {
@@ -1111,6 +1131,56 @@ impl Filter {
             Self::Not(filter) => {
                 let inner = filter.to_sql_with_params(param_idx, params, dialect);
                 format!("NOT ({})", inner)
+            }
+
+            Self::ScalarSubquery {
+                sql,
+                params: inner_params,
+            } => {
+                // `param_idx` already encodes the next available 1-based global slot:
+                // the And/Or arms forward `outer_param_idx + params.len()` as the
+                // child's param_idx, so we must NOT add params.len() again here.
+                // {N} in the SQL maps to global slot (param_idx + N + 1).
+                let base = param_idx;
+                // Reserve placeholder slots up front in inner_params index order so
+                // each `{N}` always emits the correct dialect placeholder regardless
+                // of textual order or repeats.
+                for v in inner_params.iter() {
+                    params.push(v.clone());
+                }
+                let mut out = String::with_capacity(sql.len() + inner_params.len() * 4);
+                let mut chars = sql.chars().peekable();
+                while let Some(ch) = chars.next() {
+                    if ch == '{' {
+                        // Read the integer index up to '}'.
+                        let mut digits = String::new();
+                        while let Some(&c) = chars.peek() {
+                            if c == '}' {
+                                chars.next();
+                                break;
+                            }
+                            digits.push(c);
+                            chars.next();
+                        }
+                        let n: usize = digits.parse().unwrap_or_else(|_| {
+                            panic!(
+                                "Filter::ScalarSubquery: invalid placeholder index `{{{}}}`",
+                                digits
+                            )
+                        });
+                        if n >= inner_params.len() {
+                            panic!(
+                                "Filter::ScalarSubquery: placeholder {{{}}} out of range (have {} params)",
+                                n,
+                                inner_params.len()
+                            );
+                        }
+                        out.push_str(&dialect.placeholder(base + n + 1));
+                    } else {
+                        out.push(ch);
+                    }
+                }
+                format!("({})", out)
             }
         }
     }
@@ -2741,5 +2811,57 @@ mod tests {
     #[test]
     fn to_filter_value_bool_is_bool() {
         assert_eq!(true.to_filter_value(), FilterValue::Bool(true));
+    }
+
+    #[test]
+    fn scalar_subquery_lowers_to_inline_sql_with_dialect_placeholders() {
+        use crate::dialect::Postgres;
+        let f = Filter::ScalarSubquery {
+            sql: Cow::Borrowed(
+                "(SELECT COUNT(*) FROM posts p WHERE p.author_id = users.id AND p.published = {0}) > {1}",
+            ),
+            params: vec![FilterValue::Bool(true), FilterValue::Int(5)],
+        };
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(
+            sql,
+            "((SELECT COUNT(*) FROM posts p WHERE p.author_id = users.id AND p.published = $1) > $2)"
+        );
+        assert_eq!(params, vec![FilterValue::Bool(true), FilterValue::Int(5)]);
+    }
+
+    #[test]
+    fn scalar_subquery_offsets_placeholders_inside_and() {
+        use crate::dialect::Postgres;
+        let f = Filter::and([
+            Filter::Equals("active".into(), FilterValue::Bool(true)),
+            Filter::ScalarSubquery {
+                sql: Cow::Borrowed(
+                    "(SELECT COUNT(*) FROM posts p WHERE p.author_id = users.id) >= {0}",
+                ),
+                params: vec![FilterValue::Int(1)],
+            },
+        ]);
+        let (sql, params) = f.to_sql(0, &Postgres);
+        // First filter takes $1, the scalar subquery's {0} maps to $2.
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], FilterValue::Bool(true));
+        assert_eq!(params[1], FilterValue::Int(1));
+    }
+
+    #[test]
+    fn scalar_subquery_handles_out_of_order_and_repeated_placeholders() {
+        use crate::dialect::Postgres;
+        let f = Filter::ScalarSubquery {
+            sql: Cow::Borrowed("{1} = {0} AND {1} > {0}"),
+            params: vec![FilterValue::Int(1), FilterValue::Int(2)],
+        };
+        let (sql, params) = f.to_sql(0, &Postgres);
+        // {0} → $1 (binds Int(1)), {1} → $2 (binds Int(2)), regardless of
+        // textual order or repeats.
+        assert_eq!(sql, "($2 = $1 AND $2 > $1)");
+        assert_eq!(params, vec![FilterValue::Int(1), FilterValue::Int(2)]);
     }
 }

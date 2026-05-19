@@ -236,6 +236,19 @@ pub trait QueryEngine: Send + Sync + Clone + 'static {
         })
     }
 
+    /// Whether this engine is currently executing inside an open
+    /// transaction.
+    ///
+    /// The nested-write executor (phase 5) checks this to decide
+    /// whether to issue its own `BEGIN`/`COMMIT` around a write plan
+    /// or inline into a transaction the caller already started.
+    ///
+    /// Default returns `false`. Driver engines that wrap a
+    /// driver-native transaction object override and return `true`.
+    fn in_transaction(&self) -> bool {
+        false
+    }
+
     /// Run the closure inside a transaction.
     ///
     /// Drivers that support real transactions override this to issue
@@ -417,6 +430,74 @@ mod tests {
         let filter = Filter::Equals("id".into(), crate::filter::FilterValue::Int(1));
         let converted = filter.clone().into_filter();
         assert_eq!(converted, filter);
+    }
+
+    #[test]
+    fn default_in_transaction_returns_false() {
+        #[derive(Clone)]
+        struct E;
+
+        impl QueryEngine for E {
+            fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<T>> {
+                Box::pin(async { Err(crate::error::QueryError::not_found("t")) })
+            }
+            fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+                Box::pin(async { Ok(None) })
+            }
+            fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<T>> {
+                Box::pin(async { Err(crate::error::QueryError::not_found("t")) })
+            }
+            fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+                Box::pin(async { Ok(Vec::new()) })
+            }
+            fn execute_delete(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+            fn execute_raw(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+            fn count(
+                &self,
+                _sql: &str,
+                _params: Vec<crate::filter::FilterValue>,
+            ) -> BoxFuture<'_, QueryResult<u64>> {
+                Box::pin(async { Ok(0) })
+            }
+        }
+
+        let e = E;
+        assert!(!e.in_transaction());
     }
 
     #[test]

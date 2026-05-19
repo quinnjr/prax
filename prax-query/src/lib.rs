@@ -165,6 +165,7 @@ pub mod async_optimize;
 pub mod batch;
 pub mod builder;
 pub mod cache;
+pub mod capabilities;
 pub mod connection;
 pub mod cte;
 pub mod data;
@@ -175,6 +176,7 @@ pub mod dialect;
 pub mod error;
 pub mod extension;
 pub mod filter;
+pub mod inputs;
 pub mod intern;
 pub mod introspection;
 pub mod json;
@@ -468,6 +470,102 @@ pub use profiling::{
 
 // Re-export smallvec for macros
 pub use smallvec;
+
+// Typed input shapes (phase 1 of the typed-query-traits work).
+pub use crate::capabilities::{
+    SupportsArrayOps, SupportsCaseInsensitiveMode, SupportsCorrelatedSubquery,
+    SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath, SupportsNestedWrites,
+    SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+};
+pub use crate::inputs::{
+    // Containers.
+    AggregateArgs,
+    // Traits.
+    AggregateInput,
+    // Update wrappers.
+    BigIntFieldUpdate,
+    // Scalar filters.
+    // NOTE: `ScalarFilter` (the trait) conflicts with `filter::ScalarFilter` already at crate
+    // root — re-exported as `InputScalarFilter` to disambiguate.
+    BigIntFilter,
+    BigIntNullableFieldUpdate,
+    BigIntNullableFilter,
+    BoolFieldUpdate,
+    BoolFilter,
+    BoolNullableFieldUpdate,
+    BoolNullableFilter,
+    BytesFieldUpdate,
+    BytesFilter,
+    BytesNullableFieldUpdate,
+    BytesNullableFilter,
+    CountArgs,
+    CountSelect,
+    CreateArgs,
+    CreateInput,
+    CreateManyArgs,
+    DateFilter,
+    DateNullableFilter,
+    DateTimeFieldUpdate,
+    DateTimeFilter,
+    DateTimeNullableFieldUpdate,
+    DateTimeNullableFilter,
+    DecimalFieldUpdate,
+    DecimalFilter,
+    DecimalNullableFieldUpdate,
+    DecimalNullableFilter,
+    DeleteArgs,
+    DeleteManyArgs,
+    EnumFieldUpdate,
+    EnumFilter,
+    EnumNullableFieldUpdate,
+    EnumNullableFilter,
+    FindFirstArgs,
+    FindManyArgs,
+    FindUniqueArgs,
+    FloatFieldUpdate,
+    FloatFilter,
+    FloatNullableFieldUpdate,
+    FloatNullableFilter,
+    GroupByArgs,
+    GroupByInput,
+    IncludeInput,
+    IntFieldUpdate,
+    IntFilter,
+    IntNullableFieldUpdate,
+    IntNullableFilter,
+    JsonFieldUpdate,
+    // NOTE: `JsonFilter` and `JsonNullableFilter` conflict with `json::JsonFilter` already at
+    // crate root — re-exported as `InputJsonFilter` / `InputJsonNullableFilter`.
+    JsonFilter as InputJsonFilter,
+    JsonNullableFieldUpdate,
+    JsonNullableFilter as InputJsonNullableFilter,
+    // Relation filters + meta.
+    ListRelationFilter,
+    LowerRelationFilter,
+    OrderByInput,
+    PaginationInput,
+    QueryMode,
+    RelationFilterMeta,
+    ScalarFilter as InputScalarFilter,
+    SelectInput,
+    SingleRelationFilter,
+    StringFieldUpdate,
+    StringFilter,
+    StringNullableFieldUpdate,
+    StringNullableFilter,
+    TimeFilter,
+    TimeNullableFilter,
+    UpdateArgs,
+    UpdateInput,
+    UpdateManyArgs,
+    UpsertArgs,
+    UuidFieldUpdate,
+    UuidFilter,
+    UuidNullableFieldUpdate,
+    UuidNullableFilter,
+    WhereInput,
+    WhereUniqueInput,
+};
 
 /// Prelude module for convenient imports.
 pub mod prelude {

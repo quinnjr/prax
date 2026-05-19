@@ -4812,6 +4812,7 @@ name = "prax-query"
 version = "0.9.7"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bson",
  "bumpalo",
  "chrono",

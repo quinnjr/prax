@@ -73,6 +73,43 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         self
     }
 
+    /// Apply a typed `WhereInput`. AND-composes with any previously set
+    /// filter — same semantics as calling `.r#where(...)` again.
+    pub fn with_where_input<W: crate::inputs::WhereInput<Model = M>>(mut self, w: W) -> Self {
+        let f = w.into_ir();
+        self.filter = self.filter.and_then(f);
+        self
+    }
+
+    /// Apply a typed `IncludeInput`. Merges into any previously set
+    /// includes (later wins on conflicting relation names).
+    pub fn with_include_input<I: crate::inputs::IncludeInput<Model = M>>(mut self, i: I) -> Self {
+        let inc = i.into_ir();
+        for spec in inc.specs() {
+            self.includes.push(spec.clone());
+        }
+        self
+    }
+
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
+    /// Apply a typed `OrderByInput` (replaces current).
+    pub fn with_order_by_input<O: crate::inputs::OrderByInput<Model = M>>(mut self, o: O) -> Self {
+        self.order_by = o.into_ir();
+        self
+    }
+
+    /// Doc-hidden accessor for the current filter — needed for unit
+    /// tests that don't have a running engine to issue queries against.
+    #[doc(hidden)]
+    pub fn filter_for_test(&self) -> &Filter {
+        &self.filter
+    }
+
     /// Build the SQL query.
     pub fn build_sql(
         &self,
