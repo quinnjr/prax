@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-file schemas.** Point `[schema].path` in `prax.toml` at a directory
+  instead of a single file and prax recursively loads every `*.prax` under
+  it, merging them into one cohesive schema. Discovery is sorted
+  lexicographically by relative path for deterministic codegen output; hidden
+  entries, symlinks, and `target/` directories are skipped. The new
+  `prax_schema::load(path)` entry point auto-detects file vs. directory and
+  returns `LoadedSchema { schema, sources }` (or `LoadError { error, sources }`
+  on failure, with the partial source map preserved). Wired through
+  `prax generate`, `prax validate`, `prax migrate`, `prax db`, `prax format`
+  (per-file walk) and `prax-codegen`'s schema reader, so the `prax::client!`
+  macro also picks up directory inputs.
+- **Cross-file collision detection.** `Schema::try_merge` reports every
+  duplicate model/enum/type/view/serverGroup/policy/generator/raw_sql plus
+  multiple-datasource as a `SchemaError::DuplicateAcrossFiles` /
+  `MultipleDatasource` with both `SourceLoc`s, collected without
+  short-circuiting so users see every conflict in one run.
+- **`SchemaError::ParseInFile` and `EmptySchemaDirectory`** variants for
+  multi-file diagnostics. Every top-level AST item gains an additive
+  `source_id: Option<SourceId>` so the renderer can resolve errors back to
+  file paths.
+- **Multi-file Prisma import.** `prax import --from prisma --input <dir>`
+  now mirrors Prisma's `prismaSchemaFolder` layouts into a Prax directory
+  tree: each `.prisma` becomes a `.prax` at the matching relative path, the
+  merged AST resolves cross-file relations cleanly, and duplicate models /
+  multiple datasource blocks across files are hard errors. Default output
+  directory is `./prax/schema`; `--force` is required to overwrite an
+  existing non-empty output directory. Single-file `prax import` behavior
+  is unchanged.
+
+### Deprecated
+
+- `Schema::merge` (silent overwrite). Use `Schema::try_merge` for
+  collision-aware merging. The old method stays one release for compatibility.
+
 ## [0.9.7] - 2026-05-01
 
 ### Changed

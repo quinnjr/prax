@@ -48,4 +48,35 @@ pub enum ImportError {
     #[error("Invalid configuration: {0}")]
     #[diagnostic(code(prax_import::invalid_config))]
     InvalidConfig(String),
+
+    /// Duplicate Prisma model across files in a multi-file directory.
+    #[error("duplicate prisma model `{name}` across files (source {} vs {})", .first.0, .second.0)]
+    #[diagnostic(code(prax_import::prisma::duplicate_model))]
+    DuplicatePrismaModel {
+        name: String,
+        first: crate::prisma::types::PrismaSourceId,
+        second: crate::prisma::types::PrismaSourceId,
+    },
+
+    /// Duplicate Prisma enum across files.
+    #[error("duplicate prisma enum `{name}` across files (source {} vs {})", .first.0, .second.0)]
+    #[diagnostic(code(prax_import::prisma::duplicate_enum))]
+    DuplicatePrismaEnum {
+        name: String,
+        first: crate::prisma::types::PrismaSourceId,
+        second: crate::prisma::types::PrismaSourceId,
+    },
+
+    /// Multiple datasource blocks across Prisma files.
+    #[error("multiple datasource blocks across prisma files (source {} vs {})", .first.0, .second.0)]
+    #[diagnostic(code(prax_import::prisma::multiple_datasource))]
+    MultiplePrismaDatasource {
+        first: crate::prisma::types::PrismaSourceId,
+        second: crate::prisma::types::PrismaSourceId,
+    },
+
+    /// Multi-file Prisma input directory contained no `*.prisma` files.
+    #[error("no .prisma files found under `{}`", .path.display())]
+    #[diagnostic(code(prax_import::prisma::empty_directory))]
+    EmptyPrismaDirectory { path: std::path::PathBuf },
 }

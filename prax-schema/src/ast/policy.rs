@@ -81,6 +81,9 @@ pub struct Policy {
     pub documentation: Option<Documentation>,
     /// Source location.
     pub span: Span,
+    /// Source file this policy was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl Policy {
@@ -97,6 +100,7 @@ impl Policy {
             mssql_schema: None,
             mssql_block_operations: vec![],
             documentation: None,
+            source_id: None,
             span,
         }
     }

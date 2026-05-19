@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::GenerateArgs;
 use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_PATH};
-use crate::error::{CliError, CliResult};
+use crate::error::CliResult;
 use crate::output::{self, success};
+use crate::schema_loader::load_schema;
 
 /// Run the generate command
 pub async fn run(args: GenerateArgs) -> CliResult<()> {
@@ -22,38 +23,31 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
         Config::default()
     };
 
-    // Resolve schema path
-    let schema_path = args
-        .schema
-        .clone()
-        .unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
-    if !schema_path.exists() {
-        return Err(CliError::Config(format!(
-            "Schema file not found: {}",
-            schema_path.display()
-        )));
-    }
-
     // Resolve output directory
     let output_dir = args
         .output
         .clone()
         .unwrap_or_else(|| PathBuf::from(&config.generator.output));
 
-    output::kv("Schema", &schema_path.display().to_string());
+    let display_path = args
+        .schema
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| SCHEMA_FILE_PATH.to_string());
+    output::kv("Schema", &display_path);
     output::kv("Output", &output_dir.display().to_string());
     output::newline();
 
     output::step(1, 4, "Reading schema...");
 
-    // Parse schema
-    let schema_content = std::fs::read_to_string(&schema_path)?;
-    let schema = parse_schema(&schema_content)?;
+    let loaded = load_schema(args.schema.as_deref())?;
+    let schema = &loaded.schema;
+    if loaded.sources.len() > 1 {
+        output::kv("Source files", &loaded.sources.len().to_string());
+    }
 
     output::step(2, 4, "Validating schema...");
-
-    // Validate schema
-    validate_schema(&schema)?;
+    // Validation already happened inside load_schema.
 
     output::step(3, 4, "Generating code...");
 
@@ -61,7 +55,7 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
     std::fs::create_dir_all(&output_dir)?;
 
     // Generate code
-    let generated_files = generate_code(&schema, &output_dir, &args, &config)?;
+    let generated_files = generate_code(schema, &output_dir, &args, &config)?;
 
     output::step(4, 4, "Writing files...");
 
@@ -79,26 +73,8 @@ pub async fn run(args: GenerateArgs) -> CliResult<()> {
     }
 
     output::newline();
-    success(&format!(
-        "Generated {} files in {:.2}s",
-        generated_files.len(),
-        0.0 // TODO: Add timing
-    ));
+    success(&format!("Generated {} files", generated_files.len()));
 
-    Ok(())
-}
-
-/// Parse and validate the schema file
-fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    // Use validate_schema to ensure field types are properly resolved
-    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content)
-        .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
-}
-
-/// Validate the schema (now a no-op since parse_schema does validation)
-fn validate_schema(_schema: &prax_schema::Schema) -> CliResult<()> {
-    // Validation is now done in parse_schema via validate_schema()
     Ok(())
 }
 

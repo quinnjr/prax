@@ -25,15 +25,46 @@ pub async fn run(args: ImportArgs) -> CliResult<()> {
             .unwrap_or_else(|| "stdout".to_string())
     ));
 
-    // Check if input file exists
+    // Check if input file/directory exists
     if !args.input.exists() {
         return Err(CliError::Config(format!(
-            "Input file not found: {}",
+            "Input not found: {}",
             args.input.display()
         )));
     }
 
-    // Import the schema
+    // Multi-file Prisma input: auto-detect directory and mirror it.
+    if args.input.is_dir() {
+        if args.from != ImportSource::Prisma {
+            return Err(CliError::Config(
+                "Directory inputs are only supported with --from prisma".to_string(),
+            ));
+        }
+        let output_dir = args
+            .output
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("./prax/schema"));
+        let count = prax_import::prisma::import_prisma_directory(
+            &args.input,
+            &output_dir,
+            format_schema,
+            args.force,
+        )
+        .map_err(|e| CliError::Config(format!("Import failed: {e}")))?;
+        output::success(&format!(
+            "✓ Imported {count} files into {}",
+            output_dir.display()
+        ));
+        output::newline();
+        output::info("Next steps:");
+        output::info("  1. Review the generated schema directory");
+        output::info("  2. Set `[schema].path = \"prax/schema\"` in prax.toml (if needed)");
+        output::info("  3. Run `prax validate` to check the merged schema");
+        output::info("  4. Run `prax generate` to generate Rust client code");
+        return Ok(());
+    }
+
+    // Import the schema (single-file path).
     let prax_schema = match args.from {
         ImportSource::Prisma => import_from_prisma(&args.input)?,
         ImportSource::Diesel => import_from_diesel(&args.input)?,

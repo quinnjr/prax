@@ -103,7 +103,11 @@ fn parse_datasource(input: &str) -> ImportResult<Option<PrismaDatasource>> {
         let provider = caps.get(1).unwrap().as_str().to_string();
         let url = caps.get(2).unwrap().as_str().to_string();
 
-        Ok(Some(PrismaDatasource { provider, url }))
+        Ok(Some(PrismaDatasource {
+            provider,
+            url,
+            source_id: None,
+        }))
     } else {
         Ok(None)
     }
@@ -147,6 +151,7 @@ fn parse_models(input: &str) -> ImportResult<Vec<PrismaModel>> {
             fields,
             attributes,
             documentation: None,
+            source_id: None,
         });
 
         search_from = end + 1;
@@ -514,6 +519,7 @@ fn parse_enums(input: &str) -> ImportResult<Vec<PrismaEnum>> {
             name,
             values,
             documentation: None,
+            source_id: None,
         });
     }
 
@@ -521,27 +527,45 @@ fn parse_enums(input: &str) -> ImportResult<Vec<PrismaEnum>> {
 }
 
 /// Convert Prisma schema to Prax schema.
-fn convert_prisma_to_prax(prisma_schema: PrismaSchema) -> ImportResult<Schema> {
+///
+/// Translates `PrismaSourceId(n)` provenance onto each emitted Prax item as
+/// `prax_schema::SourceId(n)` so a downstream emitter can bucket the merged
+/// schema by source file.
+pub(crate) fn convert_prisma_to_prax(prisma_schema: PrismaSchema) -> ImportResult<Schema> {
     let mut builder = SchemaBuilder::new();
 
-    // Convert datasource
+    // Convert datasource (with provenance)
+    let ds_source = prisma_schema.datasource.as_ref().and_then(|d| d.source_id);
     if let Some(datasource) = prisma_schema.datasource {
         builder = builder.with_datasource(datasource.provider, datasource.url);
     }
 
-    // Convert models
+    // Convert models, carrying source provenance
     for model in prisma_schema.models {
-        let prax_model = convert_model(model)?;
+        let sid = model.source_id;
+        let mut prax_model = convert_model(model)?;
+        if let Some(s) = sid {
+            prax_model.source_id = Some(prax_schema::SourceId(s.0));
+        }
         builder.add_model(prax_model);
     }
 
-    // Convert enums
+    // Convert enums, carrying source provenance
     for enum_def in prisma_schema.enums {
-        let prax_enum = convert_enum(enum_def);
+        let sid = enum_def.source_id;
+        let mut prax_enum = convert_enum(enum_def);
+        if let Some(s) = sid {
+            prax_enum.source_id = Some(prax_schema::SourceId(s.0));
+        }
         builder.add_enum(prax_enum);
     }
 
-    Ok(builder.build())
+    let mut schema = builder.build();
+    if let (Some(ds), Some(s)) = (schema.datasource.as_mut(), ds_source) {
+        ds.source_id = Some(prax_schema::SourceId(s.0));
+    }
+
+    Ok(schema)
 }
 
 /// Convert a Prisma model to a Prax model.

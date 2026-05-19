@@ -134,6 +134,67 @@ pub enum SchemaError {
         /// Supplied index value.
         value: String,
     },
+
+    /// Parse failure in a specific file within a multi-file schema directory.
+    #[error("parse error in source {}", .source.0)]
+    #[diagnostic(code(prax::schema::parse_in_file))]
+    ParseInFile {
+        source: crate::loader::SourceId,
+        #[source]
+        inner: Box<SchemaError>,
+    },
+
+    /// Same-named item declared in two source files.
+    #[error("duplicate {kind} `{name}` declared in two files")]
+    #[diagnostic(code(prax::schema::duplicate_across_files))]
+    DuplicateAcrossFiles {
+        kind: DuplicateKind,
+        name: String,
+        first: crate::loader::SourceLoc,
+        second: crate::loader::SourceLoc,
+    },
+
+    /// More than one `datasource` block across source files.
+    #[error("multiple datasource blocks declared (exactly one allowed across all files)")]
+    #[diagnostic(code(prax::schema::multiple_datasource))]
+    MultipleDatasource {
+        first: crate::loader::SourceLoc,
+        second: crate::loader::SourceLoc,
+    },
+
+    /// Schema directory contained no `*.prax` files.
+    #[error("schema directory `{}` contains no .prax files", .path.display())]
+    #[diagnostic(code(prax::schema::empty_directory))]
+    EmptySchemaDirectory { path: std::path::PathBuf },
+}
+
+/// The kind of top-level item involved in a cross-file duplicate-name error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateKind {
+    Model,
+    Enum,
+    Type,
+    View,
+    ServerGroup,
+    Policy,
+    Generator,
+    RawSql,
+}
+
+impl std::fmt::Display for DuplicateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            DuplicateKind::Model => "model",
+            DuplicateKind::Enum => "enum",
+            DuplicateKind::Type => "type",
+            DuplicateKind::View => "view",
+            DuplicateKind::ServerGroup => "serverGroup",
+            DuplicateKind::Policy => "policy",
+            DuplicateKind::Generator => "generator",
+            DuplicateKind::RawSql => "rawSql",
+        };
+        f.write_str(s)
+    }
 }
 
 impl SchemaError {
@@ -470,5 +531,29 @@ mod tests {
         } else {
             panic!("Expected InvalidField");
         }
+    }
+
+    #[test]
+    fn duplicate_across_files_displays_name_and_kind() {
+        use crate::ast::Span;
+        use crate::loader::{SourceId, SourceLoc};
+
+        let err = SchemaError::DuplicateAcrossFiles {
+            kind: DuplicateKind::Model,
+            name: "User".to_string(),
+            first: SourceLoc::new(SourceId(0), Span::new(0, 10)),
+            second: SourceLoc::new(SourceId(1), Span::new(0, 10)),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate model"), "got: {msg}");
+        assert!(msg.contains("User"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_directory_displays_path() {
+        let err = SchemaError::EmptySchemaDirectory {
+            path: std::path::PathBuf::from("/tmp/empty"),
+        };
+        assert!(format!("{err}").contains("/tmp/empty"));
     }
 }

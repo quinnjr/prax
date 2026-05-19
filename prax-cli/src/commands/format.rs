@@ -1,4 +1,9 @@
-//! `prax format` command - Format Prax schema file.
+//! `prax format` command - Format Prax schema file(s).
+//!
+//! Bypasses `prax_schema::load` deliberately: formatting is per-file and
+//! syntactic, so cross-file merge/validation would only get in the way.
+
+use std::path::Path;
 
 use crate::cli::FormatArgs;
 use crate::config::SCHEMA_FILE_PATH;
@@ -14,7 +19,7 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
 
     if !schema_path.exists() {
         return Err(CliError::Config(format!(
-            "Schema file not found: {}",
+            "Schema path not found: {}",
             schema_path.display()
         )));
     }
@@ -22,47 +27,82 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
     output::kv("Schema", &schema_path.display().to_string());
     output::newline();
 
-    // Read schema
-    output::step(1, 3, "Reading schema...");
-    let schema_content = std::fs::read_to_string(&schema_path)?;
+    let files: Vec<std::path::PathBuf> = if schema_path.is_dir() {
+        let discovered = prax_schema::loader::discover(&schema_path).map_err(CliError::from)?;
+        if discovered.is_empty() {
+            return Err(CliError::Config(format!(
+                "No .prax files found under {}",
+                schema_path.display()
+            )));
+        }
+        discovered.into_iter().map(|d| d.absolute).collect()
+    } else {
+        vec![schema_path.clone()]
+    };
 
-    // Parse schema to validate it first
-    let schema = parse_schema(&schema_content)?;
-
-    // Format schema
-    output::step(2, 3, "Formatting...");
-    let formatted = format_schema(&schema);
-
-    // Check if formatting changed anything
-    let changed = formatted != schema_content;
-
-    if args.check {
-        // Check mode - just report if formatting is needed
-        if changed {
-            output::newline();
-            output::error("Schema is not formatted correctly!");
-            output::info("Run `prax format` to fix formatting.");
-            return Err(CliError::Format("Schema needs formatting".to_string()));
-        } else {
-            output::newline();
-            success("Schema is already formatted!");
-            return Ok(());
+    let mut any_changed = false;
+    let mut any_needs_format = false;
+    for file in &files {
+        match format_one(file, args.check)? {
+            FormatOutcome::Unchanged => {}
+            FormatOutcome::Reformatted => any_changed = true,
+            FormatOutcome::NeedsFormatting => any_needs_format = true,
         }
     }
 
-    // Write formatted schema
-    output::step(3, 3, "Writing formatted schema...");
-
-    if changed {
-        std::fs::write(&schema_path, &formatted)?;
-        output::newline();
-        success("Schema formatted successfully!");
+    output::newline();
+    if args.check {
+        if any_needs_format {
+            output::error("Some schema files are not formatted correctly.");
+            output::info("Run `prax format` to fix formatting.");
+            return Err(CliError::Format(
+                "One or more schema files need formatting".to_string(),
+            ));
+        }
+        success(&format!(
+            "All {} schema file(s) are formatted!",
+            files.len()
+        ));
+    } else if any_changed {
+        success(&format!("Formatted {} schema file(s).", files.len()));
     } else {
-        output::newline();
-        success("Schema is already formatted!");
+        success(&format!(
+            "All {} schema file(s) are already formatted!",
+            files.len()
+        ));
     }
 
     Ok(())
+}
+
+enum FormatOutcome {
+    Unchanged,
+    Reformatted,
+    NeedsFormatting,
+}
+
+fn format_one(path: &Path, check: bool) -> CliResult<FormatOutcome> {
+    let content = std::fs::read_to_string(path)?;
+    let schema = parse_schema(&content)?;
+    let formatted = format_schema(&schema);
+    let changed = formatted != content;
+
+    if check {
+        return Ok(if changed {
+            output::error(&format!("Needs formatting: {}", path.display()));
+            FormatOutcome::NeedsFormatting
+        } else {
+            FormatOutcome::Unchanged
+        });
+    }
+
+    if changed {
+        std::fs::write(path, &formatted)?;
+        output::list_item(&format!("Formatted {}", path.display()));
+        Ok(FormatOutcome::Reformatted)
+    } else {
+        Ok(FormatOutcome::Unchanged)
+    }
 }
 
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {

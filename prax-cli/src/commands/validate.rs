@@ -9,31 +9,29 @@ use crate::output::{self, success, warn};
 pub async fn run(args: ValidateArgs) -> CliResult<()> {
     output::header("Validate Schema");
 
-    let cwd = std::env::current_dir()?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
-
-    if !schema_path.exists() {
-        return Err(CliError::Config(format!(
-            "Schema file not found: {}",
-            schema_path.display()
-        )));
-    }
-
-    output::kv("Schema", &schema_path.display().to_string());
+    let display_path = args
+        .schema
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| SCHEMA_FILE_PATH.to_string());
+    output::kv("Schema", &display_path);
     output::newline();
 
     // Parse schema
     output::step(1, 3, "Parsing schema...");
-    let schema_content = std::fs::read_to_string(&schema_path)?;
-    let schema = parse_schema(&schema_content)?;
+    let loaded = crate::schema_loader::load_schema(args.schema.as_deref())?;
+    let schema = &loaded.schema;
+    if loaded.sources.len() > 1 {
+        output::kv("Source files", &loaded.sources.len().to_string());
+    }
 
     // Validate schema
     output::step(2, 3, "Running validation checks...");
-    let validation_result = validate_schema(&schema);
+    let validation_result = validate_schema(schema);
 
     // Check config
     output::step(3, 3, "Checking configuration...");
-    let config_warnings = check_config(&schema);
+    let config_warnings = check_config(schema);
 
     output::newline();
 
@@ -104,20 +102,6 @@ pub async fn run(args: ValidateArgs) -> CliResult<()> {
     output::kv("Relations", &relations.to_string());
 
     Ok(())
-}
-
-fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    // Use validate_schema to ensure field types are properly resolved
-    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content).map_err(|e| {
-        // `e.to_string()` returns only the top-level `#[error("...")]` template;
-        // the useful detail (which model, which field, the inner message from
-        // `SyntaxError`, or the per-error list inside `ValidationFailed`) is on
-        // sub-fields and #[related]. Format via miette so the report shows the
-        // full diagnostic chain instead of a generic "syntax error in schema".
-        let report = miette::Report::from(e).with_source_code(content.to_string());
-        CliError::Schema(format!("{report:?}"))
-    })
 }
 
 fn validate_schema(schema: &prax_schema::ast::Schema) -> Result<(), Vec<String>> {

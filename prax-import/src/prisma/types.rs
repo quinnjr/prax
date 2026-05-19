@@ -2,6 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Opaque identifier for a `.prisma` source file when importing multi-file
+/// Prisma schemas. Parallel to (but deliberately distinct from)
+/// `prax_schema::SourceId`.
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
+pub struct PrismaSourceId(pub u32);
+
 /// Prisma datasource configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrismaDatasource {
@@ -9,6 +15,9 @@ pub struct PrismaDatasource {
     pub provider: String,
     /// The database connection URL.
     pub url: String,
+    /// Source file this datasource was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<PrismaSourceId>,
 }
 
 /// Prisma model definition.
@@ -22,6 +31,9 @@ pub struct PrismaModel {
     pub attributes: Vec<PrismaModelAttribute>,
     /// Documentation comment.
     pub documentation: Option<String>,
+    /// Source file this model was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<PrismaSourceId>,
 }
 
 /// Prisma field definition.
@@ -137,10 +149,13 @@ pub struct PrismaEnum {
     pub values: Vec<String>,
     /// Documentation comment.
     pub documentation: Option<String>,
+    /// Source file this enum was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<PrismaSourceId>,
 }
 
 /// Complete Prisma schema.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PrismaSchema {
     /// Datasource configuration.
     pub datasource: Option<PrismaDatasource>,

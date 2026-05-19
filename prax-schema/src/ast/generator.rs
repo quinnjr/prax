@@ -31,6 +31,9 @@ pub struct Generator {
     pub properties: IndexMap<SmolStr, GeneratorValue>,
     /// Source location.
     pub span: Span,
+    /// Source file this generator was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl Generator {
@@ -42,6 +45,7 @@ impl Generator {
             generate: GeneratorToggle::Always,
             properties: IndexMap::new(),
             span,
+            source_id: None,
         }
     }
 

@@ -138,6 +138,9 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Filesystem
+walkdir = "2.5"
+
 # Testing
 insta = { version = "1.40", features = ["yaml"] }
 pretty_assertions = "1.4"

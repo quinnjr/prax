@@ -29,13 +29,14 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
     let cwd = std::env::current_dir()?;
     let config = load_config(&cwd)?;
 
-    let schema_path = args
-        .schema
-        .clone()
-        .unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
     let migrations_dir = cwd.join(MIGRATIONS_DIR);
 
-    output::kv("Schema", &schema_path.display().to_string());
+    let display_path = args
+        .schema
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| SCHEMA_FILE_PATH.to_string());
+    output::kv("Schema", &display_path);
     output::kv("Migrations", &migrations_dir.display().to_string());
     output::newline();
 
@@ -44,8 +45,8 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
 
     // 1. Parse and validate schema
     output::step(1, total_steps, "Parsing schema...");
-    let schema_content = std::fs::read_to_string(&schema_path)?;
-    let schema = parse_schema(&schema_content)?;
+    let loaded = crate::schema_loader::load_schema(args.schema.as_deref())?;
+    let schema = loaded.schema;
 
     // 2. Check for pending migrations
     output::step(2, total_steps, "Checking migration status...");
@@ -319,13 +320,12 @@ async fn run_resolve(args: crate::cli::MigrateResolveArgs) -> CliResult<()> {
 async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
     output::header("Migrate Diff");
 
-    let cwd = std::env::current_dir()?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
+    let _cwd = std::env::current_dir()?;
 
     // Parse schema
     output::step(1, 3, "Parsing schema...");
-    let schema_content = std::fs::read_to_string(&schema_path)?;
-    let schema = parse_schema(&schema_content)?;
+    let loaded = crate::schema_loader::load_schema(args.schema.as_deref())?;
+    let schema = loaded.schema;
 
     // Get current database state
     output::step(2, 3, "Introspecting database...");
@@ -437,13 +437,6 @@ fn load_config(cwd: &Path) -> CliResult<Config> {
     } else {
         Ok(Config::default())
     }
-}
-
-fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    // Use validate_schema to ensure field types are properly resolved
-    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content)
-        .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
 }
 
 fn check_pending_migrations(migrations_dir: &Path) -> CliResult<Vec<PathBuf>> {

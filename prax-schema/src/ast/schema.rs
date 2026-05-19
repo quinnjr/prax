@@ -209,7 +209,11 @@ impl Schema {
             .collect()
     }
 
-    /// Merge another schema into this one.
+    /// Merge another schema into this one (deprecated: use [`Schema::try_merge`]).
+    ///
+    /// Silently overwrites duplicates. Kept for backward compatibility; will be
+    /// removed in a future release.
+    #[deprecated(since = "0.9.8", note = "use try_merge for collision-aware merging")]
     pub fn merge(&mut self, other: Schema) {
         self.models.extend(other.models);
         self.enums.extend(other.enums);
@@ -218,6 +222,132 @@ impl Schema {
         self.server_groups.extend(other.server_groups);
         self.policies.extend(other.policies);
         self.raw_sql.extend(other.raw_sql);
+    }
+
+    /// Merge `other` into `self`, returning every collision found rather than
+    /// silently overwriting.
+    ///
+    /// Items whose `source_id` is `None` (built outside the loader, e.g. in
+    /// tests) are reported with `SourceId(u32::MAX)`. In production usage the
+    /// loader stamps every item via [`crate::loader::stamp_source`] first.
+    pub fn try_merge(&mut self, other: Schema) -> Result<(), Vec<crate::loader::MergeConflict>> {
+        use crate::loader::MergeConflict;
+        use crate::loader::merge::loc;
+
+        let mut conflicts: Vec<MergeConflict> = Vec::new();
+
+        for (name, m) in other.models {
+            if let Some(existing) = self.models.get(&name) {
+                conflicts.push(MergeConflict::DuplicateModel {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(m.source_id, m.span),
+                });
+            } else {
+                self.models.insert(name, m);
+            }
+        }
+
+        for (name, e) in other.enums {
+            if let Some(existing) = self.enums.get(&name) {
+                conflicts.push(MergeConflict::DuplicateEnum {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(e.source_id, e.span),
+                });
+            } else {
+                self.enums.insert(name, e);
+            }
+        }
+
+        for (name, t) in other.types {
+            if let Some(existing) = self.types.get(&name) {
+                conflicts.push(MergeConflict::DuplicateType {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(t.source_id, t.span),
+                });
+            } else {
+                self.types.insert(name, t);
+            }
+        }
+
+        for (name, v) in other.views {
+            if let Some(existing) = self.views.get(&name) {
+                conflicts.push(MergeConflict::DuplicateView {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(v.source_id, v.span),
+                });
+            } else {
+                self.views.insert(name, v);
+            }
+        }
+
+        for (name, sg) in other.server_groups {
+            if let Some(existing) = self.server_groups.get(&name) {
+                conflicts.push(MergeConflict::DuplicateServerGroup {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(sg.source_id, sg.span),
+                });
+            } else {
+                self.server_groups.insert(name, sg);
+            }
+        }
+
+        for (name, g) in other.generators {
+            if let Some(existing) = self.generators.get(&name) {
+                conflicts.push(MergeConflict::DuplicateGenerator {
+                    name: name.clone(),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(g.source_id, g.span),
+                });
+            } else {
+                self.generators.insert(name, g);
+            }
+        }
+
+        for p in other.policies {
+            if let Some(existing) = self.policies.iter().find(|x| x.name() == p.name()) {
+                conflicts.push(MergeConflict::DuplicatePolicy {
+                    name: SmolStr::new(p.name()),
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(p.source_id, p.span),
+                });
+            } else {
+                self.policies.push(p);
+            }
+        }
+
+        for r in other.raw_sql {
+            if let Some(existing) = self.raw_sql.iter().find(|x| x.name == r.name) {
+                conflicts.push(MergeConflict::DuplicateRawSql {
+                    name: r.name.clone(),
+                    existing: loc(existing.source_id, super::Span::new(0, 0)),
+                    incoming: loc(r.source_id, super::Span::new(0, 0)),
+                });
+            } else {
+                self.raw_sql.push(r);
+            }
+        }
+
+        match (&self.datasource, other.datasource) {
+            (Some(existing), Some(incoming)) => {
+                conflicts.push(MergeConflict::MultipleDatasource {
+                    existing: loc(existing.source_id, existing.span),
+                    incoming: loc(incoming.source_id, incoming.span),
+                });
+            }
+            (None, Some(incoming)) => self.datasource = Some(incoming),
+            (_, None) => {}
+        }
+
+        if conflicts.is_empty() {
+            Ok(())
+        } else {
+            Err(conflicts)
+        }
     }
 }
 
@@ -228,6 +358,9 @@ pub struct RawSql {
     pub name: SmolStr,
     /// The raw SQL content.
     pub sql: String,
+    /// Source file this raw SQL was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl RawSql {
@@ -236,6 +369,7 @@ impl RawSql {
         Self {
             name: name.into(),
             sql: sql.into(),
+            source_id: None,
         }
     }
 }
@@ -600,6 +734,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_schema_merge() {
         let mut schema1 = Schema::new();
         schema1.add_model(make_model("User"));
@@ -843,6 +978,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_schema_merge_with_policies() {
         let mut schema1 = Schema::new();
         schema1.add_policy(Policy::new(

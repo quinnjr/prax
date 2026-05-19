@@ -236,6 +236,9 @@ pub struct Datasource {
     pub properties: Vec<(SmolStr, SmolStr)>,
     /// Source span for error reporting.
     pub span: Span,
+    /// Source file this datasource was parsed from (None for single-file path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<crate::loader::SourceId>,
 }
 
 impl Datasource {
@@ -249,6 +252,7 @@ impl Datasource {
             extensions: Vec::new(),
             properties: Vec::new(),
             span,
+            source_id: None,
         }
     }
 
@@ -305,6 +309,7 @@ impl Default for Datasource {
             extensions: Vec::new(),
             properties: Vec::new(),
             span: Span::new(0, 0),
+            source_id: None,
         }
     }
 }
