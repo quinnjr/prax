@@ -103,7 +103,11 @@ fn parse_datasource(input: &str) -> ImportResult<Option<PrismaDatasource>> {
         let provider = caps.get(1).unwrap().as_str().to_string();
         let url = caps.get(2).unwrap().as_str().to_string();
 
-        Ok(Some(PrismaDatasource { provider, url }))
+        Ok(Some(PrismaDatasource {
+            provider,
+            url,
+            source_id: None,
+        }))
     } else {
         Ok(None)
     }
@@ -147,6 +151,7 @@ fn parse_models(input: &str) -> ImportResult<Vec<PrismaModel>> {
             fields,
             attributes,
             documentation: None,
+            source_id: None,
         });
 
         search_from = end + 1;
@@ -514,6 +519,7 @@ fn parse_enums(input: &str) -> ImportResult<Vec<PrismaEnum>> {
             name,
             values,
             documentation: None,
+            source_id: None,
         });
     }
 
