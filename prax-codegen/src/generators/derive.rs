@@ -257,6 +257,32 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let (where_unique_struct, where_unique_impl) =
         super::generate_where_unique_input(name, &module_name, &unique_columns);
 
+    // Build IncludeField list: every field that carries a relation attr.
+    let include_fields: Vec<super::IncludeField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_some())
+        .map(|f| super::IncludeField {
+            name: f.name.clone(),
+            relation: f.name.to_string(),
+        })
+        .collect();
+
+    // Build SelectField list: all fields; relation fields are marked so
+    // their column names are excluded from the SELECT column list.
+    let select_fields: Vec<super::SelectField> = field_infos
+        .iter()
+        .map(|f| super::SelectField {
+            name: f.name.clone(),
+            column: f.column_name.clone(),
+            is_relation: f.relation.is_some(),
+        })
+        .collect();
+
+    let (include_struct, include_impl) =
+        super::generate_include_input(name, &module_name, &include_fields);
+    let (select_struct, select_impl) =
+        super::generate_select_input(name, &module_name, &select_fields);
+
     // Only emit the `WhereInput` trait impl when the model struct is pub.
     // If the struct is private (e.g., in integration tests), emitting
     // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
@@ -270,6 +296,16 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     };
     let maybe_where_unique_impl = if is_pub {
         where_unique_impl
+    } else {
+        TokenStream::new()
+    };
+    let maybe_include_impl = if is_pub {
+        include_impl
+    } else {
+        TokenStream::new()
+    };
+    let maybe_select_impl = if is_pub {
+        select_impl
     } else {
         TokenStream::new()
     };
@@ -337,11 +373,13 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #client_impl
 
             // Typed input shapes (phase 2) — struct definitions.
-            // The WhereInput / WhereUniqueInput trait impls are emitted outside
-            // the module (below) to avoid E0446 "private type in public
-            // interface" when the model struct is not `pub`.
+            // The WhereInput / WhereUniqueInput / IncludeInput / SelectInput
+            // trait impls are emitted outside the module (below) to avoid E0446
+            // "private type in public interface" when the model struct is not `pub`.
             #where_input_struct
             #where_unique_struct
+            #include_struct
+            #select_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -360,6 +398,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
         // WhereUniqueInput trait impl — same visibility gating as above.
         #maybe_where_unique_impl
+
+        // IncludeInput trait impl — same visibility gating.
+        #maybe_include_impl
+
+        // SelectInput trait impl — same visibility gating.
+        #maybe_select_impl
     })
 }
 
@@ -1002,6 +1046,65 @@ mod tests {
             code.contains("LogWhereUniqueInput"),
             "expected LogWhereUniqueInput in generated code"
         );
+    }
+
+    // ── include_input codegen tests ────────────────────────────────────────
+
+    #[test]
+    fn user_include_emits_per_relation_options() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // Even without relations, the UserInclude struct must exist with the IncludeInput impl.
+        assert!(
+            code.contains("UserInclude"),
+            "expected UserInclude struct in generated code"
+        );
+        assert!(
+            code.contains("IncludeInput"),
+            "expected IncludeInput trait impl"
+        );
+    }
+
+    // ── select_input codegen tests ─────────────────────────────────────────
+
+    #[test]
+    fn user_select_emits_per_column_options() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserSelect struct with Option<bool> per column.
+        assert!(
+            code.contains("UserSelect"),
+            "expected UserSelect struct in generated code"
+        );
+        assert!(
+            code.contains("SelectInput"),
+            "expected SelectInput trait impl"
+        );
+        // The column literals must appear in the lowering.
+        assert!(code.contains("\"id\""), "expected id column literal");
+        assert!(code.contains("\"email\""), "expected email column literal");
+        assert!(code.contains("\"name\""), "expected name column literal");
     }
 
     #[test]
