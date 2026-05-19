@@ -185,10 +185,10 @@ fn format_schema(schema: &prax_schema::Schema) -> String {
             // dimension in `ScalarType::Vector(Option<u32>)` etc. The schema
             // parser expects the dimension as a separate `@dim(N)` attribute
             // rather than inline `Vector(N)` syntax, so emit it explicitly.
-            if let prax_schema::FieldType::Scalar(scalar) = &field.field_type {
-                if let Some(dim) = scalar.dimension() {
-                    output.push_str(&format!(" @dim({})", dim));
-                }
+            if let prax_schema::FieldType::Scalar(scalar) = &field.field_type
+                && let Some(dim) = scalar.dimension()
+            {
+                output.push_str(&format!(" @dim({})", dim));
             }
 
             // Add attributes

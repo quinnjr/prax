@@ -27,9 +27,13 @@ async fn run_push(args: crate::cli::DbPushArgs) -> CliResult<()> {
 
     let cwd = std::env::current_dir()?;
     let config = load_config(&cwd)?;
-    let schema_path = args.schema.unwrap_or_else(|| cwd.join(SCHEMA_FILE_PATH));
 
-    output::kv("Schema", &schema_path.display().to_string());
+    let display_path = args
+        .schema
+        .as_deref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| SCHEMA_FILE_PATH.to_string());
+    output::kv("Schema", &display_path);
     output::kv(
         "Database",
         config
@@ -42,8 +46,8 @@ async fn run_push(args: crate::cli::DbPushArgs) -> CliResult<()> {
 
     // Parse schema
     output::step(1, 4, "Parsing schema...");
-    let schema_content = std::fs::read_to_string(&schema_path)?;
-    let schema = parse_schema(&schema_content)?;
+    let loaded = crate::schema_loader::load_schema(args.schema.as_deref())?;
+    let schema = loaded.schema;
 
     // Introspect database
     output::step(2, 4, "Introspecting database...");
@@ -368,13 +372,6 @@ fn load_config(cwd: &Path) -> CliResult<Config> {
     } else {
         Ok(Config::default())
     }
-}
-
-fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    // Use validate_schema to ensure field types are properly resolved
-    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content)
-        .map_err(|e| CliError::Schema(format!("Failed to parse/validate schema: {}", e)))
 }
 
 fn calculate_schema_changes(_schema: &prax_schema::ast::Schema) -> CliResult<Vec<SchemaChange>> {
