@@ -148,7 +148,7 @@ pub enum SchemaError {
     #[error("duplicate {kind} `{name}` declared in two files")]
     #[diagnostic(code(prax::schema::duplicate_across_files))]
     DuplicateAcrossFiles {
-        kind: &'static str,
+        kind: DuplicateKind,
         name: String,
         first: crate::loader::SourceLoc,
         second: crate::loader::SourceLoc,
@@ -166,6 +166,35 @@ pub enum SchemaError {
     #[error("schema directory `{}` contains no .prax files", .path.display())]
     #[diagnostic(code(prax::schema::empty_directory))]
     EmptySchemaDirectory { path: std::path::PathBuf },
+}
+
+/// The kind of top-level item involved in a cross-file duplicate-name error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DuplicateKind {
+    Model,
+    Enum,
+    Type,
+    View,
+    ServerGroup,
+    Policy,
+    Generator,
+    RawSql,
+}
+
+impl std::fmt::Display for DuplicateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            DuplicateKind::Model => "model",
+            DuplicateKind::Enum => "enum",
+            DuplicateKind::Type => "type",
+            DuplicateKind::View => "view",
+            DuplicateKind::ServerGroup => "serverGroup",
+            DuplicateKind::Policy => "policy",
+            DuplicateKind::Generator => "generator",
+            DuplicateKind::RawSql => "rawSql",
+        };
+        f.write_str(s)
+    }
 }
 
 impl SchemaError {
@@ -510,7 +539,7 @@ mod tests {
         use crate::loader::{SourceId, SourceLoc};
 
         let err = SchemaError::DuplicateAcrossFiles {
-            kind: "model",
+            kind: DuplicateKind::Model,
             name: "User".to_string(),
             first: SourceLoc::new(SourceId(0), Span::new(0, 10)),
             second: SourceLoc::new(SourceId(1), Span::new(0, 10)),

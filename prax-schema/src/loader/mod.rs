@@ -1,14 +1,12 @@
 //! Multi-file schema loader.
-//!
-//! See `docs/superpowers/specs/2026-05-19-multi-file-schema-design.md`.
 
-pub mod discovery;
-pub mod merge;
-pub mod source;
+mod discovery;
+pub(crate) mod merge;
+mod source;
 
 use std::path::Path;
 
-pub use discovery::Discovered;
+pub use discovery::{Discovered, discover};
 pub use merge::MergeConflict;
 pub use source::{SourceFile, SourceId, SourceLoc, SourceMap};
 
@@ -92,14 +90,17 @@ fn load_single(path: &Path) -> Result<LoadedSchema, LoadError> {
             });
         }
     };
-    let sid = sources.insert(path.to_path_buf(), content.clone());
 
     let mut schema = match parse_schema(&content) {
         Ok(s) => s,
         Err(e) => {
+            // Insert into the map before returning so the renderer can resolve
+            // SourceId(0) back to file content.
+            sources.insert(path.to_path_buf(), content);
             return Err(LoadError { error: e, sources });
         }
     };
+    let sid = sources.insert(path.to_path_buf(), content);
     stamp_source(&mut schema, sid);
 
     let validated = match Validator::new().validate(schema) {
@@ -130,7 +131,6 @@ fn load_directory(root: &Path) -> Result<LoadedSchema, LoadError> {
         });
     }
 
-    // Phase 1: read + parse each file (fail-fast on syntax error)
     let mut per_file: Vec<(SourceId, Schema)> = Vec::with_capacity(files.len());
     for f in files {
         let content = match std::fs::read_to_string(&f.absolute) {
@@ -145,9 +145,11 @@ fn load_directory(root: &Path) -> Result<LoadedSchema, LoadError> {
                 });
             }
         };
-        let sid = sources.insert(f.absolute.clone(), content.clone());
-
-        let mut schema_i = match parse_schema(&content) {
+        let sid = sources.insert(f.absolute, content);
+        // Borrow content back through the map; per-file syntax errors are
+        // fail-fast (no useful partial schema if file N of M is malformed).
+        let file_content = &sources.get(sid).expect("just inserted").content;
+        let mut schema_i = match parse_schema(file_content) {
             Ok(s) => s,
             Err(inner) => {
                 return Err(LoadError {
@@ -163,7 +165,6 @@ fn load_directory(root: &Path) -> Result<LoadedSchema, LoadError> {
         per_file.push((sid, schema_i));
     }
 
-    // Phase 2: merge with conflict collection
     let mut merged = Schema::new();
     let mut all_conflicts: Vec<MergeConflict> = Vec::new();
     for (_, schema_i) in per_file {
@@ -179,7 +180,6 @@ fn load_directory(root: &Path) -> Result<LoadedSchema, LoadError> {
         });
     }
 
-    // Phase 3: validate merged schema
     let validated = match Validator::new().validate(merged) {
         Ok(s) => s,
         Err(e) => return Err(LoadError { error: e, sources }),
@@ -205,93 +205,40 @@ fn from_conflicts(conflicts: Vec<MergeConflict>) -> SchemaError {
 }
 
 fn conflict_to_error(c: MergeConflict) -> SchemaError {
-    match c {
-        MergeConflict::DuplicateModel {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "model",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateEnum {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "enum",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateType {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "type",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateView {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "view",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateServerGroup {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "serverGroup",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicatePolicy {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "policy",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateGenerator {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "generator",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::DuplicateRawSql {
-            name,
-            existing,
-            incoming,
-        } => SchemaError::DuplicateAcrossFiles {
-            kind: "rawSql",
-            name: name.to_string(),
-            first: existing,
-            second: incoming,
-        },
-        MergeConflict::MultipleDatasource { existing, incoming } => {
-            SchemaError::MultipleDatasource {
-                first: existing,
-                second: incoming,
+    use crate::error::DuplicateKind;
+
+    macro_rules! dispatch {
+        ($($variant:ident => $kind:ident),+ $(,)?) => {
+            match c {
+                $(
+                    MergeConflict::$variant { name, existing, incoming } => {
+                        SchemaError::DuplicateAcrossFiles {
+                            kind: DuplicateKind::$kind,
+                            name: name.to_string(),
+                            first: existing,
+                            second: incoming,
+                        }
+                    }
+                ),+,
+                MergeConflict::MultipleDatasource { existing, incoming } => {
+                    SchemaError::MultipleDatasource {
+                        first: existing,
+                        second: incoming,
+                    }
+                }
             }
-        }
+        };
+    }
+
+    dispatch! {
+        DuplicateModel => Model,
+        DuplicateEnum => Enum,
+        DuplicateType => Type,
+        DuplicateView => View,
+        DuplicateServerGroup => ServerGroup,
+        DuplicatePolicy => Policy,
+        DuplicateGenerator => Generator,
+        DuplicateRawSql => RawSql,
     }
 }
 

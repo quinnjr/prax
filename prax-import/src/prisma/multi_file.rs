@@ -115,7 +115,7 @@ pub fn parse_and_merge_directory(root: &Path) -> ImportResult<(PrismaSchema, Pri
         });
     }
 
-    let mut sources = PrismaSourceMap {
+    let sources = PrismaSourceMap {
         files: files.clone(),
     };
     let mut merged = PrismaSchema::default();
@@ -128,7 +128,6 @@ pub fn parse_and_merge_directory(root: &Path) -> ImportResult<(PrismaSchema, Pri
         try_merge_prisma(&mut merged, per_file, sid)?;
     }
 
-    let _ = &mut sources; // sources is built in-place above; suppress unused-mut if any
     Ok((merged, sources))
 }
 

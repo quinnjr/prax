@@ -1,9 +1,7 @@
 //! `prax format` command - Format Prax schema file(s).
 //!
-//! Note: `format` is the one CLI command that does NOT go through
-//! `prax_schema::load()`. Loading merges and validates across files; formatting
-//! is purely syntactic and per-file, so it operates on each `.prax` file
-//! independently to preserve the user's file layout.
+//! Bypasses `prax_schema::load` deliberately: formatting is per-file and
+//! syntactic, so cross-file merge/validation would only get in the way.
 
 use std::path::Path;
 
@@ -30,8 +28,7 @@ pub async fn run(args: FormatArgs) -> CliResult<()> {
     output::newline();
 
     let files: Vec<std::path::PathBuf> = if schema_path.is_dir() {
-        let discovered =
-            prax_schema::loader::discovery::discover(&schema_path).map_err(CliError::from)?;
+        let discovered = prax_schema::loader::discover(&schema_path).map_err(CliError::from)?;
         if discovered.is_empty() {
             return Err(CliError::Config(format!(
                 "No .prax files found under {}",
