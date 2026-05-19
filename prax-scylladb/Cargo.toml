@@ -52,6 +52,7 @@ parking_lot = { workspace = true }
 tokio-test = "0.4"
 criterion = { workspace = true }
 pretty_assertions = { workspace = true }
+trybuild = { workspace = true }
 
 [[bench]]
 name = "scylladb_operations"
