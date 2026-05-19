@@ -64,6 +64,34 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         self
     }
 
+    /// Apply a typed `WhereUniqueInput`. Overwrites the existing filter
+    /// (a unique input is a complete predicate, not a constraint to AND-compose).
+    pub fn with_where_input<W: crate::inputs::WhereUniqueInput<Model = M>>(mut self, w: W) -> Self {
+        self.filter = w.into_ir();
+        self
+    }
+
+    /// Apply a typed `IncludeInput`.
+    pub fn with_include_input<I: crate::inputs::IncludeInput<Model = M>>(mut self, i: I) -> Self {
+        let inc = i.into_ir();
+        for spec in inc.specs() {
+            self.includes.push(spec.clone());
+        }
+        self
+    }
+
+    /// Apply a typed `SelectInput`.
+    pub fn with_select_input<S: crate::inputs::SelectInput<Model = M>>(mut self, s: S) -> Self {
+        self.select = s.into_ir();
+        self
+    }
+
+    /// Doc-hidden accessor for the current filter.
+    #[doc(hidden)]
+    pub fn filter_for_test(&self) -> &Filter {
+        &self.filter
+    }
+
     /// Build the SQL query.
     pub fn build_sql(
         &self,
