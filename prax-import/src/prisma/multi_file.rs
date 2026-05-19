@@ -13,6 +13,7 @@ use walkdir::WalkDir;
 use super::parser::parse_prisma_schema;
 use super::types::{PrismaSchema, PrismaSourceId};
 use crate::error::{ImportError, ImportResult};
+use prax_schema::Schema;
 
 /// A discovered `.prisma` file with absolute + relative paths.
 #[derive(Debug, Clone)]
@@ -180,6 +181,101 @@ fn try_merge_prisma(
     Ok(())
 }
 
+/// Convert a directory of `.prisma` files into a mirrored directory of `.prax`
+/// files. Each output file contains only the items that came from its
+/// corresponding input file (bucketed by `PrismaSourceId`), with the merged
+/// AST guaranteeing cross-file relations resolve cleanly.
+///
+/// `format_text` is the renderer that turns a per-file [`Schema`] back into
+/// `.prax` source text — the CLI's existing `format_schema` is a natural fit.
+///
+/// Returns the number of `.prax` files emitted. Skips source buckets that
+/// would produce an empty output (e.g. a `.prisma` file with only comments).
+///
+/// Pre-flight: if `output` exists and is non-empty, requires `force` to be
+/// true; otherwise errors with `ImportError::InvalidConfig`.
+pub fn import_prisma_directory<F>(
+    input: &Path,
+    output: &Path,
+    format_text: F,
+    force: bool,
+) -> ImportResult<usize>
+where
+    F: Fn(&Schema) -> String,
+{
+    if output.exists() {
+        let is_empty = output
+            .read_dir()
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true);
+        if !is_empty && !force {
+            return Err(ImportError::InvalidConfig(format!(
+                "output directory {} is not empty (pass --force to overwrite)",
+                output.display()
+            )));
+        }
+    }
+
+    let (merged_prisma, sources) = parse_and_merge_directory(input)?;
+    let merged_prax = super::parser::convert_prisma_to_prax(merged_prisma)?;
+
+    // Bucket prax items by their (translated) PrismaSourceId.
+    let mut buckets: std::collections::BTreeMap<PrismaSourceId, Schema> =
+        std::collections::BTreeMap::new();
+    bucket_prax_items(&merged_prax, &mut buckets);
+
+    std::fs::create_dir_all(output)?;
+
+    let mut emitted = 0usize;
+    for (sid, prax_for_file) in &buckets {
+        if is_empty_schema(prax_for_file) {
+            continue;
+        }
+        let Some(file) = sources.get(*sid) else {
+            continue;
+        };
+        let mut out_path = output.join(&file.relative);
+        out_path.set_extension("prax");
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let text = format_text(prax_for_file);
+        std::fs::write(&out_path, text)?;
+        emitted += 1;
+    }
+    Ok(emitted)
+}
+
+fn is_empty_schema(s: &Schema) -> bool {
+    s.models.is_empty()
+        && s.enums.is_empty()
+        && s.types.is_empty()
+        && s.views.is_empty()
+        && s.datasource.is_none()
+        && s.generators.is_empty()
+}
+
+fn bucket_prax_items(
+    merged: &Schema,
+    out: &mut std::collections::BTreeMap<PrismaSourceId, Schema>,
+) {
+    use prax_schema::SourceId;
+    let to_prisma = |s: SourceId| PrismaSourceId(s.0);
+
+    for m in merged.models.values() {
+        let sid = m.source_id.map(to_prisma).unwrap_or(PrismaSourceId(0));
+        out.entry(sid).or_default().add_model(m.clone());
+    }
+    for e in merged.enums.values() {
+        let sid = e.source_id.map(to_prisma).unwrap_or(PrismaSourceId(0));
+        out.entry(sid).or_default().add_enum(e.clone());
+    }
+    if let Some(ds) = &merged.datasource {
+        let sid = ds.source_id.map(to_prisma).unwrap_or(PrismaSourceId(0));
+        out.entry(sid).or_default().set_datasource(ds.clone());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +330,84 @@ model A {
         let dir = tempdir().unwrap();
         let err = parse_and_merge_directory(dir.path()).unwrap_err();
         assert!(matches!(err, ImportError::EmptyPrismaDirectory { .. }));
+    }
+
+    /// Trivial test renderer — emits a marker so we can verify which models
+    /// landed in which file without depending on the CLI's format_schema.
+    fn debug_render(s: &Schema) -> String {
+        let mut out = String::new();
+        if let Some(ds) = &s.datasource {
+            out.push_str(&format!(
+                "// datasource provider={}\n",
+                ds.provider.as_str()
+            ));
+        }
+        for m in s.models.values() {
+            out.push_str(&format!("model {} {{}}\n", m.name.as_str()));
+        }
+        for e in s.enums.values() {
+            out.push_str(&format!("enum {} {{}}\n", e.name.as_str()));
+        }
+        out
+    }
+
+    #[test]
+    fn directory_round_trip_mirrors_layout() {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+
+        std::fs::create_dir_all(input.path().join("models")).unwrap();
+        std::fs::write(
+            input.path().join("schema.prisma"),
+            r#"datasource db { provider = "postgresql" url = env("DB") }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            input.path().join("models/user.prisma"),
+            "model User { id Int @id @default(autoincrement()) email String @unique }",
+        )
+        .unwrap();
+        std::fs::write(
+            input.path().join("models/post.prisma"),
+            "model Post { id Int @id @default(autoincrement()) author_id Int }",
+        )
+        .unwrap();
+
+        let count = import_prisma_directory(input.path(), output.path(), debug_render, false)
+            .expect("import should succeed");
+
+        assert_eq!(count, 3);
+        assert!(output.path().join("schema.prax").exists());
+        assert!(output.path().join("models/user.prax").exists());
+        assert!(output.path().join("models/post.prax").exists());
+
+        // Datasource lives in the mirrored schema.prax, not in the model files.
+        let schema_content = std::fs::read_to_string(output.path().join("schema.prax")).unwrap();
+        assert!(schema_content.contains("datasource"));
+        let user_content = std::fs::read_to_string(output.path().join("models/user.prax")).unwrap();
+        assert!(user_content.contains("model User"));
+        assert!(!user_content.contains("model Post"));
+    }
+
+    #[test]
+    fn refuses_to_overwrite_non_empty_output_without_force() {
+        let input = tempdir().unwrap();
+        let output = tempdir().unwrap();
+        std::fs::write(
+            input.path().join("a.prisma"),
+            "model A { id Int @id @default(autoincrement()) }",
+        )
+        .unwrap();
+        // Pre-populate output dir so it's non-empty.
+        std::fs::write(output.path().join("existing.txt"), "hi").unwrap();
+
+        let err =
+            import_prisma_directory(input.path(), output.path(), debug_render, false).unwrap_err();
+        assert!(matches!(err, ImportError::InvalidConfig(_)));
+
+        // With --force, it succeeds.
+        let count =
+            import_prisma_directory(input.path(), output.path(), debug_render, true).unwrap();
+        assert_eq!(count, 1);
     }
 }
