@@ -30,6 +30,9 @@ smol_str = { workspace = true }
 regex-lite = { workspace = true }
 parking_lot = { workspace = true }
 
+# Filesystem (multi-file schema discovery)
+walkdir = { workspace = true }
+
 # Logging
 tracing = { workspace = true }
 
@@ -37,6 +40,7 @@ tracing = { workspace = true }
 insta = { workspace = true }
 pretty_assertions = { workspace = true }
 criterion = { workspace = true }
+tempfile = { workspace = true }
 
 [[bench]]
 name = "schema_parsing"
