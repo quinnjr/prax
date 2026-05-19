@@ -4,7 +4,7 @@
 
 pub mod source;
 
-pub use source::{SourceFile, SourceId, SourceMap};
+pub use source::{SourceFile, SourceId, SourceLoc, SourceMap};
 
 use crate::ast::Schema;
 

@@ -4,9 +4,24 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::ast::Span;
+
 /// Opaque, dense identifier for a source file in a [`SourceMap`].
 #[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct SourceId(pub u32);
+
+/// A (source file id, span) pair used in cross-file diagnostics.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SourceLoc {
+    pub source: SourceId,
+    pub span: Span,
+}
+
+impl SourceLoc {
+    pub fn new(source: SourceId, span: Span) -> Self {
+        Self { source, span }
+    }
+}
 
 /// A single source file (path + content) loaded into the schema.
 #[derive(Debug, Clone)]

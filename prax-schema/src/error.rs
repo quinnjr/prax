@@ -134,6 +134,38 @@ pub enum SchemaError {
         /// Supplied index value.
         value: String,
     },
+
+    /// Parse failure in a specific file within a multi-file schema directory.
+    #[error("parse error in source {}", .source.0)]
+    #[diagnostic(code(prax::schema::parse_in_file))]
+    ParseInFile {
+        source: crate::loader::SourceId,
+        #[source]
+        inner: Box<SchemaError>,
+    },
+
+    /// Same-named item declared in two source files.
+    #[error("duplicate {kind} `{name}` declared in two files")]
+    #[diagnostic(code(prax::schema::duplicate_across_files))]
+    DuplicateAcrossFiles {
+        kind: &'static str,
+        name: String,
+        first: crate::loader::SourceLoc,
+        second: crate::loader::SourceLoc,
+    },
+
+    /// More than one `datasource` block across source files.
+    #[error("multiple datasource blocks declared (exactly one allowed across all files)")]
+    #[diagnostic(code(prax::schema::multiple_datasource))]
+    MultipleDatasource {
+        first: crate::loader::SourceLoc,
+        second: crate::loader::SourceLoc,
+    },
+
+    /// Schema directory contained no `*.prax` files.
+    #[error("schema directory `{}` contains no .prax files", .path.display())]
+    #[diagnostic(code(prax::schema::empty_directory))]
+    EmptySchemaDirectory { path: std::path::PathBuf },
 }
 
 impl SchemaError {
@@ -470,5 +502,29 @@ mod tests {
         } else {
             panic!("Expected InvalidField");
         }
+    }
+
+    #[test]
+    fn duplicate_across_files_displays_name_and_kind() {
+        use crate::ast::Span;
+        use crate::loader::{SourceId, SourceLoc};
+
+        let err = SchemaError::DuplicateAcrossFiles {
+            kind: "model",
+            name: "User".to_string(),
+            first: SourceLoc::new(SourceId(0), Span::new(0, 10)),
+            second: SourceLoc::new(SourceId(1), Span::new(0, 10)),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("duplicate model"), "got: {msg}");
+        assert!(msg.contains("User"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_directory_displays_path() {
+        let err = SchemaError::EmptySchemaDirectory {
+            path: std::path::PathBuf::from("/tmp/empty"),
+        };
+        assert!(format!("{err}").contains("/tmp/empty"));
     }
 }
