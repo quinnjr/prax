@@ -457,7 +457,7 @@ pub struct ImportArgs {
 }
 
 /// Source ORM for import
-#[derive(ValueEnum, Debug, Clone, Copy)]
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportSource {
     /// Prisma schema (.prisma files)
     Prisma,

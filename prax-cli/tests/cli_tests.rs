@@ -433,3 +433,35 @@ enum Role {
         );
     }
 }
+
+#[test]
+fn test_import_prisma_directory_creates_mirrored_prax_directory() {
+    let input = TempDir::new().unwrap();
+    fs::create_dir_all(input.path().join("models")).unwrap();
+    fs::write(
+        input.path().join("schema.prisma"),
+        r#"datasource db { provider = "postgresql" url = env("X") }"#,
+    )
+    .unwrap();
+    fs::write(
+        input.path().join("models/u.prisma"),
+        "model U { id Int @id @default(autoincrement()) }",
+    )
+    .unwrap();
+
+    let output_dir = TempDir::new().unwrap();
+    prax_cmd()
+        .arg("import")
+        .arg("--from")
+        .arg("prisma")
+        .arg("--input")
+        .arg(input.path())
+        .arg("--output")
+        .arg(output_dir.path())
+        .arg("--force")
+        .assert()
+        .success();
+
+    assert!(output_dir.path().join("schema.prax").exists());
+    assert!(output_dir.path().join("models/u.prax").exists());
+}
