@@ -283,6 +283,20 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let (select_struct, select_impl) =
         super::generate_select_input(name, &module_name, &select_fields);
 
+    // Build OrderByField list: every non-relation scalar column is sortable.
+    let order_by_fields: Vec<super::OrderByInputField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && !f.is_list)
+        .map(|f| super::OrderByInputField {
+            variant: format_ident!("{}", f.name.to_string().to_case(Case::Pascal)),
+            column: f.column_name.clone(),
+            nullable: f.is_optional,
+        })
+        .collect();
+
+    let (order_by_struct, order_by_impl) =
+        super::generate_order_by_input(name, &module_name, &order_by_fields);
+
     // Only emit the `WhereInput` trait impl when the model struct is pub.
     // If the struct is private (e.g., in integration tests), emitting
     // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
@@ -306,6 +320,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     };
     let maybe_select_impl = if is_pub {
         select_impl
+    } else {
+        TokenStream::new()
+    };
+    let maybe_order_by_impl = if is_pub {
+        order_by_impl
     } else {
         TokenStream::new()
     };
@@ -373,13 +392,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #client_impl
 
             // Typed input shapes (phase 2) — struct definitions.
-            // The WhereInput / WhereUniqueInput / IncludeInput / SelectInput
-            // trait impls are emitted outside the module (below) to avoid E0446
-            // "private type in public interface" when the model struct is not `pub`.
+            // The WhereInput / WhereUniqueInput / IncludeInput / SelectInput /
+            // OrderByInput trait impls are emitted outside the module (below)
+            // to avoid E0446 "private type in public interface" when the model
+            // struct is not `pub`.
             #where_input_struct
             #where_unique_struct
             #include_struct
             #select_struct
+            #order_by_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -404,6 +425,9 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
         // SelectInput trait impl — same visibility gating.
         #maybe_select_impl
+
+        // OrderByInput trait impl — same visibility gating.
+        #maybe_order_by_impl
     })
 }
 
@@ -1137,5 +1161,39 @@ mod tests {
             code.contains("into_filter"),
             "expected ScalarFilter::into_filter call in into_ir"
         );
+    }
+
+    // ── order_by_input codegen tests ──────────────────────────────────────
+
+    #[test]
+    fn user_order_by_emits_per_column_variants() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserOrderBy enum with a variant per sortable column.
+        assert!(
+            code.contains("UserOrderBy"),
+            "expected UserOrderBy enum in generated code"
+        );
+        assert!(
+            code.contains("OrderByInput"),
+            "expected OrderByInput trait impl"
+        );
+        // Variants per column.
+        assert!(code.contains("Id"), "expected Id variant");
+        assert!(code.contains("Email"), "expected Email variant");
+        assert!(code.contains("Name"), "expected Name variant");
+        // SortOrder must be referenced as the variant payload.
+        assert!(code.contains("SortOrder"), "expected SortOrder payload");
     }
 }

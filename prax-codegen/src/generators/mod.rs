@@ -18,6 +18,9 @@ mod view;
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
 pub use inputs::include_input::{IncludeField, generate as generate_include_input};
+pub use inputs::order_by_input::{
+    OrderByField as OrderByInputField, generate as generate_order_by_input,
+};
 pub use inputs::select_input::{SelectField, generate as generate_select_input};
 pub use inputs::where_input::{WhereField, WhereInputTokens, generate as generate_where_input};
 pub use inputs::where_unique_input::{UniqueColumn, generate as generate_where_unique_input};
