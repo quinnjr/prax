@@ -212,10 +212,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .iter()
         .filter_map(|f| {
             if f.relation.is_some() || f.is_list {
-                // Relation fields: skip until Task 8 wires up FilterMeta.
+                // Relation fields: phase-2 emits the FilterMeta marker but
+                // leaves the WhereInput relation-filter wiring for a later
+                // phase (path-resolution work for `super::<target>::<...>`).
                 None
             } else {
-                // Scalar field: derive FilterCategory from inner type name.
                 let type_name = extract_inner_type_name(&f.ty);
                 let category =
                     super::inputs::filter_category_for(type_name.as_deref().unwrap_or(""));
@@ -669,12 +670,22 @@ fn is_option_type(ty: &Type) -> bool {
     false
 }
 
-/// Check if a type is `Vec<T>`.
+/// Check if a type is `Vec<T>` representing a to-many relation.
+///
+/// `Vec<u8>` is treated as a Bytes scalar (binary column), not a relation
+/// list. Other element types map to relation lists.
 fn is_vec_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.first()
+        && segment.ident == "Vec"
     {
-        return segment.ident == "Vec";
+        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(Type::Path(inner_path))) = args.args.first()
+            && inner_path.path.is_ident("u8")
+        {
+            return false;
+        }
+        return true;
     }
     false
 }

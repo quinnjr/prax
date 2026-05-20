@@ -1,5 +1,7 @@
 //! Generate `<Model>UpdateInput` — flat scalar fields wrapped in
-//! `*FieldUpdate` wrappers. No nested writes (phase 5).
+//! `*FieldUpdate` wrappers. Nested writes (`update`/`connect`/etc.)
+//! and the `UpdateInput` trait impl land later alongside the
+//! operation rework.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};

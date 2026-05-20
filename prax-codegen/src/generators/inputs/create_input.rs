@@ -1,7 +1,9 @@
-//! Generate `<Model>CreateInput` — flat scalar fields, no nested writes
-//! (those land in phase 5).
+//! Generate `<Model>CreateInput` — flat scalar fields.
 //!
-//! Returns a single `TokenStream` (no trait impl in phase 2 — see plan).
+//! Returns a single `TokenStream` (no trait impl). Nested writes
+//! (`connect`/`create`/`disconnect`/etc.) and the `CreateInput` trait
+//! impl that wires the data into `CreateOperation` land in a later
+//! phase together with the operation rework.
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};

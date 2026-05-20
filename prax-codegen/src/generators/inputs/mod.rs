@@ -38,8 +38,22 @@ pub enum FilterCategory {
     Enum,
 }
 
-/// Map a schema-level type string to the right `FilterCategory`.
-/// Returns `None` for unknown / relation fields.
+/// Map a type-name string to the right `FilterCategory`.
+///
+/// Accepts multiple spellings because two call sites converge here:
+/// - The `#[derive(Model)]` path's `extract_inner_type_name` returns
+///   the last path segment after unwrapping `Option<T>` — bare idents
+///   like `"i32"`, `"Vec"` (for `Vec<u8>`), `"DateTime"` (for
+///   `chrono::DateTime<_>`), `"Value"` (for `serde_json::Value`),
+///   `"NaiveDate"` / `"NaiveTime"`, `"Uuid"`, `"Decimal"`.
+/// - The `prax_schema!` path maps `ScalarType` to schema-level names
+///   (e.g. `"Int"`, `"Boolean"`, `"DateTime"`, `"Bytes"`) before
+///   calling this.
+///
+/// Returns `None` for unknown / relation fields. **When adding a new
+/// scalar type, register every spelling the derive path can produce
+/// (e.g. both `"Vec"` and `"Vec<u8>"` for byte columns) — otherwise
+/// the column is silently dropped from generated inputs.**
 pub fn filter_category_for(type_name: &str) -> Option<FilterCategory> {
     match type_name {
         "String" => Some(FilterCategory::String),
@@ -48,12 +62,16 @@ pub fn filter_category_for(type_name: &str) -> Option<FilterCategory> {
         "Float" | "f64" => Some(FilterCategory::Float),
         "Decimal" | "rust_decimal::Decimal" => Some(FilterCategory::Decimal),
         "Boolean" | "bool" => Some(FilterCategory::Bool),
-        "Bytes" | "Vec<u8>" => Some(FilterCategory::Bytes),
+        // Derive path emits "Vec" (last segment of `Vec<u8>`); schema path
+        // emits "Bytes". `Vec<u8>` literal kept for robustness.
+        "Bytes" | "Vec<u8>" | "Vec" => Some(FilterCategory::Bytes),
         "Uuid" | "uuid::Uuid" => Some(FilterCategory::Uuid),
-        "Json" | "serde_json::Value" => Some(FilterCategory::Json),
+        // Derive path emits "Value" (last segment of `serde_json::Value`);
+        // schema path emits "Json".
+        "Json" | "serde_json::Value" | "Value" => Some(FilterCategory::Json),
         "DateTime" | "chrono::DateTime<chrono::Utc>" => Some(FilterCategory::DateTime),
-        "Date" | "chrono::NaiveDate" => Some(FilterCategory::Date),
-        "Time" | "chrono::NaiveTime" => Some(FilterCategory::Time),
+        "Date" | "chrono::NaiveDate" | "NaiveDate" => Some(FilterCategory::Date),
+        "Time" | "chrono::NaiveTime" | "NaiveTime" => Some(FilterCategory::Time),
         _ => None,
     }
 }
@@ -78,8 +96,12 @@ pub fn filter_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
         (FilterCategory::Bytes, true) => "BytesNullableFilter",
         (FilterCategory::Uuid, false) => "UuidFilter",
         (FilterCategory::Uuid, true) => "UuidNullableFilter",
-        (FilterCategory::Json, false) => "InputJsonFilter",
-        (FilterCategory::Json, true) => "InputJsonNullableFilter",
+        // Inside `prax_query::inputs::*` the type is `JsonFilter`; the
+        // crate-root alias `InputJsonFilter` exists only to disambiguate
+        // from `json::JsonFilter`. Codegen emits the inputs-module path,
+        // so use the unprefixed name here.
+        (FilterCategory::Json, false) => "JsonFilter",
+        (FilterCategory::Json, true) => "JsonNullableFilter",
         (FilterCategory::DateTime, false) => "DateTimeFilter",
         (FilterCategory::DateTime, true) => "DateTimeNullableFilter",
         (FilterCategory::Date, false) => "DateFilter",
@@ -93,6 +115,14 @@ pub fn filter_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
 }
 
 /// Resolve the field-update wrapper ident.
+///
+/// `Date` and `Time` columns share `DateTimeFieldUpdate` because phase 1's
+/// update wrappers carry encoding-agnostic `Option<String>` payloads (the
+/// driver layer parses on the wire). The filter side has typed
+/// `DateFilter` / `TimeFilter` because filter values flow through
+/// `FilterValue::String` after format-specific encoding at lowering time.
+/// If a future phase introduces typed update wrappers, replace the shared
+/// `DateTimeFieldUpdate` arms with `DateFieldUpdate` / `TimeFieldUpdate`.
 pub fn update_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
     let name = match (cat, nullable) {
         (FilterCategory::String, false) => "StringFieldUpdate",
@@ -113,12 +143,12 @@ pub fn update_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
         (FilterCategory::Uuid, true) => "UuidNullableFieldUpdate",
         (FilterCategory::Json, false) => "JsonFieldUpdate",
         (FilterCategory::Json, true) => "JsonNullableFieldUpdate",
-        (FilterCategory::DateTime, false) => "DateTimeFieldUpdate",
-        (FilterCategory::DateTime, true) => "DateTimeNullableFieldUpdate",
-        (FilterCategory::Date, false) => "DateTimeFieldUpdate",
-        (FilterCategory::Date, true) => "DateTimeNullableFieldUpdate",
-        (FilterCategory::Time, false) => "DateTimeFieldUpdate",
-        (FilterCategory::Time, true) => "DateTimeNullableFieldUpdate",
+        (FilterCategory::DateTime | FilterCategory::Date | FilterCategory::Time, false) => {
+            "DateTimeFieldUpdate"
+        }
+        (FilterCategory::DateTime | FilterCategory::Date | FilterCategory::Time, true) => {
+            "DateTimeNullableFieldUpdate"
+        }
         (FilterCategory::Enum, false) => "EnumFieldUpdate",
         (FilterCategory::Enum, true) => "EnumNullableFieldUpdate",
     };
@@ -127,6 +157,11 @@ pub fn update_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
 
 /// Resolve the Rust scalar payload type that the filter / update wrapper
 /// expects.
+///
+/// Callers handling enum-typed fields must construct the payload using
+/// the enum's PascalCase ident directly; this function is unreachable
+/// for `FilterCategory::Enum` and panics there to surface the contract
+/// violation early.
 pub fn scalar_payload_type(cat: FilterCategory) -> TokenStream {
     match cat {
         FilterCategory::String => quote! { ::std::string::String },
@@ -141,8 +176,9 @@ pub fn scalar_payload_type(cat: FilterCategory) -> TokenStream {
         FilterCategory::DateTime => quote! { ::chrono::DateTime<::chrono::Utc> },
         FilterCategory::Date => quote! { ::chrono::NaiveDate },
         FilterCategory::Time => quote! { ::chrono::NaiveTime },
-        FilterCategory::Enum => {
-            panic!("enum payload requires the enum ident — caller must construct")
-        }
+        FilterCategory::Enum => unreachable!(
+            "scalar_payload_type called for FilterCategory::Enum — caller must \
+             construct payload from the enum's PascalCase ident instead"
+        ),
     }
 }

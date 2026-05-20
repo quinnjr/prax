@@ -15,16 +15,20 @@ pub struct UniqueColumn {
     pub column: String,
     /// Filter category for the scalar payload.
     pub category: FilterCategory,
-    /// For enum columns: the enum's PascalCase ident. Phase 2 leaves
-    /// this `None` (enum-aware codegen lands later).
+    /// For enum columns: the enum's PascalCase ident. Currently always
+    /// `None` — enum-typed unique columns are skipped from generation
+    /// until enum-aware codegen wires the ident through.
     pub enum_ident: Option<Ident>,
 }
 
 /// Emit the `<Model>WhereUniqueInput` enum + `WhereUniqueInput` trait impl.
 ///
-/// Returns `(struct_tokens, impl_tokens)` — `struct_tokens` is emitted
-/// inside the per-model `pub mod` block, `impl_tokens` at crate-root
-/// scope, mirroring Task 3's split pattern.
+/// Returns `(struct_tokens, impl_tokens)`. The struct goes inside the
+/// per-model `pub mod` block; the impl goes at the enclosing scope so
+/// `type Model = #model_ident` resolves to the model struct alongside
+/// the enum — avoiding E0446 "private type in public interface" when
+/// the model struct is not `pub`. (See `where_input.rs` for the same
+/// split rationale.)
 pub fn generate(
     model_ident: &Ident,
     module_name: &Ident,
@@ -40,11 +44,6 @@ pub fn generate(
         };
         let impl_tokens = quote! {
             impl ::prax_query::inputs::WhereUniqueInput for #module_name::#where_unique_ident {
-                // Use the model ident directly (not module_name::model_ident) to
-                // avoid E0603 "private struct import": `use super::*` inside the
-                // generated `pub mod` is not a pub re-export, so referencing the
-                // model as `module::Model` from outside would be accessing a
-                // private import.
                 type Model = #model_ident;
                 fn into_ir(self) -> ::prax_query::filter::Filter {
                     match self {}
@@ -122,11 +121,6 @@ pub fn generate(
 
     let impl_tokens = quote! {
         impl ::prax_query::inputs::WhereUniqueInput for #module_name::#where_unique_ident {
-            // Use the model ident directly (not module_name::model_ident) to
-            // avoid E0603 "private struct import": `use super::*` inside the
-            // generated `pub mod` is not a pub re-export, so referencing the
-            // model as `module::Model` from outside would be accessing a
-            // private import.
             type Model = #model_ident;
             fn into_ir(self) -> ::prax_query::filter::Filter {
                 match self {

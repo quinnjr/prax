@@ -78,3 +78,88 @@ fn user_where_unique_input_lowers_to_filter_equals() {
         other => panic!("expected Filter::Equals on email, got {:?}", other),
     }
 }
+
+// Second fixture exercising the temporal / binary / json / uuid scalar
+// surface so a regression in their codegen lowering is caught by tests.
+#[derive(Model, Debug, Clone)]
+#[prax(table = "audit_events")]
+pub struct AuditEvent {
+    #[prax(id, auto)]
+    pub id: i64,
+    #[prax(unique)]
+    pub event_id: ::uuid::Uuid,
+    pub occurred_at: ::chrono::DateTime<::chrono::Utc>,
+    pub payload: Vec<u8>,
+    pub metadata: ::serde_json::Value,
+    pub amount: Option<::rust_decimal::Decimal>,
+}
+
+#[test]
+fn audit_event_where_input_supports_temporal_binary_and_json() {
+    use prax_query::inputs::{
+        BytesFilter, DateTimeFilter, DecimalNullableFilter, ScalarFilter, UuidFilter,
+    };
+
+    let dt = ::chrono::Utc::now();
+    let id = ::uuid::Uuid::nil();
+    let _w = audit_event::AuditEventWhereInput {
+        event_id: Some(UuidFilter::equals(id)),
+        occurred_at: Some(DateTimeFilter::equals(dt)),
+        payload: Some(BytesFilter::equals(vec![1u8, 2, 3])),
+        amount: Some(DecimalNullableFilter {
+            is_null: Some(false),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Confirm UuidFilter lowers correctly.
+    let f = UuidFilter::equals(id).into_filter("event_id");
+    match f {
+        Filter::Equals(col, prax_query::filter::FilterValue::String(s)) => {
+            assert_eq!(col, "event_id");
+            assert_eq!(s, id.to_string());
+        }
+        other => panic!("expected UuidFilter Equals, got {:?}", other),
+    }
+}
+
+#[test]
+fn audit_event_where_unique_input_uuid_variant_lowers() {
+    use prax_query::filter::FilterValue;
+    use prax_query::inputs::WhereUniqueInput;
+
+    let id = ::uuid::Uuid::nil();
+    let w = audit_event::AuditEventWhereUniqueInput::EventId(id);
+    match w.into_ir() {
+        Filter::Equals(col, FilterValue::String(s)) => {
+            assert_eq!(col, "event_id");
+            assert_eq!(s, id.to_string());
+        }
+        other => panic!(
+            "expected Filter::Equals on event_id column, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn audit_event_select_emits_chosen_columns() {
+    use prax_query::inputs::SelectInput;
+
+    let s = audit_event::AuditEventSelect {
+        id: Some(true),
+        event_id: Some(true),
+        occurred_at: Some(true),
+        ..Default::default()
+    };
+    match s.into_ir() {
+        prax_query::types::Select::Fields(cols) => {
+            assert!(cols.contains(&"id".to_string()));
+            assert!(cols.contains(&"event_id".to_string()));
+            assert!(cols.contains(&"occurred_at".to_string()));
+            assert_eq!(cols.len(), 3);
+        }
+        other => panic!("expected Select::Fields, got {:?}", other),
+    }
+}

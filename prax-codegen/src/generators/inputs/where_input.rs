@@ -20,6 +20,7 @@ use quote::{format_ident, quote};
 use syn::Ident;
 
 use super::{FilterCategory, filter_wrapper_ident};
+use crate::generators::pascal_ident;
 
 /// One field's metadata as seen by the where-input generator.
 pub struct WhereField {
@@ -120,7 +121,7 @@ pub fn generate(
         .map(|f| {
             let name = &f.name;
             let meta_ident = {
-                let pascal_rel = super::super::pascal_ident(&f.name.to_string());
+                let pascal_rel = pascal_ident(&f.name.to_string());
                 format_ident!("{}{}FilterMeta", model_ident, pascal_rel)
             };
             quote! {

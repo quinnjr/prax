@@ -89,6 +89,9 @@ fn collect_where_fields(model: &Model) -> Vec<WhereField> {
 }
 
 fn collect_unique_columns(model: &Model) -> Vec<UniqueColumn> {
+    // Enum-typed unique columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident (the `WhereUniqueInput`
+    // generator panics on `FilterCategory::Enum` without a concrete ident).
     model
         .fields
         .values()
@@ -96,7 +99,7 @@ fn collect_unique_columns(model: &Model) -> Vec<UniqueColumn> {
         .filter_map(|f| {
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
-                FieldType::Enum(_) => inputs::FilterCategory::Enum,
+                FieldType::Enum(_) => return None,
                 _ => return None,
             };
             Some(UniqueColumn {
@@ -147,6 +150,8 @@ fn collect_order_by_fields(model: &Model) -> Vec<OrderByField> {
 }
 
 fn collect_create_fields(model: &Model) -> Vec<CreateField> {
+    // Enum-typed columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident.
     model
         .fields
         .values()
@@ -158,7 +163,7 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
             }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
-                FieldType::Enum(_) => inputs::FilterCategory::Enum,
+                FieldType::Enum(_) => return None,
                 _ => return None,
             };
             Some(CreateField {
@@ -173,6 +178,8 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
 }
 
 fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
+    // Enum-typed columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident.
     model
         .fields
         .values()
@@ -184,7 +191,7 @@ fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
             }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
-                FieldType::Enum(_) => inputs::FilterCategory::Enum,
+                FieldType::Enum(_) => return None,
                 _ => return None,
             };
             Some(UpdateField {
@@ -197,7 +204,10 @@ fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
         .collect()
 }
 
-fn collect_relation_meta_specs(model: &Model, schema: &Schema) -> Vec<RelationMetaSpec> {
+fn collect_relation_meta_specs(
+    model: &Model,
+    schema: &Schema,
+) -> Result<Vec<RelationMetaSpec>, syn::Error> {
     let parent_pk = model
         .id_fields()
         .into_iter()
@@ -205,43 +215,55 @@ fn collect_relation_meta_specs(model: &Model, schema: &Schema) -> Vec<RelationMe
         .map(column_name_of)
         .expect("model must have at least one @id field (validated upstream)");
 
-    model
-        .fields
-        .values()
-        .filter_map(|f| {
-            let target_model_name = match &f.field_type {
-                FieldType::Model(name) => name.as_str(),
-                _ => return None,
-            };
+    let mut specs = Vec::new();
+    for f in model.fields.values() {
+        let target_model_name = match &f.field_type {
+            FieldType::Model(name) => name.as_str(),
+            _ => continue,
+        };
 
-            // Look up the target model for its actual table name.
-            let child_table = schema
-                .models
-                .get(target_model_name)
-                .map(|m| m.table_name().to_string())
-                .unwrap_or_else(|| target_model_name.to_case(Case::Snake));
+        // Look up the target model for its actual table name.
+        let child_table = schema
+            .models
+            .get(target_model_name)
+            .map(|m| m.table_name().to_string())
+            .unwrap_or_else(|| target_model_name.to_case(Case::Snake));
 
-            // Extract FK from the `@relation(fields: [...])` attribute.
-            let child_fk: String = f
-                .extract_attributes()
-                .relation
-                .and_then(|r| r.fields.into_iter().next())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("{}_id", model.name().to_case(Case::Snake)));
+        // The FK column comes from `@relation(fields: [...])`. Phase 2's
+        // typed-input codegen requires it to be explicit — guessing a
+        // default would silently emit a wrong CHILD_FK constant that
+        // produces runtime "column does not exist" errors at query time.
+        let child_fk = f
+            .extract_attributes()
+            .relation
+            .and_then(|r| r.fields.into_iter().next())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "relation `{}` on model `{}` must specify \
+                         `@relation(fields: [...])` for typed-input codegen \
+                         to resolve the FK column",
+                        f.name(),
+                        model.name()
+                    ),
+                )
+            })?;
 
-            Some(RelationMetaSpec {
-                meta_ident: format_ident!(
-                    "{}{}FilterMeta",
-                    pascal_ident(model.name()),
-                    f.name().to_case(Case::Pascal)
-                ),
-                parent_table: model.table_name().to_string(),
-                parent_pk: parent_pk.clone(),
-                child_table,
-                child_fk,
-            })
-        })
-        .collect()
+        specs.push(RelationMetaSpec {
+            meta_ident: format_ident!(
+                "{}{}FilterMeta",
+                pascal_ident(model.name()),
+                f.name().to_case(Case::Pascal)
+            ),
+            parent_table: model.table_name().to_string(),
+            parent_pk: parent_pk.clone(),
+            child_table,
+            child_fk,
+        });
+    }
+    Ok(specs)
 }
 
 /// Pull the `@map("col")` override for a field, falling back to its
@@ -470,7 +492,7 @@ pub fn generate_model_module_with_style(
     let order_by_fields = collect_order_by_fields(model);
     let create_input_fields = collect_create_fields(model);
     let update_input_fields = collect_update_fields(model);
-    let relation_meta_specs = collect_relation_meta_specs(model, schema);
+    let relation_meta_specs = collect_relation_meta_specs(model, schema)?;
 
     let super::inputs::where_input::WhereInputTokens {
         struct_tokens: where_input_struct,
