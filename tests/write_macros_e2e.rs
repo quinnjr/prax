@@ -212,3 +212,34 @@ fn upsert_macro_supports_atomic_update_op() {
     assert!(sql.contains("ON CONFLICT (id)"), "got: {sql}");
     assert!(sql.contains("age = age + $"), "got: {sql}");
 }
+
+#[test]
+fn create_many_macro_compiles_with_two_rows() {
+    let client = AppClient::new();
+    let now = ::chrono::Utc::now();
+    let op = prax_orm::create_many!(client.user, {
+        data: [
+            { email: "a@x.com", name: "Alice", active: true, created_at: @(now) },
+            { email: "b@x.com", name: "Bob", active: true, created_at: @(now) },
+        ],
+    });
+    let (sql, params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("INSERT INTO User"), "got: {sql}");
+    assert!(sql.contains("VALUES ($1, $2, $3, $4)"), "got: {sql}");
+    // Two rows × four columns = 8 params.
+    assert_eq!(params.len(), 8);
+}
+
+#[test]
+fn create_many_macro_supports_skip_duplicates() {
+    let client = AppClient::new();
+    let now = ::chrono::Utc::now();
+    let op = prax_orm::create_many!(client.user, {
+        data: [
+            { email: "a@x.com", active: true, created_at: @(now) },
+        ],
+        skip_duplicates: true,
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("ON CONFLICT DO NOTHING"), "got: {sql}");
+}

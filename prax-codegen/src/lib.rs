@@ -379,6 +379,27 @@ pub fn upsert(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::create_many!` — schema-aware DSL targeting `create_many`.
+/// Top-level keys: `data:` (required list of blocks),
+/// `skip_duplicates:` (optional bool).
+///
+/// ```rust,ignore
+/// prax::create_many!(client.user, {
+///     data: [
+///         { email: "a@x.com", name: "Alice" },
+///         { email: "b@x.com", name: "Bob" },
+///     ],
+///     skip_duplicates: true,
+/// });
+/// ```
+#[proc_macro]
+pub fn create_many(input: TokenStream) -> TokenStream {
+    match macros::ops::create_many::expand_create_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.
