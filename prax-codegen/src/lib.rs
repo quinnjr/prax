@@ -358,6 +358,27 @@ pub fn update(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::upsert!` — schema-aware DSL targeting `upsert`. Top-level
+/// keys: `where:` (required, unique), `create:` (required), `update:`
+/// (required), `include` xor `select`. On hit applies the `update:`
+/// payload; on miss inserts the `create:` payload.
+///
+/// ```rust,ignore
+/// prax::upsert!(client.user, {
+///     where: { email: "a@x.com" },
+///     create: { email: "a@x.com", name: "Alice", active: true, created_at: @(now) },
+///     update: { name: { set: "Renamed" }, age: { increment: 1 } },
+///     select: { id: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn upsert(input: TokenStream) -> TokenStream {
+    match macros::ops::upsert::expand_upsert(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.

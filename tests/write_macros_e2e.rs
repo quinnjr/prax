@@ -181,3 +181,34 @@ fn update_macro_compiles_mixed_ops() {
     assert!(sql.contains("age = age + $2"), "got: {sql}");
     assert!(sql.contains("RETURNING id, age"), "got: {sql}");
 }
+
+#[test]
+fn upsert_macro_compiles_full_form() {
+    let client = AppClient::new();
+    let now = ::chrono::Utc::now();
+    let op = prax_orm::upsert!(client.user, {
+        where: { email: "a@x.com" },
+        create: { email: "a@x.com", name: "Alice", active: true, created_at: @(now) },
+        update: { name: { set: "Renamed" } },
+        select: { id: true, email: true },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("INSERT INTO User"), "got: {sql}");
+    assert!(sql.contains("ON CONFLICT (email)"), "got: {sql}");
+    assert!(sql.contains("DO UPDATE SET"), "got: {sql}");
+    assert!(sql.contains("RETURNING id, email"), "got: {sql}");
+}
+
+#[test]
+fn upsert_macro_supports_atomic_update_op() {
+    let client = AppClient::new();
+    let now = ::chrono::Utc::now();
+    let op = prax_orm::upsert!(client.user, {
+        where: { id: 1 },
+        create: { email: "b@x.com", active: true, created_at: @(now) },
+        update: { age: { increment: 1 } },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("ON CONFLICT (id)"), "got: {sql}");
+    assert!(sql.contains("age = age + $"), "got: {sql}");
+}
