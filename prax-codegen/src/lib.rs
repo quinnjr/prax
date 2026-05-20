@@ -314,6 +314,25 @@ pub fn order_by(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::create!` — schema-aware DSL targeting `create`. Top-level
+/// keys: `data:` (required), `include` xor `select`. Phase 5a is
+/// scalar-only — relation operators inside `data:` (nested writes)
+/// land in phase 5b.
+///
+/// ```rust,ignore
+/// prax::create!(client.user, {
+///     data: { email: "a@x.com", name: "Alice", age: 30 },
+///     select: { id: true, email: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn create(input: TokenStream) -> TokenStream {
+    match macros::ops::create::expand_create(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.

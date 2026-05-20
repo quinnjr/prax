@@ -5,6 +5,7 @@
 //! Filled in by tasks 13-15.
 
 pub(crate) mod count;
+pub(crate) mod create;
 pub(crate) mod delete;
 pub(crate) mod delete_many;
 pub(crate) mod find_first;
