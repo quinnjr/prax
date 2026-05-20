@@ -302,4 +302,52 @@ mod tests {
         };
         assert!(matches!(value, DslValue::Expr(_)));
     }
+
+    #[test]
+    fn dsl_value_parser_call_expression() {
+        // `where: count()` — bare ident `count` is followed by `(`, so
+        // it parses as an Expr, not BareIdent.
+        let b = parse_block(quote!({ where: count() })).unwrap();
+        let DslField::Pair { value, .. } = &b.fields[0] else {
+            panic!();
+        };
+        assert!(matches!(value, DslValue::Expr(_)));
+    }
+
+    #[test]
+    fn dsl_value_parser_negative_literal_as_expr() {
+        let b = parse_block(quote!({ age: -5 })).unwrap();
+        let DslField::Pair { value, .. } = &b.fields[0] else {
+            panic!();
+        };
+        // `-5` lowers to an Expr (Unary) — the parser cannot reach a
+        // `Lit::Int(-5)` because syn's `Lit` excludes the leading minus.
+        assert!(matches!(value, DslValue::Expr(_)));
+    }
+
+    #[test]
+    fn dsl_value_parser_at_escape_with_complex_expr() {
+        let b = parse_block(quote!({ data: @(map.get(&key).cloned().unwrap()) })).unwrap();
+        let DslField::Pair { value, .. } = &b.fields[0] else {
+            panic!();
+        };
+        assert!(matches!(value, DslValue::Expr(_)));
+    }
+
+    #[test]
+    fn dsl_value_parser_path_two_segments() {
+        let b = parse_block(quote!({ role: Role::Admin })).unwrap();
+        let DslField::Pair { value, .. } = &b.fields[0] else {
+            panic!();
+        };
+        // Two-segment path starting with a regular ident → DslValue::Path.
+        // A `crate::...` form would start with the `crate` keyword and
+        // fall through to the catch-all Expr parser instead, which is
+        // also fine for downstream lowering — both shapes carry the
+        // same path data.
+        match value {
+            DslValue::Path(p) => assert_eq!(p.segments.len(), 2),
+            other => panic!("expected Path, got {:?}", other),
+        }
+    }
 }
