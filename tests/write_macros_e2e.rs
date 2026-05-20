@@ -128,3 +128,56 @@ fn create_macro_compiles_without_optional_fields() {
     // Default Select is `*`.
     assert!(sql.contains("RETURNING *"));
 }
+
+#[test]
+fn update_macro_compiles_plain_set() {
+    let client = AppClient::new();
+    let op = prax_orm::update!(client.user, {
+        where: { id: 1 },
+        data: { name: "Renamed" },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("UPDATE User SET"), "got: {sql}");
+    assert!(sql.contains("name = $1"), "got: {sql}");
+    assert!(sql.contains("WHERE"), "got: {sql}");
+}
+
+#[test]
+fn update_macro_compiles_with_increment() {
+    let client = AppClient::new();
+    let op = prax_orm::update!(client.user, {
+        where: { id: 1 },
+        data: { age: { increment: 1 } },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("UPDATE User SET"), "got: {sql}");
+    assert!(sql.contains("age = age + $1"), "got: {sql}");
+}
+
+#[test]
+fn update_macro_compiles_with_unset() {
+    let client = AppClient::new();
+    let op = prax_orm::update!(client.user, {
+        where: { id: 1 },
+        data: { name: { unset: true } },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("name = NULL"), "got: {sql}");
+}
+
+#[test]
+fn update_macro_compiles_mixed_ops() {
+    let client = AppClient::new();
+    let op = prax_orm::update!(client.user, {
+        where: { id: 42 },
+        data: {
+            name: "Bob",
+            age: { increment: 1 },
+        },
+        select: { id: true, age: true },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("name = $1"), "got: {sql}");
+    assert!(sql.contains("age = age + $2"), "got: {sql}");
+    assert!(sql.contains("RETURNING id, age"), "got: {sql}");
+}

@@ -333,6 +333,31 @@ pub fn create(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::update!` — schema-aware DSL targeting `update`. Top-level
+/// keys: `where:` (required, unique), `data:` (required), `include`
+/// xor `select`. Atomic operators (`increment`, `decrement`,
+/// `multiply`, `divide`, `unset`) work via `{ <op>: V }` blocks inside
+/// `data:` — see spec §4.
+///
+/// ```rust,ignore
+/// prax::update!(client.user, {
+///     where: { id: 1 },
+///     data: {
+///         name: "Renamed",
+///         age: { increment: 1 },
+///         last_seen: { unset: true },
+///     },
+///     select: { id: true, age: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn update(input: TokenStream) -> TokenStream {
+    match macros::ops::update::expand_update(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.

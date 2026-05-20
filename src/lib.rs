@@ -634,7 +634,7 @@ pub use prax_codegen::prax_schema;
 pub use prax_codegen::{count, delete, delete_many, find_first, find_many, find_unique};
 
 // Write-operation macros (phase 5a). See `prax-codegen/src/macros/ops/`.
-pub use prax_codegen::create;
+pub use prax_codegen::{create, update};
 
 // Shape macros (phase 4) — typed input struct values that compose with
 // the read macros via spread. See `prax-codegen/src/macros/ops/shape.rs`.
