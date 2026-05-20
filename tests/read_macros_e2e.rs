@@ -141,3 +141,30 @@ fn find_first_compiles_with_filter_and_order() {
     });
     let _ = op.build_sql(&prax_query::dialect::Postgres);
 }
+
+#[test]
+fn count_compiles_with_where() {
+    let client = AppClient::new();
+    let op = prax_orm::count!(client.user, {
+        where: { active: true },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}
+
+#[test]
+fn delete_compiles_with_unique_where() {
+    let client = AppClient::new();
+    let op = prax_orm::delete!(client.user, {
+        where: { id: 42 },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}
+
+#[test]
+fn delete_many_compiles_with_non_unique_where() {
+    let client = AppClient::new();
+    let op = prax_orm::delete_many!(client.user, {
+        where: { active: false },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}

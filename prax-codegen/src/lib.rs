@@ -194,6 +194,40 @@ pub fn find_first(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::count!` — schema-aware DSL targeting `count`. Phase 3 only
+/// supports the `where:` key; the Prisma-style `_count` aggregate
+/// (`select: { _count: { posts: true } }`) is phase 6.
+#[proc_macro]
+pub fn count(input: TokenStream) -> TokenStream {
+    match macros::ops::count::expand_count(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::delete!` — schema-aware DSL targeting `delete`. The
+/// `where:` block must match a unique column.
+#[proc_macro]
+pub fn delete(input: TokenStream) -> TokenStream {
+    match macros::ops::delete::expand_delete(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::delete_many!` — schema-aware DSL targeting `delete_many`.
+/// The `where:` block is the non-unique form.
+///
+/// **Warning:** an empty / `Filter::None` filter matches every row in
+/// the table. See `WhereInput`'s trait-level note.
+#[proc_macro]
+pub fn delete_many(input: TokenStream) -> TokenStream {
+    match macros::ops::delete_many::expand_delete_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};
