@@ -6,6 +6,11 @@
 // Several fields are consumed by the lowering pass landing in tasks
 // 7-11; until then dead_code warnings would block CI.
 #![allow(dead_code)]
+// `DslField::Conditional` is intentionally larger than its peers
+// (carries the `cond` Expr + key/value). The macro's lowering pass
+// constructs each `DslField` directly; the size delta is paid once per
+// field-entry and isn't worth a heap allocation for boxing.
+#![allow(clippy::large_enum_variant)]
 
 use proc_macro2::Span;
 use syn::{Expr, Ident, Lit, Path};

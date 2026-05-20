@@ -168,3 +168,31 @@ fn delete_many_compiles_with_non_unique_where() {
     });
     let _ = op.build_sql(&prax_query::dialect::Postgres);
 }
+
+#[test]
+fn find_many_compiles_with_spread_inside_where() {
+    let client = AppClient::new();
+    let base = user::UserWhereInput {
+        active: Some(prax_query::inputs::BoolFilter::equals(true)),
+        ..Default::default()
+    };
+    let op = prax_orm::find_many!(client.user, {
+        where: {
+            ..base,
+            email: { contains: "@example.com" },
+        },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}
+
+#[test]
+fn find_many_compiles_with_conditional() {
+    let client = AppClient::new();
+    let want_active = true;
+    let op = prax_orm::find_many!(client.user, {
+        where: {
+            #[if(want_active)] active: true,
+        },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}

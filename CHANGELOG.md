@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Read-operation macros (phase 3).** Six new schema-aware
+  proc-macros expand a Prisma-style brace-block DSL into chained
+  `with_*_input(...)` calls on the existing fluent-builder
+  operations: `prax::find_unique!`, `prax::find_first!`,
+  `prax::find_many!`, `prax::count!`, `prax::delete!`,
+  `prax::delete_many!`. The DSL grammar supports nested scalar
+  filters, logical `and` / `or` / `not`, relation operators (`some`
+  / `every` / `none` / `is` / `is_not` / `is_null`), `..spread`
+  and `..move spread` for struct-update composition, `#[if(cond)]`
+  / `#[else_if]` / `#[else]` conditional fields, bare-ident enum
+  resolution, and `@(expr)` Rust-expression escapes. Unknown
+  fields produce a "did you mean" diagnostic computed via
+  Jaro-Winkler against the actual model. Schema discovery walks
+  up from `CARGO_MANIFEST_DIR` looking for `prax.toml`, with a
+  `PRAX_SCHEMA` env override; parsed schemas are cached per
+  process so repeat macro invocations within a single crate
+  compile in microseconds.
 - **Typed input codegen (phase 2).** `#[derive(Model)]` and the
   `prax_schema!` macro now emit seven new types per model:
   `<Model>WhereInput`, `<Model>WhereUniqueInput`, `<Model>Include`,
