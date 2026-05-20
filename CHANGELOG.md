@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shape macros (phase 4).** Five new schema-aware proc-macros
+  that return the corresponding phase-2 typed input struct **as a
+  value**: `prax::r#where!`, `prax::include!`, `prax::select!`,
+  `prax::order_by!`, `prax::cursor!`. Each takes `(Model, { ... })`
+  (or `[ ... ]` for `order_by!`'s multi-key form) and emits a
+  reusable filter / include / select / order / cursor value that
+  composes with the phase-3 read macros via `..spread` inside the
+  DSL block or via the builder methods (`with_where_input`,
+  `with_include_input`, `with_select_input`, `order_by`). The
+  shape macros inherit the full phase-3 DSL surface — spread,
+  conditional, bare-ident enum resolution, "did you mean"
+  suggestions, schema-aware validation. `r#where` is exported as
+  a raw identifier because `where` is a Rust keyword; callers
+  invoke it as `prax::r#where!(...)`.
 - **Read-operation macros (phase 3).** Six new schema-aware
   proc-macros expand a Prisma-style brace-block DSL into chained
   `with_*_input(...)` calls on the existing fluent-builder

@@ -228,6 +228,114 @@ pub fn delete_many(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::r#where!` — schema-aware shape macro returning a
+/// `<Model>WhereInput` value. Composes with the read macros via
+/// `..spread`:
+///
+/// ```rust,ignore
+/// let active = prax::r#where!(User, { active: true });
+/// let _ = prax::find_many!(client.user, {
+///     ..active,
+///     email: { contains: "@x.com" },
+/// });
+/// ```
+///
+/// Exported as `r#where` because `where` is a Rust keyword and the
+/// raw-identifier prefix is required at the call site whenever the
+/// macro is reached through a path (`prax::r#where!(...)`).
+#[proc_macro]
+pub fn r#where(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_where_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::include!` — schema-aware shape macro returning a
+/// `<Model>Include` value. Composes with the read macros via
+/// `..spread` to build reusable relation-include shapes.
+///
+/// ```rust,ignore
+/// let with_posts = prax::include!(User, { posts: true });
+/// let _ = prax::find_unique!(client.user, {
+///     where: { id: 1 },
+///     include: { ..with_posts },
+/// });
+/// ```
+///
+/// Distinct from `std::include!` — they live in different modules and
+/// there is no ambiguity at the call site as long as the path is
+/// fully qualified (`prax::include!`).
+#[proc_macro]
+pub fn include(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_include_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::select!` — schema-aware shape macro returning a
+/// `<Model>Select` value. Composes with the read macros via `..spread`.
+///
+/// ```rust,ignore
+/// let lite = prax::select!(User, { id: true, email: true });
+/// let _ = prax::find_many!(client.user, {
+///     select: { ..lite },
+/// });
+/// ```
+#[proc_macro]
+pub fn select(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_select_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::order_by!` — schema-aware shape macro returning an
+/// `OrderBy` value. Accepts either a single `{ field: dir }` block or
+/// a list of such blocks for multi-key sorts.
+///
+/// ```rust,ignore
+/// let newest_first = prax::order_by!(User, { created_at: desc });
+/// let _ = prax::find_many!(client.user, {
+///     order_by: { created_at: desc },
+/// });
+/// // or as a list:
+/// let by_active_then_email = prax::order_by!(User, [
+///     { active: desc },
+///     { email: asc },
+/// ]);
+/// ```
+#[proc_macro]
+pub fn order_by(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_order_by_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::cursor!` — schema-aware shape macro returning a
+/// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
+/// the read macros.
+///
+/// The block must have exactly one entry whose key refers to an
+/// `@id` or `@unique` column on the model.
+///
+/// ```rust,ignore
+/// let from = prax::cursor!(User, { id: 42 });
+/// let _ = prax::find_many!(client.user, {
+///     cursor: { id: 42 },
+///     take: 10,
+/// });
+/// ```
+#[proc_macro]
+pub fn cursor(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_cursor_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};

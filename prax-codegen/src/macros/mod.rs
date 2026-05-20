@@ -16,4 +16,5 @@ pub(crate) mod dsl;
 pub(crate) mod lower;
 pub(crate) mod ops;
 pub(crate) mod schema_resolve;
+pub(crate) mod shape_accessor;
 pub(crate) mod validate;

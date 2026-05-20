@@ -36,3 +36,21 @@ fn read_macros_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/read_macros/*.rs");
 }
+
+/// `trybuild` UI tests for the phase-4 shape macros (`where!`,
+/// `include!`, `select!`, `order_by!`, `cursor!`).
+///
+/// Each `.rs` file under `tests/ui/shape_macros/` is a compile-fail
+/// fixture asserting one diagnostic class — unknown field, near-miss
+/// suggestion, non-unique cursor target, unknown model. Stderrs are
+/// rustc-version sensitive; regenerate with:
+///
+/// ```bash
+/// TRYBUILD=overwrite cargo test --test trybuild_read_macros --features ui-tests
+/// ```
+#[cfg(feature = "ui-tests")]
+#[test]
+fn shape_macros_ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/shape_macros/*.rs");
+}

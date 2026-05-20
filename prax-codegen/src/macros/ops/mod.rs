@@ -10,3 +10,4 @@ pub(crate) mod delete_many;
 pub(crate) mod find_first;
 pub(crate) mod find_many;
 pub(crate) mod find_unique;
+pub(crate) mod shape;
