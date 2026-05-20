@@ -1,0 +1,16 @@
+error: Failed to parse schema: Schema file 'prax/schema.prax' not found. Searched in:
+         - CARGO_MANIFEST_DIR/prax/schema.prax
+         - (absolute) prax/schema.prax
+         - (current_dir) prax/schema.prax
+ --> tests/ui/write_macros/data_unknown_field.rs:5:1
+  |
+5 | prax_orm::prax_schema!("prax/schema.prax");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `prax_orm::prax_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: unknown field `emial` on model `User` in `data:` block. did you mean `email`?
+ --> tests/ui/write_macros/data_unknown_field.rs:9:17
+  |
+9 |         data: { emial: "x@y.com", active: true },
+  |                 ^^^^^

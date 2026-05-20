@@ -1,0 +1,16 @@
+error: Failed to parse schema: Schema file 'prax/schema.prax' not found. Searched in:
+         - CARGO_MANIFEST_DIR/prax/schema.prax
+         - (absolute) prax/schema.prax
+         - (current_dir) prax/schema.prax
+ --> tests/ui/write_macros/update_increment_on_string.rs:4:1
+  |
+4 | prax_orm::prax_schema!("prax/schema.prax");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `prax_orm::prax_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: operator `increment` is not valid on non-numeric field `email` (String)
+ --> tests/ui/write_macros/update_increment_on_string.rs:9:26
+  |
+9 |         data: { email: { increment: 1 } },
+  |                          ^^^^^^^^^
