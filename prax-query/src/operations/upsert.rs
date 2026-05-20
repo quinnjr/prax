@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::{Filter, FilterValue};
+use crate::inputs::WriteOp;
 use crate::traits::{Model, QueryEngine};
 use crate::types::Select;
 
@@ -28,6 +29,12 @@ pub struct UpsertOperation<E: QueryEngine, M: Model> {
     create_values: Vec<FilterValue>,
     update_columns: Vec<String>,
     update_values: Vec<FilterValue>,
+    /// Update-path entries pushed via [`Self::with_update_input`] or
+    /// [`Self::update_set_op`]. When non-empty these take precedence
+    /// over `update_columns`/`update_values` because they carry atomic
+    /// operators (`Increment`/`Decrement`/`Unset`) the flat
+    /// column/value pair can't express.
+    update_ops: Vec<(String, WriteOp)>,
     conflict_columns: Vec<String>,
     select: Select,
     _model: PhantomData<M>,
@@ -43,6 +50,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
             create_values: Vec::new(),
             update_columns: Vec::new(),
             update_values: Vec::new(),
+            update_ops: Vec::new(),
             conflict_columns: Vec::new(),
             select: Select::All,
             _model: PhantomData,
@@ -117,6 +125,43 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
         self
     }
 
+    /// Apply a typed `CreateInput` to the upsert's create path.
+    ///
+    /// The columns / values produced by the input are appended to the
+    /// existing `create_columns` / `create_values` lists. Phase 5a's
+    /// codegen ensures every `<Model>CreateInput` carries the
+    /// model's `@unique` conflict column, so [`Self::on_conflict`]
+    /// remains useful with this method.
+    pub fn with_create_input<I>(mut self, input: I) -> Self
+    where
+        I: crate::inputs::CreateInput<Model = M, Data = crate::inputs::CreatePayload>,
+    {
+        let data: crate::inputs::CreatePayload = input.into_ir();
+        for (col, val) in data {
+            self.create_columns.push(col);
+            self.create_values.push(val);
+        }
+        self
+    }
+
+    /// Apply a typed `UpdateInput` to the upsert's update path.
+    ///
+    /// Atomic operators are preserved — when the update branch fires,
+    /// `Increment(n)` emits `col = col + $n` in the `DO UPDATE SET`
+    /// clause, etc. Setting any input via this method overrides any
+    /// flat update columns recorded by [`Self::update`] or
+    /// [`Self::update_set`].
+    pub fn with_update_input<I>(mut self, input: I) -> Self
+    where
+        I: crate::inputs::UpdateInput<Model = M, Data = crate::inputs::UpdatePayload>,
+    {
+        let data: crate::inputs::UpdatePayload = input.into_ir();
+        for (col, op) in data {
+            self.update_ops.push((col, op));
+        }
+        self
+    }
+
     /// Build the SQL query.
     pub fn build_sql(
         &self,
@@ -151,8 +196,26 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
         sql.push(')');
 
         // Upsert clause (ON CONFLICT / ON DUPLICATE KEY)
-        // Build update SET clause
-        let update_set = if !self.update_columns.is_empty() {
+        // Build update SET clause. When `update_ops` is non-empty it
+        // supplants the legacy flat column/value list — typed inputs
+        // can carry atomic operators (`col = col + $n`) the flat
+        // pair can't represent.
+        let update_set = if !self.update_ops.is_empty() {
+            let update_parts: Vec<String> = self
+                .update_ops
+                .iter()
+                .map(|(col, op)| {
+                    let placeholder = dialect.placeholder(param_idx);
+                    let (fragment, value) = op.to_set_fragment(col, &placeholder);
+                    if let Some(v) = value {
+                        params.push(v);
+                        param_idx += 1;
+                    }
+                    fragment
+                })
+                .collect();
+            update_parts.join(", ")
+        } else if !self.update_columns.is_empty() {
             let update_parts: Vec<_> = self
                 .update_columns
                 .iter()
@@ -647,5 +710,71 @@ mod tests {
         let (_, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert_eq!(params[1], FilterValue::Json(json));
+    }
+
+    // ========== Phase 5a: typed-input wiring ==========
+
+    struct MockCreateInput(Vec<(String, FilterValue)>);
+
+    impl crate::inputs::CreateInput for MockCreateInput {
+        type Model = TestModel;
+        type Data = crate::inputs::CreatePayload;
+        fn into_ir(self) -> Self::Data {
+            self.0
+        }
+    }
+
+    struct MockUpdateInput(Vec<(String, WriteOp)>);
+
+    impl crate::inputs::UpdateInput for MockUpdateInput {
+        type Model = TestModel;
+        type Data = crate::inputs::UpdatePayload;
+        fn into_ir(self) -> Self::Data {
+            self.0
+        }
+    }
+
+    #[test]
+    fn upsert_with_create_input_appends_create_columns() {
+        let input = MockCreateInput(vec![
+            ("email".into(), FilterValue::String("a@x.com".into())),
+            ("name".into(), FilterValue::String("Alice".into())),
+        ]);
+        let op = UpsertOperation::<MockEngine, TestModel>::new(MockEngine)
+            .on_conflict(["email"])
+            .with_create_input(input)
+            .update_set("name", "Updated");
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("(email, name)"), "got: {sql}");
+        assert!(sql.contains("VALUES ($1, $2)"), "got: {sql}");
+        assert!(sql.contains("ON CONFLICT (email)"));
+        // 2 create params + 1 update param.
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn upsert_with_update_input_uses_atomic_ops() {
+        let create = MockCreateInput(vec![("id".into(), FilterValue::Int(1))]);
+        let update = MockUpdateInput(vec![
+            (
+                "name".into(),
+                WriteOp::Set(FilterValue::String("Renamed".into())),
+            ),
+            (
+                "login_count".into(),
+                WriteOp::Increment(FilterValue::Int(1)),
+            ),
+        ]);
+        let op = UpsertOperation::<MockEngine, TestModel>::new(MockEngine)
+            .on_conflict(["id"])
+            .with_create_input(create)
+            .with_update_input(update);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+        // Atomic operator must round-trip through the upsert path.
+        assert!(sql.contains("login_count = login_count + $"), "got: {sql}");
+        // 1 create + 2 update params.
+        assert_eq!(params.len(), 3);
     }
 }

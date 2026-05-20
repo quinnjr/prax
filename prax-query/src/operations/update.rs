@@ -4,6 +4,7 @@ use std::marker::PhantomData;
 
 use crate::error::QueryResult;
 use crate::filter::{Filter, FilterValue};
+use crate::inputs::WriteOp;
 use crate::traits::{Model, QueryEngine};
 use crate::types::Select;
 
@@ -23,7 +24,7 @@ use crate::types::Select;
 pub struct UpdateOperation<E: QueryEngine, M: Model> {
     engine: E,
     filter: Filter,
-    updates: Vec<(String, FilterValue)>,
+    updates: Vec<(String, WriteOp)>,
     select: Select,
     _model: PhantomData<M>,
 }
@@ -49,7 +50,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
 
     /// Set a column to a new value.
     pub fn set(mut self, column: impl Into<String>, value: impl Into<FilterValue>) -> Self {
-        self.updates.push((column.into(), value.into()));
+        self.updates
+            .push((column.into(), WriteOp::Set(value.into())));
         self
     }
 
@@ -59,16 +61,27 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
         values: impl IntoIterator<Item = (impl Into<String>, impl Into<FilterValue>)>,
     ) -> Self {
         for (col, val) in values {
-            self.updates.push((col.into(), val.into()));
+            self.updates.push((col.into(), WriteOp::Set(val.into())));
         }
         self
     }
 
     /// Increment a numeric column.
-    pub fn increment(self, column: impl Into<String>, amount: i64) -> Self {
-        // This would need special handling in SQL generation
-        // For now, we'll implement a basic version
-        self.set(column, FilterValue::Int(amount))
+    pub fn increment(mut self, column: impl Into<String>, amount: i64) -> Self {
+        self.updates
+            .push((column.into(), WriteOp::Increment(FilterValue::Int(amount))));
+        self
+    }
+
+    /// Apply a column-keyed [`WriteOp`].
+    ///
+    /// Used by `with_update_input` (and tests) to push an arbitrary
+    /// scalar atomic operator onto the update list. The DSL surface
+    /// for these operators is the `*FieldUpdate` wrappers in
+    /// [`crate::inputs::scalar_update`].
+    pub fn set_op(mut self, column: impl Into<String>, op: WriteOp) -> Self {
+        self.updates.push((column.into(), op));
+        self
     }
 
     /// Select specific fields to return.
@@ -92,14 +105,17 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
 
         // SET clause
         sql.push_str(" SET ");
-        let set_parts: Vec<_> = self
+        let set_parts: Vec<String> = self
             .updates
             .iter()
-            .map(|(col, val)| {
-                params.push(val.clone());
-                let part = format!("{} = {}", col, dialect.placeholder(param_idx));
-                param_idx += 1;
-                part
+            .map(|(col, op)| {
+                let placeholder = dialect.placeholder(param_idx);
+                let (fragment, value) = op.to_set_fragment(col, &placeholder);
+                if let Some(v) = value {
+                    params.push(v);
+                    param_idx += 1;
+                }
+                fragment
             })
             .collect();
         sql.push_str(&set_parts.join(", "));
@@ -153,6 +169,24 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
         self
     }
 
+    /// Apply a typed `UpdateInput`.
+    ///
+    /// The input's `into_ir` produces a `Vec<(column, WriteOp)>` —
+    /// each entry is appended to the operation's SET list. Atomic
+    /// operators (`Increment`/`Decrement`/`Multiply`/`Divide`) emit
+    /// `col = col <op> $n` in the resulting SQL; `Set` emits
+    /// `col = $n`; `Unset` emits `col = NULL` with no placeholder.
+    pub fn with_update_input<I>(mut self, input: I) -> Self
+    where
+        I: crate::inputs::UpdateInput<Model = M, Data = crate::inputs::UpdatePayload>,
+    {
+        let data: crate::inputs::UpdatePayload = input.into_ir();
+        for (col, op) in data {
+            self.updates.push((col, op));
+        }
+        self
+    }
+
     /// Doc-hidden accessor for the current filter.
     #[doc(hidden)]
     pub fn filter_for_test(&self) -> &Filter {
@@ -164,7 +198,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpdateOperation<E, M> {
 pub struct UpdateManyOperation<E: QueryEngine, M: Model> {
     engine: E,
     filter: Filter,
-    updates: Vec<(String, FilterValue)>,
+    updates: Vec<(String, WriteOp)>,
     _model: PhantomData<M>,
 }
 
@@ -188,7 +222,37 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
 
     /// Set a column to a new value.
     pub fn set(mut self, column: impl Into<String>, value: impl Into<FilterValue>) -> Self {
-        self.updates.push((column.into(), value.into()));
+        self.updates
+            .push((column.into(), WriteOp::Set(value.into())));
+        self
+    }
+
+    /// Apply a column-keyed [`WriteOp`].
+    pub fn set_op(mut self, column: impl Into<String>, op: WriteOp) -> Self {
+        self.updates.push((column.into(), op));
+        self
+    }
+
+    /// Apply a typed `WhereInput`. AND-composes with the existing filter.
+    pub fn with_where_input<W: crate::inputs::WhereInput<Model = M>>(mut self, w: W) -> Self {
+        let f = w.into_ir();
+        self.filter = self.filter.and_then(f);
+        self
+    }
+
+    /// Apply a typed `UpdateInput`.
+    ///
+    /// See [`UpdateOperation::with_update_input`] for the lowering
+    /// semantics — the only difference here is that `update_many` does
+    /// not return rows.
+    pub fn with_update_input<I>(mut self, input: I) -> Self
+    where
+        I: crate::inputs::UpdateInput<Model = M, Data = crate::inputs::UpdatePayload>,
+    {
+        let data: crate::inputs::UpdatePayload = input.into_ir();
+        for (col, op) in data {
+            self.updates.push((col, op));
+        }
         self
     }
 
@@ -207,14 +271,17 @@ impl<E: QueryEngine, M: Model> UpdateManyOperation<E, M> {
 
         // SET clause
         sql.push_str(" SET ");
-        let set_parts: Vec<_> = self
+        let set_parts: Vec<String> = self
             .updates
             .iter()
-            .map(|(col, val)| {
-                params.push(val.clone());
-                let part = format!("{} = {}", col, dialect.placeholder(param_idx));
-                param_idx += 1;
-                part
+            .map(|(col, op)| {
+                let placeholder = dialect.placeholder(param_idx);
+                let (fragment, value) = op.to_set_fragment(col, &placeholder);
+                if let Some(v) = value {
+                    params.push(v);
+                    param_idx += 1;
+                }
+                fragment
             })
             .collect();
         sql.push_str(&set_parts.join(", "));
@@ -411,7 +478,13 @@ mod tests {
 
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
-        assert!(sql.contains("counter = $1"));
+        // `increment` now lowers to a true `col = col + $n` atomic
+        // operator (the prior implementation collapsed it to a plain
+        // `set`, which was a documented bug).
+        assert!(
+            sql.contains("counter = counter + $1"),
+            "expected `counter = counter + $1`, got: {sql}"
+        );
         assert_eq!(params.len(), 1);
         assert_eq!(params[0], FilterValue::Int(5));
     }
@@ -623,5 +696,79 @@ mod tests {
 
         assert!(sql.contains("metadata = $1"));
         assert_eq!(params[0], FilterValue::Json(json_value));
+    }
+
+    // ========== Phase 5a: typed-input wiring ==========
+
+    /// Mock `UpdateInput` used by the `with_update_input` tests. The
+    /// codegen-emitted equivalent isn't available inside `prax-query`,
+    /// so we hand-roll the trait impl against `TestModel`.
+    struct MockUpdateInput(Vec<(String, WriteOp)>);
+
+    impl crate::inputs::UpdateInput for MockUpdateInput {
+        type Model = TestModel;
+        type Data = crate::inputs::UpdatePayload;
+        fn into_ir(self) -> Self::Data {
+            self.0
+        }
+    }
+
+    #[test]
+    fn with_update_input_appends_set_ops() {
+        let input = MockUpdateInput(vec![
+            (
+                "name".into(),
+                WriteOp::Set(FilterValue::String("Bob".into())),
+            ),
+            ("age".into(), WriteOp::Increment(FilterValue::Int(1))),
+        ]);
+
+        let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(1)))
+            .with_update_input(input);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+
+        // `Set` emits the plain `col = $n` form; `Increment` emits the
+        // atomic-operator `col = col + $n` fragment.
+        assert!(sql.contains("name = $1"), "got: {sql}");
+        assert!(sql.contains("age = age + $2"), "got: {sql}");
+        // 2 SET params + 1 WHERE param.
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], FilterValue::String("Bob".into()));
+        assert_eq!(params[1], FilterValue::Int(1));
+    }
+
+    #[test]
+    fn with_update_input_unset_emits_null_no_param() {
+        let input = MockUpdateInput(vec![("nickname".into(), WriteOp::Unset)]);
+
+        let op = UpdateOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .with_update_input(input);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+
+        assert!(sql.contains("nickname = NULL"), "got: {sql}");
+        // Unset emits no placeholder, so no parameter is pushed.
+        assert!(params.is_empty(), "expected no params, got: {params:?}");
+    }
+
+    #[test]
+    fn update_many_with_update_input_appends() {
+        let input = MockUpdateInput(vec![(
+            "name".into(),
+            WriteOp::Set(FilterValue::String("Bob".into())),
+        )]);
+
+        let op = UpdateManyOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .r#where(Filter::Equals("active".into(), FilterValue::Bool(true)))
+            .with_update_input(input);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+
+        assert!(sql.contains("UPDATE test_models SET"));
+        assert!(sql.contains("name = $1"), "got: {sql}");
+        assert!(sql.contains("WHERE"));
+        assert_eq!(params.len(), 2);
     }
 }
