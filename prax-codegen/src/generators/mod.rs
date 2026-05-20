@@ -9,7 +9,7 @@ mod derive_relation_loader;
 mod enum_gen;
 mod fields;
 mod filters;
-mod inputs;
+pub(crate) mod inputs;
 mod model;
 mod relation_accessors;
 mod type_gen;

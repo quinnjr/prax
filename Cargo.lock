@@ -4549,13 +4549,16 @@ name = "prax-codegen"
 version = "0.9.7"
 dependencies = [
  "convert_case 0.6.0",
+ "insta",
  "prax-schema",
  "pretty_assertions",
  "proc-macro2",
  "quote",
  "smol_str",
+ "strsim 0.11.1",
  "syn 2.0.117",
  "tempfile",
+ "toml 0.9.12+spec-1.1.0",
  "trybuild",
 ]
 

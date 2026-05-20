@@ -1,0 +1,9 @@
+# Workspace-root prax.toml for the phase-3 read-macro tests.
+#
+# The schema-discovery resolver (`prax-codegen/src/macros/schema_resolve.rs`)
+# walks up from each crate's CARGO_MANIFEST_DIR looking for this file.
+# Pointing at `prax/schema.prax` activates the shared fixture used by
+# `tests/read_macros_e2e.rs`.
+
+[generator.client]
+schema = "prax/schema.prax"

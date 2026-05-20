@@ -630,6 +630,9 @@ pub mod schema {
 pub use prax_codegen::Model;
 pub use prax_codegen::prax_schema;
 
+// Read-operation macros (phase 3). See `prax-codegen/src/macros/`.
+pub use prax_codegen::{count, delete, delete_many, find_first, find_many, find_unique};
+
 /// Top-level `PraxClient<E>` and the `prax::client!` macro. See the
 /// [`client`](mod@client) module docs for usage.
 pub mod client;

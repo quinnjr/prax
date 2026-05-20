@@ -55,6 +55,7 @@ use quote::quote;
 use syn::{DeriveInput, LitStr, parse_macro_input};
 
 mod generators;
+mod macros;
 mod plugins;
 mod schema_reader;
 mod types;
@@ -152,6 +153,78 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
     match generators::derive_model_impl(&input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// `prax::find_many!` — schema-aware declarative DSL for the
+/// fluent-builder's `find_many` operation. See spec §4 for the full
+/// grammar.
+///
+/// ```rust,ignore
+/// prax::find_many!(client.user, {
+///     where: { email: { contains: "@example.com" } },
+///     order_by: { created_at: desc },
+///     take: 10,
+/// });
+/// ```
+#[proc_macro]
+pub fn find_many(input: TokenStream) -> TokenStream {
+    match macros::ops::find_many::expand_find_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::find_unique!` — schema-aware DSL targeting `find_unique`.
+/// The `where:` block must match a single `@unique` (or `@id`) column.
+#[proc_macro]
+pub fn find_unique(input: TokenStream) -> TokenStream {
+    match macros::ops::find_unique::expand_find_unique(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::find_first!` — schema-aware DSL targeting `find_first`.
+#[proc_macro]
+pub fn find_first(input: TokenStream) -> TokenStream {
+    match macros::ops::find_first::expand_find_first(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::count!` — schema-aware DSL targeting `count`. Phase 3 only
+/// supports the `where:` key; the Prisma-style `_count` aggregate
+/// (`select: { _count: { posts: true } }`) is phase 6.
+#[proc_macro]
+pub fn count(input: TokenStream) -> TokenStream {
+    match macros::ops::count::expand_count(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::delete!` — schema-aware DSL targeting `delete`. The
+/// `where:` block must match a unique column.
+#[proc_macro]
+pub fn delete(input: TokenStream) -> TokenStream {
+    match macros::ops::delete::expand_delete(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::delete_many!` — schema-aware DSL targeting `delete_many`.
+/// The `where:` block is the non-unique form.
+///
+/// **Warning:** an empty / `Filter::None` filter matches every row in
+/// the table. See `WhereInput`'s trait-level note.
+#[proc_macro]
+pub fn delete_many(input: TokenStream) -> TokenStream {
+    match macros::ops::delete_many::expand_delete_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
     }
 }
 

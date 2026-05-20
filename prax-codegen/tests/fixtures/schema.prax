@@ -1,0 +1,34 @@
+// Fixture schema used by the read-operation macro lowering tests.
+
+enum Role {
+    User
+    Admin
+    Moderator
+}
+
+model User {
+    id         Int      @id @auto
+    email      String   @unique
+    name       String?
+    age        Int?
+    active     Boolean  @default(true)
+    role       Role
+    posts      Post[]   @relation(fields: [id], references: [author_id])
+    profile    Profile? @relation(fields: [id], references: [user_id])
+    created_at DateTime
+}
+
+model Post {
+    id        Int      @id @auto
+    title     String
+    published Boolean
+    author_id Int
+    author    User     @relation(fields: [author_id], references: [id])
+}
+
+model Profile {
+    id        Int    @id @auto
+    user_id   Int    @unique
+    user      User   @relation(fields: [user_id], references: [id])
+    bio       String?
+}
