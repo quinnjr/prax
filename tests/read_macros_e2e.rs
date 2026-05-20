@@ -122,3 +122,22 @@ fn find_many_compiles_with_order_by_and_skip() {
     });
     let _ = op.build_sql(&prax_query::dialect::Postgres);
 }
+
+#[test]
+fn find_unique_compiles_with_unique_where() {
+    let client = AppClient::new();
+    let op = prax_orm::find_unique!(client.user, {
+        where: { email: "alice@example.com" },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}
+
+#[test]
+fn find_first_compiles_with_filter_and_order() {
+    let client = AppClient::new();
+    let op = prax_orm::find_first!(client.user, {
+        where: { active: true },
+        order_by: { created_at: desc },
+    });
+    let _ = op.build_sql(&prax_query::dialect::Postgres);
+}

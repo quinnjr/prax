@@ -175,6 +175,25 @@ pub fn find_many(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::find_unique!` — schema-aware DSL targeting `find_unique`.
+/// The `where:` block must match a single `@unique` (or `@id`) column.
+#[proc_macro]
+pub fn find_unique(input: TokenStream) -> TokenStream {
+    match macros::ops::find_unique::expand_find_unique(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::find_first!` — schema-aware DSL targeting `find_first`.
+#[proc_macro]
+pub fn find_first(input: TokenStream) -> TokenStream {
+    match macros::ops::find_first::expand_find_first(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};
