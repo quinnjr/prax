@@ -35,6 +35,13 @@ pub enum FilterCategory {
     DateTime,
     Date,
     Time,
+    /// Enum-typed columns. Phase 2 has no producer for this variant —
+    /// schema-path collectors filter enum fields out until enum-aware
+    /// codegen wires through the user enum's PascalCase ident. The
+    /// variant is preserved here so `filter_wrapper_ident` /
+    /// `update_wrapper_ident` / `scalar_payload_type` have their full
+    /// `match` arms in place when that codegen lands.
+    #[allow(dead_code)]
     Enum,
 }
 
@@ -158,12 +165,13 @@ pub fn update_wrapper_ident(cat: FilterCategory, nullable: bool) -> Ident {
 /// Resolve the Rust scalar payload type that the filter / update wrapper
 /// expects.
 ///
-/// Callers handling enum-typed fields must construct the payload using
-/// the enum's PascalCase ident directly; this function is unreachable
-/// for `FilterCategory::Enum` and panics there to surface the contract
-/// violation early.
-pub fn scalar_payload_type(cat: FilterCategory) -> TokenStream {
-    match cat {
+/// Returns `None` for `FilterCategory::Enum`: enum payloads require the
+/// user enum's PascalCase ident, which this function does not have access
+/// to. Callers that handle enum fields must check `enum_ident` first and
+/// construct the payload from that. Returning `Option` makes the contract
+/// statically checkable instead of relying on a runtime `unreachable!`.
+pub fn scalar_payload_type(cat: FilterCategory) -> Option<TokenStream> {
+    Some(match cat {
         FilterCategory::String => quote! { ::std::string::String },
         FilterCategory::Int => quote! { i32 },
         FilterCategory::BigInt => quote! { i64 },
@@ -176,9 +184,6 @@ pub fn scalar_payload_type(cat: FilterCategory) -> TokenStream {
         FilterCategory::DateTime => quote! { ::chrono::DateTime<::chrono::Utc> },
         FilterCategory::Date => quote! { ::chrono::NaiveDate },
         FilterCategory::Time => quote! { ::chrono::NaiveTime },
-        FilterCategory::Enum => unreachable!(
-            "scalar_payload_type called for FilterCategory::Enum — caller must \
-             construct payload from the enum's PascalCase ident instead"
-        ),
-    }
+        FilterCategory::Enum => return None,
+    })
 }

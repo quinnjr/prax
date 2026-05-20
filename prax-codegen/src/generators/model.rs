@@ -13,7 +13,7 @@ use super::fields::{
 use super::inputs;
 use super::inputs::create_input::CreateField;
 use super::inputs::include_input::IncludeField;
-use super::inputs::order_by_input::OrderByField;
+use super::inputs::order_by_input::OrderByInputField;
 use super::inputs::relation_meta::RelationMetaSpec;
 use super::inputs::select_input::SelectField;
 use super::inputs::update_input::UpdateField;
@@ -51,6 +51,11 @@ fn scalar_type_name(s: &ScalarType) -> &'static str {
 // Field-list adapter functions — build the input-spec lists from schema AST.
 // ---------------------------------------------------------------------------
 
+/// Build the per-model `WhereField` list for the schema path.
+///
+/// Enum-typed columns are skipped until enum-aware codegen wires through
+/// the user enum's PascalCase ident — without that, the generator would
+/// emit `EnumFilter` instead of `EnumFilter<E>` and fail to compile.
 fn collect_where_fields(model: &Model) -> Vec<WhereField> {
     model
         .fields
@@ -74,14 +79,13 @@ fn collect_where_fields(model: &Model) -> Vec<WhereField> {
                         is_to_many: false,
                     })
                 }
-                FieldType::Enum(_) => Some(WhereField {
-                    name: snake_ident(f.name()),
-                    column: column_name_of(f),
-                    category: Some(inputs::FilterCategory::Enum),
-                    nullable: f.modifier.is_optional(),
-                    relation_target_where_input: None,
-                    is_to_many: false,
-                }),
+                FieldType::Enum(_) => {
+                    // Enum-typed columns are skipped until enum-aware codegen
+                    // threads the user enum's PascalCase ident through. Without
+                    // it, `where_input::generate` emits `EnumFilter` without
+                    // the required `<E>` type parameter and fails to compile.
+                    None
+                }
                 FieldType::Composite(_) | FieldType::Unsupported(_) => None,
             }
         })
@@ -136,12 +140,12 @@ fn collect_select_fields(model: &Model) -> Vec<SelectField> {
         .collect()
 }
 
-fn collect_order_by_fields(model: &Model) -> Vec<OrderByField> {
+fn collect_order_by_fields(model: &Model) -> Vec<OrderByInputField> {
     model
         .fields
         .values()
         .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
-        .map(|f| OrderByField {
+        .map(|f| OrderByInputField {
             variant: format_ident!("{}", f.name().to_case(Case::Pascal)),
             column: column_name_of(f),
             nullable: f.modifier.is_optional(),
@@ -155,22 +159,17 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
     model
         .fields
         .values()
-        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .filter(|f| is_mutable_scalar(f))
         .filter_map(|f| {
-            let attrs = f.extract_attributes();
-            if attrs.is_auto || attrs.is_updated_at {
-                return None;
-            }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
-                FieldType::Enum(_) => return None,
                 _ => return None,
             };
             Some(CreateField {
                 name: snake_ident(f.name()),
                 category: cat,
                 nullable: f.modifier.is_optional(),
-                has_default: attrs.default.is_some(),
+                has_default: f.extract_attributes().default.is_some(),
                 enum_ident: None,
             })
         })
@@ -183,15 +182,10 @@ fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
     model
         .fields
         .values()
-        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .filter(|f| is_mutable_scalar(f))
         .filter_map(|f| {
-            let attrs = f.extract_attributes();
-            if attrs.is_auto || attrs.is_updated_at {
-                return None;
-            }
             let cat = match &f.field_type {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
-                FieldType::Enum(_) => return None,
                 _ => return None,
             };
             Some(UpdateField {
@@ -208,12 +202,28 @@ fn collect_relation_meta_specs(
     model: &Model,
     schema: &Schema,
 ) -> Result<Vec<RelationMetaSpec>, syn::Error> {
+    // Resolve the parent PK column. Prefer the field-level `@id` form
+    // because it respects `@map` rewrites via `column_name_of`. Composite
+    // `@@id([...])` models are valid per the schema validator but produce
+    // an empty `id_fields()`; fall back to the first field name listed in
+    // the model-level `@@id` attribute. Fail loudly if a relation is
+    // declared on a PK-less model.
     let parent_pk = model
         .id_fields()
         .into_iter()
         .next()
         .map(column_name_of)
-        .expect("model must have at least one @id field (validated upstream)");
+        .or_else(|| get_primary_key_fields(model).into_iter().next())
+        .ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "model `{}` has a relation but no primary key — typed-input \
+                     relation codegen requires at least one `@id` or `@@id` column",
+                    model.name()
+                ),
+            )
+        })?;
 
     let mut specs = Vec::new();
     for f in model.fields.values() {
@@ -222,12 +232,24 @@ fn collect_relation_meta_specs(
             _ => continue,
         };
 
-        // Look up the target model for its actual table name.
+        // Look up the target model for its actual table name. Unknown target
+        // models are a schema error — emit a span'd diagnostic rather than
+        // silently emitting a wrong CHILD_TABLE constant.
         let child_table = schema
             .models
             .get(target_model_name)
             .map(|m| m.table_name().to_string())
-            .unwrap_or_else(|| target_model_name.to_case(Case::Snake));
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "relation `{}` on model `{}` references unknown target model `{}`",
+                        f.name(),
+                        model.name(),
+                        target_model_name
+                    ),
+                )
+            })?;
 
         // The FK column comes from `@relation(fields: [...])`. Phase 2's
         // typed-input codegen requires it to be explicit — guessing a
@@ -264,6 +286,22 @@ fn collect_relation_meta_specs(
         });
     }
     Ok(specs)
+}
+
+/// Whether a field is eligible for include in create / update payloads.
+///
+/// Excludes relation fields (which are written via nested-write inputs in
+/// a later phase) and DB-managed columns (`@auto`-generated PKs, fields
+/// with `@updatedAt`). Shared by the new `collect_create_fields` /
+/// `collect_update_fields` collectors and the legacy `create_fields` /
+/// `update_fields` builders inside `generate_model_module_with_style` so
+/// the exclusion rule stays consistent in both code paths.
+fn is_mutable_scalar(f: &prax_schema::ast::Field) -> bool {
+    if matches!(f.field_type, FieldType::Model(_)) {
+        return false;
+    }
+    let attrs = f.extract_attributes();
+    !attrs.is_auto && !attrs.is_updated_at
 }
 
 /// Pull the `@map("col")` override for a field, falling back to its
@@ -340,10 +378,7 @@ pub fn generate_model_module_with_style(
     let create_fields: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|field| {
             let field_name = snake_ident(field.name());
             let is_optional =
@@ -365,10 +400,7 @@ pub fn generate_model_module_with_style(
     let update_fields: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|field| {
             let field_name = snake_ident(field.name());
             let base_type = field_type_to_rust(&field.field_type, &TypeModifier::Required);
@@ -884,10 +916,7 @@ fn generate_precompiled_sql(model: &Model, table_name: &str) -> TokenStream {
     let insert_columns: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|f| f.name().to_string())
         .collect();
 
@@ -901,10 +930,7 @@ fn generate_precompiled_sql(model: &Model, table_name: &str) -> TokenStream {
     let update_columns: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .enumerate()
         .map(|(i, f)| format!("{} = ${}", f.name(), i + 1))
         .collect();

@@ -4,7 +4,7 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::Ident;
 
-pub struct OrderByField {
+pub struct OrderByInputField {
     /// Variant name (PascalCase of the column).
     pub variant: Ident,
     /// SQL column name (string literal).
@@ -22,7 +22,7 @@ pub struct OrderByField {
 pub fn generate(
     model_ident: &Ident,
     module_name: &Ident,
-    fields: &[OrderByField],
+    fields: &[OrderByInputField],
 ) -> (TokenStream, TokenStream) {
     let order_by_ident = format_ident!("{}OrderBy", model_ident);
 

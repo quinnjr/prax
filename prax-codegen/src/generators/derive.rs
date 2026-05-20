@@ -348,8 +348,14 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .iter()
         .filter_map(|f| {
             let rel = f.relation.as_ref()?;
-            // Child table name: snake_case of the target model ident.
-            let child_table = rel.target.to_string().to_case(Case::Snake);
+            // Child table: prefer the explicit `child_table = "..."` attr
+            // (required when the target model uses `#[prax(table = "...")]`),
+            // otherwise fall back to the snake-cased target ident, which
+            // matches the default table-naming convention.
+            let child_table = rel
+                .child_table
+                .clone()
+                .unwrap_or_else(|| rel.target.to_string().to_case(Case::Snake));
             Some(super::inputs::relation_meta::RelationMetaSpec {
                 meta_ident: format_ident!(
                     "{}{}FilterMeta",
@@ -579,6 +585,12 @@ struct RelationAttr {
     /// Column on this model referencing the target's PK (for
     /// `BelongsTo`). Defaults to `"id"`.
     local_key: String,
+    /// Optional explicit child SQL table name. Required when the target
+    /// model uses `#[prax(table = "...")]` to override its default name,
+    /// because the derive macro has no access to the target model's
+    /// attributes at expansion time. If absent, the snake-cased target
+    /// ident is used (matches the default table-name convention).
+    child_table: Option<String>,
 }
 
 /// Parse a field and its `#[prax(...)]` attributes.
@@ -618,6 +630,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                 let mut target: Option<syn::Ident> = None;
                 let mut fk: Option<String> = None;
                 let mut lk: Option<String> = None;
+                let mut child_table: Option<String> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("target") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -628,6 +641,9 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                     } else if inner.path.is_ident("local_key") {
                         let s: LitStr = inner.value()?.parse()?;
                         lk = Some(s.value());
+                    } else if inner.path.is_ident("child_table") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        child_table = Some(s.value());
                     }
                     Ok(())
                 })?;
@@ -641,6 +657,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                     target,
                     foreign_key,
                     local_key: lk.unwrap_or_else(|| "id".to_string()),
+                    child_table,
                 });
             }
             Ok(())

@@ -27,18 +27,17 @@ pub struct CreateField {
 pub fn generate(model_ident: &Ident, fields: &[CreateField]) -> TokenStream {
     let create_ident = format_ident!("{}CreateInput", model_ident);
 
-    let field_decls = fields.iter().map(|f| {
+    let field_decls = fields.iter().filter_map(|f| {
         let n = &f.name;
-        let payload = if let Some(e) = &f.enum_ident {
-            quote! { #e }
-        } else {
-            scalar_payload_type(f.category)
+        let payload = match &f.enum_ident {
+            Some(e) => quote! { #e },
+            None => scalar_payload_type(f.category)?,
         };
-        if f.nullable || f.has_default {
+        Some(if f.nullable || f.has_default {
             quote! { pub #n: ::core::option::Option<#payload> }
         } else {
             quote! { pub #n: #payload }
-        }
+        })
     });
 
     quote! {

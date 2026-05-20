@@ -17,45 +17,20 @@ mod view;
 
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
-// Per-input generators are re-exported as the codegen-crate's internal API.
-// They are reachable for tooling that wants to drive the generators
-// directly, but `#[doc(hidden)]` signals "not part of the stable public
-// surface — subject to change as later phases evolve the codegen pipeline."
-// Internal callers in `derive.rs` and `model.rs` reach them via full paths
-// (`super::inputs::*::generate`), so these re-exports show as unused inside
-// the crate; the `#[allow(unused_imports)]` is what preserves them.
+// Per-input generators re-exported here are the ones the `#[derive(Model)]`
+// path uses via `super::*` paths. The schema path (`model.rs`) and the
+// per-input modules use direct `super::inputs::*` paths for the rest, so
+// they are intentionally NOT re-exported here.
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub use inputs::create_input::{CreateField, generate as generate_create_input};
-#[doc(hidden)]
-#[allow(unused_imports)]
 pub use inputs::include_input::{IncludeField, generate as generate_include_input};
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub use inputs::order_by_input::{
-    OrderByField as OrderByInputField, generate as generate_order_by_input,
-};
+pub use inputs::order_by_input::{OrderByInputField, generate as generate_order_by_input};
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub use inputs::relation_meta::{RelationMetaSpec, generate as generate_relation_meta};
-#[doc(hidden)]
-#[allow(unused_imports)]
 pub use inputs::select_input::{SelectField, generate as generate_select_input};
 #[doc(hidden)]
-#[allow(unused_imports)]
-pub use inputs::update_input::{UpdateField, generate as generate_update_input};
-#[doc(hidden)]
-#[allow(unused_imports)]
 pub use inputs::where_input::{WhereField, WhereInputTokens, generate as generate_where_input};
 #[doc(hidden)]
-#[allow(unused_imports)]
 pub use inputs::where_unique_input::{UniqueColumn, generate as generate_where_unique_input};
-#[doc(hidden)]
-#[allow(unused_imports)]
-pub use inputs::{
-    FilterCategory, filter_category_for, filter_wrapper_ident, scalar_payload_type,
-    update_wrapper_ident,
-};
 #[allow(unused_imports)]
 pub use model::generate_model_module;
 pub use model::generate_model_module_with_style;

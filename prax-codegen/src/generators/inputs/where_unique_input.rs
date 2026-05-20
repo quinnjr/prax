@@ -53,14 +53,13 @@ pub fn generate(
         return (struct_tokens, impl_tokens);
     }
 
-    let variant_decls = columns.iter().map(|c| {
+    let variant_decls = columns.iter().filter_map(|c| {
         let v = &c.variant;
-        let payload = if let Some(e) = &c.enum_ident {
-            quote! { #e }
-        } else {
-            scalar_payload_type(c.category)
+        let payload = match &c.enum_ident {
+            Some(e) => quote! { #e },
+            None => scalar_payload_type(c.category)?,
         };
-        quote! { #v(#payload) }
+        Some(quote! { #v(#payload) })
     });
 
     let lower_arms = columns.iter().map(|c| {
