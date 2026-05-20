@@ -175,3 +175,87 @@ fn audit_event_select_emits_chosen_columns() {
         other => panic!("expected Select::Fields, got {:?}", other),
     }
 }
+
+#[test]
+fn user_create_input_lowers_required_and_optional_fields() {
+    use prax_query::filter::FilterValue;
+    use prax_query::inputs::CreateInput;
+
+    // `id` is `@id @auto` and excluded from CreateInput by codegen.
+    // Required: `email`, `active`. Optional: `name`, `age`.
+    let c = user::UserCreateInput {
+        email: "alice@example.com".into(),
+        name: Some("Alice".into()),
+        age: None,
+        active: true,
+    };
+    let payload = c.into_ir();
+    // Required fields always emit; `name` emits because it's `Some(...)`;
+    // `age = None` is skipped — codegen leaves nullable / has_default
+    // fields out of the payload when unset.
+    let cols: Vec<&str> = payload.iter().map(|(c, _)| c.as_str()).collect();
+    assert!(cols.contains(&"email"), "missing email; got {cols:?}");
+    assert!(cols.contains(&"active"), "missing active; got {cols:?}");
+    assert!(cols.contains(&"name"), "missing name; got {cols:?}");
+    assert!(
+        !cols.contains(&"age"),
+        "age should be omitted; got {cols:?}"
+    );
+
+    // Values round-trip through the `Into<FilterValue>` impls.
+    let email_val = payload.iter().find(|(c, _)| c == "email").map(|(_, v)| v);
+    assert!(matches!(email_val, Some(FilterValue::String(s)) if s == "alice@example.com"));
+    let active_val = payload.iter().find(|(c, _)| c == "active").map(|(_, v)| v);
+    assert_eq!(active_val, Some(&FilterValue::Bool(true)));
+}
+
+#[test]
+fn user_update_input_lowers_set_and_arithmetic_ops() {
+    use prax_query::filter::FilterValue;
+    use prax_query::inputs::{IntNullableFieldUpdate, StringFieldUpdate, UpdateInput, WriteOp};
+
+    let u = user::UserUpdateInput {
+        email: Some(StringFieldUpdate {
+            set: Some("bob@example.com".into()),
+        }),
+        age: Some(IntNullableFieldUpdate {
+            increment: Some(1),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let payload = u.into_ir();
+    // Each Option<*FieldUpdate> wrapper lowers to at least one
+    // (column, WriteOp) pair. Set + Increment surface as distinct
+    // variants in the output.
+    let has_email_set = payload.iter().any(|(c, op)| {
+        c == "email" && matches!(op, WriteOp::Set(FilterValue::String(s)) if s == "bob@example.com")
+    });
+    let has_age_increment = payload
+        .iter()
+        .any(|(c, op)| c == "age" && matches!(op, WriteOp::Increment(FilterValue::Int(1))));
+    assert!(
+        has_email_set,
+        "expected email = Set(\"bob...\"); got {payload:?}"
+    );
+    assert!(has_age_increment, "expected age += 1; got {payload:?}");
+}
+
+#[test]
+fn user_update_input_lowers_unset_on_nullable() {
+    use prax_query::inputs::{StringNullableFieldUpdate, UpdateInput, WriteOp};
+
+    // `name: Option<String>` is nullable, so the wrapper carries `unset`.
+    let u = user::UserUpdateInput {
+        name: Some(StringNullableFieldUpdate {
+            unset: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let payload = u.into_ir();
+    let has_unset = payload
+        .iter()
+        .any(|(c, op)| c == "name" && matches!(op, WriteOp::Unset));
+    assert!(has_unset, "expected name = Unset; got {payload:?}");
+}

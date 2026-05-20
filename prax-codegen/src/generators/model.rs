@@ -170,6 +170,7 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
             let attrs = f.extract_attributes();
             Some(CreateField {
                 name: snake_ident(f.name()),
+                column: column_name_of(f),
                 category: cat,
                 nullable: f.modifier.is_optional(),
                 has_default: attrs.default.is_some(),
@@ -193,6 +194,7 @@ fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
             };
             Some(UpdateField {
                 name: snake_ident(f.name()),
+                column: column_name_of(f),
                 category: cat,
                 nullable: f.modifier.is_optional(),
                 enum_ident: None,
@@ -552,11 +554,15 @@ pub fn generate_model_module_with_style(
     let (order_by_struct, order_by_impl) =
         super::generate_order_by_input(&model_name, &module_name, &order_by_fields);
 
-    let create_input_typed_struct =
-        super::inputs::create_input::generate(&model_name, &create_input_fields);
+    let super::inputs::create_input::CreateInputTokens {
+        struct_tokens: create_input_typed_struct,
+        impl_tokens: create_input_impl,
+    } = super::inputs::create_input::generate(&model_name, &module_name, &create_input_fields);
 
-    let update_input_typed_struct =
-        super::inputs::update_input::generate(&model_name, &update_input_fields);
+    let super::inputs::update_input::UpdateInputTokens {
+        struct_tokens: update_input_typed_struct,
+        impl_tokens: update_input_impl,
+    } = super::inputs::update_input::generate(&model_name, &module_name, &update_input_fields);
 
     let (relation_meta_struct, relation_meta_impl) =
         super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
@@ -649,6 +655,8 @@ pub fn generate_model_module_with_style(
         #include_impl
         #select_impl
         #order_by_impl
+        #create_input_impl
+        #update_input_impl
 
         // RelationFilterMeta impls — one per declared relation field.
         #relation_meta_impl
