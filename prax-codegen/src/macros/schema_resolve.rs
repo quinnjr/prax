@@ -10,14 +10,67 @@
 //! All errors are emitted as `syn::Error` pinned at
 //! `proc_macro2::Span::call_site()` so callers can `to_compile_error()`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use prax_schema::Schema;
+
+/// Per-process cache of parsed schemas, keyed by absolute path.
+///
+/// Proc-macros expand on a per-call basis; without caching, every
+/// invocation would re-parse the schema file (~5-10 ms each). Phase 3's
+/// six macros plus the existing `prax_schema!` would dominate compile
+/// time on a 50-model crate.
+static SCHEMA_CACHE: OnceLock<Mutex<HashMap<PathBuf, Arc<Schema>>>> = OnceLock::new();
+
+/// Resolve + parse the schema for the current proc-macro invocation.
+///
+/// First call per `(path, process)` parses; subsequent calls hit the
+/// cache. Returns an `Arc<Schema>` so the caller can hold the schema
+/// across the rest of the macro pipeline without re-parsing.
+#[allow(dead_code)]
+pub fn resolve_schema() -> Result<Arc<Schema>, syn::Error> {
+    let path = resolve_schema_path()?;
+    let cache = SCHEMA_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    // Poison-tolerant: if a previous parse panicked, drop the poison
+    // and continue. Worst case is a re-parse, not a wrong schema.
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(existing) = guard.get(&path) {
+        return Ok(Arc::clone(existing));
+    }
+    let schema = prax_schema::parse_schema_file(&path).map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!("failed to parse schema at {}: {e}", path.display()),
+        )
+    })?;
+    let arc = Arc::new(schema);
+    guard.insert(path.clone(), Arc::clone(&arc));
+    Ok(arc)
+}
+
+/// Emit a hidden `include_bytes!(schema_path)` constant so rustc's
+/// dep graph treats the schema file as an input to the consuming crate.
+///
+/// The unstable `proc_macro::tracked_path::path` API would be cleaner
+/// but isn't on stable yet, so phase 3 uses this `include_bytes!`
+/// fallback documented in the spec §5.
+#[allow(dead_code)]
+pub fn track_schema_dep(path: &Path) -> proc_macro2::TokenStream {
+    let abs = path.to_string_lossy().into_owned();
+    quote::quote! {
+        #[doc(hidden)]
+        #[allow(dead_code)]
+        const _PRAX_SCHEMA_DEP: &[u8] = include_bytes!(#abs);
+    }
+}
 
 /// Resolve the schema path to load for the current proc-macro
 /// invocation.
 ///
-/// Used by the cached `resolve_schema` entry point (task 4) and by
-/// tests directly.
-#[allow(dead_code)]
+/// Used by the cached `resolve_schema` entry point and by tests
+/// directly.
 pub fn resolve_schema_path() -> Result<PathBuf, syn::Error> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|_| {
         syn::Error::new(
@@ -238,6 +291,37 @@ mod tests {
             resolved.canonicalize().unwrap(),
             tmp.path().join("alt.prax").canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn schema_resolve_returns_arc_and_hits_cache_on_second_call() {
+        let _lock = lock();
+        let _g = EnvGuard::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let schema = tmp.path().join("custom.prax");
+        write_file(&schema, "model X { id Int @id @auto }\n");
+        // SAFETY: tests hold ENV_LOCK.
+        unsafe {
+            std::env::set_var("CARGO_MANIFEST_DIR", tmp.path());
+            std::env::set_var("PRAX_SCHEMA", &schema);
+        }
+        let first = resolve_schema().unwrap();
+        let second = resolve_schema().unwrap();
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "cache should return the same Arc on repeat calls"
+        );
+    }
+
+    #[test]
+    fn track_schema_dep_emits_include_bytes_const() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("schema.prax");
+        write_file(&p, "model X { id Int @id @auto }\n");
+        let tokens = track_schema_dep(&p);
+        let s = tokens.to_string();
+        assert!(s.contains("_PRAX_SCHEMA_DEP"));
+        assert!(s.contains("include_bytes"));
     }
 
     #[test]
