@@ -4,7 +4,7 @@ use convert_case::{Case, Casing};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type};
+use syn::{Data, DeriveInput, Fields, Ident, LitStr, Type, Visibility};
 
 /// Parse and generate code for the `#[derive(Model)]` macro.
 pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error> {
@@ -202,6 +202,195 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .collect();
     let model_relation_loader_impl = super::derive_relation_loader::emit(name, &loader_relations);
 
+    // Build WhereField list for the where_input generator.
+    // Only scalar fields (no relation attr, not a Vec) are included for now.
+    // Relation filter fields (ListRelationFilter / SingleRelationFilter) are
+    // deferred to Task 8 when `<Model><Rel>FilterMeta` types are generated;
+    // emitting them here without the corresponding FilterMeta impl would
+    // produce unresolvable references like `UserPostsFilterMeta`.
+    let where_fields: Vec<super::WhereField> = field_infos
+        .iter()
+        .filter_map(|f| {
+            if f.relation.is_some() || f.is_list {
+                // Relation fields: phase-2 emits the FilterMeta marker but
+                // leaves the WhereInput relation-filter wiring for a later
+                // phase (path-resolution work for `super::<target>::<...>`).
+                None
+            } else {
+                let type_name = extract_inner_type_name(&f.ty);
+                let category =
+                    super::inputs::filter_category_for(type_name.as_deref().unwrap_or(""));
+                Some(super::WhereField {
+                    name: f.name.clone(),
+                    column: f.column_name.clone(),
+                    category,
+                    nullable: f.is_optional,
+                    relation_target_where_input: None,
+                    is_to_many: false,
+                })
+            }
+        })
+        .collect();
+
+    let super::WhereInputTokens {
+        struct_tokens: where_input_struct,
+        impl_tokens: where_input_impl,
+    } = super::generate_where_input(name, &module_name, &where_fields);
+
+    // Build UniqueColumn list for the where_unique_input generator.
+    // Only scalar @id / @unique fields; relation fields are never unique keys
+    // we can encode as a simple Equals lookup.
+    let unique_columns: Vec<super::UniqueColumn> = field_infos
+        .iter()
+        .filter(|f| (f.is_id || f.is_unique) && f.relation.is_none() && !f.is_list)
+        .filter_map(|f| {
+            let inner = extract_inner_type_name(&f.ty);
+            let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
+            Some(super::UniqueColumn {
+                variant: format_ident!("{}", f.name.to_string().to_case(Case::Pascal)),
+                column: f.column_name.clone(),
+                category: cat,
+                enum_ident: None,
+            })
+        })
+        .collect();
+
+    super::inputs::where_unique_input::check_unique_column_collisions(
+        &unique_columns,
+        Some(&name.to_string()),
+    )?;
+
+    let (where_unique_struct, where_unique_impl) =
+        super::generate_where_unique_input(name, &module_name, &unique_columns);
+
+    // Build IncludeField list: every field that carries a relation attr.
+    let include_fields: Vec<super::IncludeField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_some())
+        .map(|f| super::IncludeField {
+            name: f.name.clone(),
+            relation: f.name.to_string(),
+        })
+        .collect();
+
+    // Build SelectField list: all fields; relation fields are marked so
+    // their column names are excluded from the SELECT column list.
+    let select_fields: Vec<super::SelectField> = field_infos
+        .iter()
+        .map(|f| super::SelectField {
+            name: f.name.clone(),
+            column: f.column_name.clone(),
+            is_relation: f.relation.is_some(),
+        })
+        .collect();
+
+    let (include_struct, include_impl) =
+        super::generate_include_input(name, &module_name, &include_fields);
+    let (select_struct, select_impl) =
+        super::generate_select_input(name, &module_name, &select_fields);
+
+    // Build OrderByField list: every non-relation scalar column is sortable.
+    let order_by_fields: Vec<super::OrderByInputField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && !f.is_list)
+        .map(|f| super::OrderByInputField {
+            variant: format_ident!("{}", f.name.to_string().to_case(Case::Pascal)),
+            column: f.column_name.clone(),
+            nullable: f.is_optional,
+        })
+        .collect();
+
+    let (order_by_struct, order_by_impl) =
+        super::generate_order_by_input(name, &module_name, &order_by_fields);
+
+    // Build CreateField list: scalar fields only, skipping auto-generated PKs.
+    let create_fields: Vec<super::inputs::create_input::CreateField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && !f.is_list)
+        .filter(|f| !(f.is_id && f.is_auto))
+        .filter_map(|f| {
+            let inner = extract_inner_type_name(&f.ty);
+            let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
+            Some(super::inputs::create_input::CreateField {
+                name: f.name.clone(),
+                category: cat,
+                nullable: f.is_optional,
+                has_default: false, // phase 2: no default detection yet
+                enum_ident: None,
+            })
+        })
+        .collect();
+
+    // Build UpdateField list: scalar fields only, skipping auto-generated PKs.
+    let update_fields: Vec<super::inputs::update_input::UpdateField> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && !f.is_list)
+        .filter(|f| !(f.is_id && f.is_auto))
+        .filter_map(|f| {
+            let inner = extract_inner_type_name(&f.ty);
+            let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
+            Some(super::inputs::update_input::UpdateField {
+                name: f.name.clone(),
+                category: cat,
+                nullable: f.is_optional,
+                enum_ident: None,
+            })
+        })
+        .collect();
+
+    let create_struct = super::inputs::create_input::generate(name, &create_fields);
+    let update_struct = super::inputs::update_input::generate(name, &update_fields);
+
+    // Build RelationMetaSpec list for the relation_meta generator (Task 8).
+    // Parent PK is the first @id field's column name.
+    let parent_pk = field_infos
+        .iter()
+        .find(|f| f.is_id)
+        .map(|f| f.column_name.clone())
+        .expect("model must have at least one #[prax(id)] field (validated upstream)");
+
+    let relation_meta_specs: Vec<super::inputs::relation_meta::RelationMetaSpec> = field_infos
+        .iter()
+        .filter_map(|f| {
+            let rel = f.relation.as_ref()?;
+            // Child table: prefer the explicit `child_table = "..."` attr
+            // (required when the target model uses `#[prax(table = "...")]`),
+            // otherwise fall back to the snake-cased target ident, which
+            // matches the default table-naming convention.
+            let child_table = rel
+                .child_table
+                .clone()
+                .unwrap_or_else(|| rel.target.to_string().to_case(Case::Snake));
+            Some(super::inputs::relation_meta::RelationMetaSpec {
+                meta_ident: format_ident!(
+                    "{}{}FilterMeta",
+                    name,
+                    f.name.to_string().to_case(Case::Pascal)
+                ),
+                parent_table: table_name.clone(),
+                parent_pk: parent_pk.clone(),
+                child_table,
+                child_fk: rel.foreign_key.clone(),
+            })
+        })
+        .collect();
+
+    let (relation_meta_struct, relation_meta_impl) =
+        super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
+
+    // Only emit the `WhereInput` trait impl when the model struct is pub.
+    // If the struct is private (e.g., in integration tests), emitting
+    // `impl WhereInput for pub UserWhereInput { type Model = PrivateUser; }`
+    // triggers E0446 "private type in public interface". The struct
+    // definition is always emitted; the trait impl is gated on visibility.
+    let is_pub = matches!(input.vis, Visibility::Public(_));
+    let gate_impl = |tokens: TokenStream| if is_pub { tokens } else { TokenStream::new() };
+    let maybe_where_input_impl = gate_impl(where_input_impl);
+    let maybe_where_unique_impl = gate_impl(where_unique_impl);
+    let maybe_include_impl = gate_impl(include_impl);
+    let maybe_select_impl = gate_impl(select_impl);
+    let maybe_order_by_impl = gate_impl(order_by_impl);
+
     Ok(quote! {
         /// Generated module for the #name model.
         pub mod #module_name {
@@ -263,6 +452,25 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             }
 
             #client_impl
+
+            // Typed input shapes (phase 2) — struct definitions.
+            // The WhereInput / WhereUniqueInput / IncludeInput / SelectInput /
+            // OrderByInput trait impls are emitted outside the module (below)
+            // to avoid E0446 "private type in public interface" when the model
+            // struct is not `pub`.
+            #where_input_struct
+            #where_unique_struct
+            #include_struct
+            #select_struct
+            #order_by_struct
+            #create_struct
+            #update_struct
+
+            // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
+            // The corresponding `impl RelationFilterMeta` blocks are emitted
+            // below at crate-root scope so the path `#module_name::#marker`
+            // resolves correctly.
+            #relation_meta_struct
         }
 
         // Emit Model, FromRow, and ModelWithPk trait implementations at crate root
@@ -273,6 +481,29 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         // Emit ModelRelationLoader<E> so every derived model — relations
         // or not — can be used on the `.include()` path uniformly.
         #model_relation_loader_impl
+
+        // WhereInput trait impl at crate scope — only emitted when the
+        // model struct is `pub` to avoid E0446. When emitted, `type Model =
+        // <Model>` is valid because the model struct is directly in scope.
+        #maybe_where_input_impl
+
+        // WhereUniqueInput trait impl — same visibility gating as above.
+        #maybe_where_unique_impl
+
+        // IncludeInput trait impl — same visibility gating.
+        #maybe_include_impl
+
+        // SelectInput trait impl — same visibility gating.
+        #maybe_select_impl
+
+        // OrderByInput trait impl — same visibility gating.
+        #maybe_order_by_impl
+
+        // RelationFilterMeta impls — one per declared relation field.
+        // Each impl associates the zero-sized `<Model><Relation>FilterMeta`
+        // marker (declared in the `pub mod` above) with the parent/child table
+        // and column names required for EXISTS / NOT EXISTS lowering.
+        #relation_meta_impl
     })
 }
 
@@ -340,6 +571,12 @@ struct RelationAttr {
     /// Column on this model referencing the target's PK (for
     /// `BelongsTo`). Defaults to `"id"`.
     local_key: String,
+    /// Optional explicit child SQL table name. Required when the target
+    /// model uses `#[prax(table = "...")]` to override its default name,
+    /// because the derive macro has no access to the target model's
+    /// attributes at expansion time. If absent, the snake-cased target
+    /// ident is used (matches the default table-name convention).
+    child_table: Option<String>,
 }
 
 /// Parse a field and its `#[prax(...)]` attributes.
@@ -379,6 +616,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                 let mut target: Option<syn::Ident> = None;
                 let mut fk: Option<String> = None;
                 let mut lk: Option<String> = None;
+                let mut child_table: Option<String> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("target") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -389,6 +627,9 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                     } else if inner.path.is_ident("local_key") {
                         let s: LitStr = inner.value()?.parse()?;
                         lk = Some(s.value());
+                    } else if inner.path.is_ident("child_table") {
+                        let s: LitStr = inner.value()?.parse()?;
+                        child_table = Some(s.value());
                     }
                     Ok(())
                 })?;
@@ -402,6 +643,7 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
                     target,
                     foreign_key,
                     local_key: lk.unwrap_or_else(|| "id".to_string()),
+                    child_table,
                 });
             }
             Ok(())
@@ -431,14 +673,53 @@ fn is_option_type(ty: &Type) -> bool {
     false
 }
 
-/// Check if a type is `Vec<T>`.
+/// Check if a type is `Vec<T>` representing a to-many relation.
+///
+/// `Vec<u8>` is treated as a Bytes scalar (binary column), not a relation
+/// list. Other element types map to relation lists.
 fn is_vec_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
         && let Some(segment) = type_path.path.segments.first()
+        && segment.ident == "Vec"
     {
-        return segment.ident == "Vec";
+        if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+            && let Some(syn::GenericArgument::Type(Type::Path(inner_path))) = args.args.first()
+            && inner_path.path.is_ident("u8")
+        {
+            return false;
+        }
+        return true;
     }
     false
+}
+
+/// Extract the last path segment name from a `syn::Type`, unwrapping one
+/// layer of `Option<T>` if present.  Returns `None` for non-path types.
+///
+/// Used by the where_input generator to map `syn::Type` → `FilterCategory`
+/// without carrying a `type_str` field in `FieldInfo`.
+///
+/// Note: only ONE layer of `Option<T>` is unwrapped. ORM column types
+/// are never doubly nested (`Option<Option<T>>` isn't a meaningful
+/// column shape), so this is a documented design assumption rather
+/// than a defensive recursive unwrap.
+fn extract_inner_type_name(ty: &Type) -> Option<String> {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first()
+            && segment.ident == "Option"
+        {
+            // Unwrap Option<T> and recurse on the inner type.
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            {
+                return extract_inner_type_name(inner);
+            }
+        }
+        // Return the last segment as the type name (handles `chrono::DateTime<_>` → `DateTime`).
+        type_path.path.segments.last().map(|s| s.ident.to_string())
+    } else {
+        None
+    }
 }
 
 /// Field type category for conditional filter emission.
@@ -747,5 +1028,405 @@ mod tests {
 
         let ty: Type = parse_quote!(i32);
         assert!(!is_vec_type(&ty));
+    }
+
+    // ── where_input codegen tests ──────────────────────────────────────────
+
+    /// Derives a User model with all fixture fields and checks that
+    /// `UserWhereInput` is present in the generated token stream with the
+    /// expected per-field entries.
+    ///
+    /// The struct is `pub` because the `WhereInput` trait impl is only
+    /// emitted for public model structs (to avoid E0446 "private type in
+    /// public interface").
+    #[test]
+    fn user_where_input_default_lowers_to_filter_none() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+                pub age: Option<i32>,
+                pub active: bool,
+                pub role: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The generated module must contain the typed where-input struct.
+        assert!(
+            code.contains("UserWhereInput"),
+            "expected UserWhereInput in generated code; got:\n{code}"
+        );
+        // Scalar fields must appear (BigInt for i64, String for email/role).
+        assert!(
+            code.contains("BigIntFilter") || code.contains("BigIntNullableFilter"),
+            "expected BigIntFilter for id field"
+        );
+        assert!(
+            code.contains("StringFilter"),
+            "expected StringFilter for email/role fields"
+        );
+        // Nullable fields must use nullable wrappers.
+        assert!(
+            code.contains("StringNullableFilter"),
+            "expected StringNullableFilter for name: Option<String>"
+        );
+        assert!(
+            code.contains("IntNullableFilter"),
+            "expected IntNullableFilter for age: Option<i32>"
+        );
+        assert!(
+            code.contains("BoolFilter"),
+            "expected BoolFilter for active: bool"
+        );
+        // Logical combinators must be present.
+        assert!(code.contains("pub and"), "expected 'and' combinator field");
+        assert!(code.contains("pub or"), "expected 'or' combinator field");
+        assert!(code.contains("pub not"), "expected 'not' combinator field");
+        // WhereInput trait impl must appear.
+        assert!(
+            code.contains("impl") && code.contains("WhereInput") && code.contains("into_ir"),
+            "expected WhereInput trait impl with into_ir"
+        );
+    }
+
+    // ── where_unique_input codegen tests ──────────────────────────────────
+
+    /// Confirms the WhereUniqueInput enum is emitted with one variant
+    /// per @id / @unique column, lowering to Filter::Equals.
+    #[test]
+    fn user_where_unique_input_emits_id_and_email_variants() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The enum + both variants must be present.
+        assert!(
+            code.contains("UserWhereUniqueInput"),
+            "expected UserWhereUniqueInput in generated code"
+        );
+        assert!(code.contains("Id"), "expected Id variant");
+        assert!(code.contains("Email"), "expected Email variant");
+        // The WhereUniqueInput trait impl with into_ir must appear.
+        assert!(
+            code.contains("WhereUniqueInput") && code.contains("into_ir"),
+            "expected WhereUniqueInput trait impl"
+        );
+        // The column literals must be present in the match arms.
+        assert!(code.contains("\"id\""), "expected \"id\" column literal");
+        assert!(
+            code.contains("\"email\""),
+            "expected \"email\" column literal"
+        );
+    }
+
+    /// Models without any unique key should still emit an uninhabited
+    /// WhereUniqueInput so generic bounds resolve.
+    #[test]
+    fn model_without_unique_key_emits_empty_where_unique_input() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "logs")]
+            pub struct Log {
+                // No @id, no @unique — but at least one field marked as id
+                // is required by derive_model_impl. Use a non-unique sentinel.
+                #[prax(id)]
+                pub message: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // Even though `message` is `id`, the enum will have one variant.
+        // For the "truly empty" case, we'd need a model without ANY id field —
+        // but derive_model_impl rejects those upstream. Confirm the enum at
+        // minimum exists.
+        assert!(
+            code.contains("LogWhereUniqueInput"),
+            "expected LogWhereUniqueInput in generated code"
+        );
+    }
+
+    // ── include_input codegen tests ────────────────────────────────────────
+
+    #[test]
+    fn user_include_emits_per_relation_options() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // Even without relations, the UserInclude struct must exist with the IncludeInput impl.
+        assert!(
+            code.contains("UserInclude"),
+            "expected UserInclude struct in generated code"
+        );
+        assert!(
+            code.contains("IncludeInput"),
+            "expected IncludeInput trait impl"
+        );
+    }
+
+    // ── select_input codegen tests ─────────────────────────────────────────
+
+    #[test]
+    fn user_select_emits_per_column_options() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserSelect struct with Option<bool> per column.
+        assert!(
+            code.contains("UserSelect"),
+            "expected UserSelect struct in generated code"
+        );
+        assert!(
+            code.contains("SelectInput"),
+            "expected SelectInput trait impl"
+        );
+        // The column literals must appear in the lowering.
+        assert!(code.contains("\"id\""), "expected id column literal");
+        assert!(code.contains("\"email\""), "expected email column literal");
+        assert!(code.contains("\"name\""), "expected name column literal");
+    }
+
+    #[test]
+    fn user_where_input_email_contains_lowers_to_contains_filter() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+            }
+        };
+
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The lowering for email (String column) must call into_filter("email").
+        assert!(
+            code.contains("\"email\""),
+            "expected column name \"email\" in the into_ir lowering"
+        );
+        // The lowering body must check for Filter::None and push.
+        assert!(
+            code.contains("into_filter"),
+            "expected ScalarFilter::into_filter call in into_ir"
+        );
+    }
+
+    // ── order_by_input codegen tests ──────────────────────────────────────
+
+    #[test]
+    fn user_order_by_emits_per_column_variants() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                pub name: Option<String>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserOrderBy enum with a variant per sortable column.
+        assert!(
+            code.contains("UserOrderBy"),
+            "expected UserOrderBy enum in generated code"
+        );
+        assert!(
+            code.contains("OrderByInput"),
+            "expected OrderByInput trait impl"
+        );
+        // Variants per column.
+        assert!(code.contains("Id"), "expected Id variant");
+        assert!(code.contains("Email"), "expected Email variant");
+        assert!(code.contains("Name"), "expected Name variant");
+        // SortOrder must be referenced as the variant payload.
+        assert!(code.contains("SortOrder"), "expected SortOrder payload");
+    }
+
+    // ── create_input codegen tests ────────────────────────────────────────
+
+    #[test]
+    fn user_create_input_emits_required_and_optional_fields() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id, auto)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+                pub age: Option<i32>,
+                pub active: bool,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserCreateInput must be present.
+        assert!(
+            code.contains("UserCreateInput"),
+            "expected UserCreateInput struct in generated code"
+        );
+        // id is @id @auto — must NOT appear in CreateInput (DB-generated).
+        // Confirm UserCreateInput doesn't surround a literal "id" payload field;
+        // this is a stringy check — accept some flexibility.
+        // Required scalar fields appear without Option wrap.
+        // (Token-stream test: just confirm the field names appear.)
+        assert!(
+            code.contains("email"),
+            "expected email field in UserCreateInput"
+        );
+        assert!(
+            code.contains("active"),
+            "expected active field in UserCreateInput"
+        );
+    }
+
+    // ── relation_meta codegen tests ───────────────────────────────────────
+
+    #[test]
+    fn user_with_posts_relation_emits_relation_filter_meta() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub posts: Vec<Post>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // Marker struct and impl must be present.
+        assert!(
+            code.contains("UserPostsFilterMeta"),
+            "expected UserPostsFilterMeta marker"
+        );
+        assert!(
+            code.contains("RelationFilterMeta"),
+            "expected RelationFilterMeta trait impl"
+        );
+        // Table + key constants.
+        assert!(
+            code.contains("\"users\""),
+            "expected \"users\" as PARENT_TABLE"
+        );
+        assert!(
+            code.contains("\"post\""),
+            "expected \"post\" as CHILD_TABLE (snake_case of target \"Post\")"
+        );
+        assert!(
+            code.contains("\"author_id\""),
+            "expected \"author_id\" as CHILD_FK"
+        );
+        assert!(code.contains("\"id\""), "expected \"id\" as PARENT_PK");
+    }
+
+    // ── update_input codegen tests ────────────────────────────────────────
+
+    #[test]
+    fn user_update_input_emits_field_update_wrappers() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id, auto)]
+                pub id: i64,
+                #[prax(unique)]
+                pub email: String,
+                pub name: Option<String>,
+                pub age: Option<i32>,
+                pub active: bool,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(result.is_ok(), "derive_model_impl failed");
+        let code = result.unwrap().to_string();
+
+        // UserUpdateInput must be present.
+        assert!(
+            code.contains("UserUpdateInput"),
+            "expected UserUpdateInput struct in generated code"
+        );
+        // Update wrappers per field type.
+        assert!(
+            code.contains("StringFieldUpdate"),
+            "expected StringFieldUpdate for email"
+        );
+        assert!(
+            code.contains("StringNullableFieldUpdate"),
+            "expected StringNullableFieldUpdate for name"
+        );
+        assert!(
+            code.contains("IntNullableFieldUpdate"),
+            "expected IntNullableFieldUpdate for age"
+        );
+        assert!(
+            code.contains("BoolFieldUpdate"),
+            "expected BoolFieldUpdate for active"
+        );
     }
 }

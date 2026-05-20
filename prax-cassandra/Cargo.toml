@@ -48,6 +48,7 @@ parking_lot = { workspace = true }
 [dev-dependencies]
 tokio-test = "0.4"
 pretty_assertions = { workspace = true }
+trybuild = { workspace = true }
 
 [features]
 default = []

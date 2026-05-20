@@ -1,0 +1,12 @@
+error[E0277]: the engine `ScyllaEngine` does not support relation filters (`some` / `every` / `none` / `is` / `is_not`)
+  --> tests/ui/cql_no_relation_filter.rs:11:30
+   |
+11 |     assert_relation_filter::<ScyllaEngine>();
+   |                              ^^^^^^^^^^^^ the trait `SupportsRelationFilter` is not implemented for `ScyllaEngine`
+   |
+   = note: ScyllaDB / Cassandra do not support correlated subqueries. Consider flattening the join or restructuring the model.
+note: required by a bound in `assert_relation_filter`
+  --> tests/ui/cql_no_relation_filter.rs:8:30
+   |
+ 8 | fn assert_relation_filter<E: SupportsRelationFilter>() {}
+   |                              ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `assert_relation_filter`

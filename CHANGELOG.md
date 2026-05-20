@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed input codegen (phase 2).** `#[derive(Model)]` and the
+  `prax_schema!` macro now emit seven new types per model:
+  `<Model>WhereInput`, `<Model>WhereUniqueInput`, `<Model>Include`,
+  `<Model>Select`, `<Model>OrderBy`, `<Model>CreateInput`, and
+  `<Model>UpdateInput`. Each implements the corresponding trait from
+  `prax_query::inputs` (where applicable) and lowers to the existing
+  runtime IR. Per-relation `<Model><Relation>FilterMeta` marker
+  structs are emitted alongside, supplying the table/column constants
+  for EXISTS / NOT EXISTS subquery lowering.
+- **Engine capability declarations.** Six SQL/NoSQL engine crates
+  (`prax-postgres`, `prax-mysql`, `prax-sqlite`, `prax-mssql`,
+  `prax-duckdb`, `prax-mongodb`) declare which
+  `prax_query::capabilities::Supports*` marker traits they
+  implement. CQL engines (`prax-scylladb`, `prax-cassandra`)
+  intentionally implement none; trybuild compile-fail tests pin the
+  gap so a future regression is caught at test time.
+- **`#[prax(relation(child_table = "..."))]` override** on the derive
+  macro, required when a relation target uses `#[prax(table = "...")]`
+  to remap the SQL table name.
+- **Schema-attribute identifier validation.** `@map` / `@@map` values
+  are now validated as ASCII-safe SQL identifiers
+  (`[A-Za-z0-9_.]`) at schema-validation time, per the
+  `.cursor/rules/sql-safety.mdc` trust-boundary contract.
 - **Multi-file schemas.** Point `[schema].path` in `prax.toml` at a directory
   instead of a single file and prax recursively loads every `*.prax` under
   it, merging them into one cohesive schema. Discovery is sorted
@@ -37,6 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory is `./prax/schema`; `--force` is required to overwrite an
   existing non-empty output directory. Single-file `prax import` behavior
   is unchanged.
+
+### Changed
+
+- `prax_query::base64` re-export so generated code emitted by
+  `prax-codegen` for `Bytes`-typed `@unique` columns resolves
+  without requiring downstream users to add `base64` to their own
+  `Cargo.toml`.
 
 ### Deprecated
 

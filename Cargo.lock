@@ -4540,6 +4540,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "trybuild",
  "uuid",
 ]
 
@@ -4881,6 +4882,7 @@ dependencies = [
  "tokio",
  "tokio-test",
  "tracing",
+ "trybuild",
  "uuid",
 ]
 

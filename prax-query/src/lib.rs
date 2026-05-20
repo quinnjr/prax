@@ -214,6 +214,13 @@ pub mod upsert;
 pub mod window;
 pub mod zero_copy;
 
+/// Re-exported `base64` crate for use by generated code emitted by
+/// `prax-codegen`. The codegen path for `Bytes`-typed `@unique` columns
+/// uses this to encode binary values to a stable string representation;
+/// re-exporting here avoids requiring downstream users to add `base64`
+/// to their own `Cargo.toml`.
+#[doc(hidden)]
+pub use base64;
 pub use error::{ErrorCode, ErrorContext, QueryError, QueryResult, Suggestion};
 pub use extension::{Extension, ExtensionBuilder, Point, Polygon};
 pub use filter::{

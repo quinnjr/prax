@@ -67,6 +67,21 @@ pub fn sort_by(column: &str) -> String {
 }
 ```
 
+#### Trust boundary for schema-author identifiers
+
+Identifiers that originate from `.prax` schema files (`@@map("table")`,
+`@map("col")`, `@relation(fields: [...])`, model and field names) are
+treated as **compile-time-trusted** — the schema author is the developer.
+Codegen interpolates these into the generated SQL and into
+`RelationFilterMeta` consts without runtime validation; if a malicious
+actor controls a schema file at build time they can already do arbitrary
+things to the produced binary.
+
+This rule still applies at runtime: any identifier that flows from end-user
+input (HTTP body, query string, CLI flag, etc.) into SQL **must** be
+whitelisted or rejected. Schema-author strings and end-user strings are
+distinct trust domains; never blur them.
+
 ### 3. Quote Identifiers When Dynamic
 
 If you must use dynamic identifiers, properly quote them:

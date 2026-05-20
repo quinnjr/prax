@@ -1,16 +1,311 @@
 //! Code generation for Prax models.
 
+use convert_case::{Case, Casing};
 use proc_macro2::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 
 use prax_schema::ModelStyle;
-use prax_schema::ast::{FieldType, Model, Schema, TypeModifier};
+use prax_schema::ast::{FieldType, Model, ScalarType, Schema, TypeModifier};
 
 use super::fields::{
     generate_field_module, generate_order_by_param, generate_select_param, generate_set_param,
 };
+use super::inputs;
+use super::inputs::create_input::CreateField;
+use super::inputs::include_input::IncludeField;
+use super::inputs::order_by_input::OrderByInputField;
+use super::inputs::relation_meta::RelationMetaSpec;
+use super::inputs::select_input::SelectField;
+use super::inputs::update_input::UpdateField;
+use super::inputs::where_input::WhereField;
+use super::inputs::where_unique_input::UniqueColumn;
 use super::{generate_doc_comment, pascal_ident, snake_ident};
 use crate::types::field_type_to_rust;
+
+/// Map a `ScalarType` to the string key used by `filter_category_for`.
+fn scalar_type_name(s: &ScalarType) -> &'static str {
+    match s {
+        ScalarType::Int => "Int",
+        ScalarType::BigInt => "BigInt",
+        ScalarType::Float => "Float",
+        ScalarType::Decimal => "Decimal",
+        ScalarType::String => "String",
+        ScalarType::Boolean => "Boolean",
+        ScalarType::DateTime => "DateTime",
+        ScalarType::Date => "Date",
+        ScalarType::Time => "Time",
+        ScalarType::Json => "Json",
+        ScalarType::Bytes => "Bytes",
+        ScalarType::Uuid => "Uuid",
+        // String-backed IDs
+        ScalarType::Cuid | ScalarType::Cuid2 | ScalarType::NanoId | ScalarType::Ulid => "String",
+        // Vector / bit types — no filter wrapper; treated as unknown
+        ScalarType::Vector(_)
+        | ScalarType::HalfVector(_)
+        | ScalarType::SparseVector(_)
+        | ScalarType::Bit(_) => "",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Field-list adapter functions — build the input-spec lists from schema AST.
+// ---------------------------------------------------------------------------
+
+/// Build the per-model `WhereField` list for the schema path.
+///
+/// Enum-typed columns are skipped until enum-aware codegen wires through
+/// the user enum's PascalCase ident — without that, the generator would
+/// emit `EnumFilter` instead of `EnumFilter<E>` and fail to compile.
+fn collect_where_fields(model: &Model) -> Vec<WhereField> {
+    model
+        .fields
+        .values()
+        .filter_map(|f| {
+            match &f.field_type {
+                FieldType::Model(_) => {
+                    // Relation fields: skip until FilterMeta wiring is present
+                    // (same decision as derive path).
+                    None
+                }
+                FieldType::Scalar(s) => {
+                    let type_name = scalar_type_name(s);
+                    let category = inputs::filter_category_for(type_name);
+                    Some(WhereField {
+                        name: snake_ident(f.name()),
+                        column: column_name_of(f),
+                        category,
+                        nullable: f.modifier.is_optional(),
+                        relation_target_where_input: None,
+                        is_to_many: false,
+                    })
+                }
+                FieldType::Enum(_) => {
+                    // Enum-typed columns are skipped until enum-aware codegen
+                    // threads the user enum's PascalCase ident through. Without
+                    // it, `where_input::generate` emits `EnumFilter` without
+                    // the required `<E>` type parameter and fails to compile.
+                    None
+                }
+                FieldType::Composite(_) | FieldType::Unsupported(_) => None,
+            }
+        })
+        .collect()
+}
+
+fn collect_unique_columns(model: &Model) -> Vec<UniqueColumn> {
+    // Enum-typed unique columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident (the `WhereUniqueInput`
+    // generator panics on `FilterCategory::Enum` without a concrete ident).
+    model
+        .fields
+        .values()
+        .filter(|f| (f.is_id() || f.is_unique()) && !matches!(f.field_type, FieldType::Model(_)))
+        .filter_map(|f| {
+            let cat = match &f.field_type {
+                FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
+                FieldType::Enum(_) => return None,
+                _ => return None,
+            };
+            Some(UniqueColumn {
+                variant: format_ident!("{}", f.name().to_case(Case::Pascal)),
+                column: column_name_of(f),
+                category: cat,
+                enum_ident: None,
+            })
+        })
+        .collect()
+}
+
+fn collect_include_fields(model: &Model) -> Vec<IncludeField> {
+    model
+        .fields
+        .values()
+        .filter(|f| matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| IncludeField {
+            name: snake_ident(f.name()),
+            relation: f.name().to_string(),
+        })
+        .collect()
+}
+
+fn collect_select_fields(model: &Model) -> Vec<SelectField> {
+    model
+        .fields
+        .values()
+        .map(|f| SelectField {
+            name: snake_ident(f.name()),
+            column: column_name_of(f),
+            is_relation: matches!(f.field_type, FieldType::Model(_)),
+        })
+        .collect()
+}
+
+fn collect_order_by_fields(model: &Model) -> Vec<OrderByInputField> {
+    model
+        .fields
+        .values()
+        .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| OrderByInputField {
+            variant: format_ident!("{}", f.name().to_case(Case::Pascal)),
+            column: column_name_of(f),
+            nullable: f.modifier.is_optional(),
+        })
+        .collect()
+}
+
+fn collect_create_fields(model: &Model) -> Vec<CreateField> {
+    // Enum-typed columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident.
+    model
+        .fields
+        .values()
+        .filter(|f| is_mutable_scalar(f))
+        .filter_map(|f| {
+            let cat = match &f.field_type {
+                FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
+                _ => return None,
+            };
+            // Single attribute-list scan instead of one in `is_mutable_scalar`
+            // plus another for `has_default`.
+            let attrs = f.extract_attributes();
+            Some(CreateField {
+                name: snake_ident(f.name()),
+                category: cat,
+                nullable: f.modifier.is_optional(),
+                has_default: attrs.default.is_some(),
+                enum_ident: None,
+            })
+        })
+        .collect()
+}
+
+fn collect_update_fields(model: &Model) -> Vec<UpdateField> {
+    // Enum-typed columns are skipped until enum-aware codegen wires
+    // through the user enum's PascalCase ident.
+    model
+        .fields
+        .values()
+        .filter(|f| is_mutable_scalar(f))
+        .filter_map(|f| {
+            let cat = match &f.field_type {
+                FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
+                _ => return None,
+            };
+            Some(UpdateField {
+                name: snake_ident(f.name()),
+                category: cat,
+                nullable: f.modifier.is_optional(),
+                enum_ident: None,
+            })
+        })
+        .collect()
+}
+
+fn collect_relation_meta_specs(
+    model: &Model,
+    schema: &Schema,
+) -> Result<Vec<RelationMetaSpec>, syn::Error> {
+    // Resolve the parent PK column. Prefer the field-level `@id` form
+    // because it respects `@map` rewrites via `column_name_of`. Composite
+    // `@@id([...])` models are valid per the schema validator but produce
+    // an empty `id_fields()`; fall back to the first field name listed in
+    // the model-level `@@id` attribute. Fail loudly if a relation is
+    // declared on a PK-less model.
+    let parent_pk = model
+        .id_fields()
+        .into_iter()
+        .next()
+        .map(column_name_of)
+        .or_else(|| get_primary_key_fields(model).into_iter().next())
+        .ok_or_else(|| {
+            syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "model `{}` has a relation but no primary key — typed-input \
+                     relation codegen requires at least one `@id` or `@@id` column",
+                    model.name()
+                ),
+            )
+        })?;
+
+    let mut specs = Vec::new();
+    for f in model.fields.values() {
+        let target_model_name = match &f.field_type {
+            FieldType::Model(name) => name.as_str(),
+            _ => continue,
+        };
+
+        // Look up the target model for its actual table name. Unknown target
+        // models are a schema error — emit a span'd diagnostic rather than
+        // silently emitting a wrong CHILD_TABLE constant.
+        let child_table = schema
+            .models
+            .get(target_model_name)
+            .map(|m| m.table_name().to_string())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "relation `{}` on model `{}` references unknown target model `{}`",
+                        f.name(),
+                        model.name(),
+                        target_model_name
+                    ),
+                )
+            })?;
+
+        // The FK column comes from `@relation(fields: [...])`. Phase 2's
+        // typed-input codegen requires it to be explicit — guessing a
+        // default would silently emit a wrong CHILD_FK constant that
+        // produces runtime "column does not exist" errors at query time.
+        let child_fk = f
+            .extract_attributes()
+            .relation
+            .and_then(|r| r.fields.into_iter().next())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "relation `{}` on model `{}` must specify \
+                         `@relation(fields: [...])` for typed-input codegen \
+                         to resolve the FK column",
+                        f.name(),
+                        model.name()
+                    ),
+                )
+            })?;
+
+        specs.push(RelationMetaSpec {
+            meta_ident: format_ident!(
+                "{}{}FilterMeta",
+                pascal_ident(model.name()),
+                f.name().to_case(Case::Pascal)
+            ),
+            parent_table: model.table_name().to_string(),
+            parent_pk: parent_pk.clone(),
+            child_table,
+            child_fk,
+        });
+    }
+    Ok(specs)
+}
+
+/// Whether a field is eligible for include in create / update payloads.
+///
+/// Excludes relation fields (which are written via nested-write inputs in
+/// a later phase) and DB-managed columns (`@auto`-generated PKs, fields
+/// with `@updatedAt`). Shared by the new `collect_create_fields` /
+/// `collect_update_fields` collectors and the legacy `create_fields` /
+/// `update_fields` builders inside `generate_model_module_with_style` so
+/// the exclusion rule stays consistent in both code paths.
+fn is_mutable_scalar(f: &prax_schema::ast::Field) -> bool {
+    if matches!(f.field_type, FieldType::Model(_)) {
+        return false;
+    }
+    let attrs = f.extract_attributes();
+    !attrs.is_auto && !attrs.is_updated_at
+}
 
 /// Pull the `@map("col")` override for a field, falling back to its
 /// declared name. Mirrors the serde-rename logic further down — both
@@ -82,18 +377,17 @@ pub fn generate_model_module_with_style(
         })
         .collect();
 
-    // Generate CreateInput fields (excluding auto-generated fields)
+    // Generate CreateInput fields (excluding auto-generated fields).
+    // `is_mutable_scalar` and `attrs.default` together do two attribute-list
+    // scans per field; hoist into one call.
     let create_fields: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|field| {
             let field_name = snake_ident(field.name());
-            let is_optional =
-                field.modifier.is_optional() || field.extract_attributes().default.is_some();
+            let attrs = field.extract_attributes();
+            let is_optional = field.modifier.is_optional() || attrs.default.is_some();
             let base_type = field_type_to_rust(&field.field_type, &TypeModifier::Required);
             let field_type = if is_optional {
                 quote! { Option<#base_type> }
@@ -111,10 +405,7 @@ pub fn generate_model_module_with_style(
     let update_fields: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|field| {
             let field_name = snake_ident(field.name());
             let base_type = field_type_to_rust(&field.field_type, &TypeModifier::Required);
@@ -224,6 +515,52 @@ pub fn generate_model_module_with_style(
         )
     };
 
+    // -----------------------------------------------------------------------
+    // Typed input generators (phase 2): collect field-spec lists and emit
+    // the seven typed input types per model.  The same split used by the
+    // derive path applies here: struct definitions go inside `pub mod`, and
+    // trait impls go at crate-root scope to avoid E0446.
+    // -----------------------------------------------------------------------
+
+    let where_fields = collect_where_fields(model);
+    let unique_columns = collect_unique_columns(model);
+    super::inputs::where_unique_input::check_unique_column_collisions(
+        &unique_columns,
+        Some(model.name()),
+    )?;
+    let include_fields = collect_include_fields(model);
+    let select_fields = collect_select_fields(model);
+    let order_by_fields = collect_order_by_fields(model);
+    let create_input_fields = collect_create_fields(model);
+    let update_input_fields = collect_update_fields(model);
+    let relation_meta_specs = collect_relation_meta_specs(model, schema)?;
+
+    let super::inputs::where_input::WhereInputTokens {
+        struct_tokens: where_input_struct,
+        impl_tokens: where_input_impl,
+    } = super::generate_where_input(&model_name, &module_name, &where_fields);
+
+    let (where_unique_struct, where_unique_impl) =
+        super::generate_where_unique_input(&model_name, &module_name, &unique_columns);
+
+    let (include_struct, include_impl) =
+        super::generate_include_input(&model_name, &module_name, &include_fields);
+
+    let (select_struct, select_impl) =
+        super::generate_select_input(&model_name, &module_name, &select_fields);
+
+    let (order_by_struct, order_by_impl) =
+        super::generate_order_by_input(&model_name, &module_name, &order_by_fields);
+
+    let create_input_typed_struct =
+        super::inputs::create_input::generate(&model_name, &create_input_fields);
+
+    let update_input_typed_struct =
+        super::inputs::update_input::generate(&model_name, &update_input_fields);
+
+    let (relation_meta_struct, relation_meta_impl) =
+        super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
+
     Ok(quote! {
         #doc
         pub mod #module_name {
@@ -285,10 +622,36 @@ pub fn generate_model_module_with_style(
 
             // Relation helpers
             #relation_helpers
+
+            // Typed input struct definitions (phase 2).  Trait impls are
+            // emitted below at crate-root scope to avoid E0446.
+            #where_input_struct
+            #where_unique_struct
+            #include_struct
+            #select_struct
+            #order_by_struct
+            #create_input_typed_struct
+            #update_input_typed_struct
+
+            // Per-relation FilterMeta marker structs.
+            #relation_meta_struct
         }
 
         // Re-export the model type at the parent level
         pub use #module_name::#model_name;
+
+        // Typed input trait impls at crate-root scope.  Emitted here so that
+        // `type Model = #model_name` does not leak a potentially private type
+        // through a public trait interface (E0446).  The schema path always
+        // generates public models, so all impls are unconditionally emitted.
+        #where_input_impl
+        #where_unique_impl
+        #include_impl
+        #select_impl
+        #order_by_impl
+
+        // RelationFilterMeta impls — one per declared relation field.
+        #relation_meta_impl
     })
 }
 
@@ -562,10 +925,7 @@ fn generate_precompiled_sql(model: &Model, table_name: &str) -> TokenStream {
     let insert_columns: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .map(|f| f.name().to_string())
         .collect();
 
@@ -579,10 +939,7 @@ fn generate_precompiled_sql(model: &Model, table_name: &str) -> TokenStream {
     let update_columns: Vec<_> = model
         .fields
         .values()
-        .filter(|f| {
-            let attrs = f.extract_attributes();
-            !attrs.is_auto && !attrs.is_updated_at && !matches!(f.field_type, FieldType::Model(_))
-        })
+        .filter(|f| is_mutable_scalar(f))
         .enumerate()
         .map(|(i, f)| format!("{} = ${}", f.name(), i + 1))
         .collect();
@@ -897,6 +1254,202 @@ mod tests {
         assert!(
             !code.contains("SimpleObject"),
             "Should NOT have SimpleObject derive"
+        );
+    }
+
+    /// Verify that the schema path emits all seven typed input types per model.
+    #[test]
+    fn schema_path_emits_typed_inputs_for_user() {
+        let schema = make_simple_schema();
+        let model = schema.get_model("User").unwrap();
+
+        let result = generate_model_module(model, &schema);
+        assert!(result.is_ok(), "generate_model_module returned Err");
+
+        let code = result.unwrap().to_string();
+
+        assert!(
+            code.contains("UserWhereInput"),
+            "expected UserWhereInput in:\n{code}"
+        );
+        assert!(
+            code.contains("UserWhereUniqueInput"),
+            "expected UserWhereUniqueInput in:\n{code}"
+        );
+        assert!(
+            code.contains("UserInclude"),
+            "expected UserInclude in:\n{code}"
+        );
+        assert!(
+            code.contains("UserSelect"),
+            "expected UserSelect in:\n{code}"
+        );
+        assert!(
+            code.contains("UserOrderBy"),
+            "expected UserOrderBy in:\n{code}"
+        );
+        assert!(
+            code.contains("UserCreateInput"),
+            "expected UserCreateInput in:\n{code}"
+        );
+        assert!(
+            code.contains("UserUpdateInput"),
+            "expected UserUpdateInput in:\n{code}"
+        );
+    }
+
+    /// Verify that relation target table names are resolved from the schema
+    /// (not just snake-cased ident) in `RelationFilterMeta` specs.
+    #[test]
+    fn schema_path_relation_meta_uses_target_table_name() {
+        use prax_schema::ast::{Attribute, AttributeArg, AttributeValue};
+
+        let mut schema = prax_schema::ast::Schema::new();
+
+        // Post model with @relation on `author` field.
+        let mut post = Model::new(make_ident("Post"), make_span());
+        post.add_field(Field::new(
+            make_ident("id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![
+                Attribute::simple(make_ident("id"), make_span()),
+                Attribute::simple(make_ident("auto"), make_span()),
+            ],
+            make_span(),
+        ));
+        // author_id FK scalar
+        post.add_field(Field::new(
+            make_ident("author_id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![],
+            make_span(),
+        ));
+        // author relation field pointing at User
+        let relation_attr = Attribute::new(
+            make_ident("relation"),
+            vec![
+                AttributeArg::named(
+                    make_ident("fields"),
+                    AttributeValue::FieldRefList(vec!["author_id".into()]),
+                    make_span(),
+                ),
+                AttributeArg::named(
+                    make_ident("references"),
+                    AttributeValue::FieldRefList(vec!["id".into()]),
+                    make_span(),
+                ),
+            ],
+            make_span(),
+        );
+        post.add_field(Field::new(
+            make_ident("author"),
+            FieldType::Model("User".into()),
+            TypeModifier::Required,
+            vec![relation_attr],
+            make_span(),
+        ));
+        schema.add_model(post);
+
+        // User model with @@map("app_users") so table_name != snake-cased ident.
+        let mut user = Model::new(make_ident("User"), make_span());
+        user.attributes.push(Attribute::new(
+            make_ident("map"),
+            vec![AttributeArg::positional(
+                AttributeValue::String("app_users".into()),
+                make_span(),
+            )],
+            make_span(),
+        ));
+        user.add_field(Field::new(
+            make_ident("id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![
+                Attribute::simple(make_ident("id"), make_span()),
+                Attribute::simple(make_ident("auto"), make_span()),
+            ],
+            make_span(),
+        ));
+        schema.add_model(user);
+
+        let post_model = schema.get_model("Post").unwrap();
+        let result = generate_model_module(post_model, &schema);
+        assert!(
+            result.is_ok(),
+            "generate_model_module for Post returned Err"
+        );
+
+        let code = result.unwrap().to_string();
+
+        // The RelationFilterMeta impl should reference "app_users" (the
+        // resolved table_name), not "user" (the snake-cased ident fallback).
+        assert!(
+            code.contains("app_users"),
+            "expected child_table 'app_users' (resolved from @@map), got:\n{code}"
+        );
+        assert!(
+            !code.contains(r#""user""#),
+            "should NOT fall back to snake-cased ident 'user', got:\n{code}"
+        );
+    }
+
+    /// `collect_relation_meta_specs` must surface a span'd `syn::Error`
+    /// (not a panic or silent default) when a relation target model is
+    /// missing from the schema.
+    #[test]
+    fn schema_path_unknown_relation_target_returns_error() {
+        use prax_schema::ast::{Attribute, AttributeArg, AttributeValue};
+
+        let mut schema = prax_schema::ast::Schema::new();
+        let mut post = Model::new(make_ident("Post"), make_span());
+        post.add_field(Field::new(
+            make_ident("id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![
+                Attribute::simple(make_ident("id"), make_span()),
+                Attribute::simple(make_ident("auto"), make_span()),
+            ],
+            make_span(),
+        ));
+        post.add_field(Field::new(
+            make_ident("author_id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![],
+            make_span(),
+        ));
+        // Relation pointing at a model that DOES NOT exist in the schema.
+        let relation_attr = Attribute::new(
+            make_ident("relation"),
+            vec![AttributeArg::named(
+                make_ident("fields"),
+                AttributeValue::FieldRefList(vec!["author_id".into()]),
+                make_span(),
+            )],
+            make_span(),
+        );
+        post.add_field(Field::new(
+            make_ident("author"),
+            FieldType::Model("NonExistentUser".into()),
+            TypeModifier::Required,
+            vec![relation_attr],
+            make_span(),
+        ));
+        schema.add_model(post);
+
+        let post_model = schema.get_model("Post").unwrap();
+        let result = generate_model_module(post_model, &schema);
+        assert!(
+            result.is_err(),
+            "expected syn::Error for unknown relation target, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("NonExistentUser"),
+            "error message should name the missing target, got: {msg}"
         );
     }
 }

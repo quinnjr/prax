@@ -9,6 +9,7 @@ mod derive_relation_loader;
 mod enum_gen;
 mod fields;
 mod filters;
+mod inputs;
 mod model;
 mod relation_accessors;
 mod type_gen;
@@ -16,6 +17,20 @@ mod view;
 
 pub use derive::derive_model_impl;
 pub use enum_gen::generate_enum_module;
+// Per-input generators re-exported here are the ones the `#[derive(Model)]`
+// path uses via `super::*` paths. The schema path (`model.rs`) and the
+// per-input modules use direct `super::inputs::*` paths for the rest, so
+// they are intentionally NOT re-exported here.
+#[doc(hidden)]
+pub use inputs::include_input::{IncludeField, generate as generate_include_input};
+#[doc(hidden)]
+pub use inputs::order_by_input::{OrderByInputField, generate as generate_order_by_input};
+#[doc(hidden)]
+pub use inputs::select_input::{SelectField, generate as generate_select_input};
+#[doc(hidden)]
+pub use inputs::where_input::{WhereField, WhereInputTokens, generate as generate_where_input};
+#[doc(hidden)]
+pub use inputs::where_unique_input::{UniqueColumn, generate as generate_where_unique_input};
 #[allow(unused_imports)]
 pub use model::generate_model_module;
 pub use model::generate_model_module_with_style;

@@ -350,6 +350,24 @@ impl Validator {
                     });
                 }
             }
+            "map" => {
+                // @map("col") rewrites the SQL column name. Identifiers must
+                // be safe for direct splicing into queries — see the
+                // `.cursor/rules/sql-safety.mdc` trust-boundary subsection.
+                if let Some(AttributeValue::String(name)) = attr.first_arg()
+                    && !is_safe_sql_identifier(name)
+                {
+                    self.errors.push(SchemaError::invalid_field(
+                        model_name,
+                        field.name(),
+                        format!(
+                            "@map(\"{}\") contains characters outside [A-Za-z0-9_.]; \
+                             SQL identifiers must be safe to splice into queries",
+                            name
+                        ),
+                    ));
+                }
+            }
             _ => {}
         }
     }
@@ -496,6 +514,27 @@ impl Validator {
                             ));
                         }
                     }
+                }
+            }
+            "map" => {
+                // @@map("table_name") — the value is flowed verbatim into
+                // generated SQL via `RelationFilterMeta::PARENT_TABLE` /
+                // `CHILD_TABLE`. Per `.cursor/rules/sql-safety.mdc`,
+                // identifiers must be whitelisted: enforce ASCII
+                // alphanumeric + underscore + dot (for schema-qualified
+                // names) here so the trust boundary is actually
+                // enforced, not just documented.
+                if let Some(AttributeValue::String(name)) = attr.first_arg()
+                    && !is_safe_sql_identifier(name)
+                {
+                    self.errors.push(SchemaError::invalid_model(
+                        model.name(),
+                        format!(
+                            "@@map(\"{}\") contains characters outside [A-Za-z0-9_.]; \
+                             SQL identifiers must be safe to splice into queries",
+                            name
+                        ),
+                    ));
                 }
             }
             _ => {}
@@ -783,6 +822,16 @@ impl Validator {
 
         relations
     }
+}
+
+/// Whether a string is a safe SQL identifier — ASCII alphanumeric plus
+/// underscore, plus dot for schema-qualified names. Defense-in-depth
+/// for the compile-time-trusted schema-author boundary described in
+/// `.cursor/rules/sql-safety.mdc`.
+fn is_safe_sql_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Validate a schema string and return the validated schema.
