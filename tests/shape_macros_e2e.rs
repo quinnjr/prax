@@ -73,3 +73,32 @@ fn include_macro_returns_user_include() {
     // and emit a `UserInclude` value.
     let _i: user::UserInclude = prax_orm::include!(User, {});
 }
+
+#[test]
+fn order_by_macro_single_block_returns_order_by() {
+    let ob: prax_query::types::OrderBy = prax_orm::order_by!(User, { created_at: desc });
+    assert!(!ob.is_empty());
+}
+
+#[test]
+fn order_by_macro_list_returns_multi_field_order_by() {
+    let ob: prax_query::types::OrderBy = prax_orm::order_by!(User, [
+        { active: desc },
+        { email: asc },
+    ]);
+    // Multi-field sort lowers to OrderBy::Fields with two entries.
+    match ob {
+        prax_query::types::OrderBy::Fields(fs) => assert_eq!(fs.len(), 2),
+        other => panic!("expected OrderBy::Fields, got {:?}", other),
+    }
+}
+
+#[test]
+fn cursor_macro_id_column_returns_where_unique_input() {
+    let _c: user::UserWhereUniqueInput = prax_orm::cursor!(User, { id: 42 });
+}
+
+#[test]
+fn cursor_macro_unique_email_column_returns_where_unique_input() {
+    let _c: user::UserWhereUniqueInput = prax_orm::cursor!(User, { email: "alice@x.com" });
+}

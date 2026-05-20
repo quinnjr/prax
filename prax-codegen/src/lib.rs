@@ -291,6 +291,51 @@ pub fn select(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::order_by!` — schema-aware shape macro returning an
+/// `OrderBy` value. Accepts either a single `{ field: dir }` block or
+/// a list of such blocks for multi-key sorts.
+///
+/// ```rust,ignore
+/// let newest_first = prax::order_by!(User, { created_at: desc });
+/// let _ = prax::find_many!(client.user, {
+///     order_by: { created_at: desc },
+/// });
+/// // or as a list:
+/// let by_active_then_email = prax::order_by!(User, [
+///     { active: desc },
+///     { email: asc },
+/// ]);
+/// ```
+#[proc_macro]
+pub fn order_by(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_order_by_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::cursor!` — schema-aware shape macro returning a
+/// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
+/// the read macros.
+///
+/// The block must have exactly one entry whose key refers to an
+/// `@id` or `@unique` column on the model.
+///
+/// ```rust,ignore
+/// let from = prax::cursor!(User, { id: 42 });
+/// let _ = prax::find_many!(client.user, {
+///     cursor: { id: 42 },
+///     take: 10,
+/// });
+/// ```
+#[proc_macro]
+pub fn cursor(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_cursor_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};

@@ -11,10 +11,20 @@
 //! ```
 
 use proc_macro2::Span;
-use syn::parse::ParseStream;
+use syn::parse::{Parse, ParseStream};
 use syn::{Lit, Token, bracketed, parenthesized};
 
 use super::ast::{DslBlock, DslValue};
+
+/// `syn::Parse` impl so callers (e.g. the shape macros' `order_by!`
+/// entry point) can `let v: DslValue = input.parse()?;` directly.
+/// Delegates to the canonical [`parse_value`] primitive — no
+/// duplicated parser logic.
+impl Parse for DslValue {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        parse_value(input)
+    }
+}
 
 /// Parse one DSL value from the stream.
 pub fn parse_value(input: ParseStream) -> syn::Result<DslValue> {
