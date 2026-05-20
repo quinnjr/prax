@@ -15,7 +15,7 @@ use crate::types::{OrderBy, Select};
 ///
 /// Implemented by per-model `UserWhereInput`, `PostWhereInput`, ...
 ///
-/// # ⚠️ Footgun: `Default::default()` lowers to `Filter::None`
+/// # Warning: `Default::default()` lowers to `Filter::None`
 ///
 /// A `*WhereInput` constructed via `Default::default()` (no fields set)
 /// produces `Filter::None`, which lowers to `WHERE TRUE` — i.e. matches

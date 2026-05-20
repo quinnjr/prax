@@ -42,11 +42,12 @@ pub fn generate(model_ident: &Ident, fields: &[CreateField]) -> TokenStream {
 
     let create_ident_doc = format!(
         "Create-time input for a `{}`.\n\n\
-         ⚠️ This type derives `Default`. Calling `{}::default()` produces \
-         zero-valued required scalar fields (`String::new()`, `0`, `false`). \
-         Use struct-literal syntax for safety, or call `Default::default()` \
-         only when you know every required field will be overridden \
-         downstream. A strict variant is planned for the operation rework.",
+         **Warning:** this type derives `Default`. Calling `{}::default()` \
+         produces zero-valued required scalar fields (`String::new()`, `0`, \
+         `false`). Use struct-literal syntax for safety, or call \
+         `Default::default()` only when you know every required field will \
+         be overridden downstream. A strict variant is planned for the \
+         operation rework.",
         create_ident, create_ident
     );
     quote! {

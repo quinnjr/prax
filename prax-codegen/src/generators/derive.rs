@@ -255,26 +255,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    // Two unique columns whose names collide after PascalCase (e.g.
-    // `id` and `Id`) would produce duplicate enum variants and an
-    // unhelpful "identifier bound more than once" error at the user's
-    // call site. Detect the collision here and emit a clearer message.
-    {
-        let mut seen: ::std::collections::HashSet<String> = ::std::collections::HashSet::new();
-        for col in &unique_columns {
-            let v = col.variant.to_string();
-            if !seen.insert(v.clone()) {
-                return Err(syn::Error::new_spanned(
-                    &col.variant,
-                    format!(
-                        "two unique fields PascalCase to the same `{}` \
-                         variant in `{}WhereUniqueInput`",
-                        v, name
-                    ),
-                ));
-            }
-        }
-    }
+    super::inputs::where_unique_input::check_unique_column_collisions(
+        &unique_columns,
+        Some(&name.to_string()),
+    )?;
 
     let (where_unique_struct, where_unique_impl) =
         super::generate_where_unique_input(name, &module_name, &unique_columns);

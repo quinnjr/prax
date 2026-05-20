@@ -67,10 +67,9 @@ pub fn generate(
         .filter(|f| f.category.is_some())
         .map(|f| {
             let name = &f.name;
-            // The preceding `.filter(|f| f.category.is_some())` makes this
-            // unwrap safe; `unwrap` is clearer about that than `expect`
-            // (which would imply an external precondition).
-            let cat = f.category.unwrap();
+            let cat = f
+                .category
+                .expect("category is_some() was checked by the preceding filter");
             let wrapper = filter_wrapper_ident(cat, f.nullable);
             quote! {
                 pub #name: ::core::option::Option<::prax_query::inputs::#wrapper>

@@ -7,6 +7,41 @@ use syn::Ident;
 
 use crate::generators::inputs::{FilterCategory, scalar_payload_type};
 
+/// Reject schemas where two unique columns PascalCase to the same enum
+/// variant — without this check, codegen emits a duplicate-variant enum
+/// and the user sees an opaque "identifier bound more than once" error
+/// at their call site instead of one pointing at the schema.
+///
+/// `model_name` is the parent model; passing `None` produces a shorter
+/// error message suitable for the derive path (where the model is
+/// implied by the macro's span).
+pub fn check_unique_column_collisions(
+    columns: &[UniqueColumn],
+    model_name: Option<&str>,
+) -> Result<(), syn::Error> {
+    let mut seen: Vec<String> = Vec::with_capacity(columns.len());
+    for col in columns {
+        let v = col.variant.to_string();
+        if seen.iter().any(|prev| prev == &v) {
+            let msg = match model_name {
+                Some(model) => format!(
+                    "model `{}`: two unique fields PascalCase to the same `{}` \
+                     variant in the generated WhereUniqueInput enum",
+                    model, v,
+                ),
+                None => format!(
+                    "two unique fields PascalCase to the same `{}` variant \
+                     in the generated WhereUniqueInput enum",
+                    v,
+                ),
+            };
+            return Err(syn::Error::new_spanned(&col.variant, msg));
+        }
+        seen.push(v);
+    }
+    Ok(())
+}
+
 /// One unique-key column.
 pub struct UniqueColumn {
     /// The variant name (PascalCase of the column).

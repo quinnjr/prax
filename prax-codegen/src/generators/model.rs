@@ -165,11 +165,14 @@ fn collect_create_fields(model: &Model) -> Vec<CreateField> {
                 FieldType::Scalar(s) => inputs::filter_category_for(scalar_type_name(s))?,
                 _ => return None,
             };
+            // Single attribute-list scan instead of one in `is_mutable_scalar`
+            // plus another for `has_default`.
+            let attrs = f.extract_attributes();
             Some(CreateField {
                 name: snake_ident(f.name()),
                 category: cat,
                 nullable: f.modifier.is_optional(),
-                has_default: f.extract_attributes().default.is_some(),
+                has_default: attrs.default.is_some(),
                 enum_ident: None,
             })
         })
@@ -374,15 +377,17 @@ pub fn generate_model_module_with_style(
         })
         .collect();
 
-    // Generate CreateInput fields (excluding auto-generated fields)
+    // Generate CreateInput fields (excluding auto-generated fields).
+    // `is_mutable_scalar` and `attrs.default` together do two attribute-list
+    // scans per field; hoist into one call.
     let create_fields: Vec<_> = model
         .fields
         .values()
         .filter(|f| is_mutable_scalar(f))
         .map(|field| {
             let field_name = snake_ident(field.name());
-            let is_optional =
-                field.modifier.is_optional() || field.extract_attributes().default.is_some();
+            let attrs = field.extract_attributes();
+            let is_optional = field.modifier.is_optional() || attrs.default.is_some();
             let base_type = field_type_to_rust(&field.field_type, &TypeModifier::Required);
             let field_type = if is_optional {
                 quote! { Option<#base_type> }
@@ -519,24 +524,10 @@ pub fn generate_model_module_with_style(
 
     let where_fields = collect_where_fields(model);
     let unique_columns = collect_unique_columns(model);
-    // PascalCase variant-name collision check — mirrors the derive path.
-    {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for col in &unique_columns {
-            let v = col.variant.to_string();
-            if !seen.insert(v.clone()) {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "model `{}`: two unique fields PascalCase to the same `{}` \
-                         variant in the generated WhereUniqueInput enum",
-                        model.name(),
-                        v,
-                    ),
-                ));
-            }
-        }
-    }
+    super::inputs::where_unique_input::check_unique_column_collisions(
+        &unique_columns,
+        Some(model.name()),
+    )?;
     let include_fields = collect_include_fields(model);
     let select_fields = collect_select_fields(model);
     let order_by_fields = collect_order_by_fields(model);
