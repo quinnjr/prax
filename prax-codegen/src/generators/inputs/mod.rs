@@ -187,3 +187,76 @@ pub fn scalar_payload_type(cat: FilterCategory) -> Option<TokenStream> {
         FilterCategory::Enum => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `filter_category_for` accepts multiple spellings per scalar type
+    /// (the derive path extracts last-segment idents like `"Vec"` while
+    /// the schema path produces schema-level names like `"Bytes"`).
+    /// This test pins every spelling so a future scalar-type addition
+    /// can't silently lose a mapping.
+    #[test]
+    fn filter_category_for_accepts_every_spelling() {
+        assert_eq!(filter_category_for("String"), Some(FilterCategory::String));
+        assert_eq!(filter_category_for("Int"), Some(FilterCategory::Int));
+        assert_eq!(filter_category_for("i32"), Some(FilterCategory::Int));
+        assert_eq!(filter_category_for("BigInt"), Some(FilterCategory::BigInt));
+        assert_eq!(filter_category_for("i64"), Some(FilterCategory::BigInt));
+        assert_eq!(filter_category_for("Float"), Some(FilterCategory::Float));
+        assert_eq!(filter_category_for("f64"), Some(FilterCategory::Float));
+        assert_eq!(
+            filter_category_for("Decimal"),
+            Some(FilterCategory::Decimal)
+        );
+        assert_eq!(
+            filter_category_for("rust_decimal::Decimal"),
+            Some(FilterCategory::Decimal)
+        );
+        assert_eq!(filter_category_for("Boolean"), Some(FilterCategory::Bool));
+        assert_eq!(filter_category_for("bool"), Some(FilterCategory::Bool));
+        assert_eq!(filter_category_for("Bytes"), Some(FilterCategory::Bytes));
+        assert_eq!(filter_category_for("Vec<u8>"), Some(FilterCategory::Bytes));
+        assert_eq!(filter_category_for("Vec"), Some(FilterCategory::Bytes));
+        assert_eq!(filter_category_for("Uuid"), Some(FilterCategory::Uuid));
+        assert_eq!(
+            filter_category_for("uuid::Uuid"),
+            Some(FilterCategory::Uuid)
+        );
+        assert_eq!(filter_category_for("Json"), Some(FilterCategory::Json));
+        assert_eq!(
+            filter_category_for("serde_json::Value"),
+            Some(FilterCategory::Json)
+        );
+        assert_eq!(filter_category_for("Value"), Some(FilterCategory::Json));
+        assert_eq!(
+            filter_category_for("DateTime"),
+            Some(FilterCategory::DateTime)
+        );
+        assert_eq!(
+            filter_category_for("chrono::DateTime<chrono::Utc>"),
+            Some(FilterCategory::DateTime)
+        );
+        assert_eq!(filter_category_for("Date"), Some(FilterCategory::Date));
+        assert_eq!(filter_category_for("NaiveDate"), Some(FilterCategory::Date));
+        assert_eq!(filter_category_for("Time"), Some(FilterCategory::Time));
+        assert_eq!(filter_category_for("NaiveTime"), Some(FilterCategory::Time));
+        // Unknown types must return None — silently dropping is the
+        // documented behavior for relation/unsupported fields.
+        assert_eq!(filter_category_for("UnknownType"), None);
+        assert_eq!(filter_category_for(""), None);
+    }
+
+    /// `scalar_payload_type` returns `None` for `Enum` (callers handle
+    /// the enum-ident path separately) and `Some` for every other arm.
+    #[test]
+    fn scalar_payload_type_is_none_only_for_enum() {
+        assert!(scalar_payload_type(FilterCategory::String).is_some());
+        assert!(scalar_payload_type(FilterCategory::Int).is_some());
+        assert!(scalar_payload_type(FilterCategory::Bytes).is_some());
+        assert!(scalar_payload_type(FilterCategory::Json).is_some());
+        assert!(scalar_payload_type(FilterCategory::DateTime).is_some());
+        assert!(scalar_payload_type(FilterCategory::Enum).is_none());
+    }
+}

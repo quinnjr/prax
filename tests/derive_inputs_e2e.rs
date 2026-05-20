@@ -144,6 +144,18 @@ fn audit_event_where_unique_input_uuid_variant_lowers() {
 }
 
 #[test]
+fn audit_event_metadata_json_nullable_filter_lowers() {
+    use prax_query::inputs::{JsonNullableFilter, ScalarFilter};
+
+    let f = JsonNullableFilter {
+        is_null: Some(false),
+        ..Default::default()
+    };
+    let filter = f.into_filter("metadata");
+    assert_eq!(filter, Filter::IsNotNull("metadata".into()));
+}
+
+#[test]
 fn audit_event_select_emits_chosen_columns() {
     use prax_query::inputs::SelectInput;
 

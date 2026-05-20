@@ -14,10 +14,23 @@ use crate::types::{OrderBy, Select};
 /// A typed shape that lowers to a runtime [`Filter`].
 ///
 /// Implemented by per-model `UserWhereInput`, `PostWhereInput`, ...
+///
+/// # ⚠️ Footgun: `Default::default()` lowers to `Filter::None`
+///
+/// A `*WhereInput` constructed via `Default::default()` (no fields set)
+/// produces `Filter::None`, which lowers to `WHERE TRUE` — i.e. matches
+/// every row. Passing such a filter to `delete_many` or `update_many`
+/// affects every row in the table. Codegen never refuses this at
+/// compile time; if a `delete_many` / `update_many` call site needs a
+/// non-empty filter, it is the caller's responsibility to verify the
+/// `Filter::None` case before invoking `.exec()`.
 pub trait WhereInput {
     /// The model this WHERE shape applies to.
     type Model: Model;
     /// Lower this input to the runtime IR.
+    ///
+    /// Returns `Filter::None` when no fields are set. See the trait-level
+    /// note about the match-all behavior of `Filter::None`.
     fn into_ir(self) -> Filter;
 }
 

@@ -52,7 +52,7 @@
 //! conn.batch_execute(&statements.to_sql()).await?;
 //! ```
 
-pub mod capabilities;
+pub(crate) mod capabilities;
 pub mod config;
 pub mod connection;
 pub mod engine;

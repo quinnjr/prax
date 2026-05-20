@@ -79,9 +79,9 @@ pub fn generate(
             }
             FilterCategory::Bytes => quote! {
                 {
-                    use base64::Engine as _;
+                    use ::prax_query::base64::Engine as _;
                     ::prax_query::filter::FilterValue::String(
-                        base64::engine::general_purpose::STANDARD.encode(&value),
+                        ::prax_query::base64::engine::general_purpose::STANDARD.encode(&value),
                     )
                 }
             },

@@ -31,7 +31,7 @@
 //!
 //! See [`SqliteEngine`]'s doc block for 0.7 breaking changes.
 
-pub mod capabilities;
+pub(crate) mod capabilities;
 pub mod config;
 pub mod connection;
 pub mod engine;

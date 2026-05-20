@@ -255,6 +255,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
+    // Two unique columns whose names collide after PascalCase (e.g.
+    // `id` and `Id`) would produce duplicate enum variants and an
+    // unhelpful "identifier bound more than once" error at the user's
+    // call site. Detect the collision here and emit a clearer message.
+    {
+        let mut seen: ::std::collections::HashSet<String> = ::std::collections::HashSet::new();
+        for col in &unique_columns {
+            let v = col.variant.to_string();
+            if !seen.insert(v.clone()) {
+                return Err(syn::Error::new_spanned(
+                    &col.variant,
+                    format!(
+                        "two unique fields PascalCase to the same `{}` \
+                         variant in `{}WhereUniqueInput`",
+                        v, name
+                    ),
+                ));
+            }
+        }
+    }
+
     let (where_unique_struct, where_unique_impl) =
         super::generate_where_unique_input(name, &module_name, &unique_columns);
 
@@ -379,31 +400,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     // triggers E0446 "private type in public interface". The struct
     // definition is always emitted; the trait impl is gated on visibility.
     let is_pub = matches!(input.vis, Visibility::Public(_));
-    let maybe_where_input_impl = if is_pub {
-        where_input_impl
-    } else {
-        TokenStream::new()
-    };
-    let maybe_where_unique_impl = if is_pub {
-        where_unique_impl
-    } else {
-        TokenStream::new()
-    };
-    let maybe_include_impl = if is_pub {
-        include_impl
-    } else {
-        TokenStream::new()
-    };
-    let maybe_select_impl = if is_pub {
-        select_impl
-    } else {
-        TokenStream::new()
-    };
-    let maybe_order_by_impl = if is_pub {
-        order_by_impl
-    } else {
-        TokenStream::new()
-    };
+    let gate_impl = |tokens: TokenStream| if is_pub { tokens } else { TokenStream::new() };
+    let maybe_where_input_impl = gate_impl(where_input_impl);
+    let maybe_where_unique_impl = gate_impl(where_unique_impl);
+    let maybe_include_impl = gate_impl(include_impl);
+    let maybe_select_impl = gate_impl(select_impl);
+    let maybe_order_by_impl = gate_impl(order_by_impl);
 
     Ok(quote! {
         /// Generated module for the #name model.
@@ -712,6 +714,11 @@ fn is_vec_type(ty: &Type) -> bool {
 ///
 /// Used by the where_input generator to map `syn::Type` → `FilterCategory`
 /// without carrying a `type_str` field in `FieldInfo`.
+///
+/// Note: only ONE layer of `Option<T>` is unwrapped. ORM column types
+/// are never doubly nested (`Option<Option<T>>` isn't a meaningful
+/// column shape), so this is a documented design assumption rather
+/// than a defensive recursive unwrap.
 fn extract_inner_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.first()

@@ -27,16 +27,37 @@ pub fn generate(model_ident: &Ident, fields: &[UpdateField]) -> TokenStream {
     let field_decls = fields.iter().map(|f| {
         let n = &f.name;
         let wrapper = update_wrapper_ident(f.category, f.nullable);
+        // `Date` and `Time` columns share `DateTimeFieldUpdate` (its
+        // `set: Option<String>` is encoding-agnostic). Emit a doc note
+        // on the generated field so the user-facing type asymmetry
+        // between filters (typed) and updates (string-encoded) is
+        // discoverable from the generated code itself.
+        let doc = match f.category {
+            FilterCategory::Date => Some(
+                "Date column. The wrapper expects an `Option<String>` \
+                 formatted as `YYYY-MM-DD`; `DateTimeFieldUpdate` is \
+                 shared across Date/Time/DateTime by design.",
+            ),
+            FilterCategory::Time => Some(
+                "Time column. The wrapper expects an `Option<String>` \
+                 formatted as `HH:MM:SS`; `DateTimeFieldUpdate` is \
+                 shared across Date/Time/DateTime by design.",
+            ),
+            _ => None,
+        };
+        let doc_attr = doc.map(|d| quote! { #[doc = #d] });
         if matches!(f.category, FilterCategory::Enum) {
             let e = f
                 .enum_ident
                 .as_ref()
                 .expect("enum field requires enum ident");
             quote! {
+                #doc_attr
                 pub #n: ::core::option::Option<::prax_query::inputs::#wrapper<#e>>
             }
         } else {
             quote! {
+                #doc_attr
                 pub #n: ::core::option::Option<::prax_query::inputs::#wrapper>
             }
         }

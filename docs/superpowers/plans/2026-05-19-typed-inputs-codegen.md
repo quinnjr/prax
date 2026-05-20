@@ -933,7 +933,7 @@ pub fn generate(model_ident: &Ident, fields: &[SelectField]) -> TokenStream {
                 if cols.is_empty() {
                     ::prax_query::types::Select::All
                 } else {
-                    ::prax_query::types::Select::Columns(cols)
+                    ::prax_query::types::Select::Fields(cols)
                 }
             }
         }

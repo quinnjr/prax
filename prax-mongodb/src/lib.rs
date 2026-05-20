@@ -54,7 +54,7 @@
 //! }
 //! ```
 
-pub mod capabilities;
+pub(crate) mod capabilities;
 pub mod client;
 pub mod config;
 pub mod document;

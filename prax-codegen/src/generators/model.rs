@@ -519,6 +519,24 @@ pub fn generate_model_module_with_style(
 
     let where_fields = collect_where_fields(model);
     let unique_columns = collect_unique_columns(model);
+    // PascalCase variant-name collision check — mirrors the derive path.
+    {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for col in &unique_columns {
+            let v = col.variant.to_string();
+            if !seen.insert(v.clone()) {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "model `{}`: two unique fields PascalCase to the same `{}` \
+                         variant in the generated WhereUniqueInput enum",
+                        model.name(),
+                        v,
+                    ),
+                ));
+            }
+        }
+    }
     let include_fields = collect_include_fields(model);
     let select_fields = collect_select_fields(model);
     let order_by_fields = collect_order_by_fields(model);
@@ -1383,6 +1401,64 @@ mod tests {
         assert!(
             !code.contains(r#""user""#),
             "should NOT fall back to snake-cased ident 'user', got:\n{code}"
+        );
+    }
+
+    /// `collect_relation_meta_specs` must surface a span'd `syn::Error`
+    /// (not a panic or silent default) when a relation target model is
+    /// missing from the schema.
+    #[test]
+    fn schema_path_unknown_relation_target_returns_error() {
+        use prax_schema::ast::{Attribute, AttributeArg, AttributeValue};
+
+        let mut schema = prax_schema::ast::Schema::new();
+        let mut post = Model::new(make_ident("Post"), make_span());
+        post.add_field(Field::new(
+            make_ident("id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![
+                Attribute::simple(make_ident("id"), make_span()),
+                Attribute::simple(make_ident("auto"), make_span()),
+            ],
+            make_span(),
+        ));
+        post.add_field(Field::new(
+            make_ident("author_id"),
+            FieldType::Scalar(ScalarType::Int),
+            TypeModifier::Required,
+            vec![],
+            make_span(),
+        ));
+        // Relation pointing at a model that DOES NOT exist in the schema.
+        let relation_attr = Attribute::new(
+            make_ident("relation"),
+            vec![AttributeArg::named(
+                make_ident("fields"),
+                AttributeValue::FieldRefList(vec!["author_id".into()]),
+                make_span(),
+            )],
+            make_span(),
+        );
+        post.add_field(Field::new(
+            make_ident("author"),
+            FieldType::Model("NonExistentUser".into()),
+            TypeModifier::Required,
+            vec![relation_attr],
+            make_span(),
+        ));
+        schema.add_model(post);
+
+        let post_model = schema.get_model("Post").unwrap();
+        let result = generate_model_module(post_model, &schema);
+        assert!(
+            result.is_err(),
+            "expected syn::Error for unknown relation target, got Ok"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("NonExistentUser"),
+            "error message should name the missing target, got: {msg}"
         );
     }
 }
