@@ -397,6 +397,51 @@ mod tests {
     }
 
     #[test]
+    fn lower_where_with_leading_spread() {
+        let out = lower("User", quote!({ ..base, email: { equals: "x" } }));
+        let s = pretty(out);
+        // Initializer uses Clone::clone(&(base)) per the spec.
+        assert!(s.contains("Clone :: clone"), "got: {s}");
+        assert!(s.contains("base"), "got: {s}");
+        assert!(s.contains("email"), "got: {s}");
+    }
+
+    #[test]
+    fn lower_where_with_move_spread() {
+        let out = lower("User", quote!({ ..move base }));
+        let s = pretty(out);
+        // Move spread elides the clone.
+        assert!(!s.contains("Clone :: clone"), "got: {s}");
+        assert!(s.contains("base"), "got: {s}");
+    }
+
+    #[test]
+    fn lower_where_with_if_conditional() {
+        // `take` is not a where field; use `active` to exercise the
+        // conditional-lowering happy path.
+        let out = lower("User", quote!({ #[if(flag)] active: true }));
+        let s = pretty(out);
+        assert!(s.contains("if flag"), "got: {s}");
+        assert!(s.contains("active"), "got: {s}");
+    }
+
+    #[test]
+    fn lower_where_with_if_else_chain() {
+        let out = lower(
+            "User",
+            quote!({
+                #[if(a)] active: true,
+                #[else_if(b)] active: false,
+                #[else] active: true,
+            }),
+        );
+        let s = pretty(out);
+        assert!(s.contains("if a"), "got: {s}");
+        assert!(s.contains("else if b"), "got: {s}");
+        assert!(s.contains("else"), "got: {s}");
+    }
+
+    #[test]
     fn lower_where_some_on_to_one_errors() {
         let schema = parse_schema(SCHEMA).unwrap();
         let model = schema.get_model("User").unwrap().clone();
