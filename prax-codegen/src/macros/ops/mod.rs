@@ -14,4 +14,5 @@ pub(crate) mod find_many;
 pub(crate) mod find_unique;
 pub(crate) mod shape;
 pub(crate) mod update;
+pub(crate) mod update_many;
 pub(crate) mod upsert;

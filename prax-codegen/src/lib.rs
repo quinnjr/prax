@@ -400,6 +400,27 @@ pub fn create_many(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::update_many!` — schema-aware DSL targeting `update_many`.
+/// Top-level keys: `where:` (optional non-unique filter), `data:`
+/// (required).
+///
+/// **Warning:** an empty/omitted `where:` matches every row in the
+/// table — see the trait-level note on `WhereInput`.
+///
+/// ```rust,ignore
+/// prax::update_many!(client.user, {
+///     where: { active: false },
+///     data: { active: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn update_many(input: TokenStream) -> TokenStream {
+    match macros::ops::update_many::expand_update_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.

@@ -243,3 +243,27 @@ fn create_many_macro_supports_skip_duplicates() {
     let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
     assert!(sql.contains("ON CONFLICT DO NOTHING"), "got: {sql}");
 }
+
+#[test]
+fn update_many_macro_compiles_with_non_unique_where() {
+    let client = AppClient::new();
+    let op = prax_orm::update_many!(client.user, {
+        where: { active: false },
+        data: { active: true },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("UPDATE User SET"), "got: {sql}");
+    assert!(sql.contains("active = $1"), "got: {sql}");
+    assert!(sql.contains("WHERE"), "got: {sql}");
+}
+
+#[test]
+fn update_many_macro_supports_arithmetic_op() {
+    let client = AppClient::new();
+    let op = prax_orm::update_many!(client.user, {
+        where: { active: true },
+        data: { age: { increment: 1 } },
+    });
+    let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("age = age + $1"), "got: {sql}");
+}
