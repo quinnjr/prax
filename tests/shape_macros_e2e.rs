@@ -47,3 +47,29 @@ fn where_macro_with_spread_composes() {
     };
     let _: user::UserWhereInput = w;
 }
+
+#[test]
+fn select_macro_returns_user_select() {
+    let s: user::UserSelect = prax_orm::select!(User, {
+        id: true,
+        email: true,
+    });
+    // The selection struct is `Default + Clone`; round-trip via clone
+    // to make sure the value is fully owned.
+    let _ = s.clone();
+}
+
+#[test]
+fn select_macro_default_when_empty() {
+    // Empty selection block is allowed — produces a UserSelect with
+    // all Option::None which lowers to Select::All at runtime.
+    let _s: user::UserSelect = prax_orm::select!(User, {});
+}
+
+#[test]
+fn include_macro_returns_user_include() {
+    // `User` in the workspace fixture schema has no relation fields,
+    // so the include block is empty. The macro should still resolve
+    // and emit a `UserInclude` value.
+    let _i: user::UserInclude = prax_orm::include!(User, {});
+}

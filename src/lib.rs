@@ -636,6 +636,7 @@ pub use prax_codegen::{count, delete, delete_many, find_first, find_many, find_u
 // Shape macros (phase 4) — typed input struct values that compose with
 // the read macros via spread. See `prax-codegen/src/macros/ops/shape.rs`.
 pub use prax_codegen::r#where;
+pub use prax_codegen::{include, select};
 
 /// Top-level `PraxClient<E>` and the `prax::client!` macro. See the
 /// [`client`](mod@client) module docs for usage.

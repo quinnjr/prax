@@ -251,6 +251,46 @@ pub fn r#where(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::include!` — schema-aware shape macro returning a
+/// `<Model>Include` value. Composes with the read macros via
+/// `..spread` to build reusable relation-include shapes.
+///
+/// ```rust,ignore
+/// let with_posts = prax::include!(User, { posts: true });
+/// let _ = prax::find_unique!(client.user, {
+///     where: { id: 1 },
+///     include: { ..with_posts },
+/// });
+/// ```
+///
+/// Distinct from `std::include!` — they live in different modules and
+/// there is no ambiguity at the call site as long as the path is
+/// fully qualified (`prax::include!`).
+#[proc_macro]
+pub fn include(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_include_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::select!` — schema-aware shape macro returning a
+/// `<Model>Select` value. Composes with the read macros via `..spread`.
+///
+/// ```rust,ignore
+/// let lite = prax::select!(User, { id: true, email: true });
+/// let _ = prax::find_many!(client.user, {
+///     select: { ..lite },
+/// });
+/// ```
+#[proc_macro]
+pub fn select(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_select_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};
