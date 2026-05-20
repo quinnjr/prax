@@ -706,4 +706,90 @@ mod tests {
         let err = lower_create_data(&block, &ctx).unwrap_err();
         assert!(err.to_string().contains("`where:` operator"), "got: {err}");
     }
+
+    // ========== update_data tests ==========
+
+    #[test]
+    fn update_data_plain_set_via_literal() {
+        let out = update("User", quote!({ email: "bob@x.com" }));
+        let s = pretty(out);
+        // Plain literal lowers to `<Wrapper as From<_>>::from(lit)`.
+        assert!(s.contains("UserUpdateInput"), "got: {s}");
+        assert!(s.contains("StringFieldUpdate"), "got: {s}");
+        assert!(s.contains("From"), "got: {s}");
+    }
+
+    #[test]
+    fn update_data_explicit_set_block() {
+        let out = update("User", quote!({ email: { set: "bob@x.com" } }));
+        let s = pretty(out);
+        // The wrapper's `set` field is initialised to Some(...).
+        // The token stream's whitespace pretty-print uses fully
+        // qualified `:: core :: option :: Option :: Some`, so the
+        // assertion just looks for `set :` followed by an `Option`
+        // path constructor.
+        assert!(s.contains("set :"), "got: {s}");
+        assert!(s.contains("Option :: Some"), "got: {s}");
+    }
+
+    #[test]
+    fn update_data_increment_on_numeric() {
+        let out = update("User", quote!({ age: { increment: 1 } }));
+        let s = pretty(out);
+        assert!(s.contains("IntNullableFieldUpdate"), "got: {s}");
+        assert!(s.contains("increment"), "got: {s}");
+    }
+
+    #[test]
+    fn update_data_decrement_on_numeric() {
+        let out = update("User", quote!({ age: { decrement: 2 } }));
+        let s = pretty(out);
+        assert!(s.contains("decrement"), "got: {s}");
+    }
+
+    #[test]
+    fn update_data_unset_on_nullable() {
+        let out = update("User", quote!({ name: { unset: true } }));
+        let s = pretty(out);
+        assert!(s.contains("StringNullableFieldUpdate"), "got: {s}");
+        assert!(s.contains("unset :"), "got: {s}");
+        assert!(s.contains("Option :: Some (true)"), "got: {s}");
+    }
+
+    #[test]
+    fn update_data_increment_on_string_errors() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        // `email: String` (non-numeric) — `increment` is invalid.
+        let block = parse_block(quote!({ email: { increment: 1 } }));
+        let err = lower_update_data(&block, &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("increment"), "got: {msg}");
+        assert!(msg.contains("non-numeric"), "got: {msg}");
+    }
+
+    #[test]
+    fn update_data_unset_on_non_nullable_errors() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        // `email: String` is required — `unset` is invalid.
+        let block = parse_block(quote!({ email: { unset: true } }));
+        let err = lower_update_data(&block, &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unset"), "got: {msg}");
+        assert!(msg.contains("nullable"), "got: {msg}");
+    }
+
+    #[test]
+    fn update_data_relation_key_is_phase_5b() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        let block = parse_block(quote!({ posts: { update: [] } }));
+        let err = lower_update_data(&block, &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("phase 5b"), "got: {msg}");
+    }
 }
