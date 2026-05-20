@@ -55,6 +55,7 @@ use quote::quote;
 use syn::{DeriveInput, LitStr, parse_macro_input};
 
 mod generators;
+mod macros;
 mod plugins;
 mod schema_reader;
 mod types;

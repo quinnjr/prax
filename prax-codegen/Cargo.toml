@@ -25,12 +25,16 @@ prax-schema = { workspace = true }
 
 # Utilities
 convert_case = { workspace = true }
+# Phase 3 macros: schema path resolution + did-you-mean diagnostics.
+strsim = "0.11"
+toml = { workspace = true }
 
 [dev-dependencies]
 # Testing proc-macros
 trybuild = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
+insta = { workspace = true }
 # For tests that need SmolStr
 smol_str = { workspace = true }
 
