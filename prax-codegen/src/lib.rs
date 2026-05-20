@@ -228,6 +228,29 @@ pub fn delete_many(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::r#where!` — schema-aware shape macro returning a
+/// `<Model>WhereInput` value. Composes with the read macros via
+/// `..spread`:
+///
+/// ```rust,ignore
+/// let active = prax::r#where!(User, { active: true });
+/// let _ = prax::find_many!(client.user, {
+///     ..active,
+///     email: { contains: "@x.com" },
+/// });
+/// ```
+///
+/// Exported as `r#where` because `where` is a Rust keyword and the
+/// raw-identifier prefix is required at the call site whenever the
+/// macro is reached through a path (`prax::r#where!(...)`).
+#[proc_macro]
+pub fn r#where(input: TokenStream) -> TokenStream {
+    match macros::ops::shape::expand_where_shape(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};
