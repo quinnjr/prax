@@ -1,0 +1,16 @@
+// Workspace-wide test fixture schema discovered by the phase-3 read
+// macros' default resolver. Mirrors the model used by
+// `tests/derive_inputs_e2e.rs` and `tests/read_macros_e2e.rs`.
+//
+// Relations and the rest of the fixture surface are exercised by the
+// in-crate `tests/fixtures/schema.prax` in `prax-codegen`, which
+// doesn't have to satisfy the runtime `Client<E>` codegen.
+
+model User {
+    id         Int      @id @auto
+    email      String   @unique
+    name       String?
+    age        Int?
+    active     Boolean  @default(true)
+    created_at DateTime
+}

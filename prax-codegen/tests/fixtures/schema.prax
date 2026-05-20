@@ -13,8 +13,8 @@ model User {
     age        Int?
     active     Boolean  @default(true)
     role       Role
-    posts      Post[]
-    profile    Profile?
+    posts      Post[]   @relation(fields: [id], references: [author_id])
+    profile    Profile? @relation(fields: [id], references: [user_id])
     created_at DateTime
 }
 

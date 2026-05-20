@@ -156,6 +156,25 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::find_many!` — schema-aware declarative DSL for the
+/// fluent-builder's `find_many` operation. See spec §4 for the full
+/// grammar.
+///
+/// ```rust,ignore
+/// prax::find_many!(client.user, {
+///     where: { email: { contains: "@example.com" } },
+///     order_by: { created_at: desc },
+///     take: 10,
+/// });
+/// ```
+#[proc_macro]
+pub fn find_many(input: TokenStream) -> TokenStream {
+    match macros::ops::find_many::expand_find_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// Internal function to generate code from a schema file.
 fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, syn::Error> {
     use plugins::{PluginConfig, PluginContext, PluginRegistry};
