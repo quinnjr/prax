@@ -57,7 +57,7 @@ prax-pgvector = { path = "prax-pgvector", version = "0.9.7" }
 # Code generation (proc-macros)
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
+syn = "2.0"
 convert_case = "0.6"
 pastey = "0.1"
 

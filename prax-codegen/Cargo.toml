@@ -18,7 +18,7 @@ proc-macro = true
 # Code generation
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
-syn = { workspace = true }
+syn = { workspace = true, features = ["full", "extra-traits", "parsing"] }
 
 # Schema parsing (for reading schema files at compile time)
 prax-schema = { workspace = true }
