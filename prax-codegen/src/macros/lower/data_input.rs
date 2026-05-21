@@ -26,16 +26,16 @@ use crate::generators::inputs::{FilterCategory, update_wrapper_ident};
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::scalar_filter::category_for_scalar;
 
-/// Phase-5b deferral diagnostic.
+/// Phase-5b deferral diagnostic for callers that don't yet support
+/// nested writes (`create_many!`, `upsert!`, `update!`).
 ///
 /// Wording matters: don't tell users they typed an "unknown field" —
-/// the field is real, just not wired through the write executor yet.
+/// the field is real, just not wired through this entry point yet.
 fn relation_phase_5b_error(rel: &str, model: &str) -> syn::Error {
     let msg = format!(
-        "nested write on relation `{rel}` (model `{model}`) is not supported in phase 5a. \
-         Relation operators inside `data:` (create, connect, connect_or_create, set, update, \
-         update_many, upsert, delete, delete_many, disconnect) land in phase 5b together with \
-         the `NestedWritePlan` executor. \
+        "nested write on relation `{rel}` (model `{model}`) is not supported in this macro. \
+         Phase 5b lands nested `create` / `connect` on `create!` only; the other write macros \
+         (update!, upsert!, create_many!) gain nested-write support in phase 5c. \
          For now, write the related rows in a separate operation and link via the FK column."
     );
     syn::Error::new(Span::call_site(), msg)
@@ -74,8 +74,114 @@ fn category_for_field(field: &Field) -> Option<FilterCategory> {
     }
 }
 
+/// Lowering result for a `data:` block on the create path with
+/// nested-write support.
+///
+/// `scalar_input` is the `<Model>CreateInput` literal — fed to
+/// `with_create_input` like before. `nested_ops` are the
+/// [`NestedWriteOp`](::prax_query::nested::NestedWriteOp) token
+/// streams extracted from relation keys; the macro emits a chained
+/// `.with(<expr>)` call per entry.
+pub struct CreateDataLowering {
+    /// Token stream evaluating to a `<Model>CreateInput`.
+    pub scalar_input: TokenStream,
+    /// Per-relation `NestedWriteOp` expression token streams.
+    pub nested_ops: Vec<TokenStream>,
+}
+
+/// Lower a `data: { ... }` block on the **create** path, recognising
+/// both scalar fields and relation keys.
+///
+/// Relation keys with nested-write operators (`create:` / `connect:`)
+/// are extracted into [`CreateDataLowering::nested_ops`]; the macro
+/// chains a `.with(<nw>)` call per op onto the `CreateOperation`.
+/// Scalar fields lower to a `<Model>CreateInput` literal as in phase 5a.
+pub fn lower_create_data_with_nested(
+    block: &DslBlock,
+    ctx: &LowerCtx<'_>,
+) -> syn::Result<CreateDataLowering> {
+    let model_ident = format_ident!("{}", ctx.model.name());
+    let module_ident = format_ident!("{}", ctx.model.name().to_case(Case::Snake));
+    let input_ident = format_ident!("{}CreateInput", ctx.model.name());
+
+    let mut scalar_stmts: Vec<TokenStream> = Vec::new();
+    let mut nested_ops: Vec<TokenStream> = Vec::new();
+    let mut field_iter = block.fields.iter().peekable();
+
+    let init = if let Some(DslField::Spread { expr, by_move, .. }) = field_iter.peek() {
+        let init_expr = if *by_move {
+            quote!(#expr)
+        } else {
+            quote!(::core::clone::Clone::clone(&(#expr)))
+        };
+        let _ = field_iter.next();
+        init_expr
+    } else {
+        quote!(<#module_ident::#input_ident as ::core::default::Default>::default())
+    };
+
+    for field in field_iter {
+        match field {
+            DslField::Pair { key, value, .. } => {
+                let key_str = key.to_string();
+                // Reject `where:` logical operators with a clearer error.
+                if matches!(key_str.as_str(), "and" | "or" | "not") {
+                    return Err(logical_in_data_error(&key_str, key.span()));
+                }
+                let model_field = lookup_field_with_suggestion(ctx, &key_str, key.span())?;
+                if model_field.is_relation() {
+                    // Lower relation key to nested-write op exprs.
+                    let ops = super::data_relation::lower_create_relation(
+                        model_field,
+                        value,
+                        key.span(),
+                        ctx,
+                    )?;
+                    for op in ops {
+                        nested_ops.push(op.op_expr);
+                    }
+                } else {
+                    scalar_stmts.push(lower_create_pair(key, value, ctx)?);
+                }
+            }
+            DslField::Spread { expr, by_move, .. } => {
+                let assign = if *by_move {
+                    quote!(__d = #expr;)
+                } else {
+                    quote!(__d = ::core::clone::Clone::clone(&(#expr));)
+                };
+                scalar_stmts.push(assign);
+            }
+            DslField::Conditional { .. } => {
+                // Conditional handling for relation keys is deferred —
+                // phase 5b's conditional-key lowering reuses the scalar
+                // path, which already rejects relation keys.
+                scalar_stmts.push(lower_create_conditional(field, ctx)?);
+            }
+        }
+    }
+
+    let scalar_input = quote! {
+        {
+            let mut __d: #module_ident::#input_ident = #init;
+            #(#scalar_stmts)*
+            let _ = stringify!(#model_ident);
+            __d
+        }
+    };
+
+    Ok(CreateDataLowering {
+        scalar_input,
+        nested_ops,
+    })
+}
+
 /// Lower a `data: { ... }` block on the **create** path to a
 /// `<Model>CreateInput` constructor.
+///
+/// Phase-5b note: This entry point is used by `create_many!` and
+/// `upsert!`, which do not support nested writes yet. It still
+/// rejects relation keys with the phase-5b diagnostic.
 pub fn lower_create_data(block: &DslBlock, ctx: &LowerCtx<'_>) -> syn::Result<TokenStream> {
     let model_ident = format_ident!("{}", ctx.model.name());
     let module_ident = format_ident!("{}", ctx.model.name().to_case(Case::Snake));
@@ -673,15 +779,36 @@ mod tests {
     }
 
     #[test]
-    fn create_data_relation_key_is_phase_5b() {
+    fn create_data_relation_key_is_phase_5c_on_legacy_callers() {
+        // `lower_create_data` is now used only by `create_many!` /
+        // `upsert!` / `update!`; those still reject relation keys.
+        // The `create!` macro uses `lower_create_data_with_nested`
+        // which routes relation keys through `data_relation`.
         let schema = parsed_schema();
         let model = schema.get_model("User").unwrap().clone();
         let ctx = LowerCtx::new(&schema, &model);
         let block = parse_block(quote!({ email: "a@x.com", posts: { create: [] } }));
         let err = lower_create_data(&block, &ctx).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("phase 5b"), "got: {msg}");
+        assert!(msg.contains("phase 5c"), "got: {msg}");
         assert!(msg.contains("posts"), "got: {msg}");
+    }
+
+    #[test]
+    fn create_data_with_nested_lowers_relation_block_to_nested_ops() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        let block = parse_block(quote!({
+            email: "a@x.com",
+            posts: { create: [{ title: "p1", published: true }] }
+        }));
+        let lowered = lower_create_data_with_nested(&block, &ctx).unwrap();
+        assert_eq!(lowered.nested_ops.len(), 1);
+        let scalar = pretty(lowered.scalar_input);
+        assert!(scalar.contains("UserCreateInput"), "got: {scalar}");
+        let nw = pretty(lowered.nested_ops[0].clone());
+        assert!(nw.contains("NestedWriteOp"), "got: {nw}");
     }
 
     #[test]
@@ -783,13 +910,13 @@ mod tests {
     }
 
     #[test]
-    fn update_data_relation_key_is_phase_5b() {
+    fn update_data_relation_key_is_phase_5c() {
         let schema = parsed_schema();
         let model = schema.get_model("User").unwrap().clone();
         let ctx = LowerCtx::new(&schema, &model);
         let block = parse_block(quote!({ posts: { update: [] } }));
         let err = lower_update_data(&block, &ctx).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("phase 5b"), "got: {msg}");
+        assert!(msg.contains("phase 5c"), "got: {msg}");
     }
 }
