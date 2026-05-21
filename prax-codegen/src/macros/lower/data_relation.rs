@@ -169,13 +169,69 @@ pub fn lower_create_relation(
                     ops.push(NestedRelationOp { op_expr });
                 }
             }
-            "update" | "update_many" | "upsert" | "delete" | "delete_many" | "disconnect"
-            | "set" => {
-                return Err(phase_5c_deferral(
+            "disconnect" => {
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                for child_block in children {
+                    let pk_expr = lower_connect_pk(child_block, target_model, &target_pk_column)?;
+                    let op_expr = quote! {
+                        ::prax_query::nested::NestedWriteOp::Disconnect {
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            foreign_key: #foreign_key,
+                            target_pk: #target_pk_column,
+                            pk: ::core::convert::Into::<
+                                ::prax_query::filter::FilterValue
+                            >::into(#pk_expr),
+                        }
+                    };
+                    ops.push(NestedRelationOp { op_expr });
+                }
+            }
+            "delete" => {
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                for child_block in children {
+                    let pk_expr = lower_connect_pk(child_block, target_model, &target_pk_column)?;
+                    let op_expr = quote! {
+                        ::prax_query::nested::NestedWriteOp::Delete {
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            target_pk: #target_pk_column,
+                            pk: ::core::convert::Into::<
+                                ::prax_query::filter::FilterValue
+                            >::into(#pk_expr),
+                        }
+                    };
+                    ops.push(NestedRelationOp { op_expr });
+                }
+            }
+            "delete_many" => {
+                let DslValue::Block(filter_block) = value else {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "`delete_many:` inside a relation expects a filter block `{ ... }`",
+                    ));
+                };
+                let target_ctx = ctx.for_model(target_model);
+                let where_expr = super::where_input::lower_where(filter_block, &target_ctx)?;
+                let op_expr = quote! {
+                    ::prax_query::nested::NestedWriteOp::DeleteMany {
+                        relation: #relation_name_str,
+                        target_table: #target_table,
+                        foreign_key: #foreign_key,
+                        filter: <_ as ::prax_query::inputs::WhereInput>::into_ir(#where_expr),
+                    }
+                };
+                ops.push(NestedRelationOp { op_expr });
+            }
+            "update" | "update_many" | "upsert" => {
+                return Err(phase_5c_mutations_deferral(
                     &op_key,
                     relation_field.name(),
                     key.span(),
                 ));
+            }
+            "set" => {
+                return Err(phase_5e_deferral(relation_field.name(), key.span()));
             }
             "connect_or_create" => {
                 return Err(syn::Error::new(
@@ -189,17 +245,23 @@ pub fn lower_create_relation(
                 ));
             }
             _ => {
-                let candidates = vec!["create".to_string(), "connect".to_string()];
+                let candidates = vec![
+                    "create".to_string(),
+                    "connect".to_string(),
+                    "disconnect".to_string(),
+                    "delete".to_string(),
+                    "delete_many".to_string(),
+                ];
                 let suggestion = crate::macros::validate::suggest(&op_key, &candidates);
                 let msg = match suggestion {
                     Some(s) => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Did you mean `{s}`? Valid operators in phase 5b: create, connect.",
+                         Did you mean `{s}`? Valid operators: create, connect, disconnect, delete, delete_many.",
                         relation_field.name(),
                     ),
                     None => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Valid operators in phase 5b: create, connect.",
+                         Valid operators: create, connect, disconnect, delete, delete_many.",
                         relation_field.name(),
                     ),
                 };
@@ -211,12 +273,24 @@ pub fn lower_create_relation(
     Ok(ops)
 }
 
-fn phase_5c_deferral(op: &str, relation: &str, span: Span) -> syn::Error {
+fn phase_5c_mutations_deferral(op: &str, relation: &str, span: Span) -> syn::Error {
     syn::Error::new(
         span,
         format!(
-            "nested operator `{op}` inside `data:` relation block `{relation}` is not \
-             supported in phase 5b. Update/upsert/delete operators on relations land in phase 5c."
+            "nested mutation operator `{op}` inside `data:` relation block `{relation}` is not \
+             yet supported. `update`, `update_many`, and `upsert` on relations land in a future \
+             phase — see the project's phase 5c-mutations milestone."
+        ),
+    )
+}
+
+fn phase_5e_deferral(relation: &str, span: Span) -> syn::Error {
+    syn::Error::new(
+        span,
+        format!(
+            "nested operator `set` inside `data:` relation block `{relation}` is not yet \
+             supported. Full-relation diff-based replacement lands in phase 5e — for now use \
+             `disconnect` to clear the FK on specific rows or `delete` to remove them."
         ),
     )
 }
@@ -489,6 +563,70 @@ mod tests {
         assert!(msg.contains("unknown nested operator"), "got: {msg}");
         // suggest should mention "create" as a fix
         assert!(msg.contains("create"), "got: {msg}");
+    }
+
+    #[test]
+    fn lowers_nested_disconnect_to_nested_write_op_disconnect() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            disconnect: [{ id: 42 }]
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("Disconnect"), "got: {s}");
+        assert!(s.contains("foreign_key"), "got: {s}");
+        assert!(s.contains("42"), "got: {s}");
+    }
+
+    #[test]
+    fn lowers_nested_delete_to_nested_write_op_delete() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            delete: [{ id: 7 }]
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("Delete"), "got: {s}");
+        assert!(s.contains("target_pk"), "got: {s}");
+        assert!(s.contains("7"), "got: {s}");
+    }
+
+    #[test]
+    fn lowers_nested_delete_many_to_nested_write_op_delete_many() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            delete_many: { published: false }
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("DeleteMany"), "got: {s}");
+        assert!(s.contains("filter"), "got: {s}");
+    }
+
+    #[test]
+    fn set_op_inside_relation_block_is_phase_5e_deferral() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            set: [{ id: 1 }]
+        })));
+        let err = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("phase 5e"), "got: {msg}");
     }
 
     #[test]
