@@ -46,9 +46,10 @@ impl PreparedStatementCache {
     /// Get or prepare a statement for the given SQL.
     pub async fn get_or_prepare(&self, client: &Object, sql: &str) -> PgResult<Statement> {
         let is_cached = {
-            let mut cache = self.prepared_queries.lock().unwrap();
-            // `get` updates LRU order. If absent, insert with `put`
-            // (which evicts LRU on overflow).
+            let mut cache = self
+                .prepared_queries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if cache.get(sql).is_some() {
                 true
             } else {
@@ -75,7 +76,10 @@ impl PreparedStatementCache {
         sql: &str,
     ) -> PgResult<Statement> {
         let is_cached = {
-            let mut cache = self.prepared_queries.lock().unwrap();
+            let mut cache = self
+                .prepared_queries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if cache.get(sql).is_some() {
                 true
             } else {
@@ -96,14 +100,20 @@ impl PreparedStatementCache {
 
     /// Clear all cached statements.
     pub fn clear(&self) {
-        let mut cache = self.prepared_queries.lock().unwrap();
+        let mut cache = self
+            .prepared_queries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.clear();
         debug!("Statement cache cleared");
     }
 
     /// Get the number of cached statement keys.
     pub fn len(&self) -> usize {
-        let cache = self.prepared_queries.lock().unwrap();
+        let cache = self
+            .prepared_queries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.len()
     }
 
