@@ -635,6 +635,18 @@ pub enum NestedWriteOp {
         target_pk: &'static str,
         pk: FilterValue,
     },
+    /// Disconnect a child row by clearing its FK column to `NULL`.
+    ///
+    /// Lowers to `UPDATE <target_table> SET <foreign_key> = NULL WHERE <target_pk> = <pk>`.
+    /// The child row persists; only the FK is cleared. Use
+    /// [`NestedWriteOp::Delete`] to remove the row entirely.
+    Disconnect {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        target_pk: &'static str,
+        pk: FilterValue,
+    },
 }
 
 impl NestedWriteOp {
@@ -668,6 +680,24 @@ impl NestedWriteOp {
                 engine
                     .execute_raw(&sql, vec![parent_pk.clone(), pk])
                     .await?;
+                Ok(())
+            }
+            NestedWriteOp::Disconnect {
+                relation: _,
+                target_table,
+                foreign_key,
+                target_pk,
+                pk,
+            } => {
+                let dialect = engine.dialect();
+                let sql = format!(
+                    "UPDATE {} SET {} = NULL WHERE {} = {}",
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
+                    dialect.quote_ident(target_pk),
+                    dialect.placeholder(1),
+                );
+                engine.execute_raw(&sql, vec![pk]).await?;
                 Ok(())
             }
             NestedWriteOp::Create {
@@ -1072,6 +1102,29 @@ mod tests {
         assert!(sql.contains("$1"), "got: {sql}");
         assert!(sql.contains("$2"), "got: {sql}");
         assert_eq!(params, &vec![FilterValue::Int(7), FilterValue::Int(42)]);
+    }
+
+    #[tokio::test]
+    async fn nested_op_disconnect_emits_update_set_null() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1);
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("NULL"), "got: {sql}");
+        assert!(sql.contains("WHERE"), "got: {sql}");
+        assert_eq!(params, &vec![FilterValue::Int(42)]);
     }
 
     #[test]
