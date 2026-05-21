@@ -703,6 +703,26 @@ pub enum NestedWriteOp {
         filter: Filter,
         payload: Vec<(String, crate::inputs::WriteOp)>,
     },
+    /// Upsert: update if a row matches `pk`, else insert.
+    ///
+    /// The two-statement engine-agnostic lowering:
+    /// 1. `UPDATE <target_table> SET <update_writeops> WHERE <target_pk> = $1`
+    /// 2. If `affected_rows == 0`, emit
+    ///    `INSERT INTO <target_table> (<create_cols + foreign_key>) VALUES (<...>)`
+    ///    with the parent PK spliced in for the FK column.
+    ///
+    /// Single-statement upsert via vendor-specific syntax (Postgres
+    /// `ON CONFLICT`, MySQL `ON DUPLICATE KEY UPDATE`, MSSQL `MERGE`) is
+    /// planned for phase 5d alongside `connect_or_create`.
+    Upsert {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        target_pk: &'static str,
+        pk: FilterValue,
+        create_payload: Vec<(String, FilterValue)>,
+        update_payload: Vec<(String, crate::inputs::WriteOp)>,
+    },
 }
 
 impl NestedWriteOp {
@@ -902,6 +922,71 @@ impl NestedWriteOp {
                 engine.execute_raw(&sql, params).await?;
                 Ok(())
             }
+            NestedWriteOp::Upsert {
+                relation: _,
+                target_table,
+                foreign_key,
+                target_pk,
+                pk,
+                create_payload,
+                update_payload,
+            } => {
+                let dialect = engine.dialect();
+                // Phase 1: attempt UPDATE.
+                let mut set_fragments: Vec<String> = Vec::with_capacity(update_payload.len());
+                let mut update_params: Vec<FilterValue> =
+                    Vec::with_capacity(update_payload.len() + 1);
+                let mut next_placeholder = 1usize;
+                for (col, op) in update_payload {
+                    let (frag, maybe_val) = op.to_set_fragment(
+                        &dialect.quote_ident(&col),
+                        &dialect.placeholder(next_placeholder),
+                    );
+                    set_fragments.push(frag);
+                    if let Some(val) = maybe_val {
+                        update_params.push(val);
+                        next_placeholder += 1;
+                    }
+                }
+                update_params.push(pk.clone());
+                let update_sql = format!(
+                    "UPDATE {} SET {} WHERE {} = {}",
+                    dialect.quote_ident(target_table),
+                    set_fragments.join(", "),
+                    dialect.quote_ident(target_pk),
+                    dialect.placeholder(next_placeholder),
+                );
+                let affected = engine.execute_raw(&update_sql, update_params).await?;
+                if affected > 0 {
+                    return Ok(());
+                }
+                // Phase 2: row didn't exist — INSERT it with the FK spliced in.
+                if create_payload.is_empty() {
+                    // Defensive: an upsert with empty create_payload and
+                    // zero affected_rows has nothing to insert. Surface
+                    // as not_found so the caller doesn't silently no-op.
+                    return Err(crate::error::QueryError::not_found(target_table)
+                        .with_context("Nested Upsert: row absent and create payload empty"));
+                }
+                let mut columns: Vec<String> =
+                    create_payload.iter().map(|(c, _)| c.clone()).collect();
+                let mut values: Vec<FilterValue> =
+                    create_payload.into_iter().map(|(_, v)| v).collect();
+                columns.push(foreign_key.to_string());
+                values.push(parent_pk.clone());
+                let placeholders: Vec<String> =
+                    (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
+                let quoted_cols: Vec<String> =
+                    columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                let insert_sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    dialect.quote_ident(target_table),
+                    quoted_cols.join(", "),
+                    placeholders.join(", "),
+                );
+                engine.execute_raw(&insert_sql, values).await?;
+                Ok(())
+            }
             NestedWriteOp::Create {
                 relation: _,
                 target_table,
@@ -975,16 +1060,33 @@ mod tests {
     /// Recording mock engine for [`NestedWriteOp::execute`] tests.
     ///
     /// Captures the (sql, params) of every [`QueryEngine::execute_raw`]
-    /// call so tests can assert the lowered shape.
+    /// call so tests can assert the lowered shape. Returns 1 from
+    /// `execute_raw` by default; tests that need to exercise the
+    /// zero-affected-rows path (e.g. upsert's insert phase) can supply a
+    /// sequence of affected-row counts via [`RecordingEngine::with_affected`].
     #[derive(Clone)]
     struct RecordingEngine {
         recorded: StatementLog,
+        affected: Arc<Mutex<Vec<u64>>>,
     }
 
     impl RecordingEngine {
         fn new() -> Self {
             Self {
                 recorded: Arc::new(Mutex::new(Vec::new())),
+                affected: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        /// Build an engine that returns each entry of `seq` from successive
+        /// `execute_raw` calls, in order. Once exhausted, falls back to 1.
+        fn with_affected(seq: Vec<u64>) -> Self {
+            // Stored in reverse so we can pop in O(1).
+            let mut rev = seq;
+            rev.reverse();
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                affected: Arc::new(Mutex::new(rev)),
             }
         }
 
@@ -1052,10 +1154,12 @@ mod tests {
             params: Vec<FilterValue>,
         ) -> BoxFuture<'_, QueryResult<u64>> {
             let recorded = self.recorded.clone();
+            let affected = self.affected.clone();
             let sql = sql.to_string();
             Box::pin(async move {
                 recorded.lock().unwrap().push((sql, params));
-                Ok(1)
+                let next = affected.lock().unwrap().pop().unwrap_or(1);
+                Ok(next)
             })
         }
 
@@ -1560,5 +1664,67 @@ mod tests {
         assert!(matches!(upsert.filter, Filter::Equals(..)));
         assert_eq!(upsert.create.data.len(), 1);
         assert_eq!(upsert.update.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_update_path_when_affected() {
+        use crate::inputs::WriteOp;
+        // Default RecordingEngine returns 1 from execute_raw, so the
+        // UPDATE is reported as affecting one row and the INSERT phase
+        // must not run.
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".to_string()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected only the UPDATE — INSERT should not have run"
+        );
+        let (sql, _) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(!sql.contains("INSERT"), "got: {sql}");
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_insert_path_when_zero_affected() {
+        use crate::inputs::WriteOp;
+        // UPDATE returns 0 (no matching row) → executor must emit the
+        // INSERT with the FK spliced in. Second call (the INSERT)
+        // returns 1.
+        let engine = RecordingEngine::with_affected(vec![0, 1]);
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".to_string()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 2);
+        let (update_sql, _) = &stmts[0];
+        assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+        let (insert_sql, insert_params) = &stmts[1];
+        assert!(insert_sql.contains("INSERT INTO"), "got: {insert_sql}");
+        assert!(insert_sql.contains("posts"), "got: {insert_sql}");
+        assert!(insert_sql.contains("title"), "got: {insert_sql}");
+        assert!(insert_sql.contains("author_id"), "got: {insert_sql}");
+        // create payload value + FK (parent_pk) = 2 params
+        assert_eq!(insert_params.len(), 2);
+        assert_eq!(insert_params[0], FilterValue::String("new".to_string()));
+        assert_eq!(insert_params[1], FilterValue::Int(7));
     }
 }
