@@ -658,6 +658,19 @@ pub enum NestedWriteOp {
         target_pk: &'static str,
         pk: FilterValue,
     },
+    /// Delete many child rows matching a scalar filter, scoped to the
+    /// parent's children only.
+    ///
+    /// Lowers to `DELETE FROM <target_table> WHERE <foreign_key> = <parent_pk> AND <filter>`.
+    /// The AND-with-parent-FK clause is a safety bound enforced at SQL
+    /// emit time — the user-supplied filter cannot remove rows belonging
+    /// to other parents.
+    DeleteMany {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        filter: Filter,
+    },
 }
 
 impl NestedWriteOp {
@@ -729,6 +742,38 @@ impl NestedWriteOp {
                     return Err(crate::error::QueryError::not_found(target_table)
                         .with_context("Nested Delete by PK"));
                 }
+                Ok(())
+            }
+            NestedWriteOp::DeleteMany {
+                relation: _,
+                target_table,
+                foreign_key,
+                filter,
+            } => {
+                let dialect = engine.dialect();
+                let is_unconstrained = matches!(filter, Filter::None);
+                let sql = if is_unconstrained {
+                    format!(
+                        "DELETE FROM {} WHERE {} = {}",
+                        dialect.quote_ident(target_table),
+                        dialect.quote_ident(foreign_key),
+                        dialect.placeholder(1),
+                    )
+                } else {
+                    let (filter_sql, params_tail) = filter.to_sql(2, &crate::dialect::Postgres);
+                    let sql = format!(
+                        "DELETE FROM {} WHERE {} = {} AND ({})",
+                        dialect.quote_ident(target_table),
+                        dialect.quote_ident(foreign_key),
+                        dialect.placeholder(1),
+                        filter_sql,
+                    );
+                    let mut params = Vec::with_capacity(params_tail.len() + 1);
+                    params.push(parent_pk.clone());
+                    params.extend(params_tail);
+                    return engine.execute_raw(&sql, params).await.map(|_| ());
+                };
+                engine.execute_raw(&sql, vec![parent_pk.clone()]).await?;
                 Ok(())
             }
             NestedWriteOp::Create {
@@ -1133,6 +1178,51 @@ mod tests {
         assert!(sql.contains("$1"), "got: {sql}");
         assert!(sql.contains("$2"), "got: {sql}");
         assert_eq!(params, &vec![FilterValue::Int(7), FilterValue::Int(42)]);
+    }
+
+    #[tokio::test]
+    async fn nested_op_delete_many_with_filter_emits_fk_and_filter_clause() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::DeleteMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::Equals("published".into(), FilterValue::Bool(false)),
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1);
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("DELETE FROM"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("$1"), "got: {sql}");
+        assert!(sql.contains("AND"), "got: {sql}");
+        assert!(sql.contains("published"), "got: {sql}");
+        assert_eq!(params.len(), 2);
+        assert!(matches!(params[0], FilterValue::Int(7)));
+        assert!(matches!(params[1], FilterValue::Bool(false)));
+    }
+
+    #[tokio::test]
+    async fn nested_op_delete_many_with_empty_filter_omits_and_clause() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::DeleteMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::None,
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("DELETE FROM"), "got: {sql}");
+        assert!(
+            !sql.contains("AND"),
+            "should omit AND when filter empty: {sql}"
+        );
+        assert_eq!(params.len(), 1);
     }
 
     #[tokio::test]
