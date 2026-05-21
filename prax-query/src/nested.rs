@@ -484,14 +484,9 @@ impl NestedWriteBuilder {
         creates: &[NestedCreateData<T>],
     ) -> Vec<(String, Vec<FilterValue>)> {
         let mut statements = Vec::with_capacity(creates.len());
-
-        // The table identifier is the same across rows. Quote it once.
         let quoted_table = quote_identifier(&self.related_table);
 
         for create in creates {
-            // Single pass over create.data instead of two
-            // .iter().map(...).collect() passes, with capacity hints
-            // that account for the trailing FK column / parent PK.
             let row_len = create.data.len() + 1;
             let mut columns: Vec<String> = Vec::with_capacity(row_len);
             let mut values: Vec<FilterValue> = Vec::with_capacity(row_len);
@@ -500,12 +495,9 @@ impl NestedWriteBuilder {
                 values.push(v.clone());
             }
 
-            // Foreign key column + parent PK.
             columns.push(self.foreign_key.clone());
             values.push(parent_id.clone());
 
-            // Build the column-list and placeholder-list inline to
-            // avoid the intermediate Vec<String> + .join() pair.
             let mut col_list = String::new();
             let mut placeholders = String::new();
             for (i, c) in columns.iter().enumerate() {
@@ -707,9 +699,6 @@ impl NestedWriteOp {
                 let mut next_placeholder = 1usize;
 
                 for child in payload {
-                    // Each child row supplies the caller-provided values
-                    // for its columns, then the parent PK for the FK
-                    // column appended above.
                     let mut row_phs: Vec<String> = Vec::with_capacity(cols_per_row);
                     for (_, v) in child {
                         values.push(v);

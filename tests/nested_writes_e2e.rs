@@ -211,8 +211,6 @@ async fn nested_create_emits_parent_insert_then_child_inserts() {
         .expect("create + nested children");
 
     let stmts = engine.statements();
-    // Multi-VALUES batching: parent INSERT + one multi-row child
-    // INSERT carrying both posts. See NestedWriteOp::Create::execute.
     assert_eq!(
         stmts.len(),
         2,

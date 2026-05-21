@@ -242,13 +242,9 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                         }
 
                         if end - idx == 1 {
-                            // Single Connect — preserve the existing
-                            // per-op execution path.
                             let op = nested[idx].clone();
                             op.execute(&tx, &parent_pk).await?;
                         } else {
-                            // Multiple consecutive matching Connects —
-                            // collapse into one parametrised UPDATE.
                             let expected = (end - idx) as u64;
                             let mut pks: Vec<FilterValue> = Vec::with_capacity(end - idx + 1);
                             pks.push(parent_pk.clone());
