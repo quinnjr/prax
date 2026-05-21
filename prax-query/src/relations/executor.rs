@@ -45,7 +45,11 @@ where
 
     let children: Vec<C> = engine.query_many::<C>(&sql, params).await?;
 
-    let mut out: HashMap<String, Vec<C>> = HashMap::new();
+    // Each bucket key is a parent PK, so the map's upper bound is the
+    // number of parents, not the number of children (children typically
+    // outnumber parents in a HasMany). Pre-sizing on parents.len()
+    // avoids the rehash chain as buckets are populated.
+    let mut out: HashMap<String, Vec<C>> = HashMap::with_capacity(parents.len());
     for child in children {
         let fk = child.get_column_value(R::FOREIGN_KEY).ok_or_else(|| {
             QueryError::internal(format!(
