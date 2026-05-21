@@ -446,6 +446,51 @@ async fn nested_connects_different_targets_are_not_batched() {
     );
 }
 
+#[tokio::test]
+async fn multi_connect_same_relation_batches_into_single_update() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(user::posts::connect(FilterValue::Int(1)))
+        .with(user::posts::connect(FilterValue::Int(2)))
+        .with(user::posts::connect(FilterValue::Int(3)))
+        .exec()
+        .await
+        .expect("create + three connects to same relation");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + one batched UPDATE; got {stmts:#?}"
+    );
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(sql.contains("posts"), "got: {sql}");
+    assert!(sql.contains("author_id"), "got: {sql}");
+    assert!(sql.contains(" IN ("), "expected batched IN-list: {sql}");
+    assert!(
+        sql.contains("$2"),
+        "expected three positional pk placeholders: {sql}"
+    );
+    assert!(
+        sql.contains("$3"),
+        "expected three positional pk placeholders: {sql}"
+    );
+    assert!(
+        sql.contains("$4"),
+        "expected three positional pk placeholders: {sql}"
+    );
+    assert_eq!(params.len(), 4, "FK + three child PKs");
+    assert!(params.contains(&FilterValue::Int(1)));
+    assert!(params.contains(&FilterValue::Int(2)));
+    assert!(params.contains(&FilterValue::Int(3)));
+}
+
 /// Compile-only assertion: `NestedWriteOp::Connect` carries the
 /// per-relation metadata so the executor can build its UPDATE without
 /// a runtime lookup.
