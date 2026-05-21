@@ -4798,6 +4798,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "futures",
+ "lru 0.12.5",
  "postgres-types",
  "prax-query",
  "pretty_assertions",

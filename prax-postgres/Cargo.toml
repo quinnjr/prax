@@ -48,6 +48,9 @@ tracing = "0.1"
 # URL parsing
 url = "2.5"
 
+# LRU cache for prepared statements
+lru = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 pretty_assertions = { workspace = true }
