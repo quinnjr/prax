@@ -688,6 +688,21 @@ pub enum NestedWriteOp {
         pk: FilterValue,
         payload: Vec<(String, crate::inputs::WriteOp)>,
     },
+    /// Update many child rows matching a filter, scoped to the parent's
+    /// children only.
+    ///
+    /// Lowers to
+    /// `UPDATE <target_table> SET <writeop-fragments> WHERE <foreign_key> = $1 AND <filter>`.
+    /// The AND-with-parent-FK clause is a safety bound enforced at SQL
+    /// emit time — the user-supplied filter cannot reach rows belonging
+    /// to other parents.
+    UpdateMany {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        filter: Filter,
+        payload: Vec<(String, crate::inputs::WriteOp)>,
+    },
 }
 
 impl NestedWriteOp {
@@ -831,6 +846,60 @@ impl NestedWriteOp {
                     return Err(crate::error::QueryError::not_found(target_table)
                         .with_context("Nested Update by PK"));
                 }
+                Ok(())
+            }
+            NestedWriteOp::UpdateMany {
+                relation: _,
+                target_table,
+                foreign_key,
+                filter,
+                payload,
+            } => {
+                if payload.is_empty() {
+                    return Ok(());
+                }
+                let dialect = engine.dialect();
+                let mut set_fragments: Vec<String> = Vec::with_capacity(payload.len());
+                let mut params: Vec<FilterValue> = Vec::with_capacity(payload.len() + 1);
+                let mut next_placeholder = 1usize;
+                for (col, op) in payload {
+                    let (frag, maybe_val) = op.to_set_fragment(
+                        &dialect.quote_ident(&col),
+                        &dialect.placeholder(next_placeholder),
+                    );
+                    set_fragments.push(frag);
+                    if let Some(val) = maybe_val {
+                        params.push(val);
+                        next_placeholder += 1;
+                    }
+                }
+                let fk_placeholder = dialect.placeholder(next_placeholder);
+                next_placeholder += 1;
+                params.push(parent_pk.clone());
+
+                let is_unconstrained = matches!(filter, Filter::None);
+                let sql = if is_unconstrained {
+                    format!(
+                        "UPDATE {} SET {} WHERE {} = {}",
+                        dialect.quote_ident(target_table),
+                        set_fragments.join(", "),
+                        dialect.quote_ident(foreign_key),
+                        fk_placeholder,
+                    )
+                } else {
+                    let (filter_sql, filter_params) =
+                        filter.to_sql(next_placeholder, &crate::dialect::Postgres);
+                    params.extend(filter_params);
+                    format!(
+                        "UPDATE {} SET {} WHERE {} = {} AND ({})",
+                        dialect.quote_ident(target_table),
+                        set_fragments.join(", "),
+                        dialect.quote_ident(foreign_key),
+                        fk_placeholder,
+                        filter_sql,
+                    )
+                };
+                engine.execute_raw(&sql, params).await?;
                 Ok(())
             }
             NestedWriteOp::Create {
@@ -1420,6 +1489,58 @@ mod tests {
             engine.statements().is_empty(),
             "empty payload should emit no SQL"
         );
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_many_with_filter() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::UpdateMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::Equals("published".into(), FilterValue::Bool(false)),
+            payload: vec![("views".to_string(), WriteOp::Set(FilterValue::Int(0)))],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1);
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("AND"), "got: {sql}");
+        assert!(sql.contains("published"), "got: {sql}");
+        // payload value + FK + filter value = 3 params
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], FilterValue::Int(0));
+        assert_eq!(params[1], FilterValue::Int(7));
+        assert_eq!(params[2], FilterValue::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_many_with_empty_filter() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::UpdateMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::None,
+            payload: vec![("views".to_string(), WriteOp::Set(FilterValue::Int(0)))],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(
+            !sql.contains("AND"),
+            "should omit AND when filter empty: {sql}"
+        );
+        // payload value + FK = 2 params
+        assert_eq!(params.len(), 2);
     }
 
     #[test]
