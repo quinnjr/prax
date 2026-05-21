@@ -114,7 +114,10 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
     ///     ]))
     ///     .exec().await?;
     /// ```
-    pub fn with(mut self, nw: NestedWriteOp) -> Self {
+    pub fn with(mut self, nw: NestedWriteOp) -> Self
+    where
+        E: crate::capabilities::SupportsNestedWrites,
+    {
         self.nested.push(nw);
         self
     }
