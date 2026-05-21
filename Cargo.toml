@@ -150,11 +150,6 @@ trybuild = "1.0"
 # Benchmarking
 criterion = { version = "0.8.0", features = ["html_reports", "async_tokio"] }
 
-# ORM Comparison (for benchmarks)
-diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
-diesel-async = { version = "0.5", features = ["postgres", "mysql", "deadpool"] }
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
-
 # Profiling
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-flame = "0.2"
@@ -210,10 +205,10 @@ uuid = { workspace = true }
 rust_decimal = { workspace = true }
 trybuild = { workspace = true }
 
-# ORM comparison benchmarks
-diesel = { workspace = true }
-diesel-async = { workspace = true }
-sea-orm = { workspace = true }
+# ORM comparison benchmarks (dev-only; not exposed to downstream crates)
+diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
+diesel-async = { version = "0.5", features = ["postgres", "mysql", "deadpool"] }
+sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "runtime-tokio"] }
 prax-postgres = { workspace = true }
 prax-mysql = { workspace = true }
