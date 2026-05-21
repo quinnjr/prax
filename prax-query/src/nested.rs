@@ -61,7 +61,7 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
-use crate::error::{QueryError, QueryResult};
+use crate::error::QueryResult;
 use crate::filter::{Filter, FilterValue};
 use crate::sql::quote_identifier;
 use crate::traits::{Model, QueryEngine};
@@ -614,19 +614,27 @@ pub enum NestedWriteOp {
         /// parent PK are appended by [`NestedWriteOp::execute`].
         payload: Vec<Vec<(String, FilterValue)>>,
     },
-    /// Connect an existing child by its PK — not yet implemented.
+    /// Connect an existing child row by its primary-key value.
     ///
-    /// Connect on a `HasMany`/`HasOne` relation translates to
-    /// `UPDATE <child_table> SET <fk> = <parent_pk> WHERE <child_pk> = <pk>`,
-    /// but plumbing the child-PK column name through to execute time
-    /// needs more relation metadata than the current codegen surface
-    /// exposes. The variant carries its data so callers can still
-    /// build it, but [`NestedWriteOp::execute`] returns
-    /// [`QueryError::internal`] until the metadata is wired.
+    /// Lowers to
+    /// `UPDATE <target_table> SET <foreign_key> = <parent_pk> WHERE <target_pk> = <pk>`
+    /// at execute time. The identifier components (`target_table`,
+    /// `foreign_key`, `target_pk`) come from codegen-emitted
+    /// `&'static str` constants on the per-relation
+    /// `RelationMeta` / `Model` types, so they are trusted at the SQL
+    /// safety boundary (see `.cursor/rules/sql-safety.mdc`). Only
+    /// `parent_pk` and `pk` flow as `$N`-bound parameters.
     Connect {
-        /// Name of the relation on the parent model.
+        /// Name of the relation on the parent model (for diagnostics).
         relation: String,
-        /// Primary key of the child row to connect.
+        /// Target child table.
+        target_table: String,
+        /// FK column on the child table that references the parent's PK.
+        foreign_key: String,
+        /// PK column on the child table — the `WHERE` predicate
+        /// `<target_pk> = $N` selects the row to point at the parent.
+        target_pk: String,
+        /// PK value of the child row to connect.
         pk: FilterValue,
     },
 }
@@ -643,11 +651,32 @@ impl NestedWriteOp {
         E: QueryEngine,
     {
         match self {
-            NestedWriteOp::Connect { relation, pk: _ } => {
-                let _ = relation;
-                Err(QueryError::internal(
-                    "nested Connect is not yet implemented (needs child-PK column metadata)",
-                ))
+            NestedWriteOp::Connect {
+                relation: _,
+                target_table,
+                foreign_key,
+                target_pk,
+                pk,
+            } => {
+                // Identifiers (`target_table`, `foreign_key`, `target_pk`)
+                // come from codegen-emitted `&'static str` constants on
+                // per-relation metadata — they are not user input.
+                // Only `parent_pk` and `pk` are parameterized; this
+                // matches the SQL-safety boundary in
+                // `.cursor/rules/sql-safety.mdc`.
+                let dialect = engine.dialect();
+                let sql = format!(
+                    "UPDATE {} SET {} = {} WHERE {} = {}",
+                    dialect.quote_ident(&target_table),
+                    dialect.quote_ident(&foreign_key),
+                    dialect.placeholder(1),
+                    dialect.quote_ident(&target_pk),
+                    dialect.placeholder(2),
+                );
+                engine
+                    .execute_raw(&sql, vec![parent_pk.clone(), pk])
+                    .await?;
+                Ok(())
             }
             NestedWriteOp::Create {
                 relation: _,
@@ -688,6 +717,102 @@ impl NestedWriteOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::error::QueryError;
+    use crate::traits::BoxFuture;
+
+    /// Recording mock engine for [`NestedWriteOp::execute`] tests.
+    ///
+    /// Captures the (sql, params) of every [`QueryEngine::execute_raw`]
+    /// call so tests can assert the lowered shape.
+    #[derive(Clone)]
+    struct RecordingEngine {
+        recorded: Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>,
+    }
+
+    impl RecordingEngine {
+        fn new() -> Self {
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn statements(&self) -> Vec<(String, Vec<FilterValue>)> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::traits::QueryEngine for RecordingEngine {
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<T>> {
+            Box::pin(async { Err(QueryError::not_found("test")) })
+        }
+
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<T>> {
+            Box::pin(async { Err(QueryError::not_found("test")) })
+        }
+
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn execute_delete(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn execute_raw(
+            &self,
+            sql: &str,
+            params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<u64>> {
+            let recorded = self.recorded.clone();
+            let sql = sql.to_string();
+            Box::pin(async move {
+                recorded.lock().unwrap().push((sql, params));
+                Ok(1)
+            })
+        }
+
+        fn count(&self, _sql: &str, _params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
 
     struct TestModel;
 
@@ -902,6 +1027,33 @@ mod tests {
         assert!(matches!(update.filter, Filter::Equals(..)));
         assert_eq!(update.data.len(), 1);
         assert_eq!(update.data[0].0, "title");
+    }
+
+    #[tokio::test]
+    async fn nested_op_connect_emits_update_set_where() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Connect {
+            relation: "posts".into(),
+            target_table: "posts".into(),
+            foreign_key: "author_id".into(),
+            target_pk: "id".into(),
+            pk: FilterValue::Int(42),
+        };
+        let parent_pk = FilterValue::Int(7);
+        op.execute(&engine, &parent_pk).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1, "expected one UPDATE statement");
+        let (sql, params) = &stmts[0];
+        // Postgres dialect quotes idents with double quotes.
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("SET"), "got: {sql}");
+        assert!(sql.contains("WHERE"), "got: {sql}");
+        assert!(sql.contains("$1"), "got: {sql}");
+        assert!(sql.contains("$2"), "got: {sql}");
+        assert_eq!(params, &vec![FilterValue::Int(7), FilterValue::Int(42)]);
     }
 
     #[test]

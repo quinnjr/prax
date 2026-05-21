@@ -96,15 +96,25 @@ pub fn emit(spec: RelationSpec<'_>) -> TokenStream {
             }
 
             /// Queue a nested `Connect` for feeding into
-            /// `CreateOperation::with(...)`. Currently this only
-            /// compiles — `NestedWriteOp::execute` returns an internal
-            /// error for `Connect` until the child-PK column name is
-            /// plumbed into the nested-write metadata.
+            /// `CreateOperation::with(...)`.
+            ///
+            /// Lowers to
+            /// `UPDATE <target_table> SET <fk> = <parent_pk> WHERE <target_pk> = $N`
+            /// at execute time. The target table, FK column, and PK
+            /// column are read from the related `Model` / relation
+            /// metadata as compile-time `&'static str` constants.
             pub fn connect(
                 pk: impl Into<::prax_query::filter::FilterValue>,
             ) -> ::prax_query::nested::NestedWriteOp {
                 ::prax_query::nested::NestedWriteOp::Connect {
                     relation: #field_name_str.into(),
+                    target_table: <super::super::#target
+                        as ::prax_query::traits::Model>::TABLE_NAME
+                        .into(),
+                    foreign_key: #foreign.into(),
+                    target_pk: <super::super::#target
+                        as ::prax_query::traits::Model>::PRIMARY_KEY[0]
+                        .into(),
                     pk: pk.into(),
                 }
             }
