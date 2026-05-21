@@ -722,13 +722,16 @@ mod tests {
     use crate::error::QueryError;
     use crate::traits::BoxFuture;
 
+    /// Captured (sql, params) entries from the mock engine.
+    type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
+
     /// Recording mock engine for [`NestedWriteOp::execute`] tests.
     ///
     /// Captures the (sql, params) of every [`QueryEngine::execute_raw`]
     /// call so tests can assert the lowered shape.
     #[derive(Clone)]
     struct RecordingEngine {
-        recorded: Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>,
+        recorded: StatementLog,
     }
 
     impl RecordingEngine {
