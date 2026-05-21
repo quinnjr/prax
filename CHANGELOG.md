@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested `disconnect` / `delete` / `delete_many` inside `create!`'s
+  `data:` (phase 5c).** Three new `NestedWriteOp` variants —
+  `Disconnect` (`UPDATE child SET fk = NULL WHERE pk = $1`), `Delete`
+  (`DELETE FROM child WHERE pk = $1`), and `DeleteMany`
+  (`DELETE FROM child WHERE fk = $parent_pk AND <filter>`). DeleteMany's
+  AND-with-parent-FK clause is a safety bound enforced at SQL emit time
+  — user filters cannot remove rows belonging to other parents. The
+  `Delete` variant returns `QueryError::not_found` when affected_rows
+  != 1, matching the Connect-batch affected-rows contract.
+
+### Changed
+
+- The phase-5b "phase 5c deferral" arm narrows to mutation operators
+  only: `update`, `update_many`, `upsert` now hit a renamed
+  `phase_5c_mutations_deferral` with clearer wording. `set:` gets its
+  own `phase_5e_deferral` pointing at `disconnect`/`delete` as
+  available alternatives. The unknown-operator did-you-mean candidate
+  list grows to include `disconnect`, `delete`, `delete_many`.
+
 - **Nested create/connect inside `create!` (phase 5b).** The `data:`
   block of `prax::create!` now accepts relation keys with
   `{ create: [...], connect: [...] }`, building a single transaction
