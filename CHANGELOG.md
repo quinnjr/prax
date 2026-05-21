@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Flat write macros (phase 5a).** Five new schema-aware proc-macros
+  that lower a Prisma-style brace-block DSL into chained
+  `with_*_input(...)` calls on the existing write operations:
+  `prax::create!`, `prax::update!`, `prax::upsert!`,
+  `prax::create_many!`, `prax::update_many!`. Each accepts a `data:`
+  block of scalar fields and supports atomic update operators on the
+  update path (`{ increment: N }`, `{ decrement: N }`, `{ multiply: N }`,
+  `{ divide: N }`, `{ set: V }`, `{ unset: true }`). `create!` /
+  `update!` / `upsert!` also accept `include` xor `select` for the
+  return shape, matching the read-macro contract.
+- **Runtime builder methods**: `with_create_input` on `CreateOperation`
+  and `UpsertOperation`; `with_create_inputs` on `CreateManyOperation`;
+  `with_update_input` on `UpdateOperation`, `UpdateManyOperation`, and
+  `UpsertOperation`. New `prax_query::inputs::WriteOp` enum carries
+  `Set` / `Increment` / `Decrement` / `Multiply` / `Divide` / `Unset`
+  variants; the SQL emitter renders the arithmetic variants as
+  `col = col <op> $n` and `Unset` as `col = NULL`. New `CreatePayload`
+  and `UpdatePayload` type aliases pin the `Data` associated type for
+  the codegen-emitted `<Model>CreateInput` / `<Model>UpdateInput`
+  trait impls.
+- **Accessor methods**: `create_many` / `update_many` on the
+  `ModelAccessor` trait return fresh batch-write operations from a
+  clone of the engine. Codegen-emitted `Client<E>` accessors already
+  expose these methods directly.
+- **Codegen**: `<Model>CreateInput` / `<Model>UpdateInput` now ship
+  with `impl CreateInput` / `impl UpdateInput` trait impls that lower
+  the struct to the matching runtime payload. Optional fields
+  (`Option<T>` slots) are skipped when unset; required scalars always
+  emit a row in the payload. Update wrappers (`IntFieldUpdate`,
+  `StringNullableFieldUpdate`, etc.) project each set field to the
+  matching `WriteOp` variant.
+
+### Deferred to phase 5b
+
+- Relation operators inside `data:` blocks (nested writes:
+  `create` / `connect` / `disconnect` / `set` / `update` /
+  `update_many` / `upsert` / `delete` / `delete_many` /
+  `connect_or_create`). Codegen emits a clear "phase 5b" diagnostic
+  pointing at the relation key with the deferred operator list.
+- `NestedWritePlan` IR + executor in `prax-query`.
+- `SupportsNestedWrites` per-engine declarations and CQL
+  capability-gap diagnostics.
+- `set: [...]` full-relation-replacement semantics.
+- Generated `<Model><Relation>CreateNestedInput` /
+  `<Model><Relation>UpdateNestedInput` and `WithoutXxx` variants.
+
 - **Shape macros (phase 4).** Five new schema-aware proc-macros
   that return the corresponding phase-2 typed input struct **as a
   value**: `prax::r#where!`, `prax::include!`, `prax::select!`,

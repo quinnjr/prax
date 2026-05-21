@@ -267,3 +267,56 @@ fn update_many_macro_supports_arithmetic_op() {
     let (sql, _params) = op.build_sql(&prax_query::dialect::Postgres);
     assert!(sql.contains("age = age + $1"), "got: {sql}");
 }
+
+// ===== Composition tests =====
+
+#[test]
+fn create_data_supports_spread_from_value() {
+    // Build a base CreateInput by hand and spread it into the macro's
+    // `data:` block. Subsequent assignments overwrite, matching Rust's
+    // struct-update syntax.
+    let client = AppClient::new();
+    let now = ::chrono::Utc::now();
+    let base = user::UserCreateInput {
+        email: "a@x.com".into(),
+        name: Some("Alice".into()),
+        age: None,
+        // `active` has `@default(true)` so codegen wraps it in
+        // Option<...> to allow the schema-side default to apply when
+        // the caller leaves it unset.
+        active: Some(true),
+        created_at: now,
+    };
+    let op = prax_orm::create!(client.user, {
+        data: {
+            ..base,
+            // Override the email field on the spread base.
+            email: "alice@x.com",
+        },
+    });
+    let (sql, params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("INSERT INTO User"), "got: {sql}");
+    // The overwritten email value lands in the first column.
+    let has_alice = params
+        .iter()
+        .any(|v| matches!(v, prax_query::filter::FilterValue::String(s) if s == "alice@x.com"));
+    assert!(has_alice, "expected email override; got: {params:?}");
+}
+
+#[test]
+fn update_macro_round_trips_through_select_returning_shape() {
+    let client = AppClient::new();
+    let op = prax_orm::update!(client.user, {
+        where: { email: "alice@x.com" },
+        data: {
+            name: "Renamed",
+            age: { increment: 1 },
+        },
+        select: { id: true, name: true, age: true },
+    });
+    let (sql, params) = op.build_sql(&prax_query::dialect::Postgres);
+    assert!(sql.contains("UPDATE User SET"), "got: {sql}");
+    assert!(sql.contains("RETURNING id, name, age"), "got: {sql}");
+    // 2 update params + 1 WHERE param.
+    assert_eq!(params.len(), 3, "got: {params:?}");
+}
