@@ -108,10 +108,19 @@ impl QueryEngine for RecordingEngine {
     }
     fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let recorded = self.recorded.clone();
-        let sql = sql.to_string();
+        let sql_string = sql.to_string();
+        // For batched-Connect UPDATEs of the form
+        //   UPDATE t SET fk = $1 WHERE pk IN ($2, $3, ...)
+        // the affected-rows check expects N rows = pks.len() - 1
+        // (params[0] is the parent FK; the rest are child PKs).
+        let affected = if sql.contains(" IN (") {
+            (params.len() as u64).saturating_sub(1)
+        } else {
+            1
+        };
         Box::pin(async move {
-            recorded.lock().unwrap().push((sql, params));
-            Ok(1)
+            recorded.lock().unwrap().push((sql_string, params));
+            Ok(affected)
         })
     }
     fn count(&self, _sql: &str, _params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
@@ -290,6 +299,149 @@ async fn mixed_create_and_connect_in_order() {
     assert!(
         stmts[2].0.contains("UPDATE"),
         "child connect: {}",
+        stmts[2].0
+    );
+}
+
+#[tokio::test]
+async fn nested_connect_single_passes_through_unchanged() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "a@x.com")
+        .with(user::posts::connect(FilterValue::Int(42)))
+        .exec()
+        .await
+        .expect("create + single connect");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "parent insert + single connect update");
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(
+        !sql.contains(" IN ("),
+        "single Connect must not batch into IN-list: {sql}"
+    );
+    assert_eq!(params.len(), 2, "FK + single child PK");
+}
+
+#[tokio::test]
+async fn nested_connect_pair_same_target_is_batched() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "a@x.com")
+        .with(user::posts::connect(FilterValue::Int(10)))
+        .with(user::posts::connect(FilterValue::Int(11)))
+        .exec()
+        .await
+        .expect("create + two connects same target");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + one batched UPDATE; got {stmts:#?}"
+    );
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(
+        sql.contains(" IN ("),
+        "two Connects must batch into IN-list: {sql}"
+    );
+    assert_eq!(params.len(), 3, "FK + two child PKs");
+    assert!(params.contains(&FilterValue::Int(10)));
+    assert!(params.contains(&FilterValue::Int(11)));
+}
+
+#[tokio::test]
+async fn nested_connect_then_create_then_connect_no_cross_batching() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "a@x.com")
+        .with(user::posts::connect(FilterValue::Int(10)))
+        .with(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("p".into()),
+        )]]))
+        .with(user::posts::connect(FilterValue::Int(11)))
+        .exec()
+        .await
+        .expect("connect, create, connect");
+
+    let stmts = engine.statements();
+    // parent INSERT + first UPDATE + child INSERT + second UPDATE
+    assert_eq!(stmts.len(), 4, "got {stmts:#?}");
+    assert!(stmts[1].0.contains("UPDATE"));
+    assert!(
+        !stmts[1].0.contains(" IN ("),
+        "first connect must stay single: {}",
+        stmts[1].0
+    );
+    assert!(stmts[2].0.contains("INSERT INTO"));
+    assert!(stmts[3].0.contains("UPDATE"));
+    assert!(
+        !stmts[3].0.contains(" IN ("),
+        "second connect must stay single: {}",
+        stmts[3].0
+    );
+}
+
+#[tokio::test]
+async fn nested_connects_different_targets_are_not_batched() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "a@x.com")
+        .with(NestedWriteOp::Connect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(10),
+        })
+        .with(NestedWriteOp::Connect {
+            relation: "comments",
+            target_table: "comments",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(20),
+        })
+        .exec()
+        .await
+        .expect("two connects to different tables");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        3,
+        "parent insert + two separate UPDATEs; got {stmts:#?}"
+    );
+    assert!(stmts[1].0.contains("UPDATE"));
+    assert!(stmts[1].0.contains("posts"), "first: {}", stmts[1].0);
+    assert!(
+        !stmts[1].0.contains(" IN ("),
+        "must not batch across targets: {}",
+        stmts[1].0
+    );
+    assert!(stmts[2].0.contains("UPDATE"));
+    assert!(stmts[2].0.contains("comments"), "second: {}", stmts[2].0);
+    assert!(
+        !stmts[2].0.contains(" IN ("),
+        "must not batch across targets: {}",
         stmts[2].0
     );
 }
