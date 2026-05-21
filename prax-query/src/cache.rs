@@ -25,6 +25,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tracing::debug;
 
@@ -38,7 +39,64 @@ pub struct QueryCache {
     /// The cached queries.
     cache: RwLock<HashMap<QueryKey, CachedQuery>>,
     /// Statistics about cache usage.
-    stats: RwLock<CacheStats>,
+    ///
+    /// Atomic counters so the `get()` hot path can record hits/misses
+    /// without taking the stats write lock while still holding the
+    /// cache read lock (the previous nested-lock pattern was a
+    /// contention hotspot under concurrent reads).
+    stats: AtomicCacheStats,
+}
+
+/// Atomic backing for [`CacheStats`].
+///
+/// `record_*` methods use `Relaxed` because the counters are
+/// strictly monotonic and don't synchronize with anything else; the
+/// only consumer is `QueryCache::stats()` which snapshots them into a
+/// regular [`CacheStats`] value.
+#[derive(Debug, Default)]
+struct AtomicCacheStats {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+    insertions: AtomicU64,
+}
+
+impl AtomicCacheStats {
+    #[inline]
+    fn record_hit(&self) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_miss(&self) {
+        self.misses.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_eviction(&self) {
+        self.evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    fn record_insertion(&self) {
+        self.insertions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> CacheStats {
+        CacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+            insertions: self.insertions.load(Ordering::Relaxed),
+        }
+    }
+
+    fn reset(&self) {
+        self.hits.store(0, Ordering::Relaxed);
+        self.misses.store(0, Ordering::Relaxed);
+        self.evictions.store(0, Ordering::Relaxed);
+        self.insertions.store(0, Ordering::Relaxed);
+    }
 }
 
 /// A key for looking up cached queries.
@@ -145,7 +203,7 @@ impl QueryCache {
         Self {
             max_size,
             cache: RwLock::new(HashMap::with_capacity(max_size)),
-            stats: RwLock::new(CacheStats::default()),
+            stats: AtomicCacheStats::default(),
         }
     }
 
@@ -157,17 +215,16 @@ impl QueryCache {
         debug!(key = ?key.key, sql_len = sql.len(), param_count, "QueryCache::insert()");
 
         let mut cache = self.cache.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
 
         // Evict if full
         if cache.len() >= self.max_size && !cache.contains_key(&key) {
             self.evict_lru(&mut cache);
-            stats.evictions += 1;
+            self.stats.record_eviction();
             debug!("QueryCache evicted entry");
         }
 
         cache.insert(key, CachedQuery::new(sql, param_count));
-        stats.insertions += 1;
+        self.stats.record_insertion();
     }
 
     /// Insert a query with known parameter count.
@@ -181,35 +238,32 @@ impl QueryCache {
         let sql = sql.into();
 
         let mut cache = self.cache.write().unwrap();
-        let mut stats = self.stats.write().unwrap();
 
         // Evict if full
         if cache.len() >= self.max_size && !cache.contains_key(&key) {
             self.evict_lru(&mut cache);
-            stats.evictions += 1;
+            self.stats.record_eviction();
         }
 
         cache.insert(key, CachedQuery::new(sql, param_count));
-        stats.insertions += 1;
+        self.stats.record_insertion();
     }
 
     /// Get a query from the cache.
     pub fn get(&self, key: impl Into<QueryKey>) -> Option<String> {
         let key = key.into();
 
-        // Try read lock first
-        {
-            let cache = self.cache.read().unwrap();
-            if let Some(entry) = cache.get(&key) {
-                let mut stats = self.stats.write().unwrap();
-                stats.hits += 1;
-                debug!(key = ?key.key, "QueryCache hit");
-                return Some(entry.sql.clone());
-            }
+        let cache = self.cache.read().unwrap();
+        if let Some(entry) = cache.get(&key) {
+            // Atomic counter — no write-lock conflict with the read
+            // lock we still hold on `cache`.
+            self.stats.record_hit();
+            debug!(key = ?key.key, "QueryCache hit");
+            return Some(entry.sql.clone());
         }
+        drop(cache);
 
-        let mut stats = self.stats.write().unwrap();
-        stats.misses += 1;
+        self.stats.record_miss();
         debug!(key = ?key.key, "QueryCache miss");
         None
     }
@@ -220,13 +274,12 @@ impl QueryCache {
 
         let cache = self.cache.read().unwrap();
         if let Some(entry) = cache.get(&key) {
-            let mut stats = self.stats.write().unwrap();
-            stats.hits += 1;
+            self.stats.record_hit();
             return Some(entry.clone());
         }
+        drop(cache);
 
-        let mut stats = self.stats.write().unwrap();
-        stats.misses += 1;
+        self.stats.record_miss();
         None
     }
 
@@ -289,14 +342,12 @@ impl QueryCache {
 
     /// Get cache statistics.
     pub fn stats(&self) -> CacheStats {
-        let stats = self.stats.read().unwrap();
-        stats.clone()
+        self.stats.snapshot()
     }
 
     /// Reset cache statistics.
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.write().unwrap();
-        *stats = CacheStats::default();
+        self.stats.reset();
     }
 
     /// Evict the least recently used entries.
