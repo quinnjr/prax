@@ -182,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prax-codegen` for `Bytes`-typed `@unique` columns resolves
   without requiring downstream users to add `base64` to their own
   `Cargo.toml`.
+- **Nested-create error diagnostics are now batch-level.** With the
+  multi-VALUES INSERT batching for `NestedWriteOp::Create`, a failing
+  child row surfaces as a single error for the whole batch rather than
+  pointing at the specific offending row. A failing batch still rolls
+  back the parent transaction; only the per-row attribution is lost.
 
 ### Deprecated
 
