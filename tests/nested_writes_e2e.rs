@@ -489,6 +489,137 @@ async fn multi_connect_same_relation_batches_into_single_update() {
     assert!(params.contains(&FilterValue::Int(3)));
 }
 
+#[tokio::test]
+async fn nested_disconnect_emits_parent_insert_then_update_set_null() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+        })
+        .exec()
+        .await
+        .expect("create + nested disconnect");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "got {stmts:#?}");
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(sql.contains("author_id"), "got: {sql}");
+    assert!(sql.contains("NULL"), "got: {sql}");
+    assert_eq!(params, &vec![FilterValue::Int(42)]);
+}
+
+#[tokio::test]
+async fn nested_delete_emits_parent_insert_then_delete_where_pk() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Delete {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(7),
+        })
+        .exec()
+        .await
+        .expect("create + nested delete");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "got {stmts:#?}");
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("DELETE FROM"), "got: {sql}");
+    assert!(sql.contains("posts"), "got: {sql}");
+    assert!(sql.contains("WHERE"), "got: {sql}");
+    assert_eq!(params, &vec![FilterValue::Int(7)]);
+}
+
+#[tokio::test]
+async fn nested_delete_many_with_filter_emits_fk_and_filter_clause() {
+    use prax_query::filter::Filter;
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::DeleteMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::Equals("published".into(), FilterValue::Bool(false)),
+        })
+        .exec()
+        .await
+        .expect("create + nested delete_many");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "got {stmts:#?}");
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("DELETE FROM"), "got: {sql}");
+    assert!(sql.contains("author_id"), "got: {sql}");
+    assert!(sql.contains("AND"), "got: {sql}");
+    assert!(sql.contains("published"), "got: {sql}");
+    assert_eq!(params.len(), 2, "FK + filter param");
+    assert!(matches!(params[1], FilterValue::Bool(false)));
+}
+
+#[tokio::test]
+async fn nested_create_plus_disconnect_plus_delete_in_one_transaction() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("new".into()),
+        )]]))
+        .with(NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(100),
+        })
+        .with(NestedWriteOp::Delete {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(200),
+        })
+        .exec()
+        .await
+        .expect("create + create-child + disconnect + delete");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        4,
+        "parent + create child + disconnect + delete; got {stmts:#?}"
+    );
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    assert!(stmts[1].0.contains("INSERT INTO"));
+    assert!(stmts[2].0.contains("UPDATE") && stmts[2].0.contains("NULL"));
+    assert!(stmts[3].0.contains("DELETE FROM"));
+}
+
 /// Compile-only assertion: `NestedWriteOp::Connect` carries the
 /// per-relation metadata so the executor can build its UPDATE without
 /// a runtime lookup.
