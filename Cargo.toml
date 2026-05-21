@@ -62,7 +62,7 @@ convert_case = "0.6"
 pastey = "0.1"
 
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "io-util", "sync", "time"] }
 futures = "0.3"
 
 # Serialization
