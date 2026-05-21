@@ -12,7 +12,7 @@ use syn::parse::Parser;
 use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
-use crate::macros::lower::data_input::lower_create_data;
+use crate::macros::lower::data_input::lower_create_data_with_nested;
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::select_input::lower_select;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
@@ -49,7 +49,7 @@ fn lower_create(
     block: &DslBlock,
     ctx: &LowerCtx<'_>,
 ) -> syn::Result<TokenStream> {
-    let mut data_tokens: Option<TokenStream> = None;
+    let mut data_lowering: Option<crate::macros::lower::data_input::CreateDataLowering> = None;
     let mut include_tokens: Option<TokenStream> = None;
     let mut select_tokens: Option<TokenStream> = None;
     let mut select_span: Option<Span> = None;
@@ -68,7 +68,7 @@ fn lower_create(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`data:` expects `{ ... }`"));
                 };
-                data_tokens = Some(lower_create_data(b, ctx)?);
+                data_lowering = Some(lower_create_data_with_nested(b, ctx)?);
             }
             "include" => {
                 let DslValue::Block(b) = value else {
@@ -103,11 +103,18 @@ fn lower_create(
         ));
     }
 
-    let data_tokens = data_tokens
+    let data_lowering = data_lowering
         .ok_or_else(|| syn::Error::new(block.span, "`create!` requires a `data:` block"))?;
+    let crate::macros::lower::data_input::CreateDataLowering {
+        scalar_input,
+        nested_ops,
+    } = data_lowering;
 
     let accessor_expr = &accessor.accessor_expr;
-    let mut chain: Vec<TokenStream> = vec![quote! { .with_create_input(#data_tokens) }];
+    let mut chain: Vec<TokenStream> = vec![quote! { .with_create_input(#scalar_input) }];
+    for nw in nested_ops {
+        chain.push(quote! { .with(#nw) });
+    }
     if let Some(i) = include_tokens {
         chain.push(quote! { .with_include_input(#i) });
     }
