@@ -202,14 +202,30 @@ async fn nested_create_emits_parent_insert_then_child_inserts() {
         .expect("create + nested children");
 
     let stmts = engine.statements();
-    assert_eq!(stmts.len(), 3, "parent + 2 child inserts; got {stmts:#?}");
+    // Multi-VALUES batching: parent INSERT + one multi-row child
+    // INSERT carrying both posts. See NestedWriteOp::Create::execute.
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent + one batched child INSERT; got {stmts:#?}"
+    );
     assert!(stmts[0].0.contains("INSERT INTO"));
     assert!(stmts[0].0.contains("users"));
-    for child in &stmts[1..] {
-        assert!(child.0.contains("INSERT INTO"));
-        assert!(child.0.contains("posts"));
-        assert!(child.0.contains("author_id"));
-    }
+
+    let (child_sql, child_params) = &stmts[1];
+    assert!(child_sql.contains("INSERT INTO"));
+    assert!(child_sql.contains("posts"));
+    assert!(child_sql.contains("author_id"));
+    // Two rows worth of placeholders + parent PK per row.
+    assert!(
+        child_sql.contains("),"),
+        "expected multi-VALUES form; got {child_sql}"
+    );
+    assert_eq!(
+        child_params.len(),
+        4,
+        "two rows x (title + FK) params; got {child_params:?}"
+    );
 }
 
 #[tokio::test]
