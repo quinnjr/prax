@@ -213,18 +213,16 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                 // reduce round trips.
                 let mut idx = 0;
                 while idx < nested.len() {
-                    if matches!(nested[idx], NestedWriteOp::Connect { .. }) {
-                        // Find the end of the run of Connects sharing
-                        // the same target metadata.
-                        let (run_table, run_fk, run_target_pk) = match &nested[idx] {
-                            NestedWriteOp::Connect {
-                                target_table,
-                                foreign_key,
-                                target_pk,
-                                ..
-                            } => (*target_table, *foreign_key, *target_pk),
-                            _ => unreachable!(),
-                        };
+                    if let NestedWriteOp::Connect {
+                        target_table: run_table,
+                        foreign_key: run_fk,
+                        target_pk: run_target_pk,
+                        ..
+                    } = &nested[idx]
+                    {
+                        let run_table = *run_table;
+                        let run_fk = *run_fk;
+                        let run_target_pk = *run_target_pk;
                         let mut end = idx + 1;
                         while end < nested.len() {
                             match &nested[end] {
