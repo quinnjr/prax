@@ -52,12 +52,6 @@
 //!     .await?;
 //! ```
 
-// Every `Filter::to_sql` call in this module passes
-// `&crate::dialect::Postgres`. Nested writes are not yet wired into a live
-// client, and the SQL builders below emit Postgres placeholder syntax (`$N`).
-// When nested writes land on the live client path they will thread the
-// engine's dialect through here, replacing the hard-coded Postgres reference.
-
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
@@ -282,6 +276,11 @@ impl<T: Model> NestedUpdateManyData<T> {
 }
 
 /// Builder for nested write SQL operations.
+///
+/// The SQL emitters here currently bake in [`crate::dialect::Postgres`] —
+/// nested writes are not yet wired into a live client, and the placeholder
+/// syntax (`$N`) is Postgres-shaped. When this builder lands on the live
+/// client path the dialect should thread through from the engine.
 #[derive(Debug)]
 pub struct NestedWriteBuilder {
     /// The parent table name.
@@ -604,12 +603,9 @@ pub enum NestedWriteOp {
     /// `relation` is retained for diagnostics/debugging; the executor
     /// only needs `target_table`, `foreign_key`, and `payload`.
     Create {
-        /// Name of the relation on the parent model.
-        relation: String,
-        /// Target child table.
-        target_table: String,
-        /// FK column on the child table that references the parent's PK.
-        foreign_key: String,
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
         /// One `Vec<(column, value)>` per child row. The FK column +
         /// parent PK are appended by [`NestedWriteOp::execute`].
         payload: Vec<Vec<(String, FilterValue)>>,
@@ -618,23 +614,16 @@ pub enum NestedWriteOp {
     ///
     /// Lowers to
     /// `UPDATE <target_table> SET <foreign_key> = <parent_pk> WHERE <target_pk> = <pk>`
-    /// at execute time. The identifier components (`target_table`,
-    /// `foreign_key`, `target_pk`) come from codegen-emitted
-    /// `&'static str` constants on the per-relation
-    /// `RelationMeta` / `Model` types, so they are trusted at the SQL
-    /// safety boundary (see `.cursor/rules/sql-safety.mdc`). Only
+    /// at execute time. The identifier fields are `&'static str` because
+    /// they come from codegen-emitted constants on the per-relation
+    /// `RelationMeta` / `Model` types — the type itself enforces the
+    /// SQL-safety boundary (see `.cursor/rules/sql-safety.mdc`). Only
     /// `parent_pk` and `pk` flow as `$N`-bound parameters.
     Connect {
-        /// Name of the relation on the parent model (for diagnostics).
-        relation: String,
-        /// Target child table.
-        target_table: String,
-        /// FK column on the child table that references the parent's PK.
-        foreign_key: String,
-        /// PK column on the child table — the `WHERE` predicate
-        /// `<target_pk> = $N` selects the row to point at the parent.
-        target_pk: String,
-        /// PK value of the child row to connect.
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        target_pk: &'static str,
         pk: FilterValue,
     },
 }
@@ -658,19 +647,13 @@ impl NestedWriteOp {
                 target_pk,
                 pk,
             } => {
-                // Identifiers (`target_table`, `foreign_key`, `target_pk`)
-                // come from codegen-emitted `&'static str` constants on
-                // per-relation metadata — they are not user input.
-                // Only `parent_pk` and `pk` are parameterized; this
-                // matches the SQL-safety boundary in
-                // `.cursor/rules/sql-safety.mdc`.
                 let dialect = engine.dialect();
                 let sql = format!(
                     "UPDATE {} SET {} = {} WHERE {} = {}",
-                    dialect.quote_ident(&target_table),
-                    dialect.quote_ident(&foreign_key),
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
                     dialect.placeholder(1),
-                    dialect.quote_ident(&target_pk),
+                    dialect.quote_ident(target_pk),
                     dialect.placeholder(2),
                 );
                 engine
@@ -691,7 +674,7 @@ impl NestedWriteOp {
                     // points at the parent we just inserted.
                     let mut columns: Vec<String> = child.iter().map(|(c, _)| c.clone()).collect();
                     let mut values: Vec<FilterValue> = child.into_iter().map(|(_, v)| v).collect();
-                    columns.push(foreign_key.clone());
+                    columns.push(foreign_key.to_string());
                     values.push(parent_pk.clone());
 
                     let placeholders: Vec<String> =
@@ -701,7 +684,7 @@ impl NestedWriteOp {
 
                     let sql = format!(
                         "INSERT INTO {} ({}) VALUES ({})",
-                        dialect.quote_ident(&target_table),
+                        dialect.quote_ident(target_table),
                         quoted_cols.join(", "),
                         placeholders.join(", "),
                     );
@@ -1036,10 +1019,10 @@ mod tests {
     async fn nested_op_connect_emits_update_set_where() {
         let engine = RecordingEngine::new();
         let op = NestedWriteOp::Connect {
-            relation: "posts".into(),
-            target_table: "posts".into(),
-            foreign_key: "author_id".into(),
-            target_pk: "id".into(),
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
             pk: FilterValue::Int(42),
         };
         let parent_pk = FilterValue::Int(7);

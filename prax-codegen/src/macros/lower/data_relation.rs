@@ -11,20 +11,15 @@
 //!
 //! All other operator keys (`update`, `upsert`, `delete`,
 //! `delete_many`, `disconnect`, `set`, `connect_or_create`) return a
-//! "phase 5c+" deferral diagnostic. Unknown operators get a
+//! "not yet supported" deferral diagnostic. Unknown operators get a
 //! did-you-mean against `[create, connect]`.
 //!
-//! ## Design choice
-//!
-//! Phase 5b does **not** generate intermediate
-//! `<RelatedModel>CreateWithout<Owner>Input` /
-//! `<Model><Relation>CreateNestedInput` structs (which the original
-//! plan called for in Tasks 3-5). Instead the DSL lowering builds the
-//! `NestedWriteOp` token streams inline using the child column-value
-//! pairs directly. This is the simpler of the two designs the plan
-//! discusses in Task 7 ("option (b)") and avoids a multi-file struct
-//! generator pass for a feature whose only consumer is the
-//! `create!` macro.
+//! Why this builds `NestedWriteOp` tokens inline rather than generating
+//! intermediate `<Without>` / `<CreateNestedInput>` structs: the only
+//! consumer is the `create!` macro, so an extra round of codegen would
+//! pay an upfront type-explosion cost for no caller benefit. When write
+//! operators land on `update!` / `upsert!` they'll share the same DSL
+//! pipeline and can reuse this lowering.
 
 use convert_case::{Case, Casing};
 use prax_schema::ast::{Field, FieldType};
@@ -145,32 +140,27 @@ pub fn lower_create_relation(
                             as ::prax_query::inputs::CreateInput>::into_ir(#input_expr)
                     });
                 }
-                let foreign_key_str = foreign_key.clone();
                 let op_expr = quote! {
                     ::prax_query::nested::NestedWriteOp::Create {
-                        relation: ::std::string::String::from(#relation_name_str),
-                        target_table: ::std::string::String::from(#target_table),
-                        foreign_key: ::std::string::String::from(#foreign_key_str),
+                        relation: #relation_name_str,
+                        target_table: #target_table,
+                        foreign_key: #foreign_key,
                         payload: ::std::vec![ #( #child_payloads ),* ],
                     }
                 };
                 ops.push(NestedRelationOp { op_expr });
-                // suppress unused warning when target_model_ident is not
-                // referenced through the input path (defensive).
                 let _ = &target_model_ident;
             }
             "connect" => {
                 let children = expect_list_of_blocks(value, &op_key, key.span())?;
-                let foreign_key_str = foreign_key.clone();
-                let target_pk_str = target_pk_column.clone();
                 for child_block in children {
-                    let pk_expr = lower_connect_pk(child_block, target_model, &target_pk_str)?;
+                    let pk_expr = lower_connect_pk(child_block, target_model, &target_pk_column)?;
                     let op_expr = quote! {
                         ::prax_query::nested::NestedWriteOp::Connect {
-                            relation: ::std::string::String::from(#relation_name_str),
-                            target_table: ::std::string::String::from(#target_table),
-                            foreign_key: ::std::string::String::from(#foreign_key_str),
-                            target_pk: ::std::string::String::from(#target_pk_str),
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            foreign_key: #foreign_key,
+                            target_pk: #target_pk_column,
                             pk: ::core::convert::Into::<
                                 ::prax_query::filter::FilterValue
                             >::into(#pk_expr),

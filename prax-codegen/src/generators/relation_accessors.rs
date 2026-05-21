@@ -107,14 +107,12 @@ pub fn emit(spec: RelationSpec<'_>) -> TokenStream {
                 pk: impl Into<::prax_query::filter::FilterValue>,
             ) -> ::prax_query::nested::NestedWriteOp {
                 ::prax_query::nested::NestedWriteOp::Connect {
-                    relation: #field_name_str.into(),
+                    relation: #field_name_str,
                     target_table: <super::super::#target
-                        as ::prax_query::traits::Model>::TABLE_NAME
-                        .into(),
-                    foreign_key: #foreign.into(),
+                        as ::prax_query::traits::Model>::TABLE_NAME,
+                    foreign_key: #foreign,
                     target_pk: <super::super::#target
-                        as ::prax_query::traits::Model>::PRIMARY_KEY[0]
-                        .into(),
+                        as ::prax_query::traits::Model>::PRIMARY_KEY[0],
                     pk: pk.into(),
                 }
             }
@@ -133,11 +131,10 @@ pub fn emit(spec: RelationSpec<'_>) -> TokenStream {
                 >,
             ) -> ::prax_query::nested::NestedWriteOp {
                 ::prax_query::nested::NestedWriteOp::Create {
-                    relation: #field_name_str.into(),
+                    relation: #field_name_str,
                     target_table: <super::super::#target
-                        as ::prax_query::traits::Model>::TABLE_NAME
-                        .into(),
-                    foreign_key: #foreign.into(),
+                        as ::prax_query::traits::Model>::TABLE_NAME,
+                    foreign_key: #foreign,
                     payload: children,
                 }
             }
