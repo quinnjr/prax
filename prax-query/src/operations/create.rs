@@ -204,8 +204,78 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                 let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
                 let parent: M = tx.execute_insert::<M>(&sql, params).await?;
                 let parent_pk = parent.pk_value();
-                for nw in nested {
-                    nw.execute(&tx, &parent_pk).await?;
+
+                // Batch consecutive Connect ops with the same
+                // (target_table, foreign_key, target_pk) into a single
+                // UPDATE ... WHERE pk IN (...). Creates and other
+                // variants pass through unchanged. Final state is
+                // identical; this just collapses adjacent runs to
+                // reduce round trips.
+                let mut idx = 0;
+                while idx < nested.len() {
+                    if matches!(nested[idx], NestedWriteOp::Connect { .. }) {
+                        // Find the end of the run of Connects sharing
+                        // the same target metadata.
+                        let (run_table, run_fk, run_target_pk) = match &nested[idx] {
+                            NestedWriteOp::Connect {
+                                target_table,
+                                foreign_key,
+                                target_pk,
+                                ..
+                            } => (*target_table, *foreign_key, *target_pk),
+                            _ => unreachable!(),
+                        };
+                        let mut end = idx + 1;
+                        while end < nested.len() {
+                            match &nested[end] {
+                                NestedWriteOp::Connect {
+                                    target_table,
+                                    foreign_key,
+                                    target_pk,
+                                    ..
+                                } if *target_table == run_table
+                                    && *foreign_key == run_fk
+                                    && *target_pk == run_target_pk =>
+                                {
+                                    end += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        if end - idx == 1 {
+                            // Single Connect — preserve the existing
+                            // per-op execution path.
+                            let op = nested[idx].clone();
+                            op.execute(&tx, &parent_pk).await?;
+                        } else {
+                            // Multiple consecutive matching Connects —
+                            // collapse into one parametrised UPDATE.
+                            let mut pks: Vec<FilterValue> = Vec::with_capacity(end - idx + 1);
+                            pks.push(parent_pk.clone());
+                            for op in &nested[idx..end] {
+                                if let NestedWriteOp::Connect { pk, .. } = op {
+                                    pks.push(pk.clone());
+                                }
+                            }
+                            let placeholders: Vec<String> =
+                                (2..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+                            let sql = format!(
+                                "UPDATE {} SET {} = {} WHERE {} IN ({})",
+                                dialect.quote_ident(run_table),
+                                dialect.quote_ident(run_fk),
+                                dialect.placeholder(1),
+                                dialect.quote_ident(run_target_pk),
+                                placeholders.join(", "),
+                            );
+                            tx.execute_raw(&sql, pks).await?;
+                        }
+                        idx = end;
+                    } else {
+                        let op = nested[idx].clone();
+                        op.execute(&tx, &parent_pk).await?;
+                        idx += 1;
+                    }
                 }
                 Ok(parent)
             })
