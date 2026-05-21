@@ -5,9 +5,14 @@
 //! Filled in by tasks 13-15.
 
 pub(crate) mod count;
+pub(crate) mod create;
+pub(crate) mod create_many;
 pub(crate) mod delete;
 pub(crate) mod delete_many;
 pub(crate) mod find_first;
 pub(crate) mod find_many;
 pub(crate) mod find_unique;
 pub(crate) mod shape;
+pub(crate) mod update;
+pub(crate) mod update_many;
+pub(crate) mod upsert;

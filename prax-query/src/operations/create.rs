@@ -78,6 +78,27 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
         self
     }
 
+    /// Apply a typed `CreateInput`.
+    ///
+    /// The input's `into_ir` produces a flat `Vec<(column, value)>`
+    /// (per `prax_query::inputs::CreatePayload`), which is appended to
+    /// the operation's columns + values just like the existing
+    /// `set_many`. Phase 5a does not surface nested writes through
+    /// this path — relation operators inside `data:` are rejected by
+    /// codegen with a "phase 5b" diagnostic before reaching the
+    /// runtime.
+    pub fn with_create_input<I>(mut self, input: I) -> Self
+    where
+        I: crate::inputs::CreateInput<Model = M, Data = crate::inputs::CreatePayload>,
+    {
+        let data: crate::inputs::CreatePayload = input.into_ir();
+        for (col, val) in data {
+            self.columns.push(col);
+            self.values.push(val);
+        }
+        self
+    }
+
     /// Queue a nested write to run alongside this create.
     ///
     /// The parent `INSERT` and every queued nested op execute inside a
@@ -236,6 +257,72 @@ impl<E: QueryEngine, M: Model> CreateManyOperation<E, M> {
     /// Skip records that violate unique constraints.
     pub fn skip_duplicates(mut self) -> Self {
         self.skip_duplicates = true;
+        self
+    }
+
+    /// Toggle `skip_duplicates` via a runtime flag.
+    ///
+    /// The bare [`Self::skip_duplicates`] is a builder-style "enable
+    /// it" call. The macros emit `with_skip_duplicates(<bool-expr>)`
+    /// so the DSL's `skip_duplicates: false` shortcut produces a
+    /// statement-level no-op without conditional macro emission.
+    pub fn with_skip_duplicates(mut self, flag: bool) -> Self {
+        self.skip_duplicates = flag;
+        self
+    }
+
+    /// Apply a batch of typed `CreateInput`s.
+    ///
+    /// Each input lowers to its own `CreatePayload`
+    /// (`Vec<(column, value)>`). The full set of columns across every
+    /// input becomes the operation's column list (first occurrence
+    /// wins for ordering); rows missing a column get `FilterValue::Null`
+    /// in that slot. This matches Prisma's `createMany` semantics,
+    /// where omitted optional fields are inserted as NULL.
+    pub fn with_create_inputs<I, T>(mut self, inputs: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: crate::inputs::CreateInput<Model = M, Data = crate::inputs::CreatePayload>,
+    {
+        // Lower every input first so we can compute the union column
+        // set before deciding the row layout.
+        let lowered: Vec<crate::inputs::CreatePayload> =
+            inputs.into_iter().map(|i| i.into_ir()).collect();
+
+        if lowered.is_empty() {
+            return self;
+        }
+
+        // Seed columns from existing state (preserves any prior
+        // `.columns(...)` call) and append new columns in first-seen
+        // order.
+        let mut columns: Vec<String> = self.columns.clone();
+        for row in &lowered {
+            for (col, _) in row {
+                if !columns.iter().any(|c| c == col) {
+                    columns.push(col.clone());
+                }
+            }
+        }
+
+        // Build each row in the canonical column order, padding missing
+        // entries with NULL.
+        let mut rows: Vec<Vec<FilterValue>> = Vec::with_capacity(lowered.len());
+        for row in lowered {
+            let mut out: Vec<FilterValue> = Vec::with_capacity(columns.len());
+            for col in &columns {
+                let v = row
+                    .iter()
+                    .find(|(c, _)| c == col)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(FilterValue::Null);
+                out.push(v);
+            }
+            rows.push(out);
+        }
+
+        self.columns = columns;
+        self.rows.extend(rows);
         self
     }
 
@@ -770,5 +857,55 @@ mod tests {
             CreateOperation::<MockEngine, TestModel>::new(MockEngine::new()).set("name", "Alice");
         let (sql, _) = op.build_sql(&crate::dialect::Postgres);
         assert!(sql.contains("RETURNING "), "expected RETURNING, got: {sql}");
+    }
+
+    // ========== Phase 5a: typed-input wiring ==========
+
+    /// Mock `CreateInput` used by the `with_create_input(s)` tests.
+    struct MockCreateInput(Vec<(String, FilterValue)>);
+
+    impl crate::inputs::CreateInput for MockCreateInput {
+        type Model = TestModel;
+        type Data = crate::inputs::CreatePayload;
+        fn into_ir(self) -> Self::Data {
+            self.0
+        }
+    }
+
+    #[test]
+    fn with_create_input_appends_columns_and_values() {
+        let input = MockCreateInput(vec![
+            ("name".into(), FilterValue::String("Alice".into())),
+            ("email".into(), FilterValue::String("a@x.com".into())),
+        ]);
+        let op = CreateOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .with_create_input(input);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+        // The chain should produce identical SQL to the existing
+        // `.set(...).set(...)` chain — that's the contract.
+        assert!(sql.contains("(name, email)"), "got: {sql}");
+        assert!(sql.contains("VALUES ($1, $2)"), "got: {sql}");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn with_create_inputs_pads_missing_columns_with_null() {
+        let row1 = MockCreateInput(vec![
+            ("name".into(), FilterValue::String("Alice".into())),
+            ("email".into(), FilterValue::String("a@x.com".into())),
+        ]);
+        // Second input omits `email` — codegen does this for inputs
+        // where the optional `email` field was left as `None`.
+        let row2 = MockCreateInput(vec![("name".into(), FilterValue::String("Bob".into()))]);
+
+        let op = CreateManyOperation::<MockEngine, TestModel>::new(MockEngine::new())
+            .with_create_inputs(vec![row1, row2]);
+
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("(name, email)"), "got: {sql}");
+        assert!(sql.contains("VALUES ($1, $2), ($3, $4)"), "got: {sql}");
+        assert_eq!(params.len(), 4);
+        assert_eq!(params[3], FilterValue::Null);
     }
 }

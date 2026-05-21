@@ -510,6 +510,8 @@ pub use crate::inputs::{
     CreateArgs,
     CreateInput,
     CreateManyArgs,
+    // Write payload (phase 5a).
+    CreatePayload,
     DateFilter,
     DateNullableFilter,
     DateTimeFieldUpdate,
@@ -565,6 +567,7 @@ pub use crate::inputs::{
     UpdateArgs,
     UpdateInput,
     UpdateManyArgs,
+    UpdatePayload,
     UpsertArgs,
     UuidFieldUpdate,
     UuidFilter,
@@ -572,6 +575,7 @@ pub use crate::inputs::{
     UuidNullableFilter,
     WhereInput,
     WhereUniqueInput,
+    WriteOp,
 };
 
 /// Prelude module for convenient imports.

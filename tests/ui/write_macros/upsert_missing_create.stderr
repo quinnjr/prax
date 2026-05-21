@@ -1,0 +1,20 @@
+error: Failed to parse schema: Schema file 'prax/schema.prax' not found. Searched in:
+         - CARGO_MANIFEST_DIR/prax/schema.prax
+         - (absolute) prax/schema.prax
+         - (current_dir) prax/schema.prax
+ --> tests/ui/write_macros/upsert_missing_create.rs:4:1
+  |
+4 | prax_orm::prax_schema!("prax/schema.prax");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `prax_orm::prax_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `upsert!` requires a `create:` block
+  --> tests/ui/write_macros/upsert_missing_create.rs:7:61
+   |
+ 7 |       let _op = prax_orm::upsert!(unimplemented!(), for User, {
+   |  _____________________________________________________________^
+ 8 | |         where: { email: "a@x.com" },
+ 9 | |         update: { name: { set: "Renamed" } },
+10 | |     });
+   | |_____^

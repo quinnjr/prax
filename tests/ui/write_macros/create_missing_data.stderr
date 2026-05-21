@@ -1,0 +1,19 @@
+error: Failed to parse schema: Schema file 'prax/schema.prax' not found. Searched in:
+         - CARGO_MANIFEST_DIR/prax/schema.prax
+         - (absolute) prax/schema.prax
+         - (current_dir) prax/schema.prax
+ --> tests/ui/write_macros/create_missing_data.rs:4:1
+  |
+4 | prax_orm::prax_schema!("prax/schema.prax");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `prax_orm::prax_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: `create!` requires a `data:` block
+ --> tests/ui/write_macros/create_missing_data.rs:7:61
+  |
+7 |       let _op = prax_orm::create!(unimplemented!(), for User, {
+  |  _____________________________________________________________^
+8 | |         select: { id: true },
+9 | |     });
+  | |_____^

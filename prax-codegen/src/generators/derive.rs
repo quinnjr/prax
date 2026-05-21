@@ -313,6 +313,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
             Some(super::inputs::create_input::CreateField {
                 name: f.name.clone(),
+                column: f.column_name.clone(),
                 category: cat,
                 nullable: f.is_optional,
                 has_default: false, // phase 2: no default detection yet
@@ -331,6 +332,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
             Some(super::inputs::update_input::UpdateField {
                 name: f.name.clone(),
+                column: f.column_name.clone(),
                 category: cat,
                 nullable: f.is_optional,
                 enum_ident: None,
@@ -338,8 +340,14 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    let create_struct = super::inputs::create_input::generate(name, &create_fields);
-    let update_struct = super::inputs::update_input::generate(name, &update_fields);
+    let super::inputs::create_input::CreateInputTokens {
+        struct_tokens: create_struct,
+        impl_tokens: create_input_impl,
+    } = super::inputs::create_input::generate(name, &module_name, &create_fields);
+    let super::inputs::update_input::UpdateInputTokens {
+        struct_tokens: update_struct,
+        impl_tokens: update_input_impl,
+    } = super::inputs::update_input::generate(name, &module_name, &update_fields);
 
     // Build RelationMetaSpec list for the relation_meta generator (Task 8).
     // Parent PK is the first @id field's column name.
@@ -390,6 +398,8 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let maybe_include_impl = gate_impl(include_impl);
     let maybe_select_impl = gate_impl(select_impl);
     let maybe_order_by_impl = gate_impl(order_by_impl);
+    let maybe_create_input_impl = gate_impl(create_input_impl);
+    let maybe_update_input_impl = gate_impl(update_input_impl);
 
     Ok(quote! {
         /// Generated module for the #name model.
@@ -498,6 +508,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
         // OrderByInput trait impl — same visibility gating.
         #maybe_order_by_impl
+
+        // CreateInput / UpdateInput trait impls (phase 5a) — same
+        // visibility gating as the other trait impls above.
+        #maybe_create_input_impl
+        #maybe_update_input_impl
 
         // RelationFilterMeta impls — one per declared relation field.
         // Each impl associates the zero-sized `<Model><Relation>FilterMeta`

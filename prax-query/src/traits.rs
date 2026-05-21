@@ -332,6 +332,25 @@ pub trait ModelAccessor<E: QueryEngine>: Send + Sync {
     /// Start an update operation.
     fn update(&self) -> crate::operations::UpdateOperation<E, Self::Model>;
 
+    /// Start a batch create operation.
+    ///
+    /// Default impl constructs a fresh `CreateManyOperation` from a
+    /// clone of the engine. `QueryEngine` already requires `Clone`,
+    /// so the bound is satisfied unconditionally. Override only if a
+    /// generated accessor needs to pre-configure the batch
+    /// (e.g. setting columns from schema defaults).
+    fn create_many(&self) -> crate::operations::CreateManyOperation<E, Self::Model> {
+        crate::operations::CreateManyOperation::new(self.engine().clone())
+    }
+
+    /// Start a batch update operation.
+    ///
+    /// Default impl constructs a fresh `UpdateManyOperation` from a
+    /// clone of the engine.
+    fn update_many(&self) -> crate::operations::UpdateManyOperation<E, Self::Model> {
+        crate::operations::UpdateManyOperation::new(self.engine().clone())
+    }
+
     /// Start a delete operation.
     fn delete(&self) -> crate::operations::DeleteOperation<E, Self::Model>;
 

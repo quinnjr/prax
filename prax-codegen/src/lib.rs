@@ -314,6 +314,113 @@ pub fn order_by(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::create!` — schema-aware DSL targeting `create`. Top-level
+/// keys: `data:` (required), `include` xor `select`. Phase 5a is
+/// scalar-only — relation operators inside `data:` (nested writes)
+/// land in phase 5b.
+///
+/// ```rust,ignore
+/// prax::create!(client.user, {
+///     data: { email: "a@x.com", name: "Alice", age: 30 },
+///     select: { id: true, email: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn create(input: TokenStream) -> TokenStream {
+    match macros::ops::create::expand_create(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::update!` — schema-aware DSL targeting `update`. Top-level
+/// keys: `where:` (required, unique), `data:` (required), `include`
+/// xor `select`. Atomic operators (`increment`, `decrement`,
+/// `multiply`, `divide`, `unset`) work via `{ <op>: V }` blocks inside
+/// `data:` — see spec §4.
+///
+/// ```rust,ignore
+/// prax::update!(client.user, {
+///     where: { id: 1 },
+///     data: {
+///         name: "Renamed",
+///         age: { increment: 1 },
+///         last_seen: { unset: true },
+///     },
+///     select: { id: true, age: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn update(input: TokenStream) -> TokenStream {
+    match macros::ops::update::expand_update(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::upsert!` — schema-aware DSL targeting `upsert`. Top-level
+/// keys: `where:` (required, unique), `create:` (required), `update:`
+/// (required), `include` xor `select`. On hit applies the `update:`
+/// payload; on miss inserts the `create:` payload.
+///
+/// ```rust,ignore
+/// prax::upsert!(client.user, {
+///     where: { email: "a@x.com" },
+///     create: { email: "a@x.com", name: "Alice", active: true, created_at: @(now) },
+///     update: { name: { set: "Renamed" }, age: { increment: 1 } },
+///     select: { id: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn upsert(input: TokenStream) -> TokenStream {
+    match macros::ops::upsert::expand_upsert(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::create_many!` — schema-aware DSL targeting `create_many`.
+/// Top-level keys: `data:` (required list of blocks),
+/// `skip_duplicates:` (optional bool).
+///
+/// ```rust,ignore
+/// prax::create_many!(client.user, {
+///     data: [
+///         { email: "a@x.com", name: "Alice" },
+///         { email: "b@x.com", name: "Bob" },
+///     ],
+///     skip_duplicates: true,
+/// });
+/// ```
+#[proc_macro]
+pub fn create_many(input: TokenStream) -> TokenStream {
+    match macros::ops::create_many::expand_create_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// `prax::update_many!` — schema-aware DSL targeting `update_many`.
+/// Top-level keys: `where:` (optional non-unique filter), `data:`
+/// (required).
+///
+/// **Warning:** an empty/omitted `where:` matches every row in the
+/// table — see the trait-level note on `WhereInput`.
+///
+/// ```rust,ignore
+/// prax::update_many!(client.user, {
+///     where: { active: false },
+///     data: { active: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn update_many(input: TokenStream) -> TokenStream {
+    match macros::ops::update_many::expand_update_many(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::cursor!` — schema-aware shape macro returning a
 /// `<Model>WhereUniqueInput` value for use as a `cursor:` argument to
 /// the read macros.

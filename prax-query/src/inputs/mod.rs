@@ -21,9 +21,11 @@ pub mod relation;
 pub mod scalar;
 pub mod scalar_update;
 pub mod traits;
+pub mod write_payload;
 
 pub use args::*;
 pub use relation::*;
 pub use scalar::*;
 pub use scalar_update::*;
 pub use traits::*;
+pub use write_payload::*;

@@ -54,3 +54,18 @@ fn shape_macros_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/shape_macros/*.rs");
 }
+
+/// `trybuild` UI tests for the phase-5a write macros (`create!`,
+/// `create_many!`, `update!`, `update_many!`, `upsert!`).
+///
+/// Each `.rs` file under `tests/ui/write_macros/` is a compile-fail
+/// fixture asserting one diagnostic class. Most important is the
+/// "phase 5b" deferral diagnostic for nested-write relation keys —
+/// the wording should point users at the right phase rather than
+/// reading like a generic "unknown field" error.
+#[cfg(feature = "ui-tests")]
+#[test]
+fn write_macros_ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/write_macros/*.rs");
+}
