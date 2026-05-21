@@ -251,6 +251,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                         } else {
                             // Multiple consecutive matching Connects —
                             // collapse into one parametrised UPDATE.
+                            let expected = (end - idx) as u64;
                             let mut pks: Vec<FilterValue> = Vec::with_capacity(end - idx + 1);
                             pks.push(parent_pk.clone());
                             for op in &nested[idx..end] {
@@ -268,7 +269,15 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                                 dialect.quote_ident(run_target_pk),
                                 placeholders.join(", "),
                             );
-                            tx.execute_raw(&sql, pks).await?;
+                            let affected = tx.execute_raw(&sql, pks).await?;
+                            if affected != expected {
+                                return Err(crate::error::QueryError::not_found(run_table)
+                                    .with_context("Nested Connect batch")
+                                    .with_help(format!(
+                                        "Expected {} matching rows but UPDATE affected {}",
+                                        expected, affected
+                                    )));
+                            }
                         }
                         idx = end;
                     } else {
