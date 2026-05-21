@@ -2,6 +2,8 @@
 
 use std::marker::PhantomData;
 
+use smallvec::SmallVec;
+
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::pagination::Pagination;
@@ -33,8 +35,10 @@ pub struct FindManyOperation<E: QueryEngine, M: Model> {
     distinct: Option<Vec<String>>,
     /// Relations to eager-load after the main query returns. Each
     /// spec drives one follow-up SELECT via the model's
-    /// [`ModelRelationLoader`] impl.
-    includes: Vec<IncludeSpec>,
+    /// [`ModelRelationLoader`] impl. Inlined for up to two specs
+    /// (the typical 0-2 case) to avoid a heap allocation on the hot
+    /// builder path.
+    includes: SmallVec<[IncludeSpec; 2]>,
     _model: PhantomData<M>,
 }
 
@@ -48,7 +52,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             pagination: Pagination::new(),
             select: Select::All,
             distinct: None,
-            includes: Vec::new(),
+            includes: SmallVec::new(),
             _model: PhantomData,
         }
     }
