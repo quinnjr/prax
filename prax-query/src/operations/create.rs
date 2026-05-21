@@ -114,7 +114,10 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
     ///     ]))
     ///     .exec().await?;
     /// ```
-    pub fn with(mut self, nw: NestedWriteOp) -> Self {
+    pub fn with(mut self, nw: NestedWriteOp) -> Self
+    where
+        E: crate::capabilities::SupportsNestedWrites,
+    {
         self.nested.push(nw);
         self
     }
@@ -201,8 +204,81 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> CreateOperation<E, M> {
                 let (sql, params) = Self::build_insert_sql(&columns, &values, &select, dialect);
                 let parent: M = tx.execute_insert::<M>(&sql, params).await?;
                 let parent_pk = parent.pk_value();
-                for nw in nested {
-                    nw.execute(&tx, &parent_pk).await?;
+
+                // Batch consecutive Connect ops with the same
+                // (target_table, foreign_key, target_pk) into a single
+                // UPDATE ... WHERE pk IN (...). Creates and other
+                // variants pass through unchanged. Final state is
+                // identical; this just collapses adjacent runs to
+                // reduce round trips.
+                let mut idx = 0;
+                while idx < nested.len() {
+                    if let NestedWriteOp::Connect {
+                        target_table: run_table,
+                        foreign_key: run_fk,
+                        target_pk: run_target_pk,
+                        ..
+                    } = &nested[idx]
+                    {
+                        let run_table = *run_table;
+                        let run_fk = *run_fk;
+                        let run_target_pk = *run_target_pk;
+                        let mut end = idx + 1;
+                        while end < nested.len() {
+                            match &nested[end] {
+                                NestedWriteOp::Connect {
+                                    target_table,
+                                    foreign_key,
+                                    target_pk,
+                                    ..
+                                } if *target_table == run_table
+                                    && *foreign_key == run_fk
+                                    && *target_pk == run_target_pk =>
+                                {
+                                    end += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+
+                        if end - idx == 1 {
+                            let op = nested[idx].clone();
+                            op.execute(&tx, &parent_pk).await?;
+                        } else {
+                            let expected = (end - idx) as u64;
+                            let mut pks: Vec<FilterValue> = Vec::with_capacity(end - idx + 1);
+                            pks.push(parent_pk.clone());
+                            for op in &nested[idx..end] {
+                                if let NestedWriteOp::Connect { pk, .. } = op {
+                                    pks.push(pk.clone());
+                                }
+                            }
+                            let placeholders: Vec<String> =
+                                (2..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+                            let sql = format!(
+                                "UPDATE {} SET {} = {} WHERE {} IN ({})",
+                                dialect.quote_ident(run_table),
+                                dialect.quote_ident(run_fk),
+                                dialect.placeholder(1),
+                                dialect.quote_ident(run_target_pk),
+                                placeholders.join(", "),
+                            );
+                            let affected = tx.execute_raw(&sql, pks).await?;
+                            if affected != expected {
+                                return Err(crate::error::QueryError::not_found(run_table)
+                                    .with_context("Nested Connect batch")
+                                    .with_help(format!(
+                                        "Expected {} matching rows but UPDATE affected {}",
+                                        expected, affected
+                                    )));
+                            }
+                        }
+                        idx = end;
+                    } else {
+                        let op = nested[idx].clone();
+                        op.execute(&tx, &parent_pk).await?;
+                        idx += 1;
+                    }
                 }
                 Ok(parent)
             })

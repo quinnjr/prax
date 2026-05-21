@@ -19,7 +19,7 @@ prax-schema.workspace = true
 # Parsing
 pest.workspace = true
 pest_derive.workspace = true
-syn.workspace = true
+syn = { workspace = true, features = ["full", "parsing"] }
 proc-macro2.workspace = true
 quote.workspace = true
 

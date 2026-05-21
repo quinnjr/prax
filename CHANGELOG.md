@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested create/connect inside `create!` (phase 5b).** The `data:`
+  block of `prax::create!` now accepts relation keys with
+  `{ create: [...], connect: [...] }`, building a single transaction
+  that inserts the parent row, inserts the nested children with the
+  parent's returned PK spliced into their FK column, and updates the
+  FK of any existing child rows targeted by `connect`. The lowering
+  recognises `create:` and `connect:` operators; everything else
+  (`update`/`upsert`/`delete`/`delete_many`/`disconnect`/`set`)
+  returns a "phase 5c" deferral diagnostic, and `connect_or_create`
+  returns "phase 5d". Unknown operators get a did-you-mean against
+  `[create, connect]`.
+- **`NestedWriteOp::Connect` executor is now functional.** Extended
+  the variant with `target_table`, `foreign_key`, and `target_pk`
+  metadata so the executor can emit
+  `UPDATE <target_table> SET <fk> = $1 WHERE <target_pk> = $2`.
+  Identifier components flow from codegen-emitted `&'static str`
+  constants on the per-relation `RelationMeta` / `Model` types;
+  only the PK values are parameterized. The codegen-emitted
+  `<relation>::connect()` helper fills the new fields from the target
+  model's `TABLE_NAME` / `PRIMARY_KEY[0]` constants.
+- **`CreateOperation::with(...)` is type-gated on
+  `SupportsNestedWrites`.** SQL engines and MongoDB already impl the
+  marker trait; CQL engines (ScyllaDB, Cassandra) intentionally do
+  not, so nested writes against CQL fail to compile with the
+  `#[diagnostic::on_unimplemented]` message on the trait.
+
+### Deferred to phase 5c+
+
+- `update`, `update_many`, `upsert`, `delete`, `delete_many`,
+  `disconnect`, `set` operators inside relation blocks — phase 5c.
+- `connect_or_create` (engine-specific lowerings) — phase 5d.
+- Diff-based full-relation replacement via `set:` — phase 5e.
+- Nested writes inside `update!` / `upsert!` `data:` blocks — phase 5c.
+- Typed `<RelatedModel>CreateWithout<Owner>Input` /
+  `<Model><Relation>CreateNestedInput` wrapper structs — phase 5b
+  lowers the DSL inline; the typed wrappers land in phase 5c
+  alongside the update/upsert nested-write surface if still useful.
+
 - **Flat write macros (phase 5a).** Five new schema-aware proc-macros
   that lower a Prisma-style brace-block DSL into chained
   `with_*_input(...)` calls on the existing write operations:
@@ -144,6 +182,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prax-codegen` for `Bytes`-typed `@unique` columns resolves
   without requiring downstream users to add `base64` to their own
   `Cargo.toml`.
+- **Nested-create error diagnostics are now batch-level.** With the
+  multi-VALUES INSERT batching for `NestedWriteOp::Create`, a failing
+  child row surfaces as a single error for the whole batch rather than
+  pointing at the specific offending row. A failing batch still rolls
+  back the parent transaction; only the per-row attribution is lost.
 
 ### Deprecated
 

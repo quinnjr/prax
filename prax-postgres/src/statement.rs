@@ -1,9 +1,10 @@
 //! Prepared statement caching.
 
-use std::collections::HashMap;
-use std::sync::RwLock;
+use std::num::NonZeroUsize;
+use std::sync::Mutex;
 
 use deadpool_postgres::{Object, Transaction};
+use lru::LruCache;
 use tokio_postgres::Statement;
 use tracing::{debug, trace};
 
@@ -11,50 +12,56 @@ use crate::error::PgResult;
 
 /// A cache for prepared statements.
 ///
-/// This cache stores prepared statements by their SQL query string,
-/// allowing reuse of statements across multiple queries.
+/// Tracks which SQL strings have been prepared so we emit a `trace!`
+/// for hits vs. misses. Eviction is true LRU via [`lru::LruCache`] —
+/// when the cache reaches `max_size` the least-recently-used entry is
+/// dropped on the next insert.
+///
+/// The cache is keyed on the SQL string; the actual `Statement` is
+/// fetched from `client.prepare_cached` on every call (deadpool reuses
+/// its own per-connection cache).
 pub struct PreparedStatementCache {
     max_size: usize,
-    /// Note: We use a simple HashMap here. In production, you might want
-    /// an LRU cache to evict old statements when the cache is full.
-    /// However, prepared statements are tied to connections, so this
-    /// cache is really just for tracking which statements we've prepared.
-    prepared_queries: RwLock<HashMap<String, bool>>,
+    /// LRU cache of SQL strings we've seen. The value is `()` because
+    /// the real `Statement` lives in deadpool-postgres' per-connection
+    /// cache; we just need to know whether we've encountered the SQL
+    /// before for tracing/metrics. `Mutex` (not `RwLock`) because every
+    /// `get_or_prepare` mutates LRU order, so the read-only path
+    /// doesn't exist.
+    prepared_queries: Mutex<LruCache<String, ()>>,
 }
 
 impl PreparedStatementCache {
     /// Create a new statement cache with the given maximum size.
+    ///
+    /// `max_size` of 0 is treated as 1 to satisfy `NonZeroUsize`.
     pub fn new(max_size: usize) -> Self {
+        let cap = NonZeroUsize::new(max_size.max(1)).expect("max(1) ensures non-zero");
         Self {
             max_size,
-            prepared_queries: RwLock::new(HashMap::new()),
+            prepared_queries: Mutex::new(LruCache::new(cap)),
         }
     }
 
     /// Get or prepare a statement for the given SQL.
     pub async fn get_or_prepare(&self, client: &Object, sql: &str) -> PgResult<Statement> {
-        // Check if we've prepared this statement before
         let is_cached = {
-            let cache = self.prepared_queries.read().unwrap();
-            cache.contains_key(sql)
+            let mut cache = self
+                .prepared_queries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cache.get(sql).is_some() {
+                true
+            } else {
+                cache.put(sql.to_string(), ());
+                false
+            }
         };
 
         if is_cached {
             trace!(sql = %sql, "Using cached prepared statement");
         } else {
             trace!(sql = %sql, "Preparing new statement");
-
-            // Check cache size and potentially evict
-            let mut cache = self.prepared_queries.write().unwrap();
-            if cache.len() >= self.max_size {
-                // Simple eviction: clear half the cache
-                // In production, use an LRU cache
-                let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
-                for key in to_remove {
-                    cache.remove(&key);
-                }
-            }
-            cache.insert(sql.to_string(), true);
         }
 
         // Always prepare - the database will reuse if it's cached server-side
@@ -68,25 +75,23 @@ impl PreparedStatementCache {
         txn: &Transaction<'a>,
         sql: &str,
     ) -> PgResult<Statement> {
-        // Similar logic to above, but for transactions
         let is_cached = {
-            let cache = self.prepared_queries.read().unwrap();
-            cache.contains_key(sql)
+            let mut cache = self
+                .prepared_queries
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if cache.get(sql).is_some() {
+                true
+            } else {
+                cache.put(sql.to_string(), ());
+                false
+            }
         };
 
         if is_cached {
             trace!(sql = %sql, "Using cached prepared statement (txn)");
         } else {
             trace!(sql = %sql, "Preparing new statement (txn)");
-
-            let mut cache = self.prepared_queries.write().unwrap();
-            if cache.len() >= self.max_size {
-                let to_remove: Vec<_> = cache.keys().take(cache.len() / 2).cloned().collect();
-                for key in to_remove {
-                    cache.remove(&key);
-                }
-            }
-            cache.insert(sql.to_string(), true);
         }
 
         let stmt = txn.prepare_cached(sql).await?;
@@ -95,14 +100,20 @@ impl PreparedStatementCache {
 
     /// Clear all cached statements.
     pub fn clear(&self) {
-        let mut cache = self.prepared_queries.write().unwrap();
+        let mut cache = self
+            .prepared_queries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.clear();
         debug!("Statement cache cleared");
     }
 
     /// Get the number of cached statement keys.
     pub fn len(&self) -> usize {
-        let cache = self.prepared_queries.read().unwrap();
+        let cache = self
+            .prepared_queries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.len()
     }
 
@@ -134,13 +145,31 @@ mod tests {
 
         // Manually insert some entries for testing
         {
-            let mut inner = cache.prepared_queries.write().unwrap();
-            inner.insert("SELECT 1".to_string(), true);
-            inner.insert("SELECT 2".to_string(), true);
+            let mut inner = cache.prepared_queries.lock().unwrap();
+            inner.put("SELECT 1".to_string(), ());
+            inner.put("SELECT 2".to_string(), ());
         }
 
         assert_eq!(cache.len(), 2);
         cache.clear();
         assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn test_cache_lru_eviction() {
+        let cache = PreparedStatementCache::new(2);
+        {
+            let mut inner = cache.prepared_queries.lock().unwrap();
+            inner.put("A".to_string(), ());
+            inner.put("B".to_string(), ());
+            // Touch A so B becomes LRU.
+            let _ = inner.get("A");
+            inner.put("C".to_string(), ());
+        }
+        let inner = cache.prepared_queries.lock().unwrap();
+        assert_eq!(inner.len(), 2);
+        assert!(inner.peek("A").is_some());
+        assert!(inner.peek("B").is_none(), "B should have been evicted");
+        assert!(inner.peek("C").is_some());
     }
 }

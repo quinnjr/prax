@@ -4,6 +4,7 @@
 //! Filled in by tasks 7-10.
 
 pub(crate) mod data_input;
+pub(crate) mod data_relation;
 pub(crate) mod include_input;
 pub(crate) mod order_by_input;
 pub(crate) mod scalar_filter;

@@ -52,16 +52,10 @@
 //!     .await?;
 //! ```
 
-// Every `Filter::to_sql` call in this module passes
-// `&crate::dialect::Postgres`. Nested writes are not yet wired into a live
-// client, and the SQL builders below emit Postgres placeholder syntax (`$N`).
-// When nested writes land on the live client path they will thread the
-// engine's dialect through here, replacing the hard-coded Postgres reference.
-
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
-use crate::error::{QueryError, QueryResult};
+use crate::error::QueryResult;
 use crate::filter::{Filter, FilterValue};
 use crate::sql::quote_identifier;
 use crate::traits::{Model, QueryEngine};
@@ -282,6 +276,11 @@ impl<T: Model> NestedUpdateManyData<T> {
 }
 
 /// Builder for nested write SQL operations.
+///
+/// The SQL emitters here currently bake in [`crate::dialect::Postgres`] —
+/// nested writes are not yet wired into a live client, and the placeholder
+/// syntax (`$N`) is Postgres-shaped. When this builder lands on the live
+/// client path the dialect should thread through from the engine.
 #[derive(Debug)]
 pub struct NestedWriteBuilder {
     /// The parent table name.
@@ -484,27 +483,36 @@ impl NestedWriteBuilder {
         parent_id: &FilterValue,
         creates: &[NestedCreateData<T>],
     ) -> Vec<(String, Vec<FilterValue>)> {
-        let mut statements = Vec::new();
+        let mut statements = Vec::with_capacity(creates.len());
+        let quoted_table = quote_identifier(&self.related_table);
 
         for create in creates {
-            let mut columns: Vec<String> = create.data.iter().map(|(k, _)| k.clone()).collect();
-            let mut values: Vec<FilterValue> = create.data.iter().map(|(_, v)| v.clone()).collect();
+            let row_len = create.data.len() + 1;
+            let mut columns: Vec<String> = Vec::with_capacity(row_len);
+            let mut values: Vec<FilterValue> = Vec::with_capacity(row_len);
+            for (k, v) in &create.data {
+                columns.push(k.clone());
+                values.push(v.clone());
+            }
 
-            // Add the foreign key column
             columns.push(self.foreign_key.clone());
             values.push(parent_id.clone());
 
-            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${}", i)).collect();
+            let mut col_list = String::new();
+            let mut placeholders = String::new();
+            for (i, c) in columns.iter().enumerate() {
+                if i > 0 {
+                    col_list.push_str(", ");
+                    placeholders.push_str(", ");
+                }
+                col_list.push_str(&quote_identifier(c));
+                use std::fmt::Write;
+                let _ = write!(placeholders, "${}", i + 1);
+            }
 
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
-                quote_identifier(&self.related_table),
-                columns
-                    .iter()
-                    .map(|c| quote_identifier(c))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                placeholders.join(", ")
+                quoted_table, col_list, placeholders,
             );
 
             statements.push((sql, values));
@@ -604,29 +612,27 @@ pub enum NestedWriteOp {
     /// `relation` is retained for diagnostics/debugging; the executor
     /// only needs `target_table`, `foreign_key`, and `payload`.
     Create {
-        /// Name of the relation on the parent model.
-        relation: String,
-        /// Target child table.
-        target_table: String,
-        /// FK column on the child table that references the parent's PK.
-        foreign_key: String,
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
         /// One `Vec<(column, value)>` per child row. The FK column +
         /// parent PK are appended by [`NestedWriteOp::execute`].
         payload: Vec<Vec<(String, FilterValue)>>,
     },
-    /// Connect an existing child by its PK — not yet implemented.
+    /// Connect an existing child row by its primary-key value.
     ///
-    /// Connect on a `HasMany`/`HasOne` relation translates to
-    /// `UPDATE <child_table> SET <fk> = <parent_pk> WHERE <child_pk> = <pk>`,
-    /// but plumbing the child-PK column name through to execute time
-    /// needs more relation metadata than the current codegen surface
-    /// exposes. The variant carries its data so callers can still
-    /// build it, but [`NestedWriteOp::execute`] returns
-    /// [`QueryError::internal`] until the metadata is wired.
+    /// Lowers to
+    /// `UPDATE <target_table> SET <foreign_key> = <parent_pk> WHERE <target_pk> = <pk>`
+    /// at execute time. The identifier fields are `&'static str` because
+    /// they come from codegen-emitted constants on the per-relation
+    /// `RelationMeta` / `Model` types — the type itself enforces the
+    /// SQL-safety boundary (see `.cursor/rules/sql-safety.mdc`). Only
+    /// `parent_pk` and `pk` flow as `$N`-bound parameters.
     Connect {
-        /// Name of the relation on the parent model.
-        relation: String,
-        /// Primary key of the child row to connect.
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        target_pk: &'static str,
         pk: FilterValue,
     },
 }
@@ -643,11 +649,26 @@ impl NestedWriteOp {
         E: QueryEngine,
     {
         match self {
-            NestedWriteOp::Connect { relation, pk: _ } => {
-                let _ = relation;
-                Err(QueryError::internal(
-                    "nested Connect is not yet implemented (needs child-PK column metadata)",
-                ))
+            NestedWriteOp::Connect {
+                relation: _,
+                target_table,
+                foreign_key,
+                target_pk,
+                pk,
+            } => {
+                let dialect = engine.dialect();
+                let sql = format!(
+                    "UPDATE {} SET {} = {} WHERE {} = {}",
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
+                    dialect.placeholder(1),
+                    dialect.quote_ident(target_pk),
+                    dialect.placeholder(2),
+                );
+                engine
+                    .execute_raw(&sql, vec![parent_pk.clone(), pk])
+                    .await?;
+                Ok(())
             }
             NestedWriteOp::Create {
                 relation: _,
@@ -655,30 +676,53 @@ impl NestedWriteOp {
                 foreign_key,
                 payload,
             } => {
-                let dialect = engine.dialect();
-                for child in payload {
-                    // Split the caller-supplied (col, val) pairs, then
-                    // append the FK column + parent PK so the child
-                    // points at the parent we just inserted.
-                    let mut columns: Vec<String> = child.iter().map(|(c, _)| c.clone()).collect();
-                    let mut values: Vec<FilterValue> = child.into_iter().map(|(_, v)| v).collect();
-                    columns.push(foreign_key.clone());
-                    values.push(parent_pk.clone());
-
-                    let placeholders: Vec<String> =
-                        (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
-                    let quoted_cols: Vec<String> =
-                        columns.iter().map(|c| dialect.quote_ident(c)).collect();
-
-                    let sql = format!(
-                        "INSERT INTO {} ({}) VALUES ({})",
-                        dialect.quote_ident(&target_table),
-                        quoted_cols.join(", "),
-                        placeholders.join(", "),
-                    );
-
-                    engine.execute_raw(&sql, values).await?;
+                if payload.is_empty() {
+                    return Ok(());
                 }
+
+                let dialect = engine.dialect();
+
+                // All rows in a single `Create` op share the same column
+                // set (codegen guarantee). Derive columns from the first
+                // row, then append the FK column once. Each row
+                // contributes its values + the parent PK.
+                let first = &payload[0];
+                let mut columns: Vec<String> = first.iter().map(|(c, _)| c.clone()).collect();
+                columns.push(foreign_key.to_string());
+                let cols_per_row = columns.len();
+
+                let quoted_cols: Vec<String> =
+                    columns.iter().map(|c| dialect.quote_ident(c)).collect();
+
+                let mut values: Vec<FilterValue> = Vec::with_capacity(payload.len() * cols_per_row);
+                let mut row_placeholders: Vec<String> = Vec::with_capacity(payload.len());
+                let mut next_placeholder = 1usize;
+
+                for child in payload {
+                    let mut row_phs: Vec<String> = Vec::with_capacity(cols_per_row);
+                    for (_, v) in child {
+                        values.push(v);
+                        row_phs.push(dialect.placeholder(next_placeholder));
+                        next_placeholder += 1;
+                    }
+                    values.push(parent_pk.clone());
+                    row_phs.push(dialect.placeholder(next_placeholder));
+                    next_placeholder += 1;
+                    row_placeholders.push(format!("({})", row_phs.join(", ")));
+                }
+
+                // NOTE: Combining all rows into a single multi-VALUES
+                // INSERT means any constraint failure rolls back the
+                // entire batch, not just the failing row. This matches
+                // typical Prisma semantics for nested writes.
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    dialect.quote_ident(target_table),
+                    quoted_cols.join(", "),
+                    row_placeholders.join(", "),
+                );
+
+                engine.execute_raw(&sql, values).await?;
                 Ok(())
             }
         }
@@ -688,6 +732,105 @@ impl NestedWriteOp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use crate::error::QueryError;
+    use crate::traits::BoxFuture;
+
+    /// Captured (sql, params) entries from the mock engine.
+    type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
+
+    /// Recording mock engine for [`NestedWriteOp::execute`] tests.
+    ///
+    /// Captures the (sql, params) of every [`QueryEngine::execute_raw`]
+    /// call so tests can assert the lowered shape.
+    #[derive(Clone)]
+    struct RecordingEngine {
+        recorded: StatementLog,
+    }
+
+    impl RecordingEngine {
+        fn new() -> Self {
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn statements(&self) -> Vec<(String, Vec<FilterValue>)> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::traits::QueryEngine for RecordingEngine {
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<T>> {
+            Box::pin(async { Err(QueryError::not_found("test")) })
+        }
+
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<T>> {
+            Box::pin(async { Err(QueryError::not_found("test")) })
+        }
+
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn execute_delete(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn execute_raw(
+            &self,
+            sql: &str,
+            params: Vec<FilterValue>,
+        ) -> BoxFuture<'_, QueryResult<u64>> {
+            let recorded = self.recorded.clone();
+            let sql = sql.to_string();
+            Box::pin(async move {
+                recorded.lock().unwrap().push((sql, params));
+                Ok(1)
+            })
+        }
+
+        fn count(&self, _sql: &str, _params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
 
     struct TestModel;
 
@@ -902,6 +1045,33 @@ mod tests {
         assert!(matches!(update.filter, Filter::Equals(..)));
         assert_eq!(update.data.len(), 1);
         assert_eq!(update.data[0].0, "title");
+    }
+
+    #[tokio::test]
+    async fn nested_op_connect_emits_update_set_where() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Connect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+        };
+        let parent_pk = FilterValue::Int(7);
+        op.execute(&engine, &parent_pk).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1, "expected one UPDATE statement");
+        let (sql, params) = &stmts[0];
+        // Postgres dialect quotes idents with double quotes.
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("SET"), "got: {sql}");
+        assert!(sql.contains("WHERE"), "got: {sql}");
+        assert!(sql.contains("$1"), "got: {sql}");
+        assert!(sql.contains("$2"), "got: {sql}");
+        assert_eq!(params, &vec![FilterValue::Int(7), FilterValue::Int(42)]);
     }
 
     #[test]

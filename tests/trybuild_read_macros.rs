@@ -69,3 +69,21 @@ fn write_macros_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/write_macros/*.rs");
 }
+
+/// `trybuild` UI tests for the phase-5b nested-write fixtures.
+///
+/// Each `.rs` file under `tests/ui/nested_writes/` exercises one
+/// failure mode of `prax::create!`'s relation-key lowering inside
+/// `data:` — unknown operator, phase-5c deferral, phase-5d deferral
+/// for `connect_or_create`. Stderrs are rustc-version sensitive;
+/// regenerate with:
+///
+/// ```bash
+/// TRYBUILD=overwrite cargo test --test trybuild_read_macros --features ui-tests
+/// ```
+#[cfg(feature = "ui-tests")]
+#[test]
+fn nested_writes_ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/nested_writes/*.rs");
+}

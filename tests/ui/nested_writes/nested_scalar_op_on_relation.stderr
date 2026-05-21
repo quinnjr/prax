@@ -1,0 +1,16 @@
+error: Failed to parse schema: Schema file 'prax/schema.prax' not found. Searched in:
+         - CARGO_MANIFEST_DIR/prax/schema.prax
+         - (absolute) prax/schema.prax
+         - (current_dir) prax/schema.prax
+ --> tests/ui/nested_writes/nested_scalar_op_on_relation.rs:5:1
+  |
+5 | prax_orm::prax_schema!("prax/schema.prax");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `prax_orm::prax_schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: unknown field `posts` on model `User` in `data:` block
+  --> tests/ui/nested_writes/nested_scalar_op_on_relation.rs:11:13
+   |
+11 |             posts: {
+   |             ^^^^^

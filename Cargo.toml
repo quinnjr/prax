@@ -57,12 +57,12 @@ prax-pgvector = { path = "prax-pgvector", version = "0.9.7" }
 # Code generation (proc-macros)
 proc-macro2 = "1.0"
 quote = "1.0"
-syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }
+syn = "2.0"
 convert_case = "0.6"
 pastey = "0.1"
 
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "io-util", "sync", "time"] }
 futures = "0.3"
 
 # Serialization
@@ -141,6 +141,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # Filesystem
 walkdir = "2.5"
 
+# LRU cache (used by prax-postgres prepared-statement cache)
+lru = "0.12"
+
 # Testing
 insta = { version = "1.40", features = ["yaml"] }
 pretty_assertions = "1.4"
@@ -149,11 +152,6 @@ trybuild = "1.0"
 
 # Benchmarking
 criterion = { version = "0.8.0", features = ["html_reports", "async_tokio"] }
-
-# ORM Comparison (for benchmarks)
-diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
-diesel-async = { version = "0.5", features = ["postgres", "mysql", "deadpool"] }
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 
 # Profiling
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
@@ -210,10 +208,10 @@ uuid = { workspace = true }
 rust_decimal = { workspace = true }
 trybuild = { workspace = true }
 
-# ORM comparison benchmarks
-diesel = { workspace = true }
-diesel-async = { workspace = true }
-sea-orm = { workspace = true }
+# ORM comparison benchmarks (dev-only; not exposed to downstream crates)
+diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
+diesel-async = { version = "0.5", features = ["postgres", "mysql", "deadpool"] }
+sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "runtime-tokio"] }
 prax-postgres = { workspace = true }
 prax-mysql = { workspace = true }
