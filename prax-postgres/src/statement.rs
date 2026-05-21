@@ -36,7 +36,7 @@ impl PreparedStatementCache {
     ///
     /// `max_size` of 0 is treated as 1 to satisfy `NonZeroUsize`.
     pub fn new(max_size: usize) -> Self {
-        let cap = NonZeroUsize::new(max_size.max(1)).unwrap();
+        let cap = NonZeroUsize::new(max_size.max(1)).expect("max(1) ensures non-zero");
         Self {
             max_size,
             prepared_queries: Mutex::new(LruCache::new(cap)),
