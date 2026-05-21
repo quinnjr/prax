@@ -667,30 +667,56 @@ impl NestedWriteOp {
                 foreign_key,
                 payload,
             } => {
-                let dialect = engine.dialect();
-                for child in payload {
-                    // Split the caller-supplied (col, val) pairs, then
-                    // append the FK column + parent PK so the child
-                    // points at the parent we just inserted.
-                    let mut columns: Vec<String> = child.iter().map(|(c, _)| c.clone()).collect();
-                    let mut values: Vec<FilterValue> = child.into_iter().map(|(_, v)| v).collect();
-                    columns.push(foreign_key.to_string());
-                    values.push(parent_pk.clone());
-
-                    let placeholders: Vec<String> =
-                        (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
-                    let quoted_cols: Vec<String> =
-                        columns.iter().map(|c| dialect.quote_ident(c)).collect();
-
-                    let sql = format!(
-                        "INSERT INTO {} ({}) VALUES ({})",
-                        dialect.quote_ident(target_table),
-                        quoted_cols.join(", "),
-                        placeholders.join(", "),
-                    );
-
-                    engine.execute_raw(&sql, values).await?;
+                if payload.is_empty() {
+                    return Ok(());
                 }
+
+                let dialect = engine.dialect();
+
+                // All rows in a single `Create` op share the same column
+                // set (codegen guarantee). Derive columns from the first
+                // row, then append the FK column once. Each row
+                // contributes its values + the parent PK.
+                let first = &payload[0];
+                let mut columns: Vec<String> = first.iter().map(|(c, _)| c.clone()).collect();
+                columns.push(foreign_key.to_string());
+                let cols_per_row = columns.len();
+
+                let quoted_cols: Vec<String> =
+                    columns.iter().map(|c| dialect.quote_ident(c)).collect();
+
+                let mut values: Vec<FilterValue> = Vec::with_capacity(payload.len() * cols_per_row);
+                let mut row_placeholders: Vec<String> = Vec::with_capacity(payload.len());
+                let mut next_placeholder = 1usize;
+
+                for child in payload {
+                    // Each child row supplies the caller-provided values
+                    // for its columns, then the parent PK for the FK
+                    // column appended above.
+                    let mut row_phs: Vec<String> = Vec::with_capacity(cols_per_row);
+                    for (_, v) in child {
+                        values.push(v);
+                        row_phs.push(dialect.placeholder(next_placeholder));
+                        next_placeholder += 1;
+                    }
+                    values.push(parent_pk.clone());
+                    row_phs.push(dialect.placeholder(next_placeholder));
+                    next_placeholder += 1;
+                    row_placeholders.push(format!("({})", row_phs.join(", ")));
+                }
+
+                // NOTE: Combining all rows into a single multi-VALUES
+                // INSERT means any constraint failure rolls back the
+                // entire batch, not just the failing row. This matches
+                // typical Prisma semantics for nested writes.
+                let sql = format!(
+                    "INSERT INTO {} ({}) VALUES {}",
+                    dialect.quote_ident(target_table),
+                    quoted_cols.join(", "),
+                    row_placeholders.join(", "),
+                );
+
+                engine.execute_raw(&sql, values).await?;
                 Ok(())
             }
         }
