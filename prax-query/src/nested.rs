@@ -483,27 +483,44 @@ impl NestedWriteBuilder {
         parent_id: &FilterValue,
         creates: &[NestedCreateData<T>],
     ) -> Vec<(String, Vec<FilterValue>)> {
-        let mut statements = Vec::new();
+        let mut statements = Vec::with_capacity(creates.len());
+
+        // The table identifier is the same across rows. Quote it once.
+        let quoted_table = quote_identifier(&self.related_table);
 
         for create in creates {
-            let mut columns: Vec<String> = create.data.iter().map(|(k, _)| k.clone()).collect();
-            let mut values: Vec<FilterValue> = create.data.iter().map(|(_, v)| v.clone()).collect();
+            // Single pass over create.data instead of two
+            // .iter().map(...).collect() passes, with capacity hints
+            // that account for the trailing FK column / parent PK.
+            let row_len = create.data.len() + 1;
+            let mut columns: Vec<String> = Vec::with_capacity(row_len);
+            let mut values: Vec<FilterValue> = Vec::with_capacity(row_len);
+            for (k, v) in &create.data {
+                columns.push(k.clone());
+                values.push(v.clone());
+            }
 
-            // Add the foreign key column
+            // Foreign key column + parent PK.
             columns.push(self.foreign_key.clone());
             values.push(parent_id.clone());
 
-            let placeholders: Vec<String> = (1..=values.len()).map(|i| format!("${}", i)).collect();
+            // Build the column-list and placeholder-list inline to
+            // avoid the intermediate Vec<String> + .join() pair.
+            let mut col_list = String::new();
+            let mut placeholders = String::new();
+            for (i, c) in columns.iter().enumerate() {
+                if i > 0 {
+                    col_list.push_str(", ");
+                    placeholders.push_str(", ");
+                }
+                col_list.push_str(&quote_identifier(c));
+                use std::fmt::Write;
+                let _ = write!(placeholders, "${}", i + 1);
+            }
 
             let sql = format!(
                 "INSERT INTO {} ({}) VALUES ({}) RETURNING *",
-                quote_identifier(&self.related_table),
-                columns
-                    .iter()
-                    .map(|c| quote_identifier(c))
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                placeholders.join(", ")
+                quoted_table, col_list, placeholders,
             );
 
             statements.push((sql, values));
