@@ -671,6 +671,23 @@ pub enum NestedWriteOp {
         foreign_key: &'static str,
         filter: Filter,
     },
+    /// Update a child row by its primary key.
+    ///
+    /// Lowers to
+    /// `UPDATE <target_table> SET <writeop-fragments> WHERE <target_pk> = $1`.
+    /// Each entry in `payload` contributes one column assignment whose
+    /// shape is determined by the [`crate::inputs::WriteOp`] variant
+    /// (plain set, atomic increment/decrement/multiply/divide, or
+    /// null-out via Unset). Returns `QueryError::not_found` when the PK
+    /// doesn't match any row, mirroring [`NestedWriteOp::Delete`]'s
+    /// affected-rows contract.
+    Update {
+        relation: &'static str,
+        target_table: &'static str,
+        target_pk: &'static str,
+        pk: FilterValue,
+        payload: Vec<(String, crate::inputs::WriteOp)>,
+    },
 }
 
 impl NestedWriteOp {
@@ -774,6 +791,46 @@ impl NestedWriteOp {
                     return engine.execute_raw(&sql, params).await.map(|_| ());
                 };
                 engine.execute_raw(&sql, vec![parent_pk.clone()]).await?;
+                Ok(())
+            }
+            NestedWriteOp::Update {
+                relation: _,
+                target_table,
+                target_pk,
+                pk,
+                payload,
+            } => {
+                if payload.is_empty() {
+                    return Ok(());
+                }
+                let dialect = engine.dialect();
+                let mut set_fragments: Vec<String> = Vec::with_capacity(payload.len());
+                let mut params: Vec<FilterValue> = Vec::with_capacity(payload.len() + 1);
+                let mut next_placeholder = 1usize;
+                for (col, op) in payload {
+                    let (frag, maybe_val) = op.to_set_fragment(
+                        &dialect.quote_ident(&col),
+                        &dialect.placeholder(next_placeholder),
+                    );
+                    set_fragments.push(frag);
+                    if let Some(val) = maybe_val {
+                        params.push(val);
+                        next_placeholder += 1;
+                    }
+                }
+                params.push(pk);
+                let sql = format!(
+                    "UPDATE {} SET {} WHERE {} = {}",
+                    dialect.quote_ident(target_table),
+                    set_fragments.join(", "),
+                    dialect.quote_ident(target_pk),
+                    dialect.placeholder(next_placeholder),
+                );
+                let affected = engine.execute_raw(&sql, params).await?;
+                if affected != 1 {
+                    return Err(crate::error::QueryError::not_found(target_table)
+                        .with_context("Nested Update by PK"));
+                }
                 Ok(())
             }
             NestedWriteOp::Create {
@@ -1266,6 +1323,103 @@ mod tests {
         assert!(sql.contains("NULL"), "got: {sql}");
         assert!(sql.contains("WHERE"), "got: {sql}");
         assert_eq!(params, &vec![FilterValue::Int(42)]);
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_plain_set() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![(
+                "title".to_string(),
+                WriteOp::Set(FilterValue::String("renamed".to_string())),
+            )],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1);
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("title"), "got: {sql}");
+        assert!(sql.contains("SET"), "got: {sql}");
+        assert!(sql.contains("WHERE"), "got: {sql}");
+        assert!(sql.contains("$1"), "got: {sql}");
+        assert!(sql.contains("$2"), "got: {sql}");
+        assert_eq!(params.len(), 2);
+        assert!(matches!(params[0], FilterValue::String(_)));
+        assert_eq!(params[1], FilterValue::Int(42));
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_increment() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        let (sql, _) = &stmts[0];
+        // Postgres dialect quotes idents — fragment will read `"views" = "views" + $1`.
+        assert!(sql.contains("+"), "got: {sql}");
+        assert!(sql.contains("views"), "got: {sql}");
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_mixed_set_and_increment() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![
+                (
+                    "title".to_string(),
+                    WriteOp::Set(FilterValue::String("renamed".to_string())),
+                ),
+                ("views".to_string(), WriteOp::Increment(FilterValue::Int(1))),
+            ],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("title"), "got: {sql}");
+        assert!(sql.contains("views"), "got: {sql}");
+        assert!(sql.contains("+"), "got: {sql}");
+        // 2 SET params + 1 PK = 3 placeholders.
+        assert!(sql.contains("$3"), "got: {sql}");
+        assert_eq!(params.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn nested_op_update_empty_payload_is_noop() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+        assert!(
+            engine.statements().is_empty(),
+            "empty payload should emit no SQL"
+        );
     }
 
     #[test]
