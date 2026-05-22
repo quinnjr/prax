@@ -234,6 +234,110 @@ pub fn lower_create_data(block: &DslBlock, ctx: &LowerCtx<'_>) -> syn::Result<To
     })
 }
 
+/// Lowering result for a `data:` block on the update path with
+/// nested-write support.
+///
+/// `scalar_input` is the `<Model>UpdateInput` literal — fed to
+/// `with_update_input` like before. `nested_ops` are the
+/// [`NestedWriteOp`](::prax_query::nested::NestedWriteOp) token
+/// streams extracted from relation keys; the macro emits a chained
+/// `.with(...)` call per entry (with the appropriate branch variant
+/// for `upsert!`).
+pub struct UpdateDataLowering {
+    /// Token stream evaluating to a `<Model>UpdateInput`.
+    pub scalar_input: TokenStream,
+    /// Per-relation `NestedWriteOp` expression token streams.
+    pub nested_ops: Vec<TokenStream>,
+}
+
+/// Lower a `data: { ... }` block on the **update** path, recognising
+/// both scalar fields and relation keys.
+///
+/// Mirrors [`lower_create_data_with_nested`]: relation keys with
+/// nested-write operators are extracted into
+/// [`UpdateDataLowering::nested_ops`]; scalar fields lower to a
+/// `<Model>UpdateInput` literal as in `lower_update_data`.
+///
+/// The nested-write ops produced by
+/// [`super::data_relation::lower_create_relation`] are agnostic to
+/// whether the parent op is create / update / upsert — they emit
+/// `NestedWriteOp::*` constructors keyed off the relation metadata,
+/// not the parent op type.
+pub fn lower_update_data_with_nested(
+    block: &DslBlock,
+    ctx: &LowerCtx<'_>,
+) -> syn::Result<UpdateDataLowering> {
+    let model_ident = format_ident!("{}", ctx.model.name());
+    let module_ident = format_ident!("{}", ctx.model.name().to_case(Case::Snake));
+    let input_ident = format_ident!("{}UpdateInput", ctx.model.name());
+
+    let mut scalar_stmts: Vec<TokenStream> = Vec::new();
+    let mut nested_ops: Vec<TokenStream> = Vec::new();
+    let mut field_iter = block.fields.iter().peekable();
+
+    let init = if let Some(DslField::Spread { expr, by_move, .. }) = field_iter.peek() {
+        let init_expr = if *by_move {
+            quote!(#expr)
+        } else {
+            quote!(::core::clone::Clone::clone(&(#expr)))
+        };
+        let _ = field_iter.next();
+        init_expr
+    } else {
+        quote!(<#module_ident::#input_ident as ::core::default::Default>::default())
+    };
+
+    for field in field_iter {
+        match field {
+            DslField::Pair { key, value, .. } => {
+                let key_str = key.to_string();
+                if matches!(key_str.as_str(), "and" | "or" | "not") {
+                    return Err(logical_in_data_error(&key_str, key.span()));
+                }
+                let model_field = lookup_field_with_suggestion(ctx, &key_str, key.span())?;
+                if model_field.is_relation() {
+                    let ops = super::data_relation::lower_create_relation(
+                        model_field,
+                        value,
+                        key.span(),
+                        ctx,
+                    )?;
+                    for op in ops {
+                        nested_ops.push(op.op_expr);
+                    }
+                } else {
+                    scalar_stmts.push(lower_update_pair(key, value, ctx)?);
+                }
+            }
+            DslField::Spread { expr, by_move, .. } => {
+                let assign = if *by_move {
+                    quote!(__d = #expr;)
+                } else {
+                    quote!(__d = ::core::clone::Clone::clone(&(#expr));)
+                };
+                scalar_stmts.push(assign);
+            }
+            DslField::Conditional { .. } => {
+                scalar_stmts.push(lower_update_conditional(field, ctx)?);
+            }
+        }
+    }
+
+    let scalar_input = quote! {
+        {
+            let mut __d: #module_ident::#input_ident = #init;
+            #(#scalar_stmts)*
+            let _ = stringify!(#model_ident);
+            __d
+        }
+    };
+
+    Ok(UpdateDataLowering {
+        scalar_input,
+        nested_ops,
+    })
+}
+
 /// Lower a `data: { ... }` block on the **update** path to a
 /// `<Model>UpdateInput` constructor.
 pub fn lower_update_data(block: &DslBlock, ctx: &LowerCtx<'_>) -> syn::Result<TokenStream> {
@@ -918,5 +1022,42 @@ mod tests {
         let err = lower_update_data(&block, &ctx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("phase 5c"), "got: {msg}");
+    }
+
+    #[test]
+    fn update_data_with_nested_lowers_relation_block_to_nested_ops() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        let block = parse_block(quote!({
+            name: "Renamed",
+            posts: { create: [{ title: "p1", published: true }] }
+        }));
+        let lowered = lower_update_data_with_nested(&block, &ctx).unwrap();
+        assert_eq!(lowered.nested_ops.len(), 1);
+        let scalar = pretty(lowered.scalar_input);
+        // The scalar half lowers to a `<Model>UpdateInput` literal.
+        assert!(scalar.contains("UserUpdateInput"), "got: {scalar}");
+        let nw = pretty(lowered.nested_ops[0].clone());
+        assert!(nw.contains("NestedWriteOp"), "got: {nw}");
+    }
+
+    #[test]
+    fn update_data_with_nested_mixes_scalar_and_disconnect() {
+        let schema = parsed_schema();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        let block = parse_block(quote!({
+            name: "Renamed",
+            posts: { disconnect: [{ id: 5 }] }
+        }));
+        let lowered = lower_update_data_with_nested(&block, &ctx).unwrap();
+        assert_eq!(
+            lowered.nested_ops.len(),
+            1,
+            "exactly one disconnect op expected"
+        );
+        let nw = pretty(lowered.nested_ops[0].clone());
+        assert!(nw.contains("Disconnect"), "got: {nw}");
     }
 }
