@@ -14,7 +14,7 @@ use syn::parse::Parser;
 use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
-use crate::macros::lower::data_input::lower_update_data;
+use crate::macros::lower::data_input::lower_update_data_with_nested;
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::order_by_input::lower_cursor;
 use crate::macros::lower::select_input::lower_select;
@@ -53,7 +53,7 @@ fn lower_update(
     ctx: &LowerCtx<'_>,
 ) -> syn::Result<TokenStream> {
     let mut where_tokens: Option<TokenStream> = None;
-    let mut data_tokens: Option<TokenStream> = None;
+    let mut data_lowering: Option<crate::macros::lower::data_input::UpdateDataLowering> = None;
     let mut include_tokens: Option<TokenStream> = None;
     let mut select_tokens: Option<TokenStream> = None;
     let mut select_span: Option<Span> = None;
@@ -80,7 +80,7 @@ fn lower_update(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`data:` expects `{ ... }`"));
                 };
-                data_tokens = Some(lower_update_data(b, ctx)?);
+                data_lowering = Some(lower_update_data_with_nested(b, ctx)?);
             }
             "include" => {
                 let DslValue::Block(b) = value else {
@@ -121,14 +121,21 @@ fn lower_update(
             "`update!` requires a `where:` block matching a unique column",
         )
     })?;
-    let data_tokens = data_tokens
+    let data_lowering = data_lowering
         .ok_or_else(|| syn::Error::new(block.span, "`update!` requires a `data:` block"))?;
+    let crate::macros::lower::data_input::UpdateDataLowering {
+        scalar_input: data_tokens,
+        nested_ops,
+    } = data_lowering;
 
     let accessor_expr = &accessor.accessor_expr;
     let mut chain: Vec<TokenStream> = vec![
         quote! { .with_where_input(#where_tokens) },
         quote! { .with_update_input(#data_tokens) },
     ];
+    for nw in nested_ops {
+        chain.push(quote! { .with(#nw) });
+    }
     if let Some(i) = include_tokens {
         chain.push(quote! { .with_include_input(#i) });
     }
