@@ -301,7 +301,24 @@ pub fn lower_create_relation(
                 }
             }
             "set" => {
-                return Err(phase_5e_deferral(relation_field.name(), key.span()));
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                let mut pk_exprs: Vec<TokenStream> = Vec::with_capacity(children.len());
+                for child_block in children {
+                    let pk_expr = lower_connect_pk(child_block, target_model, &target_pk_column)?;
+                    pk_exprs.push(quote! {
+                        ::core::convert::Into::<::prax_query::filter::FilterValue>::into(#pk_expr)
+                    });
+                }
+                let op_expr = quote! {
+                    ::prax_query::nested::NestedWriteOp::Set {
+                        relation: #relation_name_str,
+                        target_table: #target_table,
+                        foreign_key: #foreign_key,
+                        target_pk: #target_pk_column,
+                        set_pks: ::std::vec![ #( #pk_exprs ),* ],
+                    }
+                };
+                ops.push(NestedRelationOp { op_expr });
             }
             "connect_or_create" => {
                 let children = expect_list_of_blocks(value, &op_key, key.span())?;
@@ -333,6 +350,7 @@ pub fn lower_create_relation(
                     "disconnect".to_string(),
                     "delete".to_string(),
                     "delete_many".to_string(),
+                    "set".to_string(),
                     "update".to_string(),
                     "update_many".to_string(),
                     "upsert".to_string(),
@@ -342,13 +360,13 @@ pub fn lower_create_relation(
                     Some(s) => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
                          Did you mean `{s}`? Valid operators: create, connect, connect_or_create, \
-                         disconnect, delete, delete_many, update, update_many, upsert.",
+                         disconnect, delete, delete_many, set, update, update_many, upsert.",
                         relation_field.name(),
                     ),
                     None => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
                          Valid operators: create, connect, connect_or_create, disconnect, delete, \
-                         delete_many, update, update_many, upsert.",
+                         delete_many, set, update, update_many, upsert.",
                         relation_field.name(),
                     ),
                 };
@@ -358,17 +376,6 @@ pub fn lower_create_relation(
     }
 
     Ok(ops)
-}
-
-fn phase_5e_deferral(relation: &str, span: Span) -> syn::Error {
-    syn::Error::new(
-        span,
-        format!(
-            "nested operator `set` inside `data:` relation block `{relation}` is not yet \
-             supported. Full-relation diff-based replacement lands in phase 5e — for now use \
-             `disconnect` to clear the FK on specific rows or `delete` to remove them."
-        ),
-    )
 }
 
 fn expect_list_of_blocks<'a>(
@@ -880,17 +887,35 @@ mod tests {
     }
 
     #[test]
-    fn set_op_inside_relation_block_is_phase_5e_deferral() {
+    fn lowers_nested_set_to_nested_write_op() {
         let schema = parsed_schema();
         let user = schema.get_model("User").unwrap().clone();
         let ctx = LowerCtx::new(&schema, &user);
         let field = user.get_field("posts").unwrap();
         let value = DslValue::Block(parse_block(quote!({
-            set: [{ id: 1 }]
+            set: [{ id: 1 }, { id: 2 }]
         })));
-        let err = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("phase 5e"), "got: {msg}");
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("NestedWriteOp :: Set"), "got: {s}");
+        assert!(s.contains("set_pks"), "got: {s}");
+    }
+
+    #[test]
+    fn lowers_nested_set_with_empty_list() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            set: []
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("NestedWriteOp :: Set"), "got: {s}");
+        // Empty vec — the macro emits `::std::vec![]`
     }
 
     #[test]
