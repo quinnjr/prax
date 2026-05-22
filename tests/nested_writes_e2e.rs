@@ -36,6 +36,15 @@ use prax_query::traits::{BoxFuture, Model as ModelTrait, ModelWithPk, QueryEngin
 /// Captured (sql, params) entries from the mock engine.
 type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
 
+/// Which dialect the recording engine advertises. Drives the
+/// upsert dispatch in `NestedWriteOp::Upsert::execute` (Postgres →
+/// single-statement `ON CONFLICT`, MSSQL → two-statement fallback).
+#[derive(Clone, Copy)]
+enum DialectKind {
+    Postgres,
+    Mssql,
+}
+
 /// Recording mock engine that also impls `SupportsNestedWrites` so
 /// the `.with(...)` capability gate compiles.
 #[derive(Clone)]
@@ -46,6 +55,7 @@ struct RecordingEngine {
     /// Used by the upsert insert-path test to force the UPDATE phase
     /// to report 0 affected rows so the executor proceeds to INSERT.
     affected_override: Arc<Mutex<Vec<u64>>>,
+    dialect_kind: DialectKind,
 }
 
 impl RecordingEngine {
@@ -53,6 +63,7 @@ impl RecordingEngine {
         Self {
             recorded: Arc::new(Mutex::new(Vec::new())),
             affected_override: Arc::new(Mutex::new(Vec::new())),
+            dialect_kind: DialectKind::Postgres,
         }
     }
 
@@ -65,7 +76,23 @@ impl RecordingEngine {
         Self {
             recorded: Arc::new(Mutex::new(Vec::new())),
             affected_override: Arc::new(Mutex::new(rev)),
+            dialect_kind: DialectKind::Postgres,
         }
+    }
+
+    /// Engine that reports the MSSQL dialect. Used to exercise the
+    /// two-statement upsert fallback (MSSQL's `upsert_clause` returns
+    /// empty).
+    fn new_mssql() -> Self {
+        let mut e = Self::new();
+        e.dialect_kind = DialectKind::Mssql;
+        e
+    }
+
+    fn with_affected_mssql(seq: Vec<u64>) -> Self {
+        let mut e = Self::with_affected(seq);
+        e.dialect_kind = DialectKind::Mssql;
+        e
     }
 
     fn statements(&self) -> Vec<(String, Vec<FilterValue>)> {
@@ -75,7 +102,10 @@ impl RecordingEngine {
 
 impl QueryEngine for RecordingEngine {
     fn dialect(&self) -> &dyn SqlDialect {
-        &prax_query::dialect::Postgres
+        match self.dialect_kind {
+            DialectKind::Postgres => &prax_query::dialect::Postgres,
+            DialectKind::Mssql => &prax_query::dialect::Mssql,
+        }
     }
     fn query_many<T: ModelTrait + FromRow + Send + 'static>(
         &self,
@@ -796,10 +826,11 @@ async fn nested_update_many_with_filter_emits_fk_and_filter() {
 }
 
 #[tokio::test]
-async fn nested_upsert_update_path() {
+async fn nested_upsert_single_statement_on_postgres_dialect() {
     use prax_query::inputs::WriteOp;
-    // Default RecordingEngine returns 1 for the UPDATE (no IN-list), so
-    // the upsert executor must skip the INSERT phase.
+    // Postgres dialect supports `ON CONFLICT (...) DO UPDATE SET ...`,
+    // so the executor collapses the two-statement UPDATE-then-INSERT
+    // form into a single `INSERT ... ON CONFLICT` statement.
     let engine = RecordingEngine::new();
     let c = prax_orm::PraxClient::new(engine.clone());
 
@@ -818,30 +849,45 @@ async fn nested_upsert_update_path() {
         })
         .exec()
         .await
-        .expect("create + upsert update path");
+        .expect("create + single-statement upsert");
 
     let stmts = engine.statements();
     assert_eq!(
         stmts.len(),
         2,
-        "parent insert + UPDATE only (no INSERT); got {stmts:#?}"
+        "parent insert + single-statement upsert; got {stmts:#?}"
     );
     assert!(stmts[0].0.contains("INSERT INTO"));
     assert!(stmts[0].0.contains("users"));
-    let (update_sql, _) = &stmts[1];
-    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
-    assert!(update_sql.contains("posts"), "got: {update_sql}");
+    let (upsert_sql, upsert_params) = &stmts[1];
+    assert!(
+        upsert_sql.starts_with("INSERT INTO"),
+        "expected single INSERT...ON CONFLICT, got: {upsert_sql}"
+    );
+    assert!(upsert_sql.contains("posts"), "got: {upsert_sql}");
+    assert!(upsert_sql.contains("ON CONFLICT"), "got: {upsert_sql}");
+    assert!(upsert_sql.contains("DO UPDATE SET"), "got: {upsert_sql}");
+    assert!(
+        upsert_sql.contains("\"id\""),
+        "conflict target must reference target_pk: {upsert_sql}"
+    );
+    // INSERT supplies $1 (title), $2 (author_id=parent PK);
+    // SET fragment uses $3 (views increment).
+    assert!(upsert_sql.contains("$3"), "got: {upsert_sql}");
+    assert_eq!(upsert_params.len(), 3);
+    assert_eq!(upsert_params[0], FilterValue::String("new".into()));
+    assert_eq!(upsert_params[1], FilterValue::Int(7));
+    assert_eq!(upsert_params[2], FilterValue::Int(1));
 }
 
 #[tokio::test]
-async fn nested_upsert_insert_path() {
+async fn nested_upsert_two_statement_on_mssql_dialect() {
     use prax_query::inputs::WriteOp;
-    // The override sequence drives `execute_raw` returns only — the
-    // parent INSERT goes through `execute_insert`, which bypasses this
-    // override entirely:
-    //   1st execute_raw (upsert UPDATE phase)   -> 0 (no row matched)
-    //   2nd execute_raw (upsert INSERT phase)   -> 1
-    let engine = RecordingEngine::with_affected(vec![0, 1]);
+    // MSSQL's `upsert_clause` returns empty, so the executor must
+    // fall back to the existing two-statement form:
+    //   1st execute_raw (UPDATE phase) -> 0 (no row matched)
+    //   2nd execute_raw (INSERT phase) -> 1
+    let engine = RecordingEngine::with_affected_mssql(vec![0, 1]);
     let c = prax_orm::PraxClient::new(engine.clone());
 
     let _u: User = c
@@ -859,25 +905,28 @@ async fn nested_upsert_insert_path() {
         })
         .exec()
         .await
-        .expect("create + upsert insert path");
+        .expect("create + two-statement upsert fallback");
 
     let stmts = engine.statements();
     assert_eq!(
         stmts.len(),
         3,
-        "parent insert + upsert UPDATE + upsert INSERT; got {stmts:#?}"
+        "parent insert + UPDATE + INSERT (two-statement fallback); got {stmts:#?}"
     );
     let (update_sql, _) = &stmts[1];
-    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
-    assert!(update_sql.contains("posts"), "got: {update_sql}");
-    let (insert_sql, insert_params) = &stmts[2];
-    assert!(insert_sql.contains("INSERT INTO"), "got: {insert_sql}");
-    assert!(insert_sql.contains("posts"), "got: {insert_sql}");
-    assert!(insert_sql.contains("title"), "got: {insert_sql}");
     assert!(
-        insert_sql.contains("author_id"),
-        "FK should be spliced in: {insert_sql}"
+        update_sql.starts_with("UPDATE"),
+        "expected UPDATE first, got: {update_sql}"
     );
+    assert!(!update_sql.contains("ON CONFLICT"), "got: {update_sql}");
+    assert!(!update_sql.contains("ON DUPLICATE"), "got: {update_sql}");
+    // MSSQL uses bracket-quoted idents.
+    assert!(update_sql.contains("[posts]"), "got: {update_sql}");
+    let (insert_sql, insert_params) = &stmts[2];
+    assert!(insert_sql.starts_with("INSERT INTO"), "got: {insert_sql}");
+    assert!(insert_sql.contains("[posts]"), "got: {insert_sql}");
+    assert!(!insert_sql.contains("ON CONFLICT"), "got: {insert_sql}");
+    assert!(insert_sql.contains("[author_id]"), "got: {insert_sql}");
     // create payload value + FK (parent PK) = 2 params
     assert_eq!(insert_params.len(), 2);
     assert_eq!(insert_params[0], FilterValue::String("new".into()));
