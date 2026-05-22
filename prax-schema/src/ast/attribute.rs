@@ -156,6 +156,32 @@ impl Attribute {
             .map(|a| &a.value)
     }
 
+    /// First positional string-literal argument, or `None`.
+    pub fn first_string_arg(&self) -> Option<&str> {
+        self.args.first().and_then(|a| a.value.as_string())
+    }
+
+    /// First positional identifier argument, or `None`.
+    /// Also accepts a `String` variant so dotted-path args (stored as strings)
+    /// are returned for the plain-ident case when there is no dot.
+    pub fn first_ident_arg(&self) -> Option<&str> {
+        self.args.first().and_then(|a| match &a.value {
+            AttributeValue::Ident(s) => Some(s.as_str()),
+            AttributeValue::String(s) if !s.contains('.') => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// First positional argument as a dotted path (`"a"` or `"a.b"`).
+    /// Returns `None` if the first arg is neither an ident nor a string.
+    pub fn first_path_arg(&self) -> Option<String> {
+        self.args.first().and_then(|a| match &a.value {
+            AttributeValue::Ident(s) => Some(s.as_str().to_string()),
+            AttributeValue::String(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
     /// Check if this is a field-level attribute.
     pub fn is_field_attribute(&self) -> bool {
         matches!(
@@ -169,6 +195,14 @@ impl Attribute {
                 | "map"
                 | "db"
                 | "relation"
+                | "generated"
+                | "stored"
+                | "virtual"
+                | "count"
+                | "sum"
+                | "avg"
+                | "min"
+                | "max"
         )
     }
 

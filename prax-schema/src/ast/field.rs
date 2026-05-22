@@ -106,6 +106,16 @@ impl Field {
         self.is_generated() || self.is_aggregate()
     }
 
+    /// Extract the structured `@generated` attribute payload, if any.
+    pub fn generated(&self) -> Option<super::GeneratedAttribute> {
+        self.extract_attributes().generated
+    }
+
+    /// Extract the structured aggregate attribute payload, if any.
+    pub fn aggregate(&self) -> Option<super::AggregateAttribute> {
+        self.extract_attributes().aggregate
+    }
+
     /// Extract structured field attributes.
     pub fn extract_attributes(&self) -> FieldAttributes {
         let mut attrs = FieldAttributes::default();
@@ -179,6 +189,46 @@ impl Field {
                     }
 
                     attrs.relation = Some(rel);
+                }
+                "generated" => {
+                    if let Some(expression) = attr.first_string_arg() {
+                        // Default stored=true; flipped if a sibling @virtual exists.
+                        let stored = !self.attributes.iter().any(|a| a.name.as_str() == "virtual");
+                        attrs.generated = Some(super::GeneratedAttribute {
+                            expression: expression.to_string(),
+                            stored,
+                        });
+                    }
+                }
+                "stored" | "virtual" => {
+                    // Consumed by the "generated" branch above; nothing extra here.
+                }
+                "count" => {
+                    if let Some(rel) = attr.first_ident_arg() {
+                        attrs.aggregate = Some(super::AggregateAttribute {
+                            kind: super::AggregateKind::Count,
+                            relation: rel.into(),
+                            field: None,
+                        });
+                    }
+                }
+                "sum" | "avg" | "min" | "max" => {
+                    let kind = match attr.name() {
+                        "sum" => super::AggregateKind::Sum,
+                        "avg" => super::AggregateKind::Avg,
+                        "min" => super::AggregateKind::Min,
+                        "max" => super::AggregateKind::Max,
+                        _ => unreachable!(),
+                    };
+                    if let Some(path) = attr.first_path_arg()
+                        && let Some((rel, field)) = path.split_once('.')
+                    {
+                        attrs.aggregate = Some(super::AggregateAttribute {
+                            kind,
+                            relation: rel.into(),
+                            field: Some(field.into()),
+                        });
+                    }
                 }
                 _ => {}
             }

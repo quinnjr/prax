@@ -146,6 +146,9 @@ attribute_arg = {
     attribute_value
 }
 
+// Dotted identifier: a.b (used in aggregate args like @sum(posts.views))
+dotted_identifier = @{ identifier ~ "." ~ identifier }
+
 // Attribute value types
 attribute_value = {
     function_call |
@@ -154,6 +157,7 @@ attribute_value = {
     string_literal |
     number_literal |
     boolean_literal |
+    dotted_identifier |
     identifier
 }
 
