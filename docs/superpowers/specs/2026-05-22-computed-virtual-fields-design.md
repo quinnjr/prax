@@ -259,7 +259,7 @@ placeholders consistently with WHERE and SELECT.
 
 ### 6.4 `<Model>Count` synthetic struct
 
-For every model with at least one outgoing relation, codegen emits:
+For every model that has **one or more outgoing relations**, codegen emits:
 
 ```rust
 #[derive(Debug, Clone, Default)]
@@ -270,7 +270,7 @@ pub struct UserCount {
 }
 ```
 
-The result struct gains:
+…and the result struct gains a `_count` field:
 
 ```rust
 pub struct User {
@@ -279,9 +279,15 @@ pub struct User {
 }
 ```
 
-`FromRow` for `User` defaults `_count` to `None` unless the row contains
-any of the `_count_<rel>` columns, in which case it populates the
-substruct with `Some(_)`.
+Models with **zero outgoing relations** do not get a `<Model>Count`
+type and do not get the `_count` field on their result struct — a
+`_count` accessor against such a model is a compile-time error
+("model `Foo` has no relations to count").
+
+`FromRow` for `User` defaults `_count` to `None` unless the row
+contains any `_count_<rel>` columns, in which case it populates the
+substruct with `Some(_)` (only the requested relations are populated;
+unrequested ones stay `None`).
 
 ### 6.5 `_count` accessor in `select:`
 
