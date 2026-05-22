@@ -41,12 +41,30 @@ type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
 #[derive(Clone)]
 struct RecordingEngine {
     recorded: StatementLog,
+    /// Optional override sequence for execute_raw's affected-rows
+    /// return value. Empty → fall back to the IN-list heuristic.
+    /// Used by the upsert insert-path test to force the UPDATE phase
+    /// to report 0 affected rows so the executor proceeds to INSERT.
+    affected_override: Arc<Mutex<Vec<u64>>>,
 }
 
 impl RecordingEngine {
     fn new() -> Self {
         Self {
             recorded: Arc::new(Mutex::new(Vec::new())),
+            affected_override: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Build an engine that returns each entry of `seq` from successive
+    /// `execute_raw` calls, in order. Once exhausted, falls back to the
+    /// default heuristic (IN-list → child PK count, else 1).
+    fn with_affected(seq: Vec<u64>) -> Self {
+        let mut rev = seq;
+        rev.reverse();
+        Self {
+            recorded: Arc::new(Mutex::new(Vec::new())),
+            affected_override: Arc::new(Mutex::new(rev)),
         }
     }
 
@@ -108,19 +126,25 @@ impl QueryEngine for RecordingEngine {
     }
     fn execute_raw(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
         let recorded = self.recorded.clone();
+        let affected_override = self.affected_override.clone();
         let sql_string = sql.to_string();
         // For batched-Connect UPDATEs of the form
         //   UPDATE t SET fk = $1 WHERE pk IN ($2, $3, ...)
         // the affected-rows check expects N rows = pks.len() - 1
         // (params[0] is the parent FK; the rest are child PKs).
-        let affected = if sql.contains(" IN (") {
+        let affected_default = if sql.contains(" IN (") {
             (params.len() as u64).saturating_sub(1)
         } else {
             1
         };
         Box::pin(async move {
             recorded.lock().unwrap().push((sql_string, params));
-            Ok(affected)
+            let next = affected_override
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or(affected_default);
+            Ok(next)
         })
     }
     fn count(&self, _sql: &str, _params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
@@ -651,4 +675,193 @@ fn model_with_pk_compiles_for_fixture() {
         author_id: 1,
     };
     assert_eq!(p.pk_value(), FilterValue::Int(5));
+}
+
+#[tokio::test]
+async fn nested_update_emits_parent_insert_then_update() {
+    use prax_query::inputs::WriteOp;
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![(
+                "title".to_string(),
+                WriteOp::Set(FilterValue::String("renamed".into())),
+            )],
+        })
+        .exec()
+        .await
+        .expect("create + nested update");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "got {stmts:#?}");
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(sql.contains("posts"), "got: {sql}");
+    assert!(sql.contains("title"), "got: {sql}");
+    assert!(sql.contains("SET"), "got: {sql}");
+    assert!(sql.contains("WHERE"), "got: {sql}");
+    assert_eq!(params.len(), 2);
+    assert_eq!(params[1], FilterValue::Int(42));
+}
+
+#[tokio::test]
+async fn nested_update_increment_emits_arithmetic_set_clause() {
+    use prax_query::inputs::WriteOp;
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Update {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+            payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        })
+        .exec()
+        .await
+        .expect("create + nested update increment");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2);
+    let (sql, _) = &stmts[1];
+    // Postgres dialect quotes idents — the fragment is `"views" = "views" + $1`.
+    assert!(sql.contains("+"), "expected arithmetic SET clause: {sql}");
+    assert!(sql.contains("views"), "got: {sql}");
+}
+
+#[tokio::test]
+async fn nested_update_many_with_filter_emits_fk_and_filter() {
+    use prax_query::filter::Filter;
+    use prax_query::inputs::WriteOp;
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::UpdateMany {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            filter: Filter::Equals("published".into(), FilterValue::Bool(false)),
+            payload: vec![("views".to_string(), WriteOp::Set(FilterValue::Int(0)))],
+        })
+        .exec()
+        .await
+        .expect("create + nested update_many");
+
+    let stmts = engine.statements();
+    assert_eq!(stmts.len(), 2, "got {stmts:#?}");
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(sql.contains("author_id"), "got: {sql}");
+    assert!(sql.contains("AND"), "got: {sql}");
+    assert!(sql.contains("published"), "got: {sql}");
+    // payload value + FK (parent_pk) + filter value = 3 params
+    assert_eq!(params.len(), 3);
+    assert_eq!(params[0], FilterValue::Int(0));
+    assert_eq!(params[2], FilterValue::Bool(false));
+}
+
+#[tokio::test]
+async fn nested_upsert_update_path() {
+    use prax_query::inputs::WriteOp;
+    // Default RecordingEngine returns 1 for the UPDATE (no IN-list), so
+    // the upsert executor must skip the INSERT phase.
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        })
+        .exec()
+        .await
+        .expect("create + upsert update path");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + UPDATE only (no INSERT); got {stmts:#?}"
+    );
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    assert!(stmts[0].0.contains("users"));
+    let (update_sql, _) = &stmts[1];
+    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+    assert!(update_sql.contains("posts"), "got: {update_sql}");
+}
+
+#[tokio::test]
+async fn nested_upsert_insert_path() {
+    use prax_query::inputs::WriteOp;
+    // The override sequence drives `execute_raw` returns only — the
+    // parent INSERT goes through `execute_insert`, which bypasses this
+    // override entirely:
+    //   1st execute_raw (upsert UPDATE phase)   -> 0 (no row matched)
+    //   2nd execute_raw (upsert INSERT phase)   -> 1
+    let engine = RecordingEngine::with_affected(vec![0, 1]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        })
+        .exec()
+        .await
+        .expect("create + upsert insert path");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        3,
+        "parent insert + upsert UPDATE + upsert INSERT; got {stmts:#?}"
+    );
+    let (update_sql, _) = &stmts[1];
+    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+    assert!(update_sql.contains("posts"), "got: {update_sql}");
+    let (insert_sql, insert_params) = &stmts[2];
+    assert!(insert_sql.contains("INSERT INTO"), "got: {insert_sql}");
+    assert!(insert_sql.contains("posts"), "got: {insert_sql}");
+    assert!(insert_sql.contains("title"), "got: {insert_sql}");
+    assert!(
+        insert_sql.contains("author_id"),
+        "FK should be spliced in: {insert_sql}"
+    );
+    // create payload value + FK (parent PK) = 2 params
+    assert_eq!(insert_params.len(), 2);
+    assert_eq!(insert_params[0], FilterValue::String("new".into()));
 }
