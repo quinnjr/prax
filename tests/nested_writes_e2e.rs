@@ -86,10 +86,18 @@ impl QueryEngine for RecordingEngine {
     }
     fn query_one<T: ModelTrait + FromRow + Send + 'static>(
         &self,
-        _sql: &str,
-        _params: Vec<FilterValue>,
+        sql: &str,
+        params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<T>> {
-        Box::pin(async { Err(QueryError::not_found("test")) })
+        // Phase 5c's nested-upsert wiring rebuilds the affected row via
+        // SELECT after the UPDATE branch fires. Record + synthesise so
+        // the post-update path can complete in tests.
+        let recorded = self.recorded.clone();
+        let sql = sql.to_string();
+        Box::pin(async move {
+            recorded.lock().unwrap().push((sql, params));
+            T::from_row(&CannedRow).map_err(|e| QueryError::internal(e.to_string()))
+        })
     }
     fn query_optional<T: ModelTrait + FromRow + Send + 'static>(
         &self,
@@ -112,10 +120,19 @@ impl QueryEngine for RecordingEngine {
     }
     fn execute_update<T: ModelTrait + FromRow + Send + 'static>(
         &self,
-        _sql: &str,
-        _params: Vec<FilterValue>,
+        sql: &str,
+        params: Vec<FilterValue>,
     ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
-        Box::pin(async { Ok(Vec::new()) })
+        // Phase 5c's `update!` nested-write wiring routes the parent
+        // UPDATE through `execute_update`. Record so tests can assert
+        // the full statement sequence, then return an empty vec (the
+        // tests under test don't read rows back).
+        let recorded = self.recorded.clone();
+        let sql = sql.to_string();
+        Box::pin(async move {
+            recorded.lock().unwrap().push((sql, params));
+            Ok(Vec::new())
+        })
     }
     fn execute_delete(
         &self,
@@ -1080,4 +1097,243 @@ async fn nested_set_combined_with_create_child_in_one_transaction() {
     );
     assert!(stmts[2].0.contains("UPDATE") && stmts[2].0.contains("NULL"));
     assert!(stmts[3].0.contains("UPDATE") && stmts[3].0.contains(" IN ("));
+}
+
+// ========== Phase 5c: nested writes inside update! / upsert! ==========
+
+#[tokio::test]
+async fn update_with_nested_create_emits_parent_update_then_child_insert() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _rows: Vec<User> = c
+        .user()
+        .update()
+        .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+        .set("email", "renamed@x.com")
+        .with(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("p1".into()),
+        )]]))
+        .exec()
+        .await
+        .expect("update + nested create");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent UPDATE + nested child INSERT; got {stmts:#?}"
+    );
+    assert!(
+        stmts[0].0.starts_with("UPDATE"),
+        "first stmt is UPDATE users: {}",
+        stmts[0].0
+    );
+    assert!(stmts[0].0.contains("users"), "got: {}", stmts[0].0);
+    assert!(
+        stmts[1].0.contains("INSERT INTO"),
+        "second stmt is child INSERT: {}",
+        stmts[1].0
+    );
+    assert!(stmts[1].0.contains("posts"), "got: {}", stmts[1].0);
+    assert!(stmts[1].0.contains("author_id"), "got: {}", stmts[1].0);
+}
+
+#[tokio::test]
+async fn update_with_nested_disconnect_and_delete_runs_in_order() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _rows: Vec<User> = c
+        .user()
+        .update()
+        .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(100),
+        })
+        .with(NestedWriteOp::Delete {
+            relation: "posts",
+            target_table: "posts",
+            target_pk: "id",
+            pk: FilterValue::Int(200),
+        })
+        .exec()
+        .await
+        .expect("update + disconnect + delete");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        3,
+        "parent UPDATE + disconnect UPDATE + DELETE; got {stmts:#?}"
+    );
+    assert!(stmts[0].0.starts_with("UPDATE"), "got: {}", stmts[0].0);
+    assert!(stmts[0].0.contains("users"), "got: {}", stmts[0].0);
+    assert!(
+        stmts[1].0.contains("UPDATE") && stmts[1].0.contains("NULL"),
+        "disconnect: {}",
+        stmts[1].0
+    );
+    assert!(stmts[2].0.contains("DELETE FROM"), "delete: {}", stmts[2].0);
+}
+
+#[tokio::test]
+async fn upsert_update_branch_runs_update_nested_only() {
+    // The two-statement upsert UPDATE returns 1 affected — so the
+    // executor takes the update branch and fires update_nested only.
+    let engine = RecordingEngine::with_affected(vec![1]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .upsert()
+        .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+        .create_set("id", FilterValue::Int(7))
+        .create_set("email", "new@x.com")
+        .update_set("email", "renamed@x.com")
+        .with_update_nested(NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+        })
+        .with_create_nested(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("from create branch".into()),
+        )]]))
+        .exec()
+        .await
+        .expect("upsert update branch");
+
+    let stmts = engine.statements();
+    // UPDATE + SELECT (re-fetch) + nested Disconnect
+    assert_eq!(
+        stmts.len(),
+        3,
+        "UPDATE + SELECT + nested disconnect; got {stmts:#?}"
+    );
+    assert!(stmts[0].0.starts_with("UPDATE"), "got: {}", stmts[0].0);
+    assert!(stmts[0].0.contains("users"), "got: {}", stmts[0].0);
+    assert!(stmts[1].0.starts_with("SELECT"), "got: {}", stmts[1].0);
+    assert!(
+        stmts[2].0.contains("UPDATE") && stmts[2].0.contains("NULL"),
+        "nested Disconnect: {}",
+        stmts[2].0
+    );
+    // No nested child INSERT on the create_nested side.
+    assert!(
+        !stmts
+            .iter()
+            .any(|(s, _)| s.contains("INSERT INTO") && s.contains("posts")),
+        "no nested Create child INSERT on update branch: {stmts:#?}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_create_branch_runs_create_nested_only() {
+    // affected=0 on the UPDATE phase → executor falls into the INSERT
+    // branch and fires create_nested.
+    let engine = RecordingEngine::with_affected(vec![0]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .upsert()
+        .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+        .create_set("id", FilterValue::Int(7))
+        .create_set("email", "new@x.com")
+        .update_set("email", "renamed@x.com")
+        .with_update_nested(NestedWriteOp::Disconnect {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(42),
+        })
+        .with_create_nested(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("from create branch".into()),
+        )]]))
+        .exec()
+        .await
+        .expect("upsert create branch");
+
+    let stmts = engine.statements();
+    // UPDATE (0 affected) + INSERT users + nested child INSERT posts
+    assert_eq!(
+        stmts.len(),
+        3,
+        "UPDATE + INSERT users + nested INSERT posts; got {stmts:#?}"
+    );
+    assert!(stmts[0].0.starts_with("UPDATE"), "got: {}", stmts[0].0);
+    assert!(
+        stmts[1].0.contains("INSERT INTO") && stmts[1].0.contains("users"),
+        "create-branch INSERT users: {}",
+        stmts[1].0
+    );
+    assert!(
+        stmts[2].0.contains("INSERT INTO") && stmts[2].0.contains("posts"),
+        "nested Create child INSERT: {}",
+        stmts[2].0
+    );
+    // The update_nested Disconnect must NOT fire.
+    assert!(
+        !stmts.iter().any(|(s, _)| s.contains("NULL")),
+        "no nested Disconnect on create branch: {stmts:#?}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_with_nested_in_both_branches_only_one_fires() {
+    // Branch dispatch sanity-check end-to-end: same op definition, two
+    // engines configured with different affected counts.
+    for (affected, expect_disconnect, expect_child_insert) in
+        [(1u64, true, false), (0u64, false, true)]
+    {
+        let engine = RecordingEngine::with_affected(vec![affected]);
+        let c = prax_orm::PraxClient::new(engine.clone());
+
+        let _u: User = c
+            .user()
+            .upsert()
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+            .create_set("id", FilterValue::Int(7))
+            .create_set("email", "new@x.com")
+            .update_set("email", "renamed@x.com")
+            .with_update_nested(NestedWriteOp::Disconnect {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                target_pk: "id",
+                pk: FilterValue::Int(42),
+            })
+            .with_create_nested(user::posts::create(vec![vec![(
+                "title".into(),
+                FilterValue::String("p".into()),
+            )]]))
+            .exec()
+            .await
+            .expect("upsert with both branches populated");
+
+        let stmts = engine.statements();
+        let saw_disconnect = stmts.iter().any(|(s, _)| s.contains("NULL"));
+        let saw_child_insert = stmts
+            .iter()
+            .any(|(s, _)| s.contains("INSERT INTO") && s.contains("posts"));
+        assert_eq!(
+            saw_disconnect, expect_disconnect,
+            "affected={affected} stmts={stmts:#?}"
+        );
+        assert_eq!(
+            saw_child_insert, expect_child_insert,
+            "affected={affected} stmts={stmts:#?}"
+        );
+    }
 }
