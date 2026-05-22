@@ -13,7 +13,9 @@ use syn::parse::Parser;
 use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
-use crate::macros::lower::data_input::{lower_create_data, lower_update_data};
+use crate::macros::lower::data_input::{
+    lower_create_data_with_nested, lower_update_data_with_nested,
+};
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::order_by_input::lower_cursor;
 use crate::macros::lower::select_input::lower_select;
@@ -84,8 +86,8 @@ fn lower_upsert(
 ) -> syn::Result<TokenStream> {
     let mut where_tokens: Option<TokenStream> = None;
     let mut conflict_column: Option<String> = None;
-    let mut create_tokens: Option<TokenStream> = None;
-    let mut update_tokens: Option<TokenStream> = None;
+    let mut create_lowering: Option<crate::macros::lower::data_input::CreateDataLowering> = None;
+    let mut update_lowering: Option<crate::macros::lower::data_input::UpdateDataLowering> = None;
     let mut include_tokens: Option<TokenStream> = None;
     let mut select_tokens: Option<TokenStream> = None;
     let mut select_span: Option<Span> = None;
@@ -111,13 +113,13 @@ fn lower_upsert(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`create:` expects `{ ... }`"));
                 };
-                create_tokens = Some(lower_create_data(b, ctx)?);
+                create_lowering = Some(lower_create_data_with_nested(b, ctx)?);
             }
             "update" => {
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`update:` expects `{ ... }`"));
                 };
-                update_tokens = Some(lower_update_data(b, ctx)?);
+                update_lowering = Some(lower_update_data_with_nested(b, ctx)?);
             }
             "include" => {
                 let DslValue::Block(b) = value else {
@@ -158,10 +160,18 @@ fn lower_upsert(
             "`upsert!` requires a `where:` block matching a unique column",
         )
     })?;
-    let create_tokens = create_tokens
+    let create_lowering = create_lowering
         .ok_or_else(|| syn::Error::new(block.span, "`upsert!` requires a `create:` block"))?;
-    let update_tokens = update_tokens
+    let update_lowering = update_lowering
         .ok_or_else(|| syn::Error::new(block.span, "`upsert!` requires an `update:` block"))?;
+    let crate::macros::lower::data_input::CreateDataLowering {
+        scalar_input: create_tokens,
+        nested_ops: create_nested_ops,
+    } = create_lowering;
+    let crate::macros::lower::data_input::UpdateDataLowering {
+        scalar_input: update_tokens,
+        nested_ops: update_nested_ops,
+    } = update_lowering;
 
     let accessor_expr = &accessor.accessor_expr;
     let mut chain: Vec<TokenStream> = vec![quote! { .with_where_input(#where_tokens) }];
@@ -170,6 +180,12 @@ fn lower_upsert(
     }
     chain.push(quote! { .with_create_input(#create_tokens) });
     chain.push(quote! { .with_update_input(#update_tokens) });
+    for nw in create_nested_ops {
+        chain.push(quote! { .with_create_nested(#nw) });
+    }
+    for nw in update_nested_ops {
+        chain.push(quote! { .with_update_nested(#nw) });
+    }
     if let Some(i) = include_tokens {
         chain.push(quote! { .with_include_input(#i) });
     }
