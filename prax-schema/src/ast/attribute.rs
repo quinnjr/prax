@@ -204,6 +204,10 @@ pub struct FieldAttributes {
     pub native_type: Option<NativeType>,
     /// Relation attributes.
     pub relation: Option<RelationAttribute>,
+    /// `@generated("...")` attribute, if present.
+    pub generated: Option<GeneratedAttribute>,
+    /// Relation-aggregate attribute (`@count`/`@sum`/etc.), if present.
+    pub aggregate: Option<AggregateAttribute>,
 }
 
 /// Native database type specification.
@@ -240,6 +244,35 @@ pub struct RelationAttribute {
     pub on_update: Option<ReferentialAction>,
     /// Custom foreign key constraint name in the database.
     pub map: Option<String>,
+}
+
+/// Aggregate kind for relation-aggregate virtual fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateKind {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// `@generated("expr") @stored|@virtual` attribute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedAttribute {
+    /// SQL expression text. Emitted verbatim into DDL — no dialect translation.
+    pub expression: String,
+    /// True if STORED, false if VIRTUAL. Default is STORED.
+    pub stored: bool,
+}
+
+/// `@count(rel)` / `@sum(rel.field)` / etc.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AggregateAttribute {
+    pub kind: AggregateKind,
+    /// Outgoing relation name on the parent model.
+    pub relation: SmolStr,
+    /// Target field on the related model. Required for non-Count.
+    pub field: Option<SmolStr>,
 }
 
 /// Referential actions for relations.
@@ -616,6 +649,8 @@ mod tests {
             map: Some("user_id".to_string()),
             native_type: None,
             relation: None,
+            generated: None,
+            aggregate: None,
         };
 
         assert!(attrs.is_id);

@@ -86,6 +86,26 @@ impl Field {
         self.field_type.is_relation() || self.has_attribute("relation")
     }
 
+    /// True if this field has an `@generated` attribute.
+    pub fn is_generated(&self) -> bool {
+        self.has_attribute("generated")
+    }
+
+    /// True if this field has any aggregate attribute (`@count`, `@sum`, etc.).
+    pub fn is_aggregate(&self) -> bool {
+        self.has_attribute("count")
+            || self.has_attribute("sum")
+            || self.has_attribute("avg")
+            || self.has_attribute("min")
+            || self.has_attribute("max")
+    }
+
+    /// True if this field is computed by the database or by a query-time
+    /// aggregate. Such fields are excluded from CreateInput and UpdateInput.
+    pub fn is_computed(&self) -> bool {
+        self.is_generated() || self.is_aggregate()
+    }
+
     /// Extract structured field attributes.
     pub fn extract_attributes(&self) -> FieldAttributes {
         let mut attrs = FieldAttributes::default();
