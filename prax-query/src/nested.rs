@@ -747,6 +747,30 @@ pub enum NestedWriteOp {
         where_filter: Filter,
         create_payload: Vec<(String, FilterValue)>,
     },
+    /// Replace the relation contents — after execution, exactly the
+    /// listed child rows are connected to the parent. Rows currently
+    /// connected that aren't in `set_pks` get their FK cleared; rows in
+    /// `set_pks` that aren't currently connected (or are connected to a
+    /// different parent) get their FK pointed at this parent.
+    ///
+    /// Two-statement engine-agnostic lowering:
+    /// 1. `UPDATE <target_table> SET <foreign_key> = NULL WHERE <foreign_key> = $parent AND <target_pk> NOT IN (set_pks)`
+    /// 2. `UPDATE <target_table> SET <foreign_key> = $parent WHERE <target_pk> IN (set_pks)`
+    ///
+    /// When `set_pks` is empty, step 1's `NOT IN ()` is invalid SQL —
+    /// the executor special-cases this to `UPDATE <child> SET <fk> = NULL
+    /// WHERE <fk> = $parent` (no NOT IN clause), then skips step 2.
+    ///
+    /// `set:` claims rows for this parent regardless of who they belonged
+    /// to before — pre-existing FK values get overwritten. This matches
+    /// Prisma's relation-replacement semantics.
+    Set {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        target_pk: &'static str,
+        set_pks: Vec<FilterValue>,
+    },
 }
 
 impl NestedWriteOp {
@@ -1127,6 +1151,68 @@ impl NestedWriteOp {
                 );
 
                 engine.execute_raw(&sql, values).await?;
+                Ok(())
+            }
+            NestedWriteOp::Set {
+                relation: _,
+                target_table,
+                foreign_key,
+                target_pk,
+                set_pks,
+            } => {
+                let dialect = engine.dialect();
+
+                // Phase 1: disconnect current children not in set_pks.
+                if set_pks.is_empty() {
+                    // No NOT IN clause needed — clear every child of this parent.
+                    let sql = format!(
+                        "UPDATE {} SET {} = NULL WHERE {} = {}",
+                        dialect.quote_ident(target_table),
+                        dialect.quote_ident(foreign_key),
+                        dialect.quote_ident(foreign_key),
+                        dialect.placeholder(1),
+                    );
+                    engine.execute_raw(&sql, vec![parent_pk.clone()]).await?;
+                    return Ok(());
+                }
+                // set_pks is non-empty — emit disconnect with NOT IN clause + connect.
+                let mut disconnect_params: Vec<FilterValue> = Vec::with_capacity(set_pks.len() + 1);
+                disconnect_params.push(parent_pk.clone());
+                let mut not_in_placeholders: Vec<String> = Vec::with_capacity(set_pks.len());
+                for (i, pk) in set_pks.iter().enumerate() {
+                    disconnect_params.push(pk.clone());
+                    not_in_placeholders.push(dialect.placeholder(i + 2));
+                }
+                let disconnect_sql = format!(
+                    "UPDATE {} SET {} = NULL WHERE {} = {} AND {} NOT IN ({})",
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
+                    dialect.quote_ident(foreign_key),
+                    dialect.placeholder(1),
+                    dialect.quote_ident(target_pk),
+                    not_in_placeholders.join(", "),
+                );
+                engine
+                    .execute_raw(&disconnect_sql, disconnect_params)
+                    .await?;
+
+                // Phase 2: connect every row in set_pks (idempotent for already-connected).
+                let mut connect_params: Vec<FilterValue> = Vec::with_capacity(set_pks.len() + 1);
+                connect_params.push(parent_pk.clone());
+                let mut in_placeholders: Vec<String> = Vec::with_capacity(set_pks.len());
+                for (i, pk) in set_pks.iter().enumerate() {
+                    connect_params.push(pk.clone());
+                    in_placeholders.push(dialect.placeholder(i + 2));
+                }
+                let connect_sql = format!(
+                    "UPDATE {} SET {} = {} WHERE {} IN ({})",
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
+                    dialect.placeholder(1),
+                    dialect.quote_ident(target_pk),
+                    in_placeholders.join(", "),
+                );
+                engine.execute_raw(&connect_sql, connect_params).await?;
                 Ok(())
             }
         }
@@ -1885,6 +1971,130 @@ mod tests {
             FilterValue::String("fallback".to_string())
         );
         assert_eq!(insert_params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_set_with_empty_list_clears_all_children() {
+        // Empty set_pks → one UPDATE with `WHERE fk = $1`, no NOT IN clause,
+        // no connect step.
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1, "expected only the disconnect-all UPDATE");
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        assert!(sql.contains("= NULL"), "got: {sql}");
+        assert!(!sql.contains("NOT IN"), "got: {sql}");
+        assert!(!sql.contains(" IN ("), "got: {sql}");
+        // Only the parent_pk param.
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_set_with_non_empty_list_emits_disconnect_then_connect() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3),
+            ],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 2);
+        let (disconnect_sql, disconnect_params) = &stmts[0];
+        assert!(disconnect_sql.contains("UPDATE"), "got: {disconnect_sql}");
+        assert!(disconnect_sql.contains("posts"), "got: {disconnect_sql}");
+        assert!(
+            disconnect_sql.contains("author_id"),
+            "got: {disconnect_sql}"
+        );
+        assert!(disconnect_sql.contains("= NULL"), "got: {disconnect_sql}");
+        assert!(disconnect_sql.contains("NOT IN"), "got: {disconnect_sql}");
+        // params: parent_pk ($1) + 3 set pks ($2..$4)
+        assert_eq!(disconnect_params.len(), 4);
+        assert_eq!(disconnect_params[0], FilterValue::Int(7));
+        assert_eq!(disconnect_params[1], FilterValue::Int(1));
+        assert_eq!(disconnect_params[2], FilterValue::Int(2));
+        assert_eq!(disconnect_params[3], FilterValue::Int(3));
+
+        let (connect_sql, connect_params) = &stmts[1];
+        assert!(connect_sql.contains("UPDATE"), "got: {connect_sql}");
+        assert!(connect_sql.contains("posts"), "got: {connect_sql}");
+        assert!(connect_sql.contains("author_id"), "got: {connect_sql}");
+        assert!(connect_sql.contains(" IN ("), "got: {connect_sql}");
+        assert!(!connect_sql.contains("NOT IN"), "got: {connect_sql}");
+        // params: parent_pk ($1) + 3 set pks ($2..$4)
+        assert_eq!(connect_params.len(), 4);
+        assert_eq!(connect_params[0], FilterValue::Int(7));
+        assert_eq!(connect_params[1], FilterValue::Int(1));
+        assert_eq!(connect_params[2], FilterValue::Int(2));
+        assert_eq!(connect_params[3], FilterValue::Int(3));
+    }
+
+    #[tokio::test]
+    async fn nested_op_set_with_single_element_uses_single_placeholder_in_lists() {
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![FilterValue::Int(5)],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 2);
+        let (disconnect_sql, _) = &stmts[0];
+        // The NOT IN list has one placeholder.
+        assert!(
+            disconnect_sql.contains("NOT IN ($2)"),
+            "got: {disconnect_sql}"
+        );
+        let (connect_sql, _) = &stmts[1];
+        assert!(connect_sql.contains(" IN ($2)"), "got: {connect_sql}");
+        assert!(!connect_sql.contains("NOT IN"), "got: {connect_sql}");
+    }
+
+    #[tokio::test]
+    async fn nested_op_set_disconnect_clears_only_current_parents_children() {
+        // The disconnect UPDATE must be scoped to `WHERE fk = $parent AND ...`
+        // — without this clause, we'd clear children belonging to other parents.
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![FilterValue::Int(1)],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        let (disconnect_sql, _) = &stmts[0];
+        // The disconnect must scope to the parent's children.
+        assert!(
+            disconnect_sql.contains("author_id\" = $1"),
+            "expected `author_id = $1` clause; got: {disconnect_sql}"
+        );
     }
 
     #[tokio::test]
