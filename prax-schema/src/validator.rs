@@ -43,6 +43,9 @@ impl Validator {
             self.validate_model(model, &schema);
         }
 
+        // Validate computed / virtual field combinations
+        self.validate_computed_fields(&schema);
+
         // Validate each enum
         for e in schema.enums.values() {
             self.validate_enum(e);
@@ -752,6 +755,153 @@ impl Validator {
                 }
             }
             _ => {} // Other attributes are allowed
+        }
+    }
+
+    /// Validate computed and virtual field combinations within every model.
+    ///
+    /// Illegal cases:
+    /// - `@generated` + `@id` or `@auto`
+    /// - `@generated` + an aggregate attribute on the same field
+    /// - Empty expression inside `@generated("")`
+    /// - `@count(rel.field)` — count takes only a relation name, not a dotted path
+    /// - `@sum/@avg/@min/@max(rel)` — non-Count aggregates need `rel.field`
+    /// - Unknown relation name in any aggregate attribute
+    /// - `@stored` or `@virtual` without a sibling `@generated`
+    fn validate_computed_fields(&mut self, schema: &Schema) {
+        for model in schema.models.values() {
+            for field in model.fields.values() {
+                let attrs = field.extract_attributes();
+
+                // ── @generated validations ─────────────────────────────────
+                if let Some(g) = &attrs.generated {
+                    if attrs.is_id || attrs.is_auto {
+                        self.errors.push(SchemaError::invalid_field(
+                            model.name(),
+                            field.name(),
+                            format!(
+                                "field `{}` cannot be both @generated and @id/@auto",
+                                field.name()
+                            ),
+                        ));
+                    }
+                    if attrs.aggregate.is_some() {
+                        self.errors.push(SchemaError::invalid_field(
+                            model.name(),
+                            field.name(),
+                            format!(
+                                "field `{}` cannot be both @generated and an aggregate",
+                                field.name()
+                            ),
+                        ));
+                    }
+                    if g.expression.trim().is_empty() {
+                        self.errors.push(SchemaError::invalid_field(
+                            model.name(),
+                            field.name(),
+                            format!(
+                                "field `{}`: @generated expression must not be empty",
+                                field.name()
+                            ),
+                        ));
+                    }
+                }
+
+                // ── aggregate validations ──────────────────────────────────
+                // Check each raw aggregate attribute so we can also detect
+                // malformed forms that the extractor silently drops (e.g.
+                // `@sum(posts)` with no dot, `@count(posts.id)` with a dot).
+                for raw_attr in &field.attributes {
+                    match raw_attr.name() {
+                        "count" => {
+                            // @count must have a plain relation name with no dot.
+                            // first_path_arg() returns the raw string/ident;
+                            // if it contains a dot the user wrote `@count(rel.field)`.
+                            if let Some(path) = raw_attr.first_path_arg() {
+                                if path.contains('.') {
+                                    self.errors.push(SchemaError::invalid_field(
+                                        model.name(),
+                                        field.name(),
+                                        format!(
+                                            "field `{}`: @count takes a relation name, not `relation.field`",
+                                            field.name()
+                                        ),
+                                    ));
+                                } else {
+                                    // Relation must exist on this model.
+                                    let rel_exists = model
+                                        .fields
+                                        .values()
+                                        .any(|f| f.name() == path && f.is_list());
+                                    if !rel_exists {
+                                        self.errors.push(SchemaError::invalid_field(
+                                            model.name(),
+                                            field.name(),
+                                            format!(
+                                                "field `{}`: unknown relation `{}` in @count",
+                                                field.name(),
+                                                path
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        "sum" | "avg" | "min" | "max" => {
+                            let kind_name = raw_attr.name();
+                            if let Some(path) = raw_attr.first_path_arg() {
+                                if let Some((rel, _field_part)) = path.split_once('.') {
+                                    // Validate relation exists.
+                                    let rel_exists = model
+                                        .fields
+                                        .values()
+                                        .any(|f| f.name() == rel && f.is_list());
+                                    if !rel_exists {
+                                        self.errors.push(SchemaError::invalid_field(
+                                            model.name(),
+                                            field.name(),
+                                            format!(
+                                                "field `{}`: unknown relation `{}` in @{}",
+                                                field.name(),
+                                                rel,
+                                                kind_name
+                                            ),
+                                        ));
+                                    }
+                                } else {
+                                    // No dot — missing field path.
+                                    self.errors.push(SchemaError::invalid_field(
+                                        model.name(),
+                                        field.name(),
+                                        format!(
+                                            "field `{}`: @{} requires `relation.field`",
+                                            field.name(),
+                                            kind_name
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // ── orphan @stored / @virtual ──────────────────────────────
+                let has_generated = attrs.generated.is_some();
+                for attr_name in ["stored", "virtual"] {
+                    if field.has_attribute(attr_name) && !has_generated {
+                        self.errors.push(SchemaError::invalid_field(
+                            model.name(),
+                            field.name(),
+                            format!(
+                                "field `{}`: @{} is only valid alongside @generated",
+                                field.name(),
+                                attr_name
+                            ),
+                        ));
+                    }
+                }
+            }
         }
     }
 
