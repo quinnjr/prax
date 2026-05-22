@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested `update` / `update_many` / `upsert` inside `create!`'s
+  `data:` (phase 5c-mutations).** Three new `NestedWriteOp` variants
+  with executors. Update + UpdateMany emit standard `UPDATE SET ...
+  WHERE ...` with `WriteOp` fragments (`set`, `increment`, `decrement`,
+  `multiply`, `divide`, `unset` are all supported). Upsert uses a
+  two-statement engine-agnostic path: UPDATE first, INSERT (with FK
+  spliced in) when affected_rows == 0. Single-statement upsert via
+  vendor-specific syntax (Postgres `ON CONFLICT` etc.) ships alongside
+  `connect_or_create` in phase 5d.
 - **Nested `disconnect` / `delete` / `delete_many` inside `create!`'s
   `data:` (phase 5c).** Three new `NestedWriteOp` variants —
   `Disconnect` (`UPDATE child SET fk = NULL WHERE pk = $1`), `Delete`
@@ -21,6 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The phase-5c deferral arm for mutation operators is gone; `update`,
+  `update_many`, `upsert` are now first-class. Only `set:` (phase 5e)
+  and `connect_or_create` (phase 5d) remain deferred. The
+  unknown-operator did-you-mean candidate list grows to include
+  `update`, `update_many`, `upsert`.
+- The `nested_unknown_op_phase_5c` trybuild fixture is removed — the
+  operator it tested (`update:`) now ships.
 - The phase-5b "phase 5c deferral" arm narrows to mutation operators
   only: `update`, `update_many`, `upsert` now hit a renamed
   `phase_5c_mutations_deferral` with clearer wording. `set:` gets its

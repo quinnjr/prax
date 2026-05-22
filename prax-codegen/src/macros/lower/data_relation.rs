@@ -223,12 +223,82 @@ pub fn lower_create_relation(
                 };
                 ops.push(NestedRelationOp { op_expr });
             }
-            "update" | "update_many" | "upsert" => {
-                return Err(phase_5c_mutations_deferral(
-                    &op_key,
-                    relation_field.name(),
-                    key.span(),
-                ));
+            "update" => {
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                let target_ctx = ctx.for_model(target_model);
+                for child_block in children {
+                    // Each entry is `{ where: { id: N }, data: { ... } }`.
+                    let (pk_expr, data_expr) = extract_update_entry(
+                        child_block,
+                        target_model,
+                        &target_pk_column,
+                        &target_ctx,
+                    )?;
+                    let op_expr = quote! {
+                        ::prax_query::nested::NestedWriteOp::Update {
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            target_pk: #target_pk_column,
+                            pk: ::core::convert::Into::<
+                                ::prax_query::filter::FilterValue
+                            >::into(#pk_expr),
+                            payload: <_ as ::prax_query::inputs::UpdateInput>::into_ir(#data_expr),
+                        }
+                    };
+                    ops.push(NestedRelationOp { op_expr });
+                }
+            }
+            "update_many" => {
+                let DslValue::Block(entry_block) = value else {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "`update_many:` inside a relation expects \
+                         `{ where: { ... }, data: { ... } }`",
+                    ));
+                };
+                let target_ctx = ctx.for_model(target_model);
+                let (where_expr, data_expr) =
+                    extract_update_many_entry(entry_block, &target_ctx, key.span())?;
+                let op_expr = quote! {
+                    ::prax_query::nested::NestedWriteOp::UpdateMany {
+                        relation: #relation_name_str,
+                        target_table: #target_table,
+                        foreign_key: #foreign_key,
+                        filter: <_ as ::prax_query::inputs::WhereInput>::into_ir(#where_expr),
+                        payload: <_ as ::prax_query::inputs::UpdateInput>::into_ir(#data_expr),
+                    }
+                };
+                ops.push(NestedRelationOp { op_expr });
+            }
+            "upsert" => {
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                let target_ctx = ctx.for_model(target_model);
+                for child_block in children {
+                    // Each entry is `{ where: { id: N }, create: { ... }, update: { ... } }`.
+                    let (pk_expr, create_expr, update_expr) = extract_upsert_entry(
+                        child_block,
+                        target_model,
+                        &target_pk_column,
+                        &target_ctx,
+                    )?;
+                    let op_expr = quote! {
+                        ::prax_query::nested::NestedWriteOp::Upsert {
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            foreign_key: #foreign_key,
+                            target_pk: #target_pk_column,
+                            pk: ::core::convert::Into::<
+                                ::prax_query::filter::FilterValue
+                            >::into(#pk_expr),
+                            create_payload: <
+                                #target_module_ident::#target_input_ident
+                                as ::prax_query::inputs::CreateInput
+                            >::into_ir(#create_expr),
+                            update_payload: <_ as ::prax_query::inputs::UpdateInput>::into_ir(#update_expr),
+                        }
+                    };
+                    ops.push(NestedRelationOp { op_expr });
+                }
             }
             "set" => {
                 return Err(phase_5e_deferral(relation_field.name(), key.span()));
@@ -251,17 +321,22 @@ pub fn lower_create_relation(
                     "disconnect".to_string(),
                     "delete".to_string(),
                     "delete_many".to_string(),
+                    "update".to_string(),
+                    "update_many".to_string(),
+                    "upsert".to_string(),
                 ];
                 let suggestion = crate::macros::validate::suggest(&op_key, &candidates);
                 let msg = match suggestion {
                     Some(s) => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Did you mean `{s}`? Valid operators: create, connect, disconnect, delete, delete_many.",
+                         Did you mean `{s}`? Valid operators: create, connect, disconnect, delete, \
+                         delete_many, update, update_many, upsert.",
                         relation_field.name(),
                     ),
                     None => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Valid operators: create, connect, disconnect, delete, delete_many.",
+                         Valid operators: create, connect, disconnect, delete, delete_many, \
+                         update, update_many, upsert.",
                         relation_field.name(),
                     ),
                 };
@@ -271,17 +346,6 @@ pub fn lower_create_relation(
     }
 
     Ok(ops)
-}
-
-fn phase_5c_mutations_deferral(op: &str, relation: &str, span: Span) -> syn::Error {
-    syn::Error::new(
-        span,
-        format!(
-            "nested mutation operator `{op}` inside `data:` relation block `{relation}` is not \
-             yet supported. `update`, `update_many`, and `upsert` on relations land in a future \
-             phase — see the project's phase 5c-mutations milestone."
-        ),
-    )
 }
 
 fn phase_5e_deferral(relation: &str, span: Span) -> syn::Error {
@@ -412,6 +476,168 @@ fn lower_connect_pk(
     }
 }
 
+/// Pluck a single named pair out of a block, returning its value.
+///
+/// Used by [`extract_update_entry`] / [`extract_update_many_entry`] /
+/// [`extract_upsert_entry`] to enforce that mutation operator entries
+/// have exactly the expected key set with no extras.
+fn take_named_field<'a>(
+    block: &'a DslBlock,
+    name: &str,
+    op: &str,
+    span: Span,
+) -> syn::Result<&'a DslValue> {
+    for f in &block.fields {
+        if let DslField::Pair { key, value, .. } = f
+            && key == name
+        {
+            return Ok(value);
+        }
+    }
+    Err(syn::Error::new(
+        span,
+        format!("`{op}:` entry is missing required key `{name}:`"),
+    ))
+}
+
+/// Reject any extra keys on a mutation operator entry beyond `expected`.
+fn reject_extra_keys(block: &DslBlock, expected: &[&str], op: &str, span: Span) -> syn::Result<()> {
+    for f in &block.fields {
+        match f {
+            DslField::Pair { key, .. } => {
+                let key_str = key.to_string();
+                if !expected.contains(&key_str.as_str()) {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "unexpected key `{key_str}` on `{op}:` entry. Valid keys: {}.",
+                            expected.join(", "),
+                        ),
+                    ));
+                }
+            }
+            DslField::Spread { .. } | DslField::Conditional { .. } => {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`{op}:` entry does not support spread or conditional fields",),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lower an `update:` list entry `{ where: { <pk>: V }, data: { ... } }`.
+///
+/// Returns the PK expression token stream and the lowered
+/// `<Target>UpdateInput` constructor token stream.
+fn extract_update_entry(
+    block: &DslBlock,
+    target_model: &Model,
+    target_pk_col: &str,
+    target_ctx: &LowerCtx<'_>,
+) -> syn::Result<(TokenStream, TokenStream)> {
+    reject_extra_keys(block, &["where", "data"], "update", Span::call_site())?;
+    let where_value = take_named_field(block, "where", "update", Span::call_site())?;
+    let data_value = take_named_field(block, "data", "update", Span::call_site())?;
+
+    let DslValue::Block(where_block) = where_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`update:` entry expects `where: { <pk>: <value> }`",
+        ));
+    };
+    let DslValue::Block(data_block) = data_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`update:` entry expects `data: { ... }`",
+        ));
+    };
+
+    let pk_expr = lower_connect_pk(where_block, target_model, target_pk_col)?;
+    let data_expr = super::data_input::lower_update_data(data_block, target_ctx)?;
+    Ok((pk_expr, data_expr))
+}
+
+/// Lower the single `update_many:` block `{ where: { ... }, data: { ... } }`.
+///
+/// Returns the lowered `<Target>WhereInput` and `<Target>UpdateInput`
+/// constructor token streams.
+fn extract_update_many_entry(
+    block: &DslBlock,
+    target_ctx: &LowerCtx<'_>,
+    span: Span,
+) -> syn::Result<(TokenStream, TokenStream)> {
+    reject_extra_keys(block, &["where", "data"], "update_many", span)?;
+    let where_value = take_named_field(block, "where", "update_many", span)?;
+    let data_value = take_named_field(block, "data", "update_many", span)?;
+
+    let DslValue::Block(where_block) = where_value else {
+        return Err(syn::Error::new(
+            span,
+            "`update_many:` entry expects `where: { ... }`",
+        ));
+    };
+    let DslValue::Block(data_block) = data_value else {
+        return Err(syn::Error::new(
+            span,
+            "`update_many:` entry expects `data: { ... }`",
+        ));
+    };
+
+    let where_expr = super::where_input::lower_where(where_block, target_ctx)?;
+    let data_expr = super::data_input::lower_update_data(data_block, target_ctx)?;
+    Ok((where_expr, data_expr))
+}
+
+/// Lower an `upsert:` list entry
+/// `{ where: { <pk>: V }, create: { ... }, update: { ... } }`.
+///
+/// Returns `(pk_expr, create_expr, update_expr)` token streams. The
+/// `create` payload is lowered against `<Target>CreateInput` — the
+/// FK column is omitted from the user-facing input and is appended at
+/// executor time, so a vanilla CreateInput lowering is what we want.
+fn extract_upsert_entry(
+    block: &DslBlock,
+    target_model: &Model,
+    target_pk_col: &str,
+    target_ctx: &LowerCtx<'_>,
+) -> syn::Result<(TokenStream, TokenStream, TokenStream)> {
+    reject_extra_keys(
+        block,
+        &["where", "create", "update"],
+        "upsert",
+        Span::call_site(),
+    )?;
+    let where_value = take_named_field(block, "where", "upsert", Span::call_site())?;
+    let create_value = take_named_field(block, "create", "upsert", Span::call_site())?;
+    let update_value = take_named_field(block, "update", "upsert", Span::call_site())?;
+
+    let DslValue::Block(where_block) = where_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`upsert:` entry expects `where: { <pk>: <value> }`",
+        ));
+    };
+    let DslValue::Block(create_block) = create_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`upsert:` entry expects `create: { ... }`",
+        ));
+    };
+    let DslValue::Block(update_block) = update_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`upsert:` entry expects `update: { ... }`",
+        ));
+    };
+
+    let pk_expr = lower_connect_pk(where_block, target_model, target_pk_col)?;
+    let create_expr = super::data_input::lower_create_data(create_block, target_ctx)?;
+    let update_expr = super::data_input::lower_update_data(update_block, target_ctx)?;
+    Ok((pk_expr, create_expr, update_expr))
+}
+
 /// Resolve the FK column on `target_model` that points back at `parent_model`.
 ///
 /// Looks for the back-pointer field on the target whose `field_type`
@@ -535,21 +761,6 @@ mod tests {
     }
 
     #[test]
-    fn update_op_inside_relation_block_is_phase_5c_deferral() {
-        let schema = parsed_schema();
-        let user = schema.get_model("User").unwrap().clone();
-        let ctx = LowerCtx::new(&schema, &user);
-        let field = user.get_field("posts").unwrap();
-        let value = DslValue::Block(parse_block(quote!({
-            update: [{}]
-        })));
-        let err = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("phase 5c"), "got: {msg}");
-        assert!(msg.contains("update"), "got: {msg}");
-    }
-
-    #[test]
     fn unknown_op_inside_relation_block_suggests_create() {
         let schema = parsed_schema();
         let user = schema.get_model("User").unwrap().clone();
@@ -641,5 +852,65 @@ mod tests {
         let err = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("phase 5d"), "got: {msg}");
+    }
+
+    #[test]
+    fn lowers_nested_update_to_nested_write_op_update() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            update: [{ where: { id: 1 }, data: { title: "renamed" } }]
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("NestedWriteOp"), "got: {s}");
+        assert!(s.contains("Update"), "got: {s}");
+        assert!(s.contains("target_pk"), "got: {s}");
+        assert!(s.contains("payload"), "got: {s}");
+        assert!(s.contains("UpdateInput"), "got: {s}");
+    }
+
+    #[test]
+    fn lowers_nested_update_many_to_nested_write_op_update_many() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            update_many: { where: { published: false }, data: { title: "x" } }
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("UpdateMany"), "got: {s}");
+        assert!(s.contains("foreign_key"), "got: {s}");
+        assert!(s.contains("filter"), "got: {s}");
+        assert!(s.contains("payload"), "got: {s}");
+    }
+
+    #[test]
+    fn lowers_nested_upsert_to_nested_write_op_upsert() {
+        let schema = parsed_schema();
+        let user = schema.get_model("User").unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &user);
+        let field = user.get_field("posts").unwrap();
+        let value = DslValue::Block(parse_block(quote!({
+            upsert: [{
+                where: { id: 99 },
+                create: { title: "new", published: true },
+                update: { title: "x" }
+            }]
+        })));
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("Upsert"), "got: {s}");
+        assert!(s.contains("target_pk"), "got: {s}");
+        assert!(s.contains("create_payload"), "got: {s}");
+        assert!(s.contains("update_payload"), "got: {s}");
+        assert!(s.contains("99"), "got: {s}");
     }
 }
