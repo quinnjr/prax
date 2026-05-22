@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use crate::error::QueryResult;
 use crate::filter::{Filter, FilterValue};
 use crate::inputs::WriteOp;
-use crate::traits::{Model, QueryEngine};
+use crate::nested::NestedWriteOp;
+use crate::traits::{Model, ModelWithPk, QueryEngine};
 use crate::types::Select;
 
 /// An upsert (insert or update) operation.
@@ -37,6 +38,12 @@ pub struct UpsertOperation<E: QueryEngine, M: Model> {
     update_ops: Vec<(String, WriteOp)>,
     conflict_columns: Vec<String>,
     select: Select,
+    /// Nested-write ops to run when the *create* branch fires (the
+    /// row didn't previously exist). Empty on the fast path.
+    create_nested: Vec<NestedWriteOp>,
+    /// Nested-write ops to run when the *update* branch fires (the
+    /// row already existed). Empty on the fast path.
+    update_nested: Vec<NestedWriteOp>,
     _model: PhantomData<M>,
 }
 
@@ -53,6 +60,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
             update_ops: Vec::new(),
             conflict_columns: Vec::new(),
             select: Select::All,
+            create_nested: Vec::new(),
+            update_nested: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -254,15 +263,311 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> UpsertOperation<E, M> {
         (sql, params)
     }
 
+    /// Queue a nested write to fire when the *create* branch runs
+    /// (i.e. no existing row matched).
+    pub fn with_create_nested(mut self, nw: NestedWriteOp) -> Self
+    where
+        E: crate::capabilities::SupportsNestedWrites,
+    {
+        self.create_nested.push(nw);
+        self
+    }
+
+    /// Queue a nested write to fire when the *update* branch runs
+    /// (i.e. an existing row was found and updated).
+    pub fn with_update_nested(mut self, nw: NestedWriteOp) -> Self
+    where
+        E: crate::capabilities::SupportsNestedWrites,
+    {
+        self.update_nested.push(nw);
+        self
+    }
+
     /// Execute the upsert and return the record.
+    ///
+    /// Fast path (no nested writes queued): runs a single
+    /// vendor-specific upsert (`INSERT ... ON CONFLICT DO UPDATE` on
+    /// Postgres, the dialect's equivalent elsewhere).
+    ///
+    /// Slow path (nested writes queued via `with_create_nested` /
+    /// `with_update_nested`): runs a two-statement
+    /// engine-agnostic upsert inside a transaction so we can tell which
+    /// branch fired:
+    /// 1. `UPDATE` the row by primary key. If `affected > 0`, the
+    ///    update branch ran — fire `update_nested` with the PK we
+    ///    already have from `where:`.
+    /// 2. Otherwise `INSERT` the row, take the PK from the inserted
+    ///    model, and fire `create_nested`.
     pub async fn exec(self) -> QueryResult<M>
     where
-        M: Send + 'static,
+        M: Send + 'static + ModelWithPk,
     {
-        let dialect = self.engine.dialect();
-        let (sql, params) = self.build_sql(dialect);
-        self.engine.execute_insert::<M>(&sql, params).await
+        // Fast path: single-statement vendor-specific upsert.
+        if self.create_nested.is_empty() && self.update_nested.is_empty() {
+            let dialect = self.engine.dialect();
+            let (sql, params) = self.build_sql(dialect);
+            return self.engine.execute_insert::<M>(&sql, params).await;
+        }
+
+        // Nested writes are queued — the existing where-unique must
+        // equal-match the primary key column. This is the same
+        // restriction as `update!`'s nested-write path.
+        let parent_pk =
+            crate::operations::update::extract_pk_from_filter(&self.filter, M::PRIMARY_KEY[0])
+                .ok_or_else(|| {
+                    crate::error::QueryError::invalid_input(
+                        "where",
+                        "nested writes inside `upsert!` require the `where:` clause to equal-match \
+                 the primary-key column",
+                    )
+                    .with_help(format!(
+                        "expected `where: {{ {pk}: <value> }}` on `{table}` — non-PK unique \
+                 columns are not yet supported for nested writes inside upsert!. \
+                 Lift this restriction by running the nested ops in a separate operation \
+                 after looking up the row's PK.",
+                        pk = M::PRIMARY_KEY[0],
+                        table = M::TABLE_NAME,
+                    ))
+                })?;
+
+        let UpsertOperation {
+            engine,
+            filter,
+            create_columns,
+            create_values,
+            update_columns,
+            update_values,
+            update_ops,
+            conflict_columns: _,
+            select,
+            create_nested,
+            update_nested,
+            _model,
+        } = self;
+
+        engine
+            .transaction(move |tx| async move {
+                let dialect = tx.dialect();
+
+                // Phase 1: try UPDATE first.
+                let (update_sql, update_params) = build_update_sql::<M>(
+                    &filter,
+                    &update_columns,
+                    &update_values,
+                    &update_ops,
+                    dialect,
+                );
+                let affected = tx.execute_raw(&update_sql, update_params).await?;
+
+                let (row, fired_nested): (M, Vec<NestedWriteOp>) = if affected > 0 {
+                    // Update branch — fetch the row back via SELECT so
+                    // the caller sees the freshly-updated columns. We
+                    // know the PK from the where filter.
+                    let (sel_sql, sel_params) =
+                        build_select_by_pk_sql::<M>(parent_pk.clone(), &select, dialect);
+                    let fetched: M = tx.query_one::<M>(&sel_sql, sel_params).await?;
+                    (fetched, update_nested)
+                } else {
+                    // Create branch — INSERT and capture the returned row.
+                    let (ins_sql, ins_params) =
+                        build_insert_sql::<M>(&create_columns, &create_values, &select, dialect);
+                    let inserted: M = tx.execute_insert::<M>(&ins_sql, ins_params).await?;
+                    (inserted, create_nested)
+                };
+
+                // Dispatch the chosen nested-op vec, sharing the same
+                // partition-by-target-Connect batching as create.rs.
+                let parent_pk_for_nested = if affected > 0 {
+                    parent_pk
+                } else {
+                    row.pk_value()
+                };
+                run_nested_ops(&tx, dialect, fired_nested, &parent_pk_for_nested).await?;
+
+                Ok(row)
+            })
+            .await
     }
+}
+
+/// Build a two-statement-style UPDATE for the upsert's "update branch".
+///
+/// Uses `update_ops` when populated (carries atomic operators), else
+/// falls back to the legacy flat `update_columns`/`update_values` pair.
+/// Always emits a `WHERE` clause from `filter` (the where-unique).
+fn build_update_sql<M: Model>(
+    filter: &Filter,
+    update_columns: &[String],
+    update_values: &[FilterValue],
+    update_ops: &[(String, WriteOp)],
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> (String, Vec<FilterValue>) {
+    let mut sql = String::new();
+    let mut params = Vec::new();
+    let mut param_idx = 1;
+
+    sql.push_str("UPDATE ");
+    sql.push_str(M::TABLE_NAME);
+    sql.push_str(" SET ");
+
+    let set_parts: Vec<String> = if !update_ops.is_empty() {
+        update_ops
+            .iter()
+            .map(|(col, op)| {
+                let placeholder = dialect.placeholder(param_idx);
+                let (fragment, value) = op.to_set_fragment(col, &placeholder);
+                if let Some(v) = value {
+                    params.push(v);
+                    param_idx += 1;
+                }
+                fragment
+            })
+            .collect()
+    } else {
+        update_columns
+            .iter()
+            .zip(update_values.iter())
+            .map(|(col, val)| {
+                params.push(val.clone());
+                let part = format!("{} = {}", col, dialect.placeholder(param_idx));
+                param_idx += 1;
+                part
+            })
+            .collect()
+    };
+    sql.push_str(&set_parts.join(", "));
+
+    if !filter.is_none() {
+        let (where_sql, where_params) = filter.to_sql(param_idx - 1, dialect);
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_sql);
+        params.extend(where_params);
+    }
+
+    (sql, params)
+}
+
+/// Build the create-branch INSERT used by the two-statement upsert.
+fn build_insert_sql<M: Model>(
+    columns: &[String],
+    values: &[FilterValue],
+    select: &Select,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> (String, Vec<FilterValue>) {
+    let mut sql = String::new();
+    sql.push_str("INSERT INTO ");
+    sql.push_str(M::TABLE_NAME);
+    sql.push_str(" (");
+    sql.push_str(&columns.join(", "));
+    sql.push(')');
+    sql.push_str(" VALUES (");
+    let placeholders: Vec<_> = (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
+    sql.push_str(&placeholders.join(", "));
+    sql.push(')');
+    sql.push_str(&dialect.returning_clause(&select.to_sql()));
+    (sql, values.to_vec())
+}
+
+/// Build the SELECT-by-pk used to re-fetch the row after the update
+/// branch ran.
+fn build_select_by_pk_sql<M: Model>(
+    pk: FilterValue,
+    select: &Select,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> (String, Vec<FilterValue>) {
+    let cols = select.to_sql();
+    let sql = format!(
+        "SELECT {} FROM {} WHERE {} = {}",
+        if cols.is_empty() || cols == "*" {
+            "*".to_string()
+        } else {
+            cols
+        },
+        M::TABLE_NAME,
+        dialect.quote_ident(M::PRIMARY_KEY[0]),
+        dialect.placeholder(1),
+    );
+    (sql, vec![pk])
+}
+
+/// Iterate `nested` against `tx`, batching consecutive Connect ops with
+/// the same target — mirrors the create.rs partition loop.
+async fn run_nested_ops<E: QueryEngine>(
+    tx: &E,
+    dialect: &dyn crate::dialect::SqlDialect,
+    nested: Vec<NestedWriteOp>,
+    parent_pk: &FilterValue,
+) -> QueryResult<()> {
+    let mut idx = 0;
+    while idx < nested.len() {
+        if let NestedWriteOp::Connect {
+            target_table: run_table,
+            foreign_key: run_fk,
+            target_pk: run_target_pk,
+            ..
+        } = &nested[idx]
+        {
+            let run_table = *run_table;
+            let run_fk = *run_fk;
+            let run_target_pk = *run_target_pk;
+            let mut end = idx + 1;
+            while end < nested.len() {
+                match &nested[end] {
+                    NestedWriteOp::Connect {
+                        target_table,
+                        foreign_key,
+                        target_pk,
+                        ..
+                    } if *target_table == run_table
+                        && *foreign_key == run_fk
+                        && *target_pk == run_target_pk =>
+                    {
+                        end += 1;
+                    }
+                    _ => break,
+                }
+            }
+
+            if end - idx == 1 {
+                let op = nested[idx].clone();
+                op.execute(tx, parent_pk).await?;
+            } else {
+                let expected = (end - idx) as u64;
+                let mut pks: Vec<FilterValue> = Vec::with_capacity(end - idx + 1);
+                pks.push(parent_pk.clone());
+                for op in &nested[idx..end] {
+                    if let NestedWriteOp::Connect { pk, .. } = op {
+                        pks.push(pk.clone());
+                    }
+                }
+                let placeholders: Vec<String> =
+                    (2..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+                let sql = format!(
+                    "UPDATE {} SET {} = {} WHERE {} IN ({})",
+                    dialect.quote_ident(run_table),
+                    dialect.quote_ident(run_fk),
+                    dialect.placeholder(1),
+                    dialect.quote_ident(run_target_pk),
+                    placeholders.join(", "),
+                );
+                let affected = tx.execute_raw(&sql, pks).await?;
+                if affected != expected {
+                    return Err(crate::error::QueryError::not_found(run_table)
+                        .with_context("Nested Connect batch")
+                        .with_help(format!(
+                            "Expected {} matching rows but UPDATE affected {}",
+                            expected, affected
+                        )));
+                }
+            }
+            idx = end;
+        } else {
+            let op = nested[idx].clone();
+            op.execute(tx, parent_pk).await?;
+            idx += 1;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -282,6 +587,18 @@ mod tests {
     impl crate::row::FromRow for TestModel {
         fn from_row(_row: &impl crate::row::RowRef) -> Result<Self, crate::row::RowError> {
             Ok(TestModel)
+        }
+    }
+
+    // Phase-5c slow-path nested-write wiring requires `ModelWithPk` on
+    // the return type. The constant PK is fine because the legacy
+    // single-statement tests never exercise the slow path.
+    impl crate::traits::ModelWithPk for TestModel {
+        fn pk_value(&self) -> FilterValue {
+            FilterValue::Int(0)
+        }
+        fn get_column_value(&self, _column: &str) -> Option<FilterValue> {
+            None
         }
     }
 
@@ -776,5 +1093,365 @@ mod tests {
         assert!(sql.contains("login_count = login_count + $"), "got: {sql}");
         // 1 create + 2 update params.
         assert_eq!(params.len(), 3);
+    }
+
+    // ========== Phase 5c: nested-write wiring on upsert! ==========
+
+    use std::sync::{Arc, Mutex};
+
+    type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
+
+    /// Recording engine that exposes a settable `affected` sequence and
+    /// returns a default `TestModel` from `execute_insert` / `query_one`
+    /// (the two paths the nested-upsert exec consumes).
+    #[derive(Clone)]
+    struct RecordingEngine {
+        recorded: StatementLog,
+        affected: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl RecordingEngine {
+        fn with_affected(seq: Vec<u64>) -> Self {
+            let mut rev = seq;
+            rev.reverse();
+            Self {
+                recorded: Arc::new(Mutex::new(Vec::new())),
+                affected: Arc::new(Mutex::new(rev)),
+            }
+        }
+
+        fn statements(&self) -> Vec<(String, Vec<FilterValue>)> {
+            self.recorded.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::capabilities::SupportsNestedWrites for RecordingEngine {}
+
+    impl QueryEngine for RecordingEngine {
+        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
+            &crate::dialect::Postgres
+        }
+
+        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            sql: &str,
+            params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<T>> {
+            let recorded = self.recorded.clone();
+            let sql = sql.to_string();
+            Box::pin(async move {
+                recorded.lock().unwrap().push((sql, params));
+                T::from_row(&CannedRow).map_err(|e| QueryError::internal(e.to_string()))
+            })
+        }
+
+        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<Option<T>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            sql: &str,
+            params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<T>> {
+            let recorded = self.recorded.clone();
+            let sql = sql.to_string();
+            Box::pin(async move {
+                recorded.lock().unwrap().push((sql, params));
+                T::from_row(&CannedRow).map_err(|e| QueryError::internal(e.to_string()))
+            })
+        }
+
+        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<Vec<T>>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn execute_delete(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn execute_raw(
+            &self,
+            sql: &str,
+            params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<u64>> {
+            let recorded = self.recorded.clone();
+            let affected = self.affected.clone();
+            let sql_string = sql.to_string();
+            let default = if sql.contains(" IN (") {
+                (params.len() as u64).saturating_sub(1)
+            } else {
+                1
+            };
+            Box::pin(async move {
+                recorded.lock().unwrap().push((sql_string, params));
+                Ok(affected.lock().unwrap().pop().unwrap_or(default))
+            })
+        }
+
+        fn count(
+            &self,
+            _sql: &str,
+            _params: Vec<FilterValue>,
+        ) -> crate::traits::BoxFuture<'_, QueryResult<u64>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
+
+    /// Stand-in RowRef so `execute_insert` / `query_one` can synthesise
+    /// a `TestModel` value without a live database.
+    struct CannedRow;
+
+    impl crate::row::RowRef for CannedRow {
+        fn get_i32(&self, _column: &str) -> Result<i32, crate::row::RowError> {
+            Ok(0)
+        }
+        fn get_i32_opt(&self, _column: &str) -> Result<Option<i32>, crate::row::RowError> {
+            Ok(Some(0))
+        }
+        fn get_i64(&self, _column: &str) -> Result<i64, crate::row::RowError> {
+            Ok(0)
+        }
+        fn get_i64_opt(&self, _column: &str) -> Result<Option<i64>, crate::row::RowError> {
+            Ok(None)
+        }
+        fn get_f64(&self, _column: &str) -> Result<f64, crate::row::RowError> {
+            Ok(0.0)
+        }
+        fn get_f64_opt(&self, _column: &str) -> Result<Option<f64>, crate::row::RowError> {
+            Ok(None)
+        }
+        fn get_bool(&self, _column: &str) -> Result<bool, crate::row::RowError> {
+            Ok(false)
+        }
+        fn get_bool_opt(&self, _column: &str) -> Result<Option<bool>, crate::row::RowError> {
+            Ok(None)
+        }
+        fn get_str(&self, _column: &str) -> Result<&str, crate::row::RowError> {
+            Ok("canned")
+        }
+        fn get_str_opt(&self, _column: &str) -> Result<Option<&str>, crate::row::RowError> {
+            Ok(Some("canned"))
+        }
+        fn get_bytes(&self, _column: &str) -> Result<&[u8], crate::row::RowError> {
+            Ok(b"")
+        }
+        fn get_bytes_opt(&self, _column: &str) -> Result<Option<&[u8]>, crate::row::RowError> {
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn upsert_with_nested_in_update_branch_fires_update_nested_only() {
+        // affected=1 on the UPDATE → update branch.
+        let engine = RecordingEngine::with_affected(vec![1]);
+        let op = UpsertOperation::<RecordingEngine, TestModel>::new(engine.clone())
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+            .create_set("id", FilterValue::Int(7))
+            .create_set("email", "new@x.com")
+            .update_set("name", "Renamed")
+            .with_update_nested(NestedWriteOp::Disconnect {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                target_pk: "id",
+                pk: FilterValue::Int(42),
+            })
+            .with_create_nested(NestedWriteOp::Create {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                payload: vec![vec![("title".into(), FilterValue::String("p1".into()))]],
+            });
+
+        let _ = op.exec().await.expect("upsert update branch");
+
+        let stmts = engine.statements();
+        // Expect: UPDATE (affected=1) + SELECT (re-fetch) + nested Disconnect UPDATE
+        assert_eq!(
+            stmts.len(),
+            3,
+            "UPDATE + SELECT + nested disconnect; got {stmts:#?}"
+        );
+        assert!(
+            stmts[0].0.starts_with("UPDATE test_models"),
+            "first stmt should be parent UPDATE: {}",
+            stmts[0].0
+        );
+        assert!(
+            stmts[1].0.starts_with("SELECT"),
+            "second stmt should re-fetch the row: {}",
+            stmts[1].0
+        );
+        // Third stmt is the nested Disconnect — UPDATE child + NULL.
+        assert!(stmts[2].0.contains("UPDATE"), "got: {}", stmts[2].0);
+        assert!(stmts[2].0.contains("posts"), "got: {}", stmts[2].0);
+        assert!(stmts[2].0.contains("NULL"), "got: {}", stmts[2].0);
+        // Verify no INSERT (no create branch) and no nested Create (FK splicing).
+        assert!(
+            !stmts.iter().any(|(s, _)| s.starts_with("INSERT INTO")),
+            "no INSERT must fire on update branch: {stmts:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_with_nested_in_create_branch_fires_create_nested_only() {
+        // affected=0 on UPDATE → create branch (INSERT runs).
+        let engine = RecordingEngine::with_affected(vec![0]);
+        let op = UpsertOperation::<RecordingEngine, TestModel>::new(engine.clone())
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+            .create_set("id", FilterValue::Int(7))
+            .create_set("email", "new@x.com")
+            .update_set("name", "Renamed")
+            .with_update_nested(NestedWriteOp::Disconnect {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                target_pk: "id",
+                pk: FilterValue::Int(42),
+            })
+            .with_create_nested(NestedWriteOp::Create {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                payload: vec![vec![("title".into(), FilterValue::String("p1".into()))]],
+            });
+
+        let _ = op.exec().await.expect("upsert create branch");
+
+        let stmts = engine.statements();
+        // Expect: UPDATE (affected=0) + INSERT + nested Create child INSERT
+        assert_eq!(
+            stmts.len(),
+            3,
+            "UPDATE + INSERT + nested child INSERT; got {stmts:#?}"
+        );
+        assert!(
+            stmts[0].0.starts_with("UPDATE test_models"),
+            "first stmt should be parent UPDATE: {}",
+            stmts[0].0
+        );
+        assert!(
+            stmts[1].0.contains("INSERT INTO test_models"),
+            "second stmt should be the create-branch INSERT: {}",
+            stmts[1].0
+        );
+        assert!(
+            stmts[2].0.contains("INSERT INTO"),
+            "third stmt should be the nested Create child INSERT: {}",
+            stmts[2].0
+        );
+        assert!(
+            stmts[2].0.contains("posts"),
+            "nested INSERT targets posts: {}",
+            stmts[2].0
+        );
+        // No SELECT (we got the row directly from the INSERT) and no
+        // nested Disconnect UPDATE on posts table.
+        assert!(
+            !stmts.iter().any(|(s, _)| s.starts_with("SELECT")),
+            "no SELECT must fire on create branch: {stmts:#?}"
+        );
+        assert!(
+            !stmts
+                .iter()
+                .any(|(s, _)| s.contains("UPDATE \"posts\"") || s.contains("UPDATE posts")),
+            "no nested Disconnect on update_nested must fire: {stmts:#?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn upsert_both_branches_carry_nested_only_one_fires() {
+        // Run twice with two engines — once for each branch — and
+        // confirm only the branch-appropriate nested ops execute.
+        // Branch 1: update.
+        let engine_u = RecordingEngine::with_affected(vec![1]);
+        let _ = UpsertOperation::<RecordingEngine, TestModel>::new(engine_u.clone())
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+            .create_set("id", FilterValue::Int(7))
+            .update_set("name", "Renamed")
+            .with_update_nested(NestedWriteOp::Disconnect {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                target_pk: "id",
+                pk: FilterValue::Int(42),
+            })
+            .with_create_nested(NestedWriteOp::Create {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                payload: vec![vec![("title".into(), FilterValue::String("p".into()))]],
+            })
+            .exec()
+            .await
+            .expect("update branch");
+        let u_stmts = engine_u.statements();
+        // Disconnect must fire, child INSERT (nested Create) must not.
+        assert!(
+            u_stmts.iter().any(|(s, _)| s.contains("NULL")),
+            "expected nested Disconnect: {u_stmts:#?}"
+        );
+        assert!(
+            !u_stmts
+                .iter()
+                .any(|(s, _)| s.contains("INSERT INTO") && s.contains("posts")),
+            "no nested Create child INSERT on update branch: {u_stmts:#?}"
+        );
+
+        // Branch 2: create.
+        let engine_c = RecordingEngine::with_affected(vec![0]);
+        let _ = UpsertOperation::<RecordingEngine, TestModel>::new(engine_c.clone())
+            .r#where(Filter::Equals("id".into(), FilterValue::Int(7)))
+            .create_set("id", FilterValue::Int(7))
+            .update_set("name", "Renamed")
+            .with_update_nested(NestedWriteOp::Disconnect {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                target_pk: "id",
+                pk: FilterValue::Int(42),
+            })
+            .with_create_nested(NestedWriteOp::Create {
+                relation: "posts",
+                target_table: "posts",
+                foreign_key: "author_id",
+                payload: vec![vec![("title".into(), FilterValue::String("p".into()))]],
+            })
+            .exec()
+            .await
+            .expect("create branch");
+        let c_stmts = engine_c.statements();
+        // Child INSERT (nested Create on posts) must fire, Disconnect must not.
+        assert!(
+            c_stmts
+                .iter()
+                .any(|(s, _)| s.contains("INSERT INTO") && s.contains("posts")),
+            "expected nested Create child INSERT: {c_stmts:#?}"
+        );
+        assert!(
+            !c_stmts.iter().any(|(s, _)| s.contains("NULL")),
+            "no nested Disconnect on create branch: {c_stmts:#?}"
+        );
     }
 }

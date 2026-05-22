@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested writes inside `update!` and `upsert!` macros.** `update!`'s
+  `data:` block and `upsert!`'s `create:`/`update:` branches now accept
+  the full Prisma nested-write operator set (`create`, `connect`,
+  `disconnect`, `delete`, `delete_many`, `update`, `update_many`,
+  `upsert`, `connect_or_create`, `set`).
+- `UpdateOperation::with(NestedWriteOp)` and
+  `UpsertOperation::with_create_nested(NestedWriteOp)` /
+  `with_update_nested(NestedWriteOp)` runtime builders, gated on
+  `SupportsNestedWrites`.
+- `UpsertOperation` dispatches nested ops by branch: `update_nested`
+  fires when the existing-row UPDATE matched; `create_nested` fires
+  when the row was newly inserted. The slow path runs a two-statement
+  engine-agnostic upsert (UPDATE, then INSERT if zero rows affected),
+  re-fetching the post-update row via SELECT so the caller still sees
+  the merged columns.
+
+### Known limitations
+
+- Nested writes inside `update!` / `upsert!` currently require the
+  `where:` clause to equal-match the primary-key column. Non-PK unique
+  columns (e.g. `where: { email: "..." }`) error with a clear
+  diagnostic. Lifting this restriction is a separate follow-up — it
+  needs a SELECT-then-update pattern to capture the row's PK.
+
 - **Nested `set:` full-relation replacement inside `create!`'s `data:`
   (phase 5e).** New `NestedWriteOp::Set` variant with two-statement
   engine-agnostic executor: disconnect (`UPDATE child SET fk = NULL
