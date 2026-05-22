@@ -304,20 +304,32 @@ pub fn lower_create_relation(
                 return Err(phase_5e_deferral(relation_field.name(), key.span()));
             }
             "connect_or_create" => {
-                return Err(syn::Error::new(
-                    key.span(),
-                    format!(
-                        "nested operator `connect_or_create` inside `data:` relation block \
-                         `{}` is not supported in phase 5b. `connect_or_create` (engine-specific \
-                         lowerings) lands in phase 5d.",
-                        relation_field.name(),
-                    ),
-                ));
+                let children = expect_list_of_blocks(value, &op_key, key.span())?;
+                let target_ctx = ctx.for_model(target_model);
+                for child_block in children {
+                    // Each entry is `{ where: { ... }, create: { ... } }`.
+                    let (where_expr, create_expr) =
+                        extract_connect_or_create_entry(child_block, &target_ctx)?;
+                    let op_expr = quote! {
+                        ::prax_query::nested::NestedWriteOp::ConnectOrCreate {
+                            relation: #relation_name_str,
+                            target_table: #target_table,
+                            foreign_key: #foreign_key,
+                            where_filter: <_ as ::prax_query::inputs::WhereInput>::into_ir(#where_expr),
+                            create_payload: <
+                                #target_module_ident::#target_input_ident
+                                as ::prax_query::inputs::CreateInput
+                            >::into_ir(#create_expr),
+                        }
+                    };
+                    ops.push(NestedRelationOp { op_expr });
+                }
             }
             _ => {
                 let candidates = vec![
                     "create".to_string(),
                     "connect".to_string(),
+                    "connect_or_create".to_string(),
                     "disconnect".to_string(),
                     "delete".to_string(),
                     "delete_many".to_string(),
@@ -329,14 +341,14 @@ pub fn lower_create_relation(
                 let msg = match suggestion {
                     Some(s) => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Did you mean `{s}`? Valid operators: create, connect, disconnect, delete, \
-                         delete_many, update, update_many, upsert.",
+                         Did you mean `{s}`? Valid operators: create, connect, connect_or_create, \
+                         disconnect, delete, delete_many, update, update_many, upsert.",
                         relation_field.name(),
                     ),
                     None => format!(
                         "unknown nested operator `{op_key}` inside `data:` relation block `{}`. \
-                         Valid operators: create, connect, disconnect, delete, delete_many, \
-                         update, update_many, upsert.",
+                         Valid operators: create, connect, connect_or_create, disconnect, delete, \
+                         delete_many, update, update_many, upsert.",
                         relation_field.name(),
                     ),
                 };
@@ -638,6 +650,47 @@ fn extract_upsert_entry(
     Ok((pk_expr, create_expr, update_expr))
 }
 
+/// Pull `{ where: <filter>, create: <create-payload> }` out of a single
+/// `connect_or_create` entry.
+///
+/// The `where` block lowers via the target's `WhereInput` — any filter
+/// shape is acceptable at codegen-time; semantics at runtime use the
+/// resulting Filter directly. The `create` block lowers via the target's
+/// `CreateInput`; the FK column is omitted from the user input and is
+/// spliced in by the executor.
+///
+/// Returns `(where_expr, create_expr)` token streams.
+fn extract_connect_or_create_entry(
+    block: &DslBlock,
+    target_ctx: &LowerCtx<'_>,
+) -> syn::Result<(TokenStream, TokenStream)> {
+    reject_extra_keys(
+        block,
+        &["where", "create"],
+        "connect_or_create",
+        Span::call_site(),
+    )?;
+    let where_value = take_named_field(block, "where", "connect_or_create", Span::call_site())?;
+    let create_value = take_named_field(block, "create", "connect_or_create", Span::call_site())?;
+
+    let DslValue::Block(where_block) = where_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`connect_or_create:` entry expects `where: { ... }`",
+        ));
+    };
+    let DslValue::Block(create_block) = create_value else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "`connect_or_create:` entry expects `create: { ... }`",
+        ));
+    };
+
+    let where_expr = super::where_input::lower_where(where_block, target_ctx)?;
+    let create_expr = super::data_input::lower_create_data(create_block, target_ctx)?;
+    Ok((where_expr, create_expr))
+}
+
 /// Resolve the FK column on `target_model` that points back at `parent_model`.
 ///
 /// Looks for the back-pointer field on the target whose `field_type`
@@ -841,17 +894,20 @@ mod tests {
     }
 
     #[test]
-    fn connect_or_create_is_phase_5d() {
+    fn lowers_nested_connect_or_create_to_nested_write_op() {
         let schema = parsed_schema();
         let user = schema.get_model("User").unwrap().clone();
         let ctx = LowerCtx::new(&schema, &user);
         let field = user.get_field("posts").unwrap();
         let value = DslValue::Block(parse_block(quote!({
-            connect_or_create: [{ where: {}, create: {} }]
+            connect_or_create: [{ where: { id: 1 }, create: { title: "x" } }]
         })));
-        let err = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("phase 5d"), "got: {msg}");
+        let ops = lower_create_relation(field, &value, Span::call_site(), &ctx).unwrap();
+        assert_eq!(ops.len(), 1);
+        let s = pretty(ops[0].op_expr.clone());
+        assert!(s.contains("ConnectOrCreate"), "got: {s}");
+        assert!(s.contains("where_filter"), "got: {s}");
+        assert!(s.contains("create_payload"), "got: {s}");
     }
 
     #[test]
