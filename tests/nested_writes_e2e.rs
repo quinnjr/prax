@@ -28,7 +28,7 @@ use prax_orm::{Model, client};
 use prax_query::capabilities::SupportsNestedWrites;
 use prax_query::dialect::SqlDialect;
 use prax_query::error::{QueryError, QueryResult};
-use prax_query::filter::FilterValue;
+use prax_query::filter::{Filter, FilterValue};
 use prax_query::nested::NestedWriteOp;
 use prax_query::row::{FromRow, RowError, RowRef};
 use prax_query::traits::{BoxFuture, Model as ModelTrait, ModelWithPk, QueryEngine};
@@ -864,4 +864,95 @@ async fn nested_upsert_insert_path() {
     // create payload value + FK (parent PK) = 2 params
     assert_eq!(insert_params.len(), 2);
     assert_eq!(insert_params[0], FilterValue::String("new".into()));
+}
+
+#[tokio::test]
+async fn nested_connect_or_create_connect_path() {
+    // Affected-override sequence:
+    //   1st execute_raw (connect_or_create UPDATE phase) -> 1 (row matched)
+    // The executor must skip the INSERT phase.
+    let engine = RecordingEngine::with_affected(vec![1]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::ConnectOrCreate {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            where_filter: Filter::Equals("id".into(), FilterValue::Int(42)),
+            create_payload: vec![("title".to_string(), FilterValue::String("fallback".into()))],
+        })
+        .exec()
+        .await
+        .expect("create + connect_or_create connect path");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + UPDATE only (no INSERT); got {stmts:#?}"
+    );
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    assert!(stmts[0].0.contains("users"));
+    let (update_sql, update_params) = &stmts[1];
+    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+    assert!(update_sql.contains("posts"), "got: {update_sql}");
+    assert!(update_sql.contains("author_id"), "got: {update_sql}");
+    // The child INSERT must not have run.
+    assert!(
+        !stmts.iter().skip(1).any(|(s, _)| s.contains("INSERT INTO")),
+        "no child INSERT expected; got {stmts:#?}"
+    );
+    // UPDATE params: parent_pk ($1) + filter value ($2).
+    assert_eq!(update_params.len(), 2);
+    assert_eq!(update_params[1], FilterValue::Int(42));
+}
+
+#[tokio::test]
+async fn nested_connect_or_create_create_path() {
+    // Affected-override sequence:
+    //   1st execute_raw (connect_or_create UPDATE phase) -> 0 (no match)
+    //   2nd execute_raw (connect_or_create INSERT phase) -> 1
+    let engine = RecordingEngine::with_affected(vec![0, 1]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::ConnectOrCreate {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            where_filter: Filter::Equals("id".into(), FilterValue::Int(42)),
+            create_payload: vec![("title".to_string(), FilterValue::String("fallback".into()))],
+        })
+        .exec()
+        .await
+        .expect("create + connect_or_create create path");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        3,
+        "parent insert + connect_or_create UPDATE + child INSERT; got {stmts:#?}"
+    );
+    let (update_sql, _) = &stmts[1];
+    assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+    assert!(update_sql.contains("posts"), "got: {update_sql}");
+    let (insert_sql, insert_params) = &stmts[2];
+    assert!(insert_sql.contains("INSERT INTO"), "got: {insert_sql}");
+    assert!(insert_sql.contains("posts"), "got: {insert_sql}");
+    assert!(insert_sql.contains("title"), "got: {insert_sql}");
+    assert!(
+        insert_sql.contains("author_id"),
+        "FK should be spliced in: {insert_sql}"
+    );
+    // create payload value + FK (parent PK) = 2 params; the parent PK
+    // is appended last so it lines up with the FK column.
+    assert_eq!(insert_params.len(), 2);
+    assert_eq!(insert_params[0], FilterValue::String("fallback".into()));
 }

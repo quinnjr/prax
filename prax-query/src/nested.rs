@@ -723,6 +723,30 @@ pub enum NestedWriteOp {
         create_payload: Vec<(String, FilterValue)>,
         update_payload: Vec<(String, crate::inputs::WriteOp)>,
     },
+    /// Connect an existing child row if a `where` filter matches, else
+    /// insert a new one with the parent's FK spliced in.
+    ///
+    /// Two-statement engine-agnostic lowering:
+    /// 1. `UPDATE <target_table> SET <foreign_key> = $1 WHERE <filter>`
+    ///    (the connect path — points any matching row at the parent).
+    /// 2. If `affected_rows == 0`, emit
+    ///    `INSERT INTO <target_table> (<create_cols + foreign_key>) VALUES (<...>)`
+    ///    (the create path).
+    ///
+    /// If the filter matches multiple rows, every match has its FK pointed
+    /// at the parent — `connect_or_create` is typically used with a unique
+    /// where, but this is not enforced at runtime.
+    ///
+    /// As a safety measure, an empty (`Filter::None`) `where_filter` is
+    /// rejected at execute time — without this guard, the UPDATE would
+    /// lower to `... WHERE TRUE`, rewriting every row in the table.
+    ConnectOrCreate {
+        relation: &'static str,
+        target_table: &'static str,
+        foreign_key: &'static str,
+        where_filter: Filter,
+        create_payload: Vec<(String, FilterValue)>,
+    },
 }
 
 impl NestedWriteOp {
@@ -967,6 +991,69 @@ impl NestedWriteOp {
                     // as not_found so the caller doesn't silently no-op.
                     return Err(crate::error::QueryError::not_found(target_table)
                         .with_context("Nested Upsert: row absent and create payload empty"));
+                }
+                let mut columns: Vec<String> =
+                    create_payload.iter().map(|(c, _)| c.clone()).collect();
+                let mut values: Vec<FilterValue> =
+                    create_payload.into_iter().map(|(_, v)| v).collect();
+                columns.push(foreign_key.to_string());
+                values.push(parent_pk.clone());
+                let placeholders: Vec<String> =
+                    (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
+                let quoted_cols: Vec<String> =
+                    columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                let insert_sql = format!(
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    dialect.quote_ident(target_table),
+                    quoted_cols.join(", "),
+                    placeholders.join(", "),
+                );
+                engine.execute_raw(&insert_sql, values).await?;
+                Ok(())
+            }
+            NestedWriteOp::ConnectOrCreate {
+                relation: _,
+                target_table,
+                foreign_key,
+                where_filter,
+                create_payload,
+            } => {
+                // Safety: reject an empty (`Filter::None`) where. Without
+                // this guard the UPDATE would lower to `... WHERE TRUE`
+                // (per `Filter::None::to_sql`), rewriting every row in
+                // the child table. `connect_or_create` semantically
+                // requires a unique-where lookup; an empty where is a
+                // user error, not an "always match every row" command.
+                if matches!(where_filter, Filter::None) {
+                    return Err(crate::error::QueryError::not_found(target_table).with_context(
+                        "Nested ConnectOrCreate: empty `where` block would match every row; supply a unique filter",
+                    ));
+                }
+                let dialect = engine.dialect();
+                // Phase 1: attempt UPDATE to connect existing row(s).
+                let (filter_sql, filter_params) = where_filter.to_sql(2, &crate::dialect::Postgres);
+                let mut update_params: Vec<FilterValue> =
+                    Vec::with_capacity(filter_params.len() + 1);
+                update_params.push(parent_pk.clone());
+                update_params.extend(filter_params);
+                let update_sql = format!(
+                    "UPDATE {} SET {} = {} WHERE {}",
+                    dialect.quote_ident(target_table),
+                    dialect.quote_ident(foreign_key),
+                    dialect.placeholder(1),
+                    filter_sql,
+                );
+                let affected = engine.execute_raw(&update_sql, update_params).await?;
+                if affected > 0 {
+                    return Ok(());
+                }
+                // Phase 2: no row matched — INSERT with FK spliced in.
+                if create_payload.is_empty() {
+                    return Err(
+                        crate::error::QueryError::not_found(target_table).with_context(
+                            "Nested ConnectOrCreate: no match and create payload empty",
+                        ),
+                    );
                 }
                 let mut columns: Vec<String> =
                     create_payload.iter().map(|(c, _)| c.clone()).collect();
@@ -1726,5 +1813,102 @@ mod tests {
         assert_eq!(insert_params.len(), 2);
         assert_eq!(insert_params[0], FilterValue::String("new".to_string()));
         assert_eq!(insert_params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_connect_or_create_connect_path_when_affected() {
+        // Default RecordingEngine returns 1 from execute_raw, so the
+        // UPDATE matches at least one row and the INSERT phase must not
+        // run.
+        let engine = RecordingEngine::with_affected(vec![1]);
+        let op = NestedWriteOp::ConnectOrCreate {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            where_filter: Filter::Equals("id".into(), FilterValue::Int(42)),
+            create_payload: vec![(
+                "title".to_string(),
+                FilterValue::String("fallback".to_string()),
+            )],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected only the UPDATE — INSERT should not have run"
+        );
+        let (sql, params) = &stmts[0];
+        assert!(sql.contains("UPDATE"), "got: {sql}");
+        assert!(!sql.contains("INSERT"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("author_id"), "got: {sql}");
+        // params: parent_pk ($1) + filter value ($2)
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], FilterValue::Int(7));
+        assert_eq!(params[1], FilterValue::Int(42));
+    }
+
+    #[tokio::test]
+    async fn nested_op_connect_or_create_create_path_when_zero_affected() {
+        // UPDATE returns 0 (no matching row) → executor must emit the
+        // INSERT with the FK spliced in. Second call (the INSERT)
+        // returns 1.
+        let engine = RecordingEngine::with_affected(vec![0, 1]);
+        let op = NestedWriteOp::ConnectOrCreate {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            where_filter: Filter::Equals("id".into(), FilterValue::Int(42)),
+            create_payload: vec![(
+                "title".to_string(),
+                FilterValue::String("fallback".to_string()),
+            )],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 2);
+        let (update_sql, _) = &stmts[0];
+        assert!(update_sql.contains("UPDATE"), "got: {update_sql}");
+        let (insert_sql, insert_params) = &stmts[1];
+        assert!(insert_sql.contains("INSERT INTO"), "got: {insert_sql}");
+        assert!(insert_sql.contains("posts"), "got: {insert_sql}");
+        assert!(insert_sql.contains("title"), "got: {insert_sql}");
+        assert!(insert_sql.contains("author_id"), "got: {insert_sql}");
+        // create payload value + FK (parent_pk) = 2 params; parent_pk
+        // must be last so the FK column lines up with $2.
+        assert_eq!(insert_params.len(), 2);
+        assert_eq!(
+            insert_params[0],
+            FilterValue::String("fallback".to_string())
+        );
+        assert_eq!(insert_params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_connect_or_create_rejects_empty_where() {
+        // Filter::None would lower to `WHERE TRUE` and rewrite every row.
+        // The executor must reject this defensively before issuing SQL.
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::ConnectOrCreate {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            where_filter: Filter::None,
+            create_payload: vec![(
+                "title".to_string(),
+                FilterValue::String("fallback".to_string()),
+            )],
+        };
+        let err = op
+            .execute(&engine, &FilterValue::Int(7))
+            .await
+            .expect_err("empty where must be rejected");
+        let op_ctx = err.context.operation.clone().unwrap_or_default();
+        assert!(op_ctx.contains("ConnectOrCreate"), "got: {op_ctx}");
+        // No SQL should have been emitted.
+        assert!(engine.statements().is_empty());
     }
 }

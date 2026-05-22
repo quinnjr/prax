@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested `connect_or_create` inside `create!`'s `data:` (phase 5d).**
+  New `NestedWriteOp::ConnectOrCreate` variant with two-statement
+  engine-agnostic executor: `UPDATE child SET fk WHERE <filter>`
+  (connect path); if zero affected rows, `INSERT INTO child (... + fk)
+  VALUES (...)` (create path). Behaves correctly even when the where
+  matches multiple rows — every match gets its FK pointed at the
+  parent. Defensively rejects an empty (`Filter::None`) where to avoid
+  the UPDATE matching every row in the child table. Single-statement
+  vendor-specific upsert (Postgres `ON CONFLICT`, MySQL
+  `ON DUPLICATE KEY`, MSSQL `MERGE`) remains a separate optimization
+  phase.
 - **Nested `update` / `update_many` / `upsert` inside `create!`'s
   `data:` (phase 5c-mutations).** Three new `NestedWriteOp` variants
   with executors. Update + UpdateMany emit standard `UPDATE SET ...
@@ -30,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Inside `create!`'s `data:` block, only `set:` (phase 5e) remains a
+  deferred nested operator. The unknown-operator did-you-mean
+  candidate list grows to include `connect_or_create`.
+- The `nested_connect_or_create_phase_5d` trybuild fixture is removed
+  — the operator it tested now ships.
 - The phase-5c deferral arm for mutation operators is gone; `update`,
   `update_many`, `upsert` are now first-class. Only `set:` (phase 5e)
   and `connect_or_create` (phase 5d) remain deferred. The
