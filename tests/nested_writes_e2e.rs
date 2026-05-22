@@ -956,3 +956,128 @@ async fn nested_connect_or_create_create_path() {
     assert_eq!(insert_params.len(), 2);
     assert_eq!(insert_params[0], FilterValue::String("fallback".into()));
 }
+
+#[tokio::test]
+async fn nested_set_empty_list_emits_disconnect_all() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![],
+        })
+        .exec()
+        .await
+        .expect("create + nested set empty");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + single disconnect-all UPDATE; got {stmts:#?}"
+    );
+    let (sql, params) = &stmts[1];
+    assert!(sql.contains("UPDATE"), "got: {sql}");
+    assert!(sql.contains("posts"), "got: {sql}");
+    assert!(sql.contains("NULL"), "got: {sql}");
+    assert!(
+        !sql.contains("NOT IN"),
+        "empty list should not emit NOT IN: {sql}"
+    );
+    assert_eq!(params.len(), 1, "parent_pk only");
+}
+
+#[tokio::test]
+async fn nested_set_with_pks_emits_disconnect_then_connect() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3),
+            ],
+        })
+        .exec()
+        .await
+        .expect("create + nested set with PKs");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        3,
+        "parent insert + disconnect UPDATE + connect UPDATE; got {stmts:#?}"
+    );
+
+    let (disconnect_sql, disconnect_params) = &stmts[1];
+    assert!(disconnect_sql.contains("UPDATE"), "got: {disconnect_sql}");
+    assert!(disconnect_sql.contains("NULL"), "got: {disconnect_sql}");
+    assert!(disconnect_sql.contains("NOT IN"), "got: {disconnect_sql}");
+    assert_eq!(disconnect_params.len(), 4, "parent_pk + 3 set_pks");
+
+    let (connect_sql, connect_params) = &stmts[2];
+    assert!(connect_sql.contains("UPDATE"), "got: {connect_sql}");
+    assert!(connect_sql.contains("author_id"), "got: {connect_sql}");
+    assert!(connect_sql.contains(" IN ("), "got: {connect_sql}");
+    assert!(
+        !connect_sql.contains("NOT IN"),
+        "connect must not include NOT IN: {connect_sql}"
+    );
+    assert_eq!(connect_params.len(), 4, "parent_pk + 3 set_pks");
+}
+
+#[tokio::test]
+async fn nested_set_combined_with_create_child_in_one_transaction() {
+    let engine = RecordingEngine::new();
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(user::posts::create(vec![vec![(
+            "title".into(),
+            FilterValue::String("new".into()),
+        )]]))
+        .with(NestedWriteOp::Set {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            set_pks: vec![FilterValue::Int(10), FilterValue::Int(20)],
+        })
+        .exec()
+        .await
+        .expect("create + create-child + set");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        4,
+        "parent + create-child + set-disconnect + set-connect; got {stmts:#?}"
+    );
+    assert!(stmts[0].0.contains("INSERT INTO"));
+    assert!(
+        stmts[1].0.contains("INSERT INTO"),
+        "create child: {}",
+        stmts[1].0
+    );
+    assert!(stmts[2].0.contains("UPDATE") && stmts[2].0.contains("NULL"));
+    assert!(stmts[3].0.contains("UPDATE") && stmts[3].0.contains(" IN ("));
+}
