@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Nested `set:` full-relation replacement inside `create!`'s `data:`
+  (phase 5e).** New `NestedWriteOp::Set` variant with two-statement
+  engine-agnostic executor: disconnect (`UPDATE child SET fk = NULL
+  WHERE fk = $parent AND pk NOT IN (...)`) followed by connect
+  (`UPDATE child SET fk = $parent WHERE pk IN (...)`). Empty
+  `set: []` special-cases to a plain disconnect-all (no invalid
+  `NOT IN ()` clause). Pre-existing FK values on listed rows are
+  overwritten — `set:` claims rows for this parent regardless of prior
+  ownership, matching Prisma's relation-replacement semantics.
+
+### Changed
+
+- **The nested-write operator surface inside `create!`'s `data:` is
+  now complete.** Every Prisma-style operator ships: `create`,
+  `connect`, `disconnect`, `delete`, `delete_many`, `update`,
+  `update_many`, `upsert`, `connect_or_create`, `set`. Single-statement
+  vendor-specific upsert/connect_or_create (Postgres `ON CONFLICT`,
+  MySQL `ON DUPLICATE KEY`, MSSQL `MERGE`) remains a separate
+  optimization phase. The unknown-operator did-you-mean candidate list
+  grows to include `set`. The `nested_set_phase_5e` trybuild fixture is
+  removed — the operator it tested now ships.
+
 - **Nested `connect_or_create` inside `create!`'s `data:` (phase 5d).**
   New `NestedWriteOp::ConnectOrCreate` variant with two-statement
   engine-agnostic executor: `UPDATE child SET fk WHERE <filter>`
