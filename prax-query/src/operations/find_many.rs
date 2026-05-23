@@ -7,6 +7,7 @@ use smallvec::SmallVec;
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::pagination::Pagination;
+use crate::projection::ScalarProjection;
 use crate::relations::IncludeSpec;
 use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::{OrderBy, Select};
@@ -39,6 +40,9 @@ pub struct FindManyOperation<E: QueryEngine, M: Model> {
     /// (the typical 0-2 case) to avoid a heap allocation on the hot
     /// builder path.
     includes: SmallVec<[IncludeSpec; 2]>,
+    /// Extra scalar-subquery columns appended to the SELECT clause.
+    /// Used by relation-aggregate virtual fields (`@count`, `@sum`, …).
+    pub extra_projections: Vec<ScalarProjection>,
     _model: PhantomData<M>,
 }
 
@@ -53,6 +57,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             select: Select::All,
             distinct: None,
             includes: SmallVec::new(),
+            extra_projections: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -153,7 +158,14 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
     ) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0, dialect);
+        // Projection params come first; WHERE params are offset by the
+        // number of params already consumed by the extra projections so
+        // that all dialect placeholders form a single contiguous sequence.
+        let proj_param_count: usize = self.extra_projections.iter().map(|p| p.params.len()).sum();
+        let (where_sql, where_params) = self.filter.to_sql(proj_param_count, dialect);
+
+        let mut params: Vec<crate::filter::FilterValue> =
+            Vec::with_capacity(proj_param_count + where_params.len());
 
         let mut sql = String::new();
 
@@ -166,6 +178,19 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         }
         sql.push_str(&self.select.to_sql());
 
+        // Extra scalar-subquery projections
+        let mut proj_offset = 0usize;
+        for proj in &self.extra_projections {
+            sql.push_str(", ");
+            let frag = proj.to_sql(proj_offset, dialect, &mut params);
+            sql.push('(');
+            sql.push_str(&frag);
+            sql.push_str(") AS \"");
+            sql.push_str(proj.alias);
+            sql.push('"');
+            proj_offset += proj.params.len();
+        }
+
         // FROM clause
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
@@ -175,6 +200,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
         }
+        params.extend(where_params);
 
         // ORDER BY clause
         if !self.order_by.is_empty() {
