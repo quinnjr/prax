@@ -13,6 +13,8 @@ fn field(name: &str, cql_type: &str) -> CqlFieldDiff {
         name: name.into(),
         cql_type: cql_type.into(),
         is_static: false,
+        generated: None,
+        is_aggregate: false,
     }
 }
 

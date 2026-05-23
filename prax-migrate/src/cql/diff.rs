@@ -91,6 +91,14 @@ pub struct CqlFieldDiff {
     pub name: String,
     pub cql_type: String,
     pub is_static: bool,
+    /// Set when the source schema field carries `@generated`. CQL engines do
+    /// not support generated columns; the migration generator will emit a
+    /// warning and omit the column rather than producing broken DDL.
+    pub generated: Option<prax_schema::ast::GeneratedAttribute>,
+    /// Set when the source schema field is an aggregate (`@count`, `@sum`,
+    /// etc.). Aggregate fields have no DDL representation; they are silently
+    /// skipped when generating CQL.
+    pub is_aggregate: bool,
 }
 
 /// A clustering key with explicit ordering.

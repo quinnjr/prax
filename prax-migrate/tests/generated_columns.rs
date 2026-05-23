@@ -3,10 +3,14 @@
 //! Tests that each SQL generator emits the correct GENERATED AS syntax for
 //! stored and virtual computed columns, including Postgres's fallback to STORED
 //! (with a warning) when @virtual is requested.
+//!
+//! Also tests that the CQL generator rejects @generated columns (via warning)
+//! and silently skips aggregate fields.
 
 use prax_migrate::{
-    DuckDbSqlGenerator, FieldDiff, ModelDiff, MssqlGenerator, MySqlGenerator, PostgresSqlGenerator,
-    SchemaDiff, SqliteGenerator,
+    CqlFieldDiff, CqlMigrationGenerator, CqlSchemaDiff, CqlTableDiff, DuckDbSqlGenerator,
+    FieldDiff, ModelDiff, MssqlGenerator, MySqlGenerator, PostgresSqlGenerator, SchemaDiff,
+    SqliteGenerator,
 };
 use prax_schema::ast::GeneratedAttribute;
 
@@ -230,5 +234,152 @@ fn duckdb_emits_virtual_generated_column() {
     assert!(
         sql.contains(&format!("GENERATED ALWAYS AS ({EXPR}) VIRTUAL")),
         "missing DuckDB GENERATED ... VIRTUAL in:\n{sql}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CQL helpers and tests
+// ---------------------------------------------------------------------------
+
+fn cql_simple_field(name: &str, cql_type: &str) -> CqlFieldDiff {
+    CqlFieldDiff {
+        name: name.into(),
+        cql_type: cql_type.into(),
+        is_static: false,
+        generated: None,
+        is_aggregate: false,
+    }
+}
+
+fn cql_generated_field(name: &str) -> CqlFieldDiff {
+    CqlFieldDiff {
+        name: name.into(),
+        cql_type: "text".into(),
+        is_static: false,
+        generated: Some(GeneratedAttribute {
+            expression: EXPR.to_string(),
+            stored: true,
+        }),
+        is_aggregate: false,
+    }
+}
+
+fn cql_aggregate_field(name: &str) -> CqlFieldDiff {
+    CqlFieldDiff {
+        name: name.into(),
+        cql_type: "counter".into(),
+        is_static: false,
+        generated: None,
+        is_aggregate: true,
+    }
+}
+
+fn cql_fixture_diff_with_generated() -> CqlSchemaDiff {
+    CqlSchemaDiff {
+        create_tables: vec![CqlTableDiff {
+            name: "users".into(),
+            fields: vec![
+                cql_simple_field("id", "uuid"),
+                cql_simple_field("first_name", "text"),
+                cql_simple_field("last_name", "text"),
+                cql_generated_field("full_name"),
+            ],
+            partition_keys: vec!["id".into()],
+            clustering_keys: vec![],
+            compaction: None,
+            default_ttl: None,
+        }],
+        ..CqlSchemaDiff::default()
+    }
+}
+
+fn cql_fixture_diff_aggregate_only() -> CqlSchemaDiff {
+    CqlSchemaDiff {
+        create_tables: vec![CqlTableDiff {
+            name: "posts".into(),
+            fields: vec![
+                cql_simple_field("id", "uuid"),
+                cql_simple_field("title", "text"),
+                cql_aggregate_field("post_count"),
+            ],
+            partition_keys: vec!["id".into()],
+            clustering_keys: vec![],
+            compaction: None,
+            default_ttl: None,
+        }],
+        ..CqlSchemaDiff::default()
+    }
+}
+
+/// CQL does not support @generated columns. The generator must emit a warning
+/// and omit the column from DDL rather than producing broken CQL.
+#[test]
+fn cql_warns_on_generated_column_and_omits_it() {
+    let migration = CqlMigrationGenerator::new().generate(&cql_fixture_diff_with_generated());
+
+    // A warning must be present mentioning the @generated field.
+    assert!(
+        !migration.warnings.is_empty(),
+        "expected a warning for @generated on CQL engine"
+    );
+    assert!(
+        migration
+            .warnings
+            .iter()
+            .any(|w| w.contains("full_name") && w.contains("@generated")),
+        "warning should mention 'full_name' and '@generated': {:?}",
+        migration.warnings
+    );
+
+    // The column must NOT appear in the generated DDL.
+    assert!(
+        !migration.up.contains("full_name"),
+        "generated column 'full_name' should be omitted from CQL DDL:\n{}",
+        migration.up
+    );
+
+    // The other columns (and the table itself) should still be present.
+    assert!(
+        migration.up.contains("CREATE TABLE"),
+        "table DDL should still be emitted:\n{}",
+        migration.up
+    );
+    assert!(
+        migration.up.contains("first_name"),
+        "non-generated columns should still appear in DDL:\n{}",
+        migration.up
+    );
+}
+
+/// Aggregate fields (`@count`, `@sum`, etc.) have no DDL representation in CQL.
+/// The generator must silently skip them without any warning.
+#[test]
+fn cql_silently_skips_aggregate_fields() {
+    let migration = CqlMigrationGenerator::new().generate(&cql_fixture_diff_aggregate_only());
+
+    // No warnings should be emitted for aggregate fields.
+    assert!(
+        migration.warnings.is_empty(),
+        "no warnings expected for aggregate fields: {:?}",
+        migration.warnings
+    );
+
+    // The aggregate column must NOT appear in the generated DDL.
+    assert!(
+        !migration.up.contains("post_count"),
+        "aggregate field 'post_count' should be silently omitted from CQL DDL:\n{}",
+        migration.up
+    );
+
+    // The table and non-aggregate columns should still be present.
+    assert!(
+        migration.up.contains("CREATE TABLE"),
+        "table DDL should still be emitted:\n{}",
+        migration.up
+    );
+    assert!(
+        migration.up.contains("title"),
+        "non-aggregate columns should still appear in DDL:\n{}",
+        migration.up
     );
 }
