@@ -3,6 +3,13 @@
 use crate::diff::SchemaDiff;
 use crate::sql::{MigrationSql, PostgresSqlGenerator};
 
+/// Marker trait — dialects that support computed columns of the form
+/// `GENERATED ALWAYS AS (expr) STORED|VIRTUAL` (or vendor-specific
+/// equivalent: MySQL `AS (expr) STORED|VIRTUAL`, MSSQL
+/// `AS (expr) [PERSISTED]`). Implemented by every SQL generator;
+/// not implemented by `CqlMigrationGenerator`.
+pub trait SupportsGeneratedColumns {}
+
 /// A migration dialect abstracts the schema diff type, migration output type,
 /// and generator for a specific database backend.
 pub trait MigrationDialect {

@@ -1,5 +1,6 @@
 //! SQL generation for migrations.
 
+use crate::dialect::SupportsGeneratedColumns;
 use crate::diff::{
     EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
     ModelAlterDiff, ModelDiff, SchemaDiff, ViewDiff,
@@ -7,6 +8,8 @@ use crate::diff::{
 
 /// SQL generator for PostgreSQL.
 pub struct PostgresSqlGenerator;
+
+impl SupportsGeneratedColumns for PostgresSqlGenerator {}
 
 impl PostgresSqlGenerator {
     /// Generate SQL for a schema diff.
@@ -531,6 +534,8 @@ impl MigrationSql {
 /// SQL generator for MySQL.
 pub struct MySqlGenerator;
 
+impl SupportsGeneratedColumns for MySqlGenerator {}
+
 impl MySqlGenerator {
     /// Generate SQL for a schema diff.
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
@@ -840,6 +845,8 @@ impl MySqlGenerator {
 
 /// SQL generator for SQLite.
 pub struct SqliteGenerator;
+
+impl SupportsGeneratedColumns for SqliteGenerator {}
 
 impl SqliteGenerator {
     /// Generate SQL for a schema diff.
@@ -1161,6 +1168,8 @@ impl SqliteGenerator {
 
 /// SQL generator for Microsoft SQL Server.
 pub struct MssqlGenerator;
+
+impl SupportsGeneratedColumns for MssqlGenerator {}
 
 impl MssqlGenerator {
     /// Generate SQL for a schema diff.
@@ -1491,6 +1500,8 @@ impl MssqlGenerator {
 
 /// SQL generator for DuckDB.
 pub struct DuckDbSqlGenerator;
+
+impl SupportsGeneratedColumns for DuckDbSqlGenerator {}
 
 impl DuckDbSqlGenerator {
     /// Generate SQL for a schema diff.
