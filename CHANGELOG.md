@@ -9,6 +9,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Computed and virtual fields (phase 5.5).** Three new schema-level
+  field classes:
+  - `@generated("expr") @stored|@virtual` — DB-side computed columns,
+    with per-dialect DDL emit: `GENERATED ALWAYS AS (...) STORED|VIRTUAL`
+    on Postgres / SQLite / DuckDB, `AS (...) [STORED|VIRTUAL]` on MySQL,
+    `AS (...) [PERSISTED]` on MSSQL. CQL engines reject `@generated`
+    at migrate time. New `SupportsGeneratedColumns` capability marker
+    implemented by all five SQL generators. Postgres `@virtual` falls
+    back to `STORED` with a warning (PG ≥ 17 native virtual columns are
+    a deferred follow-up).
+  - `@count(rel)` and `@sum`/`@avg`/`@min`/`@max(rel.field)` — relation
+    aggregate virtuals. Result-struct types: Count → `i64`,
+    Avg → `Option<f64>`, others → `Option<T>` matching the underlying
+    column. WHERE / ORDER BY lower via the existing
+    `Filter::ScalarSubquery` IR variant; SELECT lowers via a new
+    `ScalarProjection` runtime type in `prax-query`. New
+    `SupportsScalarSubqueryInSelect` capability marker — implemented by
+    all five SQL engines plus the SQLx-routed engine, not by MongoDB or
+    CQL engines.
+  - `select: { _count: { rel: true } }` ad-hoc accessor — emits one
+    `ScalarProjection` per listed relation with alias `_count_<rel>`.
+    Compile-time error against models with zero outgoing to-many
+    relations.
+- Synthetic `<Model>Count` struct emitted for every model with one or
+  more outgoing relations (`pub <rel>: Option<i64>` per relation).
+- `Model` trait: defaulted associated constants `GENERATED_FIELDS` and
+  `AGGREGATE_FIELDS` carrying per-model metadata for downstream consumers.
+- `#[prax(generated = "expr", stored)]` / `#[prax(generated = "expr",
+  r#virtual)]` and `#[prax(count(rel))]` / `#[prax(sum(rel.field))]`
+  / `#[prax(avg/min/max(...))]` derive-attribute syntax mirroring the
+  `.prax` directives.
+- All `@generated` and aggregate fields are excluded from
+  `<Model>CreateInput` and `<Model>UpdateInput`; included in
+  `<Model>WhereInput`, `<Model>SelectInput`, `<Model>OrderByInput`.
+
+### Known limitations
+
+- Postgres rejects `@virtual` and emits `STORED` instead with a warning
+  (PG ≥ 17 support deferred).
+- The `_count` ad-hoc accessor only supports counts; sum/avg/min/max
+  require a schema-level `@sum/@avg/...` attribute.
+- The `_count` macro accessor and schema-level aggregate macro lowering
+  target schema-defined (`.prax`) models. Derive-style models can
+  declare aggregates and have them appear on the result struct, but
+  must use the runtime `.with_scalar_projection(...)` builder API
+  rather than the macro DSL.
+- MongoDB engines fail to compile against scalar-projection operations
+  until the `$lookup` follow-up ships.
+- Aggregate fields filtered in `where:` support only comparison
+  operators (`equals`, `not_equals`, `lt`, `lte`, `gt`, `gte`, `in`,
+  `not_in`). String filter operators are rejected at compile time.
+- `include: { _count: … }` is not wired; use `select: { _count: … }`.
+
 - **Nested writes inside `update!` and `upsert!` macros.** `update!`'s
   `data:` block and `upsert!`'s `create:`/`update:` branches now accept
   the full Prisma nested-write operator set (`create`, `connect`,
