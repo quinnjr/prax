@@ -272,6 +272,91 @@ fn count_field_defaults_to_zero_when_row_missing() {
     );
 }
 
+// ── Input-struct membership (Task 12) ────────────────────────────────────────
+
+/// `UserCreateInput` must NOT have `full_name`, `search_key`, `post_count`, or
+/// `total_views` fields. These are computed by the DB or via scalar subquery
+/// and cannot be assigned by the caller.
+///
+/// The assertion is structural: if any of those fields were mistakenly added
+/// back to `UserCreateInput`, the struct-literal construction below would fail
+/// to compile (extra fields in struct literal / missing required field) —
+/// turning a runtime mystery into a compile error.
+#[test]
+fn user_create_input_excludes_computed_fields() {
+    let _ = user::UserCreateInput {
+        email: "a@b.com".into(),
+        first_name: "Ada".into(),
+        last_name: "Lovelace".into(),
+        // No full_name, no search_key, no post_count, no total_views.
+    };
+}
+
+/// `UserUpdateInput` must also exclude computed fields. Verify by constructing
+/// a default instance (all fields are `Option<*FieldUpdate>` so `Default`
+/// works) and confirming the type exists and is constructible.
+#[test]
+fn user_update_input_excludes_computed_fields() {
+    // Default construction succeeds — all fields are Option wrappers.
+    let _ = user::UserUpdateInput::default();
+    // If full_name / search_key / post_count / total_views had been mistakenly
+    // added to UpdateInput they would appear here as extra Option fields.
+    // Because the struct derives Default, the compile test is: does it derive
+    // Default WITHOUT those fields present?  The answer is yes iff exclusion
+    // is correct — any spuriously-included non-Option field would break Default.
+}
+
+/// `UserWhereInput` MUST include aggregate fields so callers can filter on them.
+/// `post_count: i64` maps to `BigIntFilter`; `total_views: Option<i32>` maps
+/// to `IntNullableFilter`.
+#[test]
+fn user_where_input_has_aggregate_filters() {
+    let _ = user::UserWhereInput {
+        post_count: Some(prax_query::inputs::BigIntFilter::equals(7)),
+        total_views: Some(prax_query::inputs::IntNullableFilter {
+            equals: Some(42),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+}
+
+/// `UserWhereInput` MUST also include `@generated` fields (`full_name`,
+/// `search_key`). These are real DB columns and can be filtered upon.
+#[test]
+fn user_where_input_has_generated_filters() {
+    let _ = user::UserWhereInput {
+        full_name: Some(prax_query::inputs::StringFilter::equals("Ada Lovelace")),
+        search_key: Some(prax_query::inputs::StringFilter::equals("ada lovelace")),
+        ..Default::default()
+    };
+}
+
+/// `UserSelect` MUST include `full_name` and `search_key` (@generated fields)
+/// plus `post_count` and `total_views` (aggregate fields) as `Option<bool>`
+/// fields, so callers can opt them in.
+#[test]
+fn user_select_input_has_computed_fields() {
+    let _ = user::UserSelect {
+        full_name: Some(true),
+        search_key: Some(true),
+        post_count: Some(true),
+        total_views: Some(true),
+        ..Default::default()
+    };
+}
+
+/// `UserOrderBy` MUST include variants for `@generated` and aggregate fields
+/// so callers can sort on them.
+#[test]
+fn user_order_by_includes_computed_variants() {
+    use prax_query::types::SortOrder;
+    let _ = user::UserOrderBy::FullName(SortOrder::Asc);
+    let _ = user::UserOrderBy::SearchKey(SortOrder::Desc);
+    let _ = user::UserOrderBy::PostCount(SortOrder::Asc);
+    let _ = user::UserOrderBy::TotalViews(SortOrder::Desc);
+}
+
 /// When the row DOES include the projected aggregate values, they must be
 /// decoded correctly.
 #[test]

@@ -15,6 +15,11 @@ pub struct SelectField {
     pub column: String,
     /// Whether this field is a relation (skip from SELECT column list).
     pub is_relation: bool,
+    /// Whether this field has no real base-table column (aggregate fields).
+    /// Aggregate fields appear in the struct as `Option<bool>` but must not
+    /// be pushed into the SELECT column list — they are resolved via
+    /// scalar subquery at a later phase.
+    pub is_no_column: bool,
 }
 
 pub fn generate(
@@ -31,15 +36,18 @@ pub fn generate(
         }
     });
 
-    let lowerings = fields.iter().filter(|f| !f.is_relation).map(|f| {
-        let n = &f.name;
-        let col = &f.column;
-        quote! {
-            if self.#n == ::core::option::Option::Some(true) {
-                cols.push(#col.to_string());
+    let lowerings = fields
+        .iter()
+        .filter(|f| !f.is_relation && !f.is_no_column)
+        .map(|f| {
+            let n = &f.name;
+            let col = &f.column;
+            quote! {
+                if self.#n == ::core::option::Option::Some(true) {
+                    cols.push(#col.to_string());
+                }
             }
-        }
-    });
+        });
 
     let struct_tokens = quote! {
         #[derive(Debug, Clone, Default, ::serde::Serialize, ::serde::Deserialize)]

@@ -136,6 +136,7 @@ fn collect_select_fields(model: &Model) -> Vec<SelectField> {
             name: snake_ident(f.name()),
             column: column_name_of(f),
             is_relation: matches!(f.field_type, FieldType::Model(_)),
+            is_no_column: false,
         })
         .collect()
 }

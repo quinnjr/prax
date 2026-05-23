@@ -330,12 +330,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
     // Build SelectField list: all fields; relation fields are marked so
     // their column names are excluded from the SELECT column list.
+    // Aggregate fields are also marked as no-column — they have no base-table
+    // column and will be resolved via scalar subquery in a later phase.
     let select_fields: Vec<super::SelectField> = field_infos
         .iter()
         .map(|f| super::SelectField {
             name: f.name.clone(),
             column: f.column_name.clone(),
             is_relation: f.relation.is_some(),
+            is_no_column: f.aggregate.is_some(),
         })
         .collect();
 
@@ -358,11 +361,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let (order_by_struct, order_by_impl) =
         super::generate_order_by_input(name, &module_name, &order_by_fields);
 
-    // Build CreateField list: scalar fields only, skipping auto-generated PKs.
+    // Build CreateField list: scalar fields only, skipping auto-generated PKs
+    // and computed/aggregate fields (@generated and @count/@sum/@avg/@min/@max).
+    // Computed columns are derived by the DB or via scalar subquery — callers
+    // cannot (and should not) assign values to them at create time.
     let create_fields: Vec<super::inputs::create_input::CreateField> = field_infos
         .iter()
         .filter(|f| f.relation.is_none() && !f.is_list)
         .filter(|f| !(f.is_id && f.is_auto))
+        .filter(|f| f.generated.is_none() && f.aggregate.is_none())
         .filter_map(|f| {
             let inner = extract_inner_type_name(&f.ty);
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
@@ -377,11 +384,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    // Build UpdateField list: scalar fields only, skipping auto-generated PKs.
+    // Build UpdateField list: scalar fields only, skipping auto-generated PKs
+    // and computed/aggregate fields (@generated and @count/@sum/@avg/@min/@max).
+    // Computed columns are derived by the DB or via scalar subquery — callers
+    // cannot (and should not) set them at update time.
     let update_fields: Vec<super::inputs::update_input::UpdateField> = field_infos
         .iter()
         .filter(|f| f.relation.is_none() && !f.is_list)
         .filter(|f| !(f.is_id && f.is_auto))
+        .filter(|f| f.generated.is_none() && f.aggregate.is_none())
         .filter_map(|f| {
             let inner = extract_inner_type_name(&f.ty);
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
