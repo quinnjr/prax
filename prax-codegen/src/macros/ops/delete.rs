@@ -13,7 +13,7 @@ use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
 use crate::macros::lower::order_by_input::lower_cursor;
-use crate::macros::lower::select_input::lower_select;
+use crate::macros::lower::select_input::lower_select_struct_only;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
 use crate::macros::validate::unknown_top_key_error;
 
@@ -69,7 +69,7 @@ fn lower_delete(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`select:` expects `{ ... }`"));
                 };
-                select_tokens = Some(lower_select(b, ctx)?);
+                select_tokens = Some(lower_select_struct_only(b, ctx)?);
             }
             "include" => {
                 return Err(syn::Error::new(

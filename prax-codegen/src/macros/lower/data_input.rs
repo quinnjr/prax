@@ -404,6 +404,18 @@ fn lower_create_pair(
 
     let field = lookup_field_with_suggestion(ctx, &key_str, key.span())?;
 
+    // Aggregate and generated fields are read-only / computed — reject
+    // assignment with a clear error.
+    if field.is_computed() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!(
+                "field `{}` is a computed virtual and cannot be assigned in `data:`",
+                key_str
+            ),
+        ));
+    }
+
     // Relation fields → phase-5b deferral.
     if field.is_relation() {
         return Err(relation_phase_5b_error(field.name(), ctx.model.name()));
@@ -438,6 +450,18 @@ fn lower_update_pair(
     }
 
     let field = lookup_field_with_suggestion(ctx, &key_str, key.span())?;
+
+    // Aggregate and generated fields are read-only / computed — reject
+    // assignment with a clear error.
+    if field.is_computed() {
+        return Err(syn::Error::new(
+            key.span(),
+            format!(
+                "field `{}` is a computed virtual and cannot be assigned in `data:`",
+                key_str
+            ),
+        ));
+    }
 
     if field.is_relation() {
         return Err(relation_phase_5b_error(field.name(), ctx.model.name()));

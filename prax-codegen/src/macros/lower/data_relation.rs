@@ -212,7 +212,8 @@ pub fn lower_create_relation(
                     ));
                 };
                 let target_ctx = ctx.for_model(target_model);
-                let where_expr = super::where_input::lower_where(filter_block, &target_ctx)?;
+                let where_expr =
+                    super::where_input::lower_where_input_only(filter_block, &target_ctx)?;
                 let op_expr = quote! {
                     ::prax_query::nested::NestedWriteOp::DeleteMany {
                         relation: #relation_name_str,
@@ -604,7 +605,7 @@ fn extract_update_many_entry(
         ));
     };
 
-    let where_expr = super::where_input::lower_where(where_block, target_ctx)?;
+    let where_expr = super::where_input::lower_where_input_only(where_block, target_ctx)?;
     let data_expr = super::data_input::lower_update_data(data_block, target_ctx)?;
     Ok((where_expr, data_expr))
 }
@@ -693,7 +694,7 @@ fn extract_connect_or_create_entry(
         ));
     };
 
-    let where_expr = super::where_input::lower_where(where_block, target_ctx)?;
+    let where_expr = super::where_input::lower_where_input_only(where_block, target_ctx)?;
     let create_expr = super::data_input::lower_create_data(create_block, target_ctx)?;
     Ok((where_expr, create_expr))
 }

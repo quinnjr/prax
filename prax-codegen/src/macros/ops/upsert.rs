@@ -18,7 +18,7 @@ use crate::macros::lower::data_input::{
 };
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::order_by_input::lower_cursor;
-use crate::macros::lower::select_input::lower_select;
+use crate::macros::lower::select_input::lower_select_struct_only;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
 use crate::macros::validate::unknown_top_key_error;
 
@@ -132,7 +132,7 @@ fn lower_upsert(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`select:` expects `{ ... }`"));
                 };
-                select_tokens = Some(lower_select(b, ctx)?);
+                select_tokens = Some(lower_select_struct_only(b, ctx)?);
                 select_span = Some(key.span());
             }
             _ => {

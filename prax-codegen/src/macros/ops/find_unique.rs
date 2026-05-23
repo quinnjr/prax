@@ -14,7 +14,7 @@ use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::order_by_input::lower_cursor;
-use crate::macros::lower::select_input::lower_select;
+use crate::macros::lower::select_input::{SelectLowering, lower_select};
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
 use crate::macros::validate::unknown_top_key_error;
 
@@ -51,7 +51,7 @@ fn lower_find_unique(
 ) -> syn::Result<TokenStream> {
     let mut where_tokens: Option<TokenStream> = None;
     let mut include_tokens: Option<TokenStream> = None;
-    let mut select_tokens: Option<TokenStream> = None;
+    let mut select_lowering: Option<SelectLowering> = None;
 
     for field in &block.fields {
         let DslField::Pair { key, value, .. } = field else {
@@ -79,7 +79,7 @@ fn lower_find_unique(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`select:` expects `{ ... }`"));
                 };
-                select_tokens = Some(lower_select(b, ctx)?);
+                select_lowering = Some(lower_select(b, ctx)?);
             }
             _ => {
                 return Err(unknown_top_key_error(
@@ -92,7 +92,7 @@ fn lower_find_unique(
         }
     }
 
-    if select_tokens.is_some() && include_tokens.is_some() {
+    if select_lowering.is_some() && include_tokens.is_some() {
         return Err(syn::Error::new(
             Span::call_site(),
             "`select` and `include` are mutually exclusive — choose one",
@@ -110,8 +110,12 @@ fn lower_find_unique(
     if let Some(i) = include_tokens {
         chain.push(quote! { .with_include_input(#i) });
     }
-    if let Some(s) = select_tokens {
+    if let Some(sl) = select_lowering {
+        let s = sl.select_struct;
         chain.push(quote! { .with_select_input(#s) });
+        for proj in sl.scalar_projections {
+            chain.push(proj);
+        }
     }
 
     Ok(quote! {

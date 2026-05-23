@@ -13,7 +13,7 @@ use syn::parse::Parser;
 use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
-use crate::macros::lower::where_input::lower_where;
+use crate::macros::lower::where_input::lower_where_input_only;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
 use crate::macros::validate::unknown_top_key_error;
 
@@ -62,7 +62,7 @@ fn lower_count(
                 let DslValue::Block(b) = value else {
                     return Err(syn::Error::new(key.span(), "`where:` expects `{ ... }`"));
                 };
-                where_tokens = Some(lower_where(b, ctx)?);
+                where_tokens = Some(lower_where_input_only(b, ctx)?);
             }
             "select" => {
                 return Err(syn::Error::new(
