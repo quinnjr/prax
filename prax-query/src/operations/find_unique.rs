@@ -2,6 +2,7 @@
 
 use std::marker::PhantomData;
 
+use crate::capabilities::SupportsScalarSubqueryInSelect;
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::projection::ScalarProjection;
@@ -96,7 +97,27 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     pub fn filter_for_test(&self) -> &Filter {
         &self.filter
     }
+}
 
+impl<E, M> FindUniqueOperation<E, M>
+where
+    E: QueryEngine + SupportsScalarSubqueryInSelect,
+    M: Model + crate::row::FromRow,
+{
+    /// Append a scalar-subquery projection to the SELECT list.
+    ///
+    /// Available only on engines that implement
+    /// [`SupportsScalarSubqueryInSelect`]. SQL backends (Postgres, MySQL,
+    /// SQLite, MSSQL, DuckDB, SQLx) all satisfy this bound; MongoDB,
+    /// ScyllaDB, and Cassandra do not — calling this method on those
+    /// engines is a **compile-time error**.
+    pub fn with_scalar_projection(mut self, proj: ScalarProjection) -> Self {
+        self.extra_projections.push(proj);
+        self
+    }
+}
+
+impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Build the SQL query.
     pub fn build_sql(
         &self,
