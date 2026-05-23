@@ -576,6 +576,24 @@ pub fn generate_model_module_with_style(
     let (relation_meta_struct, relation_meta_impl) =
         super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
 
+    // `<Model>Count` synthetic struct — emitted at crate-root scope,
+    // outside the `pub mod <model>` block, so it is a sibling of the
+    // generated model struct.  Only models with ≥1 outgoing relations
+    // get this struct.
+    let count_relation_names: Vec<String> = model
+        .fields
+        .values()
+        .filter(|f| matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| f.name().to_string())
+        .collect();
+    let count_struct_outgoing: Vec<super::count_struct::OutgoingRelation<'_>> =
+        count_relation_names
+            .iter()
+            .map(|n| super::count_struct::OutgoingRelation { field_name: n })
+            .collect();
+    let count_struct_tokens =
+        super::count_struct::emit_count_struct(&model_name, &count_struct_outgoing);
+
     Ok(quote! {
         #doc
         pub mod #module_name {
@@ -669,6 +687,11 @@ pub fn generate_model_module_with_style(
 
         // RelationFilterMeta impls — one per declared relation field.
         #relation_meta_impl
+
+        // `<Model>Count` synthetic struct — only present when the model has
+        // at least one outgoing relation.  See `count_struct` module for the
+        // design rationale and deferral notes.
+        #count_struct_tokens
     })
 }
 

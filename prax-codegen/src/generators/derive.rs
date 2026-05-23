@@ -234,6 +234,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
+    // Build the outgoing-relation list for the `<Model>Count` synthetic
+    // struct.  Only fields that carry a `#[prax(relation(...))]` attr
+    // are outgoing relations — scalar fields and aggregate fields are
+    // excluded.  The field name on the parent struct (e.g., `posts`) is
+    // used as the `Option<i64>` field name on `<Model>Count`.
+    //
+    // We collect the field names as owned Strings first so that the
+    // `OutgoingRelation<'a>` borrows have a lifetime that spans the
+    // `emit_count_struct` call below.
+    let count_relation_names: Vec<String> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_some())
+        .map(|f| f.name.to_string())
+        .collect();
+    let count_struct_outgoing: Vec<super::count_struct::OutgoingRelation<'_>> =
+        count_relation_names
+            .iter()
+            .map(|n| super::count_struct::OutgoingRelation { field_name: n })
+            .collect();
+    let count_struct_tokens = super::count_struct::emit_count_struct(name, &count_struct_outgoing);
+
     // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
     // no relations still get an impl — it errors on any unknown name,
     // preserving the uniform `ModelRelationLoader` bound on find
@@ -585,6 +606,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         // marker (declared in the `pub mod` above) with the parent/child table
         // and column names required for EXISTS / NOT EXISTS lowering.
         #relation_meta_impl
+
+        // `<Model>Count` synthetic struct — emitted only when the model has
+        // at least one outgoing relation.  Contains one `pub <rel>: Option<i64>`
+        // per relation.  The `_count` result-field integration is deferred to
+        // Task 14 (the derive macro cannot add fields to the user's struct).
+        #count_struct_tokens
     })
 }
 
@@ -1556,6 +1583,125 @@ mod tests {
         assert!(
             code.contains("BoolFieldUpdate"),
             "expected BoolFieldUpdate for active"
+        );
+    }
+
+    // ── count_struct codegen tests ────────────────────────────────────────
+
+    /// A model with outgoing relations must emit `<Model>Count` with one
+    /// `Option<i64>` field per relation.
+    #[test]
+    fn user_with_relations_emits_count_struct() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub posts: Vec<Post>,
+                #[prax(relation(target = "Comment", foreign_key = "user_id"))]
+                pub comments: Vec<Comment>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The `UserCount` struct must be present.
+        assert!(
+            code.contains("UserCount"),
+            "expected UserCount struct in generated code; got:\n{code}"
+        );
+        // Each relation produces an `Option<i64>` field.
+        assert!(
+            code.contains("pub posts"),
+            "expected `pub posts` field on UserCount"
+        );
+        assert!(
+            code.contains("pub comments"),
+            "expected `pub comments` field on UserCount"
+        );
+        // `Option < i64 >` (token-stream spacing) must appear.
+        assert!(
+            code.contains("Option < i64 >"),
+            "expected Option<i64> field type on UserCount fields"
+        );
+        // Default derive must be present so UserCount::default() works.
+        assert!(
+            code.contains("Default"),
+            "expected #[derive(Default)] on UserCount"
+        );
+    }
+
+    /// A model with **no** outgoing relations must NOT emit `<Model>Count`.
+    #[test]
+    fn model_without_relations_does_not_emit_count_struct() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "posts")]
+            pub struct Post {
+                #[prax(id)]
+                pub id: i64,
+                pub title: String,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // `PostCount` must NOT appear in the generated code.
+        // Models with zero outgoing relations are not count-able at the
+        // type level — attempting `_count` on them will be a compile-time
+        // error enforced in Task 14 macro lowering / Task 15 trybuild.
+        assert!(
+            !code.contains("PostCount"),
+            "unexpected PostCount in generated code for a relation-free model"
+        );
+    }
+
+    /// `<Model>Count` fields must match the relation field names exactly —
+    /// not the target model names.
+    #[test]
+    fn count_struct_uses_field_names_not_target_model_names() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "authors")]
+            pub struct Author {
+                #[prax(id)]
+                pub id: i64,
+                pub name: String,
+                // Field name is `articles`, target model is `Post`
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub articles: Vec<Post>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        assert!(
+            code.contains("AuthorCount"),
+            "expected AuthorCount in generated code"
+        );
+        // The field name on the count struct is `articles`, not `post` or `Post`.
+        assert!(
+            code.contains("pub articles"),
+            "expected `pub articles` on AuthorCount, not the target model name"
+        );
+        assert!(
+            !code.contains("pub post"),
+            "unexpected `pub post` — count struct should use field name, not model name"
         );
     }
 }
