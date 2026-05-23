@@ -699,7 +699,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
-        assert!(sql.contains("ON CONFLICT (email)"));
+        assert!(sql.contains("ON CONFLICT (\"email\")"));
         assert!(sql.contains("DO UPDATE SET"));
         assert!(sql.contains("RETURNING *"));
         assert_eq!(params.len(), 3); // 2 create + 1 update
@@ -969,7 +969,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
 
         assert!(sql.contains("INSERT INTO test_models"));
-        assert!(sql.contains("ON CONFLICT (email)"));
+        assert!(sql.contains("ON CONFLICT (\"email\")"));
         assert!(sql.contains("DO UPDATE SET"));
         assert!(sql.contains("RETURNING id, name, email"));
         assert_eq!(params.len(), 3);
@@ -1065,7 +1065,7 @@ mod tests {
         let (sql, params) = op.build_sql(&crate::dialect::Postgres);
         assert!(sql.contains("(email, name)"), "got: {sql}");
         assert!(sql.contains("VALUES ($1, $2)"), "got: {sql}");
-        assert!(sql.contains("ON CONFLICT (email)"));
+        assert!(sql.contains("ON CONFLICT (\"email\")"));
         // 2 create params + 1 update param.
         assert_eq!(params.len(), 3);
     }

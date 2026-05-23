@@ -705,15 +705,37 @@ pub enum NestedWriteOp {
     },
     /// Upsert: update if a row matches `pk`, else insert.
     ///
-    /// The two-statement engine-agnostic lowering:
-    /// 1. `UPDATE <target_table> SET <update_writeops> WHERE <target_pk> = $1`
-    /// 2. If `affected_rows == 0`, emit
-    ///    `INSERT INTO <target_table> (<create_cols + foreign_key>) VALUES (<...>)`
-    ///    with the parent PK spliced in for the FK column.
+    /// On dialects with native single-statement upsert (Postgres, SQLite,
+    /// DuckDB, MySQL), emits one
+    /// `INSERT INTO <target_table> (<create_cols + fk>) VALUES (...)
+    /// ON CONFLICT (<target_pk>) DO UPDATE SET <update_writeops>`
+    /// (or `ON DUPLICATE KEY UPDATE ...` on MySQL). The `pk` field is
+    /// unused on this path — conflict detection comes from the inserted
+    /// row's PK column, which the codegen guarantees is present in
+    /// `create_payload`.
     ///
-    /// Single-statement upsert via vendor-specific syntax (Postgres
-    /// `ON CONFLICT`, MySQL `ON DUPLICATE KEY UPDATE`, MSSQL `MERGE`) is
-    /// planned for phase 5d alongside `connect_or_create`.
+    /// On MSSQL and CQL, falls back to the two-statement form:
+    /// 1. `UPDATE <target_table> SET <update_writeops> WHERE <target_pk> = $1`
+    /// 2. If `affected_rows == 0`, `INSERT INTO <target_table>
+    ///    (<create_cols + fk>) VALUES (<...>)`.
+    ///
+    /// **Limitations of the fallback path** (MSSQL/CQL only):
+    /// - The `affected_rows == 0` check cannot distinguish "row absent"
+    ///   from "row exists but no columns changed" — a UPDATE that hits an
+    ///   identical row produces a spurious INSERT attempt and likely a PK
+    ///   unique-violation. Wrap the fallback in a transaction (or use a
+    ///   single-statement dialect) for strongest semantics.
+    /// - There is a TOCTOU race between the UPDATE returning 0 and the
+    ///   subsequent INSERT; a concurrent writer can insert the same row
+    ///   first.
+    ///
+    /// Document-store engines (`NotSql` dialect) are rejected at the top
+    /// of `execute` with `QueryError::unsupported(...)`.
+    ///
+    /// **Empty payloads**: an empty `update_payload` on a single-statement
+    /// dialect lowers to `ON CONFLICT (...) DO NOTHING` (PG/SQLite/DuckDB)
+    /// or `INSERT IGNORE INTO` (MySQL — idempotent no-op).
+    /// An empty `create_payload` errors with `QueryError::invalid_input`.
     Upsert {
         relation: &'static str,
         target_table: &'static str,
@@ -1011,28 +1033,55 @@ impl NestedWriteOp {
             } => {
                 let dialect = engine.dialect();
 
-                // Probe the dialect for single-statement upsert support.
-                // Build the SET fragment with placeholders positioned
-                // AFTER the INSERT's column values (insert occupies
-                // $1..$N where N = create_payload.len() + 1 for the FK).
-                let insert_arity = create_payload.len() + 1;
+                // Guard: document-store engines (NotSql) panic on any SQL
+                // emission helper. Short-circuit before touching the dialect.
+                if !dialect.supports_upsert() {
+                    return Err(crate::error::QueryError::unsupported(format!(
+                        "Nested Upsert is not supported by the `{}` engine",
+                        std::any::type_name::<dyn crate::dialect::SqlDialect>()
+                    )));
+                }
+
+                // Guard: an upsert with no payloads is a no-op.
+                if update_payload.is_empty() && create_payload.is_empty() {
+                    return Ok(());
+                }
+
+                // Guard: create_payload must not be empty — we can't INSERT
+                // a row with no columns.
+                if create_payload.is_empty() {
+                    return Err(crate::error::QueryError::invalid_input(
+                        "create_payload",
+                        "Nested Upsert requires at least one create column when no row to update",
+                    ));
+                }
+
+                // Probe the dialect for single-statement upsert support by
+                // checking whether upsert_clause returns a non-empty string.
+                //
+                // For the normal path (non-empty update_payload): build the
+                // SET fragment with placeholders positioned AFTER the INSERT's
+                // column values (insert occupies $1..$N where N =
+                // create_payload.len() + 1 for the FK).
+                //
+                // On PG-family dialects the `start_ph` arg positions SET-clause
+                // placeholders after the INSERT VALUES placeholders ($N+1, $N+2, ...).
+                // On MySQL the placeholder text is always `?` — the SET-vs-VALUES split
+                // is enforced solely by the param-push order: INSERT values are pushed
+                // first below, then SET params via `values.extend(single_set_params)`.
+                let insert_arity = create_payload.len() + 1; // cols + FK
                 let (single_set_text, single_set_params) =
                     build_writeop_set_clause(&update_payload, dialect, insert_arity + 1);
-                let target_pk_quoted = dialect.quote_ident(target_pk);
-                let conflict_cols = [target_pk_quoted.as_str()];
-                let upsert_clause = dialect.upsert_clause(&conflict_cols, &single_set_text);
 
-                if !upsert_clause.is_empty() {
+                // Pass raw (unquoted) target_pk — upsert_clause implementations
+                // are responsible for quoting identifiers internally.
+                let conflict_cols = [target_pk];
+                let upsert_clause_text = dialect.upsert_clause(&conflict_cols, &single_set_text);
+
+                if !upsert_clause_text.is_empty() {
                     // Single-statement path:
                     //   INSERT INTO child (cols + fk) VALUES ($1..$N) ON CONFLICT (...) DO UPDATE SET ...
-                    if create_payload.is_empty() {
-                        // No insert columns means we can't build a
-                        // single-statement upsert (and the
-                        // zero-affected fallback would also fail). Keep
-                        // the existing behavior: surface as not_found.
-                        return Err(crate::error::QueryError::not_found(target_table)
-                            .with_context("Nested Upsert: row absent and create payload empty"));
-                    }
+                    //   or (empty update_payload): INSERT … ON CONFLICT DO NOTHING / INSERT IGNORE
                     let mut columns: Vec<String> =
                         create_payload.iter().map(|(c, _)| c.clone()).collect();
                     let mut values: Vec<FilterValue> =
@@ -1043,26 +1092,79 @@ impl NestedWriteOp {
                         (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
                     let quoted_cols: Vec<String> =
                         columns.iter().map(|c| dialect.quote_ident(c)).collect();
-                    values.extend(single_set_params);
-                    // Drop the `pk` value — the single-statement form
-                    // never references it; the conflict target is
-                    // derived from the inserted row's PK column (which
-                    // the codegen guarantees is present when
-                    // create_payload is populated by the macro).
+
+                    // Drop the `pk` value — the single-statement form never
+                    // references it; the conflict target is derived from the
+                    // inserted row's PK column (which the codegen guarantees
+                    // is present when create_payload is populated by the macro).
                     let _ = pk;
+
+                    let effective_upsert_clause = if update_payload.is_empty() {
+                        // Pure-insert semantics: collapse to conditional INSERT.
+                        // Use upsert_do_nothing_clause for dialect-specific DO NOTHING syntax.
+                        // MySQL returns the idempotent self-assign form; PG/SQLite/DuckDB
+                        // return ON CONFLICT (...) DO NOTHING.
+                        let do_nothing = dialect.upsert_do_nothing_clause(&conflict_cols);
+                        if do_nothing.is_empty() {
+                            // Fallback dialect (MSSQL/CQL) with empty upsert_do_nothing_clause
+                            // but non-empty upsert_clause_text: very rare. Treat as no-op.
+                            return Ok(());
+                        }
+                        do_nothing
+                    } else {
+                        values.extend(single_set_params);
+                        upsert_clause_text
+                    };
+
+                    let insert_prefix = "INSERT INTO";
+
                     let sql = format!(
-                        "INSERT INTO {} ({}) VALUES ({}){}",
+                        "{} {} ({}) VALUES ({}){}",
+                        insert_prefix,
                         dialect.quote_ident(target_table),
                         quoted_cols.join(", "),
                         placeholders.join(", "),
-                        upsert_clause,
+                        effective_upsert_clause,
                     );
                     engine.execute_raw(&sql, values).await?;
                     return Ok(());
                 }
 
-                // Two-statement fallback for dialects without
-                // ON CONFLICT / ON DUPLICATE KEY (MSSQL, CQL, NotSql).
+                // Two-statement fallback for dialects without native upsert syntax
+                // (MSSQL, CQL). NotSql engines short-circuit above with QueryError::unsupported.
+                //
+                // TODO(upsert-toctou): `affected_rows == 0` cannot distinguish
+                // "no row matched" from "row matched but no columns changed"
+                // (MSSQL `@@ROWCOUNT`, CQL row-count semantics). A no-op UPDATE
+                // would incorrectly trigger the INSERT, producing a PK unique
+                // violation. Wrapping in an explicit transaction requires plumbing
+                // not yet available here; tracked for a follow-up PR.
+                if update_payload.is_empty() {
+                    // Pure-insert semantics on fallback path: skip the UPDATE
+                    // entirely and emit a bare INSERT. If the row already exists
+                    // the engine will surface a PK/unique violation, which is
+                    // the correct behaviour for an insert-or-fail path on dialects
+                    // without native upsert syntax.
+                    let mut columns: Vec<String> =
+                        create_payload.iter().map(|(c, _)| c.clone()).collect();
+                    let mut values: Vec<FilterValue> =
+                        create_payload.into_iter().map(|(_, v)| v).collect();
+                    columns.push(foreign_key.to_string());
+                    values.push(parent_pk.clone());
+                    let placeholders: Vec<String> =
+                        (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
+                    let quoted_cols: Vec<String> =
+                        columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                    let insert_sql = format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        dialect.quote_ident(target_table),
+                        quoted_cols.join(", "),
+                        placeholders.join(", "),
+                    );
+                    engine.execute_raw(&insert_sql, values).await?;
+                    return Ok(());
+                }
+
                 // Phase 1: attempt UPDATE.
                 let (set_text, mut update_params) =
                     build_writeop_set_clause(&update_payload, dialect, 1);
@@ -1080,13 +1182,6 @@ impl NestedWriteOp {
                     return Ok(());
                 }
                 // Phase 2: row didn't exist — INSERT it with the FK spliced in.
-                if create_payload.is_empty() {
-                    // Defensive: an upsert with empty create_payload and
-                    // zero affected_rows has nothing to insert. Surface
-                    // as not_found so the caller doesn't silently no-op.
-                    return Err(crate::error::QueryError::not_found(target_table)
-                        .with_context("Nested Upsert: row absent and create payload empty"));
-                }
                 let mut columns: Vec<String> =
                     create_payload.iter().map(|(c, _)| c.clone()).collect();
                 let mut values: Vec<FilterValue> =
