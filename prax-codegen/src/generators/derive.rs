@@ -109,9 +109,13 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
     // Relation fields (`Vec<_>`) are handled separately by the relation
     // codegen; they're not columns and don't round-trip through FromRow.
+    // Aggregate fields (`@count`/`@sum`/etc.) also have no underlying column
+    // in the base table — they are excluded from COLUMNS but do participate
+    // in FromRow with soft-missing defaulting (see `derive_from_row::emit`).
+    // @generated fields ARE real columns and stay in COLUMNS.
     let all_columns: Vec<String> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| f.column_name.clone())
         .collect();
     let pk_columns_owned: Vec<String> = field_infos
@@ -119,10 +123,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .filter(|f| f.is_id)
         .map(|f| f.column_name.clone())
         .collect();
+    // Regular scalar fields: non-list, non-aggregate — deserialized normally.
     let from_row_fields: Vec<(Ident, Type, String)> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone()))
+        .collect();
+    // Aggregate fields: soft-miss the column, defaulting to 0 (Count) or None
+    // (Sum/Avg/Min/Max) when the row doesn't include the projected value.
+    // Tuple: (field_ident, declared_type, col_name, kind_str).
+    let aggregate_from_row_fields: Vec<(Ident, Type, String, String)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.aggregate.as_ref().map(|(kind, _rel, _field)| {
+                (
+                    f.name.clone(),
+                    f.ty.clone(),
+                    f.column_name.clone(),
+                    kind.clone(),
+                )
+            })
+        })
         .collect();
     // Relation fields get initialized to `Default::default()` on
     // `from_row` — the `.include()` path fills them afterwards.
@@ -134,9 +155,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     // Same shape as from_row_fields plus the is_id flag; the ModelWithPk
     // emitter needs is_id to route PK fields into pk_value() and every
     // scalar field into get_column_value().
+    // Aggregate fields are excluded: they have no underlying column to match.
     let model_with_pk_fields: Vec<(Ident, Type, String, bool)> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone(), f.is_id))
         .collect();
 
@@ -176,8 +198,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &generated_fields_refs,
         &aggregate_fields_refs,
     );
-    let from_row_impl =
-        super::derive_from_row::emit(name, &from_row_fields, &from_row_relation_fields);
+    let from_row_impl = super::derive_from_row::emit(
+        name,
+        &from_row_fields,
+        &from_row_relation_fields,
+        &aggregate_from_row_fields,
+    );
     let model_with_pk_impl = super::derive_model_with_pk::emit(name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { super::#name });
 

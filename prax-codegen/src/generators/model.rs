@@ -493,7 +493,10 @@ pub fn generate_model_module_with_style(
     // The prax_schema! path filters `FieldType::Model(_)` relation
     // fields out of `from_row_fields` above; pass an empty slice for
     // relation defaults to keep the `FromRow` shape unchanged.
-    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[]);
+    // The prax_schema! path does not yet interpret aggregate directives
+    // from the .prax AST (Task 11 wires the derive path; schema path follows).
+    // Pass an empty slice so aggregate fields default to the zero-state.
+    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[], &[]);
     let model_with_pk_impl = super::derive_model_with_pk::emit(&model_name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { #model_name });
 
