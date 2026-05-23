@@ -301,7 +301,7 @@ fn build_count_projection_for_relation(
         .with_scalar_projection(::prax_query::ScalarProjection::new(
             ::std::borrow::Cow::Owned(#sql.to_string()),
             ::std::vec![],
-            ::std::boxed::Box::leak(#alias.into_boxed_str()),
+            #alias,
         ))
     })
 }
@@ -394,7 +394,7 @@ fn lower_aggregate_field_projection(
         .with_scalar_projection(::prax_query::ScalarProjection::new(
             ::std::borrow::Cow::Owned(#sql.to_string()),
             ::std::vec![],
-            ::std::boxed::Box::leak(#field_name.to_string().into_boxed_str()),
+            #field_name,
         ))
     })
 }
