@@ -17,6 +17,7 @@ model User {
     profile     Profile? @relation(fields: [id], references: [user_id])
     created_at  DateTime
     post_count  Int      @count(posts)
+    full_name   String   @generated
 }
 
 model Post {

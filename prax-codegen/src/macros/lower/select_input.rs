@@ -503,6 +503,28 @@ mod tests {
     }
 
     #[test]
+    fn lower_select_count_accessor_unknown_relation_did_you_mean() {
+        // "pots" is a typo for "posts"; the did-you-mean suggestion
+        // must appear in the error message.
+        let err = lower_err("User", quote!({ _count: { pots: true } }));
+        let msg = err.to_string();
+        assert!(msg.contains("unknown relation"), "got: {msg}");
+        assert!(msg.contains("did you mean"), "got: {msg}");
+        assert!(msg.contains("posts"), "got: {msg}");
+    }
+
+    #[test]
+    fn lower_select_count_on_model_without_to_many_relations_errors() {
+        // `Post` has no outgoing to-many relations (only `author User`
+        // which is a to-one back-reference).  The error must call out
+        // "no outgoing to-many relations to count".
+        let err = lower_err("Post", quote!({ _count: { anything: true } }));
+        let msg = err.to_string();
+        assert!(msg.contains("no outgoing to-many relations"), "got: {msg}");
+        assert!(msg.contains("Post"), "got: {msg}");
+    }
+
+    #[test]
     fn lower_select_aggregate_field_emits_scalar_projection() {
         // post_count is an @count(posts) field in the fixture schema.
         let out = lower("User", quote!({ post_count: true }));

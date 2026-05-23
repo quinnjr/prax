@@ -87,3 +87,51 @@ fn nested_writes_ui() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/nested_writes/*.rs");
 }
+
+/// `trybuild` UI tests for phase-5.5 computed/virtual field diagnostics.
+///
+/// These fixtures assert the four key compile-time error paths introduced
+/// in Tasks 12–14:
+///
+/// - assigning a `@count`/`@sum`/… aggregate field in `data:`
+/// - assigning a `@generated` field in `data:`
+/// - `_count: { unknown_rel: true }` (with did-you-mean)
+/// - `_count` on a model that has zero outgoing to-many relations
+///
+/// The fixtures live under `tests/ui/computed_fields/` and the schema
+/// resolver is pointed at `prax-codegen/tests/fixtures/schema.prax`
+/// (which declares the `posts` relation, `post_count @count`, and
+/// `full_name @generated` on `User`).
+///
+/// Regenerate baselines after intentional wording changes:
+///
+/// ```bash
+/// TRYBUILD=overwrite cargo test --test trybuild_read_macros \
+///     --features ui-tests computed_fields_ui
+/// ```
+#[cfg(feature = "ui-tests")]
+#[test]
+fn computed_fields_ui() {
+    // Override the schema resolver to use the richer prax-codegen fixture
+    // schema (which has relations + computed fields that the workspace-level
+    // prax/schema.prax omits to keep read_macros_e2e lean).
+    let schema_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("prax-codegen/tests/fixtures/schema.prax")
+        .canonicalize()
+        .expect("prax-codegen fixture schema not found — is the prax-codegen crate present?");
+
+    // SAFETY: trybuild spawns child cargo check processes that inherit
+    // this env var. This test function is the sole writer.
+    unsafe {
+        std::env::set_var("PRAX_SCHEMA", &schema_path);
+    }
+
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/computed_fields/*.rs");
+
+    // Restore the default schema so later tests in the same process use
+    // the workspace prax.toml → prax/schema.prax path.
+    unsafe {
+        std::env::remove_var("PRAX_SCHEMA");
+    }
+}

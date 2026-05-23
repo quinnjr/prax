@@ -1,0 +1,5 @@
+error: unknown field `full_name` on model `User` in `data:` block
+  --> tests/ui/computed_fields/set_generated_in_data_fail.rs:12:35
+   |
+12 |         data: { email: "a@b.com", full_name: "Alice Smith" },
+   |                                   ^^^^^^^^^

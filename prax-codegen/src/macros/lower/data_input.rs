@@ -1084,4 +1084,85 @@ mod tests {
         let nw = pretty(lowered.nested_ops[0].clone());
         assert!(nw.contains("Disconnect"), "got: {nw}");
     }
+
+    // ========== computed/virtual field rejection tests ==========
+    // Task 15: lock the "computed virtual cannot be assigned in data:"
+    // diagnostic introduced in Task 12/14.
+
+    fn create_err(model_name: &str, tokens: TokenStream) -> syn::Error {
+        let schema = parsed_schema();
+        let model = schema.get_model(model_name).unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        lower_create_data(&parse_block(tokens), &ctx).unwrap_err()
+    }
+
+    fn update_err(model_name: &str, tokens: TokenStream) -> syn::Error {
+        let schema = parsed_schema();
+        let model = schema.get_model(model_name).unwrap().clone();
+        let ctx = LowerCtx::new(&schema, &model);
+        lower_update_data(&parse_block(tokens), &ctx).unwrap_err()
+    }
+
+    #[test]
+    fn create_data_rejects_aggregate_field_with_computed_virtual_message() {
+        // `post_count` is `@count(posts)` — assigning it in `data:` must
+        // produce the "computed virtual and cannot be assigned" diagnostic,
+        // not a generic "unknown field".
+        let err = create_err("User", quote!({ email: "a@x.com", post_count: 7 }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("computed virtual"),
+            "expected 'computed virtual' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("post_count"),
+            "expected field name in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn create_data_rejects_generated_field_with_computed_virtual_message() {
+        // `full_name` is `@generated` — same gate.
+        let err = create_err(
+            "User",
+            quote!({ email: "a@x.com", full_name: "Alice Smith" }),
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("computed virtual"),
+            "expected 'computed virtual' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("full_name"),
+            "expected field name in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn update_data_rejects_aggregate_field_with_computed_virtual_message() {
+        let err = update_err("User", quote!({ post_count: 7 }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("computed virtual"),
+            "expected 'computed virtual' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("post_count"),
+            "expected field name in error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn update_data_rejects_generated_field_with_computed_virtual_message() {
+        let err = update_err("User", quote!({ full_name: "Renamed" }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("computed virtual"),
+            "expected 'computed virtual' in error, got: {msg}"
+        );
+        assert!(
+            msg.contains("full_name"),
+            "expected field name in error, got: {msg}"
+        );
+    }
 }
