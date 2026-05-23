@@ -470,6 +470,10 @@ fn parse_attribute_value(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<
         }
         Rule::boolean_literal => Ok(AttributeValue::Boolean(pair.as_str() == "true")),
         Rule::identifier => Ok(AttributeValue::Ident(SmolStr::new(pair.as_str()))),
+        Rule::dotted_identifier => {
+            // Represent "rel.field" as a String so callers can split on '.'
+            Ok(AttributeValue::String(pair.as_str().to_string()))
+        }
         Rule::function_call => {
             let mut inner = pair.into_inner();
             let name = SmolStr::new(inner.next().unwrap().as_str());

@@ -1,5 +1,6 @@
 //! SQL generation for migrations.
 
+use crate::dialect::SupportsGeneratedColumns;
 use crate::diff::{
     EnumAlterDiff, EnumDiff, ExtensionDiff, FieldAlterDiff, FieldDiff, ForeignKeyDiff, IndexDiff,
     ModelAlterDiff, ModelDiff, SchemaDiff, ViewDiff,
@@ -7,6 +8,8 @@ use crate::diff::{
 
 /// SQL generator for PostgreSQL.
 pub struct PostgresSqlGenerator;
+
+impl SupportsGeneratedColumns for PostgresSqlGenerator {}
 
 impl PostgresSqlGenerator {
     /// Generate SQL for a schema diff.
@@ -43,6 +46,35 @@ impl PostgresSqlGenerator {
         for alter in &diff.alter_enums {
             up.extend(self.alter_enum(alter));
             // Reversing enum alterations is complex
+        }
+
+        // Warn about @virtual generated columns: Postgres has no native virtual
+        // computed columns, so they are emitted as STORED instead.
+        for model in &diff.create_models {
+            for field in &model.fields {
+                if let Some(generated_col) = &field.generated
+                    && !generated_col.stored
+                {
+                    warnings.push(format!(
+                        "Column '{}' on table '{}' is @virtual but Postgres does not support \
+                         virtual generated columns; emitted as STORED instead.",
+                        field.column_name, model.table_name
+                    ));
+                }
+            }
+        }
+        for alter in &diff.alter_models {
+            for field in &alter.add_fields {
+                if let Some(generated_col) = &field.generated
+                    && !generated_col.stored
+                {
+                    warnings.push(format!(
+                        "Column '{}' on table '{}' is @virtual but Postgres does not support \
+                         virtual generated columns; emitted as STORED instead.",
+                        field.column_name, alter.table_name
+                    ));
+                }
+            }
         }
 
         // Create models in FK-dependency order (referenced tables first).
@@ -253,6 +285,31 @@ impl PostgresSqlGenerator {
 
     /// Generate column definition.
     fn column_definition(&self, field: &FieldDiff) -> String {
+        // Generated columns have their own DDL form; handle them first.
+        if let Some(generated_col) = &field.generated {
+            let col = format!("\"{}\"", field.column_name);
+            let sql_type = if let Some(enum_name) = &field.enum_name {
+                format!("\"{}\"", enum_name)
+            } else {
+                field.sql_type.clone()
+            };
+            if generated_col.stored {
+                // Postgres natively supports stored generated columns (12+).
+                return format!(
+                    "{} {} GENERATED ALWAYS AS ({}) STORED",
+                    col, sql_type, generated_col.expression
+                );
+            } else {
+                // Postgres has no native virtual (non-stored) generated columns.
+                // Emit STORED as a pragmatic fallback; a warning is added by the
+                // caller via MigrationSql.warnings (see generate()).
+                return format!(
+                    "{} {} GENERATED ALWAYS AS ({}) STORED",
+                    col, sql_type, generated_col.expression
+                );
+            }
+        }
+
         let mut parts = vec![format!("\"{}\"", field.column_name)];
 
         // If this is an enum type, use the quoted enum name as the SQL type
@@ -531,6 +588,8 @@ impl MigrationSql {
 /// SQL generator for MySQL.
 pub struct MySqlGenerator;
 
+impl SupportsGeneratedColumns for MySqlGenerator {}
+
 impl MySqlGenerator {
     /// Generate SQL for a schema diff.
     pub fn generate(&self, diff: &SchemaDiff) -> MigrationSql {
@@ -682,8 +741,6 @@ impl MySqlGenerator {
 
     /// Generate column definition for MySQL.
     fn column_definition(&self, field: &FieldDiff) -> String {
-        let mut parts = vec![format!("`{}`", field.column_name)];
-
         // MySQL type mapping
         let sql_type = match field.sql_type.as_str() {
             "INTEGER" if field.is_auto_increment => "INT AUTO_INCREMENT".to_string(),
@@ -697,6 +754,21 @@ impl MySqlGenerator {
             "JSONB" | "JSON" => "JSON".to_string(),
             other => other.to_string(),
         };
+
+        // Generated columns use MySQL's `AS (<expr>) STORED|VIRTUAL` syntax.
+        if let Some(generated_col) = &field.generated {
+            let keyword = if generated_col.stored {
+                "STORED"
+            } else {
+                "VIRTUAL"
+            };
+            return format!(
+                "`{}` {} AS ({}) {}",
+                field.column_name, sql_type, generated_col.expression, keyword
+            );
+        }
+
+        let mut parts = vec![format!("`{}`", field.column_name)];
         parts.push(sql_type);
 
         if !field.nullable && !field.is_primary_key {
@@ -840,6 +912,8 @@ impl MySqlGenerator {
 
 /// SQL generator for SQLite.
 pub struct SqliteGenerator;
+
+impl SupportsGeneratedColumns for SqliteGenerator {}
 
 impl SqliteGenerator {
     /// Generate SQL for a schema diff.
@@ -1021,6 +1095,20 @@ impl SqliteGenerator {
             "JSONB" | "JSON" => "TEXT".to_string(), // SQLite stores JSON as TEXT
             other => other.to_string(),
         };
+
+        // SQLite generated columns: GENERATED ALWAYS AS (<expr>) STORED|VIRTUAL
+        if let Some(generated_col) = &field.generated {
+            let keyword = if generated_col.stored {
+                "STORED"
+            } else {
+                "VIRTUAL"
+            };
+            return format!(
+                "\"{}\" {} GENERATED ALWAYS AS ({}) {}",
+                field.column_name, sql_type, generated_col.expression, keyword
+            );
+        }
+
         parts.push(sql_type);
 
         if !field.nullable && !field.is_primary_key {
@@ -1161,6 +1249,8 @@ impl SqliteGenerator {
 
 /// SQL generator for Microsoft SQL Server.
 pub struct MssqlGenerator;
+
+impl SupportsGeneratedColumns for MssqlGenerator {}
 
 impl MssqlGenerator {
     /// Generate SQL for a schema diff.
@@ -1317,6 +1407,19 @@ impl MssqlGenerator {
 
     /// Generate column definition for MSSQL.
     fn column_definition(&self, field: &FieldDiff) -> String {
+        // MSSQL computed columns: `[col] AS (<expr>) [PERSISTED]`. The type is
+        // omitted — MSSQL infers it from the expression.
+        if let Some(generated_col) = &field.generated {
+            return if generated_col.stored {
+                format!(
+                    "[{}] AS ({}) PERSISTED",
+                    field.column_name, generated_col.expression
+                )
+            } else {
+                format!("[{}] AS ({})", field.column_name, generated_col.expression)
+            };
+        }
+
         let mut parts = vec![format!("[{}]", field.column_name)];
 
         // MSSQL type mapping
@@ -1491,6 +1594,8 @@ impl MssqlGenerator {
 
 /// SQL generator for DuckDB.
 pub struct DuckDbSqlGenerator;
+
+impl SupportsGeneratedColumns for DuckDbSqlGenerator {}
 
 impl DuckDbSqlGenerator {
     /// Generate SQL for a schema diff.
@@ -1703,6 +1808,13 @@ impl DuckDbSqlGenerator {
         let mut columns = Vec::new();
 
         for field in &model.fields {
+            // Generated columns use column_definition(), which handles the
+            // GENERATED ALWAYS AS (...) STORED|VIRTUAL syntax.
+            if field.generated.is_some() {
+                columns.push(self.column_definition(field));
+                continue;
+            }
+
             let mut col = format!("\"{}\"", field.column_name);
             col.push(' ');
 
@@ -1852,10 +1964,22 @@ impl DuckDbSqlGenerator {
 
     /// Generate column definition string for CREATE/ALTER TABLE.
     fn column_definition(&self, field: &FieldDiff) -> String {
-        let mut parts = vec![
-            format!("\"{}\"", field.column_name),
-            self.map_field_type(&field.sql_type),
-        ];
+        let sql_type = self.map_field_type(&field.sql_type);
+
+        // DuckDB generated columns: GENERATED ALWAYS AS (<expr>) STORED|VIRTUAL
+        if let Some(generated_col) = &field.generated {
+            let keyword = if generated_col.stored {
+                "STORED"
+            } else {
+                "VIRTUAL"
+            };
+            return format!(
+                "\"{}\" {} GENERATED ALWAYS AS ({}) {}",
+                field.column_name, sql_type, generated_col.expression, keyword
+            );
+        }
+
+        let mut parts = vec![format!("\"{}\"", field.column_name), sql_type];
 
         if !field.nullable && !field.is_primary_key {
             parts.push("NOT NULL".to_string());
@@ -1975,6 +2099,7 @@ mod tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -1987,6 +2112,7 @@ mod tests {
                     is_unique: true,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2086,6 +2212,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),
@@ -2254,6 +2381,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2334,6 +2462,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2500,6 +2629,7 @@ mod tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2517,6 +2647,7 @@ mod tests {
                         index: Some(VectorIndexKind::Hnsw),
                     }),
                     enum_name: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2571,6 +2702,7 @@ mod tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "embedding".to_string(),
@@ -2588,6 +2720,7 @@ mod tests {
                         index: Some(VectorIndexKind::Hnsw),
                     }),
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "summary_vec".to_string(),
@@ -2605,6 +2738,7 @@ mod tests {
                         index: Some(VectorIndexKind::Hnsw),
                     }),
                     enum_name: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -2644,6 +2778,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -2741,6 +2876,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -3194,6 +3330,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),
@@ -3496,6 +3633,7 @@ mod duckdb_tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "email".to_string(),
@@ -3508,6 +3646,7 @@ mod duckdb_tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3540,6 +3679,7 @@ mod duckdb_tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
                 FieldDiff {
                     name: "tags".to_string(),
@@ -3552,6 +3692,7 @@ mod duckdb_tests {
                     is_unique: false,
                     vector: None,
                     enum_name: None,
+                    generated: None,
                 },
             ],
             primary_key: vec!["id".to_string()],
@@ -3594,6 +3735,7 @@ mod duckdb_tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             drop_fields: Vec::new(),
             alter_fields: Vec::new(),

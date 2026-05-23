@@ -8,6 +8,14 @@
 //! returns a single `OrderBy` (so multiple
 //! `with_order_by_input` calls would clobber each other).
 //!
+//! ## Aggregate fields in `order_by:`
+//!
+//! When a key in `order_by:` is a schema-level aggregate field, the
+//! generated `OrderByField` uses the scalar-subquery SQL as the column
+//! expression. The `SqlBuilder` emits it verbatim in the `ORDER BY`
+//! clause — e.g. `ORDER BY (SELECT COUNT(*) ...) DESC`. This is the
+//! same approach used by Prisma's generated SQL for aggregate ordering.
+//!
 //! `cursor` lowers to the per-model `<Model>WhereUniqueInput` enum
 //! variant: the block must have exactly one key, matched against a
 //! `@unique` column.
@@ -54,16 +62,6 @@ pub fn lower_order_by(value: &DslValue, ctx: &LowerCtx<'_>) -> syn::Result<Token
                 ));
             };
             let key_str = key.to_string();
-            let column = lookup_column(ctx.model, &key_str).ok_or_else(|| {
-                syn::Error::new(
-                    key.span(),
-                    format!(
-                        "unknown order_by field `{}` on model `{}`",
-                        key_str,
-                        ctx.model.name()
-                    ),
-                )
-            })?;
             let dir = match value {
                 DslValue::BareIdent(id) => id.to_string(),
                 DslValue::Path(p) => p
@@ -78,16 +76,44 @@ pub fn lower_order_by(value: &DslValue, ctx: &LowerCtx<'_>) -> syn::Result<Token
                     ));
                 }
             };
-            let dir_ident = match dir.to_lowercase().as_str() {
-                "asc" => quote::format_ident!("asc"),
-                "desc" => quote::format_ident!("desc"),
-                other => {
-                    return Err(syn::Error::new(
-                        key.span(),
-                        format!("unknown sort direction `{other}`; expected `asc` or `desc`"),
-                    ));
-                }
-            };
+            let dir_lower = dir.to_lowercase();
+            if !matches!(dir_lower.as_str(), "asc" | "desc") {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!("unknown sort direction `{dir}`; expected `asc` or `desc`"),
+                ));
+            }
+
+            // Check if this is an aggregate field (order by scalar subquery).
+            if let Some(model_field) = ctx.model.get_field(&key_str)
+                && let Some(agg) = model_field.aggregate()
+            {
+                let subquery = build_aggregate_order_by_column(&key_str, &agg, key.span(), ctx)?;
+                let sort_order = if dir_lower == "asc" {
+                    quote! { ::prax_query::types::SortOrder::Asc }
+                } else {
+                    quote! { ::prax_query::types::SortOrder::Desc }
+                };
+                fields.push(quote! {
+                    ::prax_query::types::OrderByField::new(
+                        ::std::string::String::from(#subquery),
+                        #sort_order,
+                    )
+                });
+                continue;
+            }
+
+            let dir_ident = quote::format_ident!("{}", dir_lower);
+            let column = lookup_column(ctx.model, &key_str).ok_or_else(|| {
+                syn::Error::new(
+                    key.span(),
+                    format!(
+                        "unknown order_by field `{}` on model `{}`",
+                        key_str,
+                        ctx.model.name()
+                    ),
+                )
+            })?;
             fields.push(quote! {
                 ::prax_query::types::OrderByField::#dir_ident(#column)
             });
@@ -156,8 +182,87 @@ pub fn lower_cursor(block: &DslBlock, ctx: &LowerCtx<'_>) -> syn::Result<TokenSt
 
 fn lookup_column(model: &Model, field_name: &str) -> Option<String> {
     let f = model.get_field(field_name)?;
+    // Aggregate fields don't map to DB columns — they use subquery SQL.
+    if f.is_aggregate() {
+        return None;
+    }
     let attrs = f.extract_attributes();
     Some(attrs.map.unwrap_or_else(|| f.name().to_string()))
+}
+
+/// Build the scalar-subquery SQL string for an aggregate field used in
+/// `order_by:`. The SQL is emitted verbatim as the `OrderByField::column`.
+fn build_aggregate_order_by_column(
+    field_name: &str,
+    agg: &prax_schema::AggregateAttribute,
+    span: proc_macro2::Span,
+    ctx: &LowerCtx<'_>,
+) -> syn::Result<String> {
+    use crate::macros::lower::select_input::aggregate_sql;
+
+    let rel_name = agg.relation.as_str();
+    let rel_field = ctx.model.get_field(rel_name).ok_or_else(|| {
+        syn::Error::new(
+            span,
+            format!(
+                "aggregate field `{field_name}` references relation `{rel_name}` \
+                 which does not exist on model `{}`",
+                ctx.model.name()
+            ),
+        )
+    })?;
+
+    let prax_schema::FieldType::Model(target_model_name) = &rel_field.field_type else {
+        return Err(syn::Error::new(
+            span,
+            format!("field `{rel_name}` is not a relation"),
+        ));
+    };
+
+    let target_model = ctx.schema.get_model(target_model_name).ok_or_else(|| {
+        syn::Error::new(
+            span,
+            format!("model `{target_model_name}` not found in schema"),
+        )
+    })?;
+
+    let attrs = rel_field.extract_attributes();
+    let rel_attr = attrs.relation.ok_or_else(|| {
+        syn::Error::new(
+            span,
+            format!("relation `{rel_name}` has no `@relation(fields: [...], references: [...])`"),
+        )
+    })?;
+
+    if rel_attr.fields.is_empty() || rel_attr.references.is_empty() {
+        return Err(syn::Error::new(
+            span,
+            format!("relation `{rel_name}` must declare `fields` and `references`"),
+        ));
+    }
+
+    let parent_table = ctx.model.table_name();
+    let parent_pk = rel_attr.fields[0].as_str();
+    let target_table = target_model.table_name();
+    let fk_column = rel_attr.references[0].as_str();
+
+    let kind = match agg.kind {
+        prax_schema::AggregateKind::Count => "count",
+        prax_schema::AggregateKind::Sum => "sum",
+        prax_schema::AggregateKind::Avg => "avg",
+        prax_schema::AggregateKind::Min => "min",
+        prax_schema::AggregateKind::Max => "max",
+    };
+    let agg_field = agg.field.as_deref();
+
+    Ok(aggregate_sql(
+        kind,
+        target_table,
+        fk_column,
+        parent_table,
+        parent_pk,
+        agg_field,
+    ))
 }
 
 #[cfg(test)]
@@ -249,5 +354,22 @@ mod tests {
         let block = syn::parse2::<DslBlock>(quote!({ id: 1, email: "x" })).unwrap();
         let err = lower_cursor(&block, &ctx).unwrap_err();
         assert!(err.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn lower_order_by_aggregate_field_emits_subquery_column() {
+        // post_count is an @count(posts) field in the fixture schema.
+        let schema = parse_schema(SCHEMA).unwrap();
+        let model = schema.get_model("User").unwrap().clone();
+        let ctx = ctx(&schema, &model);
+        let block = syn::parse2::<DslBlock>(quote!({ post_count: desc })).unwrap();
+        let out = lower_order_by(&DslValue::Block(block), &ctx)
+            .unwrap()
+            .to_string();
+        assert!(out.contains("OrderBy"), "got: {out}");
+        assert!(out.contains("COUNT"), "got: {out}");
+        assert!(out.contains("Desc"), "got: {out}");
+        // The subquery SQL should be the column expression, not a bare column name.
+        assert!(out.contains("SELECT"), "got: {out}");
     }
 }

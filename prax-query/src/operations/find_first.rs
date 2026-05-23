@@ -2,8 +2,10 @@
 
 use std::marker::PhantomData;
 
+use crate::capabilities::SupportsScalarSubqueryInSelect;
 use crate::error::QueryResult;
 use crate::filter::Filter;
+use crate::projection::ScalarProjection;
 use crate::relations::IncludeSpec;
 use crate::traits::{Model, ModelRelationLoader, QueryEngine};
 use crate::types::{OrderBy, Select};
@@ -32,6 +34,9 @@ pub struct FindFirstOperation<E: QueryEngine, M: Model> {
     /// loader dispatch path as `find_many`/`find_unique` — the
     /// executor sees a 1-element slice when a row is found.
     includes: Vec<IncludeSpec>,
+    /// Extra scalar-subquery columns appended to the SELECT clause.
+    /// Used by relation-aggregate virtual fields (`@count`, `@sum`, …).
+    pub extra_projections: Vec<ScalarProjection>,
     _model: PhantomData<M>,
 }
 
@@ -44,6 +49,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
             order_by: OrderBy::none(),
             select: Select::All,
             includes: Vec::new(),
+            extra_projections: Vec::new(),
             _model: PhantomData,
         }
     }
@@ -109,19 +115,58 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     pub fn filter_for_test(&self) -> &Filter {
         &self.filter
     }
+}
 
+impl<E, M> FindFirstOperation<E, M>
+where
+    E: QueryEngine + SupportsScalarSubqueryInSelect,
+    M: Model + crate::row::FromRow,
+{
+    /// Append a scalar-subquery projection to the SELECT list.
+    ///
+    /// Available only on engines that implement
+    /// [`SupportsScalarSubqueryInSelect`]. SQL backends (Postgres, MySQL,
+    /// SQLite, MSSQL, DuckDB, SQLx) all satisfy this bound; MongoDB,
+    /// ScyllaDB, and Cassandra do not — calling this method on those
+    /// engines is a **compile-time error**.
+    pub fn with_scalar_projection(mut self, proj: ScalarProjection) -> Self {
+        self.extra_projections.push(proj);
+        self
+    }
+}
+
+impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Build the SQL query.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
     ) -> (String, Vec<crate::filter::FilterValue>) {
-        let (where_sql, params) = self.filter.to_sql(0, dialect);
+        // Projection params come first; WHERE params are offset so all
+        // dialect placeholders form a single contiguous sequence.
+        let proj_param_count: usize = self.extra_projections.iter().map(|p| p.params.len()).sum();
+        let (where_sql, where_params) = self.filter.to_sql(proj_param_count, dialect);
+
+        let mut params: Vec<crate::filter::FilterValue> =
+            Vec::with_capacity(proj_param_count + where_params.len());
 
         let mut sql = String::new();
 
         // SELECT clause
         sql.push_str("SELECT ");
         sql.push_str(&self.select.to_sql());
+
+        // Extra scalar-subquery projections
+        let mut proj_offset = 0usize;
+        for proj in &self.extra_projections {
+            sql.push_str(", ");
+            let frag = proj.to_sql(proj_offset, dialect, &mut params);
+            sql.push('(');
+            sql.push_str(&frag);
+            sql.push_str(") AS \"");
+            sql.push_str(proj.alias);
+            sql.push('"');
+            proj_offset += proj.params.len();
+        }
 
         // FROM clause
         sql.push_str(" FROM ");
@@ -132,6 +177,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
         }
+        params.extend(where_params);
 
         // ORDER BY clause
         if !self.order_by.is_empty() {

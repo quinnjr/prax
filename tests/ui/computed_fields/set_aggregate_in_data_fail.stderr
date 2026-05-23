@@ -1,0 +1,5 @@
+error: unknown field `post_count` on model `User` in `data:` block
+  --> tests/ui/computed_fields/set_aggregate_in_data_fail.rs:16:35
+   |
+16 |         data: { email: "a@b.com", post_count: 7 },
+   |                                   ^^^^^^^^^^

@@ -19,6 +19,31 @@ pub trait Model: Sized + Send + Sync {
 
     /// All column names for this model.
     const COLUMNS: &'static [&'static str];
+
+    /// Metadata for fields annotated with `#[prax(generated = "expr")]`.
+    ///
+    /// Each entry is `(field_name, expression, stored)` where `stored` is
+    /// `true` for a physically-stored generated column and `false` for a
+    /// virtual (computed-on-read) column.
+    ///
+    /// Models without any generated fields default to an empty slice.
+    const GENERATED_FIELDS: &'static [(&'static str, &'static str, bool)] = &[];
+
+    /// Metadata for fields annotated with aggregate directives
+    /// (`#[prax(count(rel))]`, `#[prax(sum(rel.field))]`, etc.).
+    ///
+    /// Each entry is `(field_name, kind_str, relation, field)` where
+    /// `kind_str` is one of `"count"`, `"sum"`, `"avg"`, `"min"`, `"max"`,
+    /// `relation` is the relation name, and `field` is the target field
+    /// (always `None` for `count`).
+    ///
+    /// Models without any aggregate fields default to an empty slice.
+    const AGGREGATE_FIELDS: &'static [(
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<&'static str>,
+    )] = &[];
 }
 
 /// Runtime access to a model's primary key and column values.

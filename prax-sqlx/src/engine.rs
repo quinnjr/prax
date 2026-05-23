@@ -517,6 +517,12 @@ impl QueryEngine for SqlxEngine {
     }
 }
 
+/// SQLx routes exclusively to SQL backends (Postgres, MySQL, SQLite), all of
+/// which support scalar subqueries in SELECT. Implementing this marker here
+/// lets callers use [`FindManyOperation::with_scalar_projection`] and its
+/// siblings on `SqlxEngine` just like the individual SQL engine crates.
+impl prax_query::capabilities::SupportsScalarSubqueryInSelect for SqlxEngine {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

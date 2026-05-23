@@ -25,6 +25,7 @@ fn make_bigint_pk(column_name: &str) -> FieldDiff {
         is_unique: false,
         vector: None,
         enum_name: None,
+        generated: None,
     }
 }
 
@@ -40,6 +41,7 @@ fn make_varchar_field(name: &str, nullable: bool) -> FieldDiff {
         is_unique: false,
         vector: None,
         enum_name: None,
+        generated: None,
     }
 }
 
@@ -170,6 +172,7 @@ fn test_duckdb_generate_list_type() {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             },
             FieldDiff {
                 name: "prices".to_string(),
@@ -182,6 +185,7 @@ fn test_duckdb_generate_list_type() {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             },
         ],
         primary_key: vec!["id".to_string()],
@@ -238,6 +242,7 @@ fn test_duckdb_generate_enum_with_table() {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             },
         ],
         primary_key: vec!["id".to_string()],

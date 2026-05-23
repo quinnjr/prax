@@ -41,6 +41,7 @@ insta = { workspace = true }
 pretty_assertions = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "schema_parsing"

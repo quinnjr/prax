@@ -109,9 +109,13 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
     // Relation fields (`Vec<_>`) are handled separately by the relation
     // codegen; they're not columns and don't round-trip through FromRow.
+    // Aggregate fields (`@count`/`@sum`/etc.) also have no underlying column
+    // in the base table — they are excluded from COLUMNS but do participate
+    // in FromRow with soft-missing defaulting (see `derive_from_row::emit`).
+    // @generated fields ARE real columns and stay in COLUMNS.
     let all_columns: Vec<String> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| f.column_name.clone())
         .collect();
     let pk_columns_owned: Vec<String> = field_infos
@@ -119,10 +123,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .filter(|f| f.is_id)
         .map(|f| f.column_name.clone())
         .collect();
+    // Regular scalar fields: non-list, non-aggregate — deserialized normally.
     let from_row_fields: Vec<(Ident, Type, String)> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone()))
+        .collect();
+    // Aggregate fields: soft-miss the column, defaulting to 0 (Count) or None
+    // (Sum/Avg/Min/Max) when the row doesn't include the projected value.
+    // Tuple: (field_ident, declared_type, col_name, kind_str).
+    let aggregate_from_row_fields: Vec<(Ident, Type, String, String)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.aggregate.as_ref().map(|(kind, _rel, _field)| {
+                (
+                    f.name.clone(),
+                    f.ty.clone(),
+                    f.column_name.clone(),
+                    kind.clone(),
+                )
+            })
+        })
         .collect();
     // Relation fields get initialized to `Default::default()` on
     // `from_row` — the `.include()` path fills them afterwards.
@@ -134,10 +155,38 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     // Same shape as from_row_fields plus the is_id flag; the ModelWithPk
     // emitter needs is_id to route PK fields into pk_value() and every
     // scalar field into get_column_value().
+    // Aggregate fields are excluded: they have no underlying column to match.
     let model_with_pk_fields: Vec<(Ident, Type, String, bool)> = field_infos
         .iter()
-        .filter(|f| !f.is_list)
+        .filter(|f| !f.is_list && f.aggregate.is_none())
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone(), f.is_id))
+        .collect();
+
+    // Collect generated and aggregate field metadata for the Model trait consts.
+    let generated_fields: Vec<(String, String, bool)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.generated
+                .as_ref()
+                .map(|(expr, stored)| (f.name.to_string(), expr.clone(), *stored))
+        })
+        .collect();
+    let aggregate_fields: Vec<(String, String, String, Option<String>)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.aggregate.as_ref().map(|(kind, rel, field)| {
+                (f.name.to_string(), kind.clone(), rel.clone(), field.clone())
+            })
+        })
+        .collect();
+
+    let generated_fields_refs: Vec<(&str, &str, bool)> = generated_fields
+        .iter()
+        .map(|(f, e, s)| (f.as_str(), e.as_str(), *s))
+        .collect();
+    let aggregate_fields_refs: Vec<(&str, &str, &str, Option<&str>)> = aggregate_fields
+        .iter()
+        .map(|(f, k, r, field)| (f.as_str(), k.as_str(), r.as_str(), field.as_deref()))
         .collect();
 
     let model_trait_impl = super::derive_model_trait::emit(
@@ -146,9 +195,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         &table_name,
         &pk_columns_owned,
         &all_columns,
+        &generated_fields_refs,
+        &aggregate_fields_refs,
     );
-    let from_row_impl =
-        super::derive_from_row::emit(name, &from_row_fields, &from_row_relation_fields);
+    let from_row_impl = super::derive_from_row::emit(
+        name,
+        &from_row_fields,
+        &from_row_relation_fields,
+        &aggregate_from_row_fields,
+    );
     let model_with_pk_impl = super::derive_model_with_pk::emit(name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { super::#name });
 
@@ -178,6 +233,27 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             })
         })
         .collect();
+
+    // Build the outgoing-relation list for the `<Model>Count` synthetic
+    // struct.  Only fields that carry a `#[prax(relation(...))]` attr
+    // are outgoing relations — scalar fields and aggregate fields are
+    // excluded.  The field name on the parent struct (e.g., `posts`) is
+    // used as the `Option<i64>` field name on `<Model>Count`.
+    //
+    // We collect the field names as owned Strings first so that the
+    // `OutgoingRelation<'a>` borrows have a lifetime that spans the
+    // `emit_count_struct` call below.
+    let count_relation_names: Vec<String> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_some())
+        .map(|f| f.name.to_string())
+        .collect();
+    let count_struct_outgoing: Vec<super::count_struct::OutgoingRelation<'_>> =
+        count_relation_names
+            .iter()
+            .map(|n| super::count_struct::OutgoingRelation { field_name: n })
+            .collect();
+    let count_struct_tokens = super::count_struct::emit_count_struct(name, &count_struct_outgoing);
 
     // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
     // no relations still get an impl — it errors on any unknown name,
@@ -275,12 +351,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
 
     // Build SelectField list: all fields; relation fields are marked so
     // their column names are excluded from the SELECT column list.
+    // Aggregate fields are also marked as no-column — they have no base-table
+    // column and will be resolved via scalar subquery in a later phase.
     let select_fields: Vec<super::SelectField> = field_infos
         .iter()
         .map(|f| super::SelectField {
             name: f.name.clone(),
             column: f.column_name.clone(),
             is_relation: f.relation.is_some(),
+            is_no_column: f.aggregate.is_some(),
         })
         .collect();
 
@@ -303,11 +382,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     let (order_by_struct, order_by_impl) =
         super::generate_order_by_input(name, &module_name, &order_by_fields);
 
-    // Build CreateField list: scalar fields only, skipping auto-generated PKs.
+    // Build CreateField list: scalar fields only, skipping auto-generated PKs
+    // and computed/aggregate fields (@generated and @count/@sum/@avg/@min/@max).
+    // Computed columns are derived by the DB or via scalar subquery — callers
+    // cannot (and should not) assign values to them at create time.
     let create_fields: Vec<super::inputs::create_input::CreateField> = field_infos
         .iter()
         .filter(|f| f.relation.is_none() && !f.is_list)
         .filter(|f| !(f.is_id && f.is_auto))
+        .filter(|f| f.generated.is_none() && f.aggregate.is_none())
         .filter_map(|f| {
             let inner = extract_inner_type_name(&f.ty);
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
@@ -322,11 +405,15 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         })
         .collect();
 
-    // Build UpdateField list: scalar fields only, skipping auto-generated PKs.
+    // Build UpdateField list: scalar fields only, skipping auto-generated PKs
+    // and computed/aggregate fields (@generated and @count/@sum/@avg/@min/@max).
+    // Computed columns are derived by the DB or via scalar subquery — callers
+    // cannot (and should not) set them at update time.
     let update_fields: Vec<super::inputs::update_input::UpdateField> = field_infos
         .iter()
         .filter(|f| f.relation.is_none() && !f.is_list)
         .filter(|f| !(f.is_id && f.is_auto))
+        .filter(|f| f.generated.is_none() && f.aggregate.is_none())
         .filter_map(|f| {
             let inner = extract_inner_type_name(&f.ty);
             let cat = super::inputs::filter_category_for(inner.as_deref().unwrap_or(""))?;
@@ -519,6 +606,12 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         // marker (declared in the `pub mod` above) with the parent/child table
         // and column names required for EXISTS / NOT EXISTS lowering.
         #relation_meta_impl
+
+        // `<Model>Count` synthetic struct — emitted only when the model has
+        // at least one outgoing relation.  Contains one `pub <rel>: Option<i64>`
+        // per relation.  The `_count` result-field integration is deferred to
+        // Task 14 (the derive macro cannot add fields to the user's struct).
+        #count_struct_tokens
     })
 }
 
@@ -566,6 +659,12 @@ struct FieldInfo {
     is_optional: bool,
     is_list: bool,
     relation: Option<RelationAttr>,
+    /// `#[prax(generated = "expr")]` / `#[prax(generated = "expr", stored)]`
+    /// / `#[prax(generated = "expr", virtual)]` — (expression, stored).
+    generated: Option<(String, bool)>,
+    /// `#[prax(count(rel))]` / `#[prax(sum(rel.field))]` etc.
+    /// Tuple: (kind_str, relation, field).
+    aggregate: Option<(String, String, Option<String>)>,
 }
 
 /// Parsed `#[prax(relation(target = "...", foreign_key = "...", local_key = "..."))]`.
@@ -607,6 +706,9 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
     let mut is_auto = false;
     let mut is_unique = false;
     let mut relation: Option<RelationAttr> = None;
+    let mut generated_expr: Option<String> = None;
+    let mut generated_stored: bool = true; // default: stored
+    let mut aggregate: Option<(String, String, Option<String>)> = None;
 
     // Determine if the type is Optional or Vec
     let is_optional = is_option_type(&ty);
@@ -627,6 +729,41 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
             } else if meta.path.is_ident("column") {
                 let value: LitStr = meta.value()?.parse()?;
                 column_name = value.value();
+            } else if meta.path.is_ident("generated") {
+                let value: LitStr = meta.value()?.parse()?;
+                generated_expr = Some(value.value());
+            } else if meta.path.is_ident("stored") {
+                generated_stored = true;
+            } else if meta.path.is_ident("virtual") {
+                generated_stored = false;
+            } else if meta.path.is_ident("count") {
+                // #[prax(count(relation_name))]
+                // Parse `(ident)` directly from the token stream.
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let rel_ident: syn::Ident = content.parse()?;
+                aggregate = Some(("count".to_string(), rel_ident.to_string(), None));
+            } else if meta.path.is_ident("sum")
+                || meta.path.is_ident("avg")
+                || meta.path.is_ident("min")
+                || meta.path.is_ident("max")
+            {
+                // #[prax(sum(relation.field))] — parse `(ident.ident)`.
+                let kind_str = meta
+                    .path
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let rel_ident: syn::Ident = content.parse()?;
+                let _dot: syn::Token![.] = content.parse()?;
+                let field_ident: syn::Ident = content.parse()?;
+                aggregate = Some((
+                    kind_str,
+                    rel_ident.to_string(),
+                    Some(field_ident.to_string()),
+                ));
             } else if meta.path.is_ident("relation") {
                 let mut target: Option<syn::Ident> = None;
                 let mut fk: Option<String> = None;
@@ -665,6 +802,8 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
         })?;
     }
 
+    let generated = generated_expr.map(|expr| (expr, generated_stored));
+
     Ok(FieldInfo {
         name,
         ty,
@@ -675,6 +814,8 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
         is_optional,
         is_list,
         relation,
+        generated,
+        aggregate,
     })
 }
 
@@ -1442,6 +1583,125 @@ mod tests {
         assert!(
             code.contains("BoolFieldUpdate"),
             "expected BoolFieldUpdate for active"
+        );
+    }
+
+    // ── count_struct codegen tests ────────────────────────────────────────
+
+    /// A model with outgoing relations must emit `<Model>Count` with one
+    /// `Option<i64>` field per relation.
+    #[test]
+    fn user_with_relations_emits_count_struct() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "users")]
+            pub struct User {
+                #[prax(id)]
+                pub id: i64,
+                pub email: String,
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub posts: Vec<Post>,
+                #[prax(relation(target = "Comment", foreign_key = "user_id"))]
+                pub comments: Vec<Comment>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // The `UserCount` struct must be present.
+        assert!(
+            code.contains("UserCount"),
+            "expected UserCount struct in generated code; got:\n{code}"
+        );
+        // Each relation produces an `Option<i64>` field.
+        assert!(
+            code.contains("pub posts"),
+            "expected `pub posts` field on UserCount"
+        );
+        assert!(
+            code.contains("pub comments"),
+            "expected `pub comments` field on UserCount"
+        );
+        // `Option < i64 >` (token-stream spacing) must appear.
+        assert!(
+            code.contains("Option < i64 >"),
+            "expected Option<i64> field type on UserCount fields"
+        );
+        // Default derive must be present so UserCount::default() works.
+        assert!(
+            code.contains("Default"),
+            "expected #[derive(Default)] on UserCount"
+        );
+    }
+
+    /// A model with **no** outgoing relations must NOT emit `<Model>Count`.
+    #[test]
+    fn model_without_relations_does_not_emit_count_struct() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "posts")]
+            pub struct Post {
+                #[prax(id)]
+                pub id: i64,
+                pub title: String,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        // `PostCount` must NOT appear in the generated code.
+        // Models with zero outgoing relations are not count-able at the
+        // type level — attempting `_count` on them will be a compile-time
+        // error enforced in Task 14 macro lowering / Task 15 trybuild.
+        assert!(
+            !code.contains("PostCount"),
+            "unexpected PostCount in generated code for a relation-free model"
+        );
+    }
+
+    /// `<Model>Count` fields must match the relation field names exactly —
+    /// not the target model names.
+    #[test]
+    fn count_struct_uses_field_names_not_target_model_names() {
+        let input: DeriveInput = parse_quote! {
+            #[prax(table = "authors")]
+            pub struct Author {
+                #[prax(id)]
+                pub id: i64,
+                pub name: String,
+                // Field name is `articles`, target model is `Post`
+                #[prax(relation(target = "Post", foreign_key = "author_id"))]
+                pub articles: Vec<Post>,
+            }
+        };
+        let result = derive_model_impl(&input);
+        assert!(
+            result.is_ok(),
+            "derive_model_impl failed: {:?}",
+            result.err()
+        );
+        let code = result.unwrap().to_string();
+
+        assert!(
+            code.contains("AuthorCount"),
+            "expected AuthorCount in generated code"
+        );
+        // The field name on the count struct is `articles`, not `post` or `Post`.
+        assert!(
+            code.contains("pub articles"),
+            "expected `pub articles` on AuthorCount, not the target model name"
+        );
+        assert!(
+            !code.contains("pub post"),
+            "unexpected `pub post` — count struct should use field name, not model name"
         );
     }
 }

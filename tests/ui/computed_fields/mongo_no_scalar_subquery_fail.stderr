@@ -1,0 +1,12 @@
+error[E0277]: the engine `MongoEngine` does not support scalar subqueries in SELECT
+  --> tests/ui/computed_fields/mongo_no_scalar_subquery_fail.rs:11:32
+   |
+11 |     requires_scalar_subquery::<prax_mongodb::MongoEngine>();
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `SupportsScalarSubqueryInSelect` is not implemented for `MongoEngine`
+   |
+   = note: All SQL engines satisfy this. MongoDB requires the $lookup-lowering follow-up plan.
+note: required by a bound in `requires_scalar_subquery`
+  --> tests/ui/computed_fields/mongo_no_scalar_subquery_fail.rs:8:32
+   |
+ 8 | fn requires_scalar_subquery<E: prax_query::capabilities::SupportsScalarSubqueryInSelect>() {}
+   |                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_scalar_subquery`

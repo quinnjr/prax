@@ -194,6 +194,7 @@ pub mod partition;
 pub mod pool;
 pub mod procedure;
 pub mod profiling;
+pub mod projection;
 pub mod query;
 pub mod raw;
 pub mod relations;
@@ -267,6 +268,7 @@ pub use procedure::{
     Parameter, ParameterMode, ProcedureCall, ProcedureCallOperation, ProcedureEngine,
     ProcedureResult,
 };
+pub use projection::ScalarProjection;
 pub use query::QueryBuilder;
 pub use raw::{RawExecuteOperation, RawQueryOperation, Sql};
 pub use relations::{

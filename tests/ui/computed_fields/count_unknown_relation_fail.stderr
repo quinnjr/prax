@@ -1,0 +1,5 @@
+error: model `User` has no outgoing to-many relations to count
+  --> tests/ui/computed_fields/count_unknown_relation_fail.rs:14:29
+   |
+14 |         select: { id: true, _count: { pots: true } },
+   |                             ^^^^^^

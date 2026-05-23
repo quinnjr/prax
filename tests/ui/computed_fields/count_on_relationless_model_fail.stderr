@@ -1,0 +1,5 @@
+error: unknown model `Post`. Known models: ["User"]
+  --> tests/ui/computed_fields/count_on_relationless_model_fail.rs:15:58
+   |
+15 |     let _op = prax_orm::find_many!(unimplemented!(), for Post, {
+   |                                                          ^^^^

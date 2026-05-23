@@ -136,6 +136,7 @@ fn collect_select_fields(model: &Model) -> Vec<SelectField> {
             name: snake_ident(f.name()),
             column: column_name_of(f),
             is_relation: matches!(f.field_type, FieldType::Model(_)),
+            is_no_column: false,
         })
         .collect()
 }
@@ -478,17 +479,25 @@ pub fn generate_model_module_with_style(
         })
         .collect();
 
+    // The prax_schema! path does not (yet) interpret @generated / aggregate
+    // directives from the .prax schema AST — that wiring is Task 7/11.
+    // Pass empty slices so the Model trait consts default to &[].
     let model_trait_impl = super::derive_model_trait::emit(
         &model_name,
         model.name(),
         &table_name,
         &pk_columns_owned,
         &all_columns,
+        &[],
+        &[],
     );
     // The prax_schema! path filters `FieldType::Model(_)` relation
     // fields out of `from_row_fields` above; pass an empty slice for
     // relation defaults to keep the `FromRow` shape unchanged.
-    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[]);
+    // The prax_schema! path does not yet interpret aggregate directives
+    // from the .prax AST (Task 11 wires the derive path; schema path follows).
+    // Pass an empty slice so aggregate fields default to the zero-state.
+    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[], &[]);
     let model_with_pk_impl = super::derive_model_with_pk::emit(&model_name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { #model_name });
 
@@ -566,6 +575,24 @@ pub fn generate_model_module_with_style(
 
     let (relation_meta_struct, relation_meta_impl) =
         super::inputs::relation_meta::generate(&module_name, &relation_meta_specs);
+
+    // `<Model>Count` synthetic struct — emitted at crate-root scope,
+    // outside the `pub mod <model>` block, so it is a sibling of the
+    // generated model struct.  Only models with ≥1 outgoing relations
+    // get this struct.
+    let count_relation_names: Vec<String> = model
+        .fields
+        .values()
+        .filter(|f| matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| f.name().to_string())
+        .collect();
+    let count_struct_outgoing: Vec<super::count_struct::OutgoingRelation<'_>> =
+        count_relation_names
+            .iter()
+            .map(|n| super::count_struct::OutgoingRelation { field_name: n })
+            .collect();
+    let count_struct_tokens =
+        super::count_struct::emit_count_struct(&model_name, &count_struct_outgoing);
 
     Ok(quote! {
         #doc
@@ -660,6 +687,11 @@ pub fn generate_model_module_with_style(
 
         // RelationFilterMeta impls — one per declared relation field.
         #relation_meta_impl
+
+        // `<Model>Count` synthetic struct — only present when the model has
+        // at least one outgoing relation.  See `count_struct` module for the
+        // design rationale and deferral notes.
+        #count_struct_tokens
     })
 }
 

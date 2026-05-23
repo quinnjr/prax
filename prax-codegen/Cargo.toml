@@ -40,4 +40,8 @@ smol_str = { workspace = true }
 
 [features]
 default = []
+# Trybuild UI tests for macro diagnostics. Gated because trybuild stderr
+# snapshots are sensitive to rustc version — run with
+# `cargo test -p prax-codegen --test ui --features ui-tests` on a pinned toolchain.
+ui-tests = []
 

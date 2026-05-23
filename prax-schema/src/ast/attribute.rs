@@ -156,6 +156,32 @@ impl Attribute {
             .map(|a| &a.value)
     }
 
+    /// First positional string-literal argument, or `None`.
+    pub fn first_string_arg(&self) -> Option<&str> {
+        self.args.first().and_then(|a| a.value.as_string())
+    }
+
+    /// First positional identifier argument, or `None`.
+    /// Also accepts a `String` variant so dotted-path args (stored as strings)
+    /// are returned for the plain-ident case when there is no dot.
+    pub fn first_ident_arg(&self) -> Option<&str> {
+        self.args.first().and_then(|a| match &a.value {
+            AttributeValue::Ident(s) => Some(s.as_str()),
+            AttributeValue::String(s) if !s.contains('.') => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
+    /// First positional argument as a dotted path (`"a"` or `"a.b"`).
+    /// Returns `None` if the first arg is neither an ident nor a string.
+    pub fn first_path_arg(&self) -> Option<String> {
+        self.args.first().and_then(|a| match &a.value {
+            AttributeValue::Ident(s) => Some(s.as_str().to_string()),
+            AttributeValue::String(s) => Some(s.clone()),
+            _ => None,
+        })
+    }
+
     /// Check if this is a field-level attribute.
     pub fn is_field_attribute(&self) -> bool {
         matches!(
@@ -169,6 +195,14 @@ impl Attribute {
                 | "map"
                 | "db"
                 | "relation"
+                | "generated"
+                | "stored"
+                | "virtual"
+                | "count"
+                | "sum"
+                | "avg"
+                | "min"
+                | "max"
         )
     }
 
@@ -204,6 +238,10 @@ pub struct FieldAttributes {
     pub native_type: Option<NativeType>,
     /// Relation attributes.
     pub relation: Option<RelationAttribute>,
+    /// `@generated("...")` attribute, if present.
+    pub generated: Option<GeneratedAttribute>,
+    /// Relation-aggregate attribute (`@count`/`@sum`/etc.), if present.
+    pub aggregate: Option<AggregateAttribute>,
 }
 
 /// Native database type specification.
@@ -240,6 +278,35 @@ pub struct RelationAttribute {
     pub on_update: Option<ReferentialAction>,
     /// Custom foreign key constraint name in the database.
     pub map: Option<String>,
+}
+
+/// Aggregate kind for relation-aggregate virtual fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AggregateKind {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// `@generated("expr") @stored|@virtual` attribute.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedAttribute {
+    /// SQL expression text. Emitted verbatim into DDL — no dialect translation.
+    pub expression: String,
+    /// True if STORED, false if VIRTUAL. Default is STORED.
+    pub stored: bool,
+}
+
+/// `@count(rel)` / `@sum(rel.field)` / etc.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AggregateAttribute {
+    pub kind: AggregateKind,
+    /// Outgoing relation name on the parent model.
+    pub relation: SmolStr,
+    /// Target field on the related model. Required for non-Count.
+    pub field: Option<SmolStr>,
 }
 
 /// Referential actions for relations.
@@ -616,6 +683,8 @@ mod tests {
             map: Some("user_id".to_string()),
             native_type: None,
             relation: None,
+            generated: None,
+            aggregate: None,
         };
 
         assert!(attrs.is_id);

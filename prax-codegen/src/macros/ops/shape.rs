@@ -27,8 +27,8 @@ use crate::macros::dsl::ast::{DslBlock, DslValue};
 use crate::macros::lower::LowerCtx;
 use crate::macros::lower::include_input::lower_include;
 use crate::macros::lower::order_by_input::{lower_cursor, lower_order_by};
-use crate::macros::lower::select_input::lower_select;
-use crate::macros::lower::where_input::lower_where;
+use crate::macros::lower::select_input::lower_select_struct_only;
+use crate::macros::lower::where_input::lower_where_input_only;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
 use crate::macros::shape_accessor::parse_model_ident;
 
@@ -43,7 +43,7 @@ pub fn expand_where_shape(input: TokenStream) -> syn::Result<TokenStream> {
         let _: Token![,] = s.parse()?;
         let block: DslBlock = s.parse()?;
         let ctx = LowerCtx::new(&schema, model);
-        lower_where(&block, &ctx)
+        lower_where_input_only(&block, &ctx)
     };
 
     let body = Parser::parse2(parser, input)?;
@@ -89,7 +89,7 @@ pub fn expand_select_shape(input: TokenStream) -> syn::Result<TokenStream> {
         let _: Token![,] = s.parse()?;
         let block: DslBlock = s.parse()?;
         let ctx = LowerCtx::new(&schema, model);
-        lower_select(&block, &ctx)
+        lower_select_struct_only(&block, &ctx)
     };
 
     let body = Parser::parse2(parser, input)?;

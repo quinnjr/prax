@@ -39,7 +39,31 @@ impl CqlMigrationGenerator {
         }
 
         for table in &diff.create_tables {
-            up.push(self.create_table_statement(table, ks_context));
+            // Filter fields: skip aggregates (no DDL) and warn on @generated
+            // (CQL engines do not support computed/generated columns).
+            let mut filtered_fields: Vec<CqlFieldDiff> = Vec::new();
+            for field in &table.fields {
+                if field.is_aggregate {
+                    // Aggregate fields have no DDL in CQL; silently omit them.
+                    continue;
+                }
+                if let Some(generated_attr) = &field.generated {
+                    warnings.push(format!(
+                        "@generated columns are not supported on CQL engines; \
+                         field `{}.{}` (expression: `{}`) has been omitted from DDL. \
+                         Remove the @generated attribute or use a SQL engine.",
+                        table.name, field.name, generated_attr.expression
+                    ));
+                    // Omit the column — emitting broken DDL is worse than a warning.
+                    continue;
+                }
+                filtered_fields.push(field.clone());
+            }
+            let filtered_table = CqlTableDiff {
+                fields: filtered_fields,
+                ..table.clone()
+            };
+            up.push(self.create_table_statement(&filtered_table, ks_context));
             down.push(self.drop_table_statement(&table.name, ks_context));
         }
 
@@ -76,7 +100,32 @@ impl CqlMigrationGenerator {
                 }
             }
 
-            up.extend(self.alter_table_statements(alter, ks_context));
+            // Filter add_fields: skip aggregates, warn on @generated.
+            let filtered_add_fields: Vec<CqlFieldDiff> = alter
+                .add_fields
+                .iter()
+                .filter(|field| {
+                    if field.is_aggregate {
+                        return false;
+                    }
+                    if let Some(generated_attr) = &field.generated {
+                        warnings.push(format!(
+                            "@generated columns are not supported on CQL engines; \
+                             field `{}.{}` (expression: `{}`) has been omitted from DDL. \
+                             Remove the @generated attribute or use a SQL engine.",
+                            alter.name, field.name, generated_attr.expression
+                        ));
+                        return false;
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            let filtered_alter = crate::cql::diff::CqlTableAlterDiff {
+                add_fields: filtered_add_fields,
+                ..alter.clone()
+            };
+            up.extend(self.alter_table_statements(&filtered_alter, ks_context));
         }
 
         for index in &diff.create_indexes {
@@ -435,6 +484,8 @@ mod tests {
             name: name.into(),
             cql_type: cql_type.into(),
             is_static: false,
+            generated: None,
+            is_aggregate: false,
         }
     }
 
