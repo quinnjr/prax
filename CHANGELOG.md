@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`NestedWriteOp::Upsert` now emits a single statement on dialects
+  that support it** (Postgres `ON CONFLICT (pk) DO UPDATE SET ...`,
+  SQLite, DuckDB, MySQL `ON DUPLICATE KEY UPDATE ...`). Halves the
+  round-trips for nested upserts on those engines. MSSQL and CQL keep
+  the existing two-statement fallback since neither has a clean
+  single-statement upsert (MSSQL would need `MERGE`, CQL is
+  last-write-wins by default and doesn't surface ON CONFLICT).
+  Behavior unchanged on the fallback path.
+- `NestedWriteOp::ConnectOrCreate` continues to use the two-statement
+  form regardless of dialect — its conflict-column extraction from
+  arbitrary `where:` filters is more nuanced and deferred to a
+  follow-up.
+
 ### Added
 
 - **Computed and virtual fields (phase 5.5).** Three new schema-level
