@@ -140,12 +140,41 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .map(|f| (f.name.clone(), f.ty.clone(), f.column_name.clone(), f.is_id))
         .collect();
 
+    // Collect generated and aggregate field metadata for the Model trait consts.
+    let generated_fields: Vec<(String, String, bool)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.generated
+                .as_ref()
+                .map(|(expr, stored)| (f.name.to_string(), expr.clone(), *stored))
+        })
+        .collect();
+    let aggregate_fields: Vec<(String, String, String, Option<String>)> = field_infos
+        .iter()
+        .filter_map(|f| {
+            f.aggregate.as_ref().map(|(kind, rel, field)| {
+                (f.name.to_string(), kind.clone(), rel.clone(), field.clone())
+            })
+        })
+        .collect();
+
+    let generated_fields_refs: Vec<(&str, &str, bool)> = generated_fields
+        .iter()
+        .map(|(f, e, s)| (f.as_str(), e.as_str(), *s))
+        .collect();
+    let aggregate_fields_refs: Vec<(&str, &str, &str, Option<&str>)> = aggregate_fields
+        .iter()
+        .map(|(f, k, r, field)| (f.as_str(), k.as_str(), r.as_str(), field.as_deref()))
+        .collect();
+
     let model_trait_impl = super::derive_model_trait::emit(
         name,
         &name.to_string(),
         &table_name,
         &pk_columns_owned,
         &all_columns,
+        &generated_fields_refs,
+        &aggregate_fields_refs,
     );
     let from_row_impl =
         super::derive_from_row::emit(name, &from_row_fields, &from_row_relation_fields);
@@ -566,6 +595,12 @@ struct FieldInfo {
     is_optional: bool,
     is_list: bool,
     relation: Option<RelationAttr>,
+    /// `#[prax(generated = "expr")]` / `#[prax(generated = "expr", stored)]`
+    /// / `#[prax(generated = "expr", virtual)]` — (expression, stored).
+    generated: Option<(String, bool)>,
+    /// `#[prax(count(rel))]` / `#[prax(sum(rel.field))]` etc.
+    /// Tuple: (kind_str, relation, field).
+    aggregate: Option<(String, String, Option<String>)>,
 }
 
 /// Parsed `#[prax(relation(target = "...", foreign_key = "...", local_key = "..."))]`.
@@ -607,6 +642,9 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
     let mut is_auto = false;
     let mut is_unique = false;
     let mut relation: Option<RelationAttr> = None;
+    let mut generated_expr: Option<String> = None;
+    let mut generated_stored: bool = true; // default: stored
+    let mut aggregate: Option<(String, String, Option<String>)> = None;
 
     // Determine if the type is Optional or Vec
     let is_optional = is_option_type(&ty);
@@ -627,6 +665,41 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
             } else if meta.path.is_ident("column") {
                 let value: LitStr = meta.value()?.parse()?;
                 column_name = value.value();
+            } else if meta.path.is_ident("generated") {
+                let value: LitStr = meta.value()?.parse()?;
+                generated_expr = Some(value.value());
+            } else if meta.path.is_ident("stored") {
+                generated_stored = true;
+            } else if meta.path.is_ident("virtual") {
+                generated_stored = false;
+            } else if meta.path.is_ident("count") {
+                // #[prax(count(relation_name))]
+                // Parse `(ident)` directly from the token stream.
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let rel_ident: syn::Ident = content.parse()?;
+                aggregate = Some(("count".to_string(), rel_ident.to_string(), None));
+            } else if meta.path.is_ident("sum")
+                || meta.path.is_ident("avg")
+                || meta.path.is_ident("min")
+                || meta.path.is_ident("max")
+            {
+                // #[prax(sum(relation.field))] — parse `(ident.ident)`.
+                let kind_str = meta
+                    .path
+                    .get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                let content;
+                syn::parenthesized!(content in meta.input);
+                let rel_ident: syn::Ident = content.parse()?;
+                let _dot: syn::Token![.] = content.parse()?;
+                let field_ident: syn::Ident = content.parse()?;
+                aggregate = Some((
+                    kind_str,
+                    rel_ident.to_string(),
+                    Some(field_ident.to_string()),
+                ));
             } else if meta.path.is_ident("relation") {
                 let mut target: Option<syn::Ident> = None;
                 let mut fk: Option<String> = None;
@@ -665,6 +738,8 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
         })?;
     }
 
+    let generated = generated_expr.map(|expr| (expr, generated_stored));
+
     Ok(FieldInfo {
         name,
         ty,
@@ -675,6 +750,8 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
         is_optional,
         is_list,
         relation,
+        generated,
+        aggregate,
     })
 }
 

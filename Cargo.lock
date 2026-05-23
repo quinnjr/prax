@@ -4858,6 +4858,7 @@ dependencies = [
  "pretty_assertions",
  "regex-lite",
  "serde",
+ "serde_json",
  "smol_str",
  "tempfile",
  "thiserror 2.0.18",

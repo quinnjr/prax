@@ -478,12 +478,17 @@ pub fn generate_model_module_with_style(
         })
         .collect();
 
+    // The prax_schema! path does not (yet) interpret @generated / aggregate
+    // directives from the .prax schema AST — that wiring is Task 7/11.
+    // Pass empty slices so the Model trait consts default to &[].
     let model_trait_impl = super::derive_model_trait::emit(
         &model_name,
         model.name(),
         &table_name,
         &pk_columns_owned,
         &all_columns,
+        &[],
+        &[],
     );
     // The prax_schema! path filters `FieldType::Model(_)` relation
     // fields out of `from_row_fields` above; pass an empty slice for
