@@ -109,6 +109,7 @@ mod tests {
                 is_unique: false,
                 vector: None,
                 enum_name: None,
+                generated: None,
             }],
             primary_key: vec!["id".to_string()],
             indexes: Vec::new(),

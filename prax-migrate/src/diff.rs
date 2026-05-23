@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use prax_schema::Schema;
-use prax_schema::ast::{Field, FieldType, IndexType, Model, VectorOps, View};
+use prax_schema::ast::{Field, FieldType, GeneratedAttribute, IndexType, Model, VectorOps, View};
 
 use crate::error::MigrateResult;
 
@@ -292,6 +292,9 @@ pub struct FieldDiff {
     /// type referencing a pre-created enum type; SQLite/MySQL/MSSQL/DuckDB use
     /// TEXT (optionally with a CHECK constraint of valid variants).
     pub enum_name: Option<String>,
+    /// If this field is a generated/computed column, the `@generated` attribute
+    /// payload. Generators use this to emit dialect-specific GENERATED AS syntax.
+    pub generated: Option<GeneratedAttribute>,
 }
 
 /// Diff for altering a field.
@@ -846,6 +849,8 @@ fn field_to_diff(field: &Field) -> FieldDiff {
         _ => None,
     };
 
+    let generated = field.generated();
+
     FieldDiff {
         name: field.name().to_string(),
         column_name,
@@ -857,6 +862,7 @@ fn field_to_diff(field: &Field) -> FieldDiff {
         is_unique,
         vector: None,
         enum_name,
+        generated,
     }
 }
 
@@ -1273,6 +1279,7 @@ mod tests {
             is_unique: false,
             vector: None,
             enum_name: None,
+            generated: None,
         };
         assert!(f.vector.is_none());
     }
