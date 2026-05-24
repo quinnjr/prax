@@ -255,6 +255,19 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             .collect();
     let count_struct_tokens = super::count_struct::emit_count_struct(name, &count_struct_outgoing);
 
+    let scalar_meta: Vec<super::aggregate::ScalarFieldMeta<'_>> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && f.aggregate.is_none())
+        .map(|f| super::aggregate::ScalarFieldMeta {
+            ident: &f.name,
+            ty: &f.ty,
+            column_name: f.column_name.as_str(),
+            is_numeric: super::aggregate::rust_type_is_numeric(&f.ty),
+            is_sortable: super::aggregate::rust_type_is_sortable(&f.ty),
+        })
+        .collect();
+    let aggregate_select_inputs = super::aggregate::emit_select_inputs(name, &scalar_meta);
+
     // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
     // no relations still get an impl — it errors on any unknown name,
     // preserving the uniform `ModelRelationLoader` bound on find
@@ -562,6 +575,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #order_by_struct
             #create_struct
             #update_struct
+
+            // Per-model aggregate select-shape input structs (phase 6):
+            // <Model>{Count,Sum,Avg,Min,Max}Select.
+            #aggregate_select_inputs
 
             // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
             // The corresponding `impl RelationFilterMeta` blocks are emitted
