@@ -705,15 +705,37 @@ pub enum NestedWriteOp {
     },
     /// Upsert: update if a row matches `pk`, else insert.
     ///
-    /// The two-statement engine-agnostic lowering:
-    /// 1. `UPDATE <target_table> SET <update_writeops> WHERE <target_pk> = $1`
-    /// 2. If `affected_rows == 0`, emit
-    ///    `INSERT INTO <target_table> (<create_cols + foreign_key>) VALUES (<...>)`
-    ///    with the parent PK spliced in for the FK column.
+    /// On dialects with native single-statement upsert (Postgres, SQLite,
+    /// DuckDB, MySQL), emits one
+    /// `INSERT INTO <target_table> (<create_cols + fk>) VALUES (...)
+    /// ON CONFLICT (<target_pk>) DO UPDATE SET <update_writeops>`
+    /// (or `ON DUPLICATE KEY UPDATE ...` on MySQL). The `pk` field is
+    /// unused on this path — conflict detection comes from the inserted
+    /// row's PK column, which the codegen guarantees is present in
+    /// `create_payload`.
     ///
-    /// Single-statement upsert via vendor-specific syntax (Postgres
-    /// `ON CONFLICT`, MySQL `ON DUPLICATE KEY UPDATE`, MSSQL `MERGE`) is
-    /// planned for phase 5d alongside `connect_or_create`.
+    /// On MSSQL and CQL, falls back to the two-statement form:
+    /// 1. `UPDATE <target_table> SET <update_writeops> WHERE <target_pk> = $1`
+    /// 2. If `affected_rows == 0`, `INSERT INTO <target_table>
+    ///    (<create_cols + fk>) VALUES (<...>)`.
+    ///
+    /// **Limitations of the fallback path** (MSSQL/CQL only):
+    /// - The `affected_rows == 0` check cannot distinguish "row absent"
+    ///   from "row exists but no columns changed" — a UPDATE that hits an
+    ///   identical row produces a spurious INSERT attempt and likely a PK
+    ///   unique-violation. Wrap the fallback in a transaction (or use a
+    ///   single-statement dialect) for strongest semantics.
+    /// - There is a TOCTOU race between the UPDATE returning 0 and the
+    ///   subsequent INSERT; a concurrent writer can insert the same row
+    ///   first.
+    ///
+    /// Document-store engines (`NotSql` dialect) are rejected at the top
+    /// of `execute` with `QueryError::unsupported(...)`.
+    ///
+    /// **Empty payloads**: an empty `update_payload` on a single-statement
+    /// dialect lowers to `ON CONFLICT (...) DO NOTHING` (PG/SQLite/DuckDB)
+    /// or `INSERT IGNORE INTO` (MySQL — idempotent no-op).
+    /// An empty `create_payload` errors with `QueryError::invalid_input`.
     Upsert {
         relation: &'static str,
         target_table: &'static str,
@@ -773,16 +795,13 @@ pub enum NestedWriteOp {
     },
 }
 
-/// Build a `col1 = $i, col2 = col2 + $j, ...` SET clause from a
-/// `(column, WriteOp)` list, with the first parameter positioned at
-/// `start_ph`. Returns the joined clause text and the parameter values
-/// in matching positional order.
+/// Shared SET-clause builder for the `Upsert` single-statement and
+/// two-statement fallback paths. `start_ph` lets the caller position
+/// placeholders after any preceding INSERT values; PG-family dialects
+/// use this index numerically, MySQL ignores it (`?` placeholders are
+/// positional via param push order).
 ///
-/// `Unset` operators emit a literal `col = NULL` and contribute no
-/// parameter slot (matching [`crate::inputs::WriteOp::to_set_fragment`]'s
-/// `None` return for `Unset`). Used by the `Upsert` executor for both
-/// the single-statement (`ON CONFLICT DO UPDATE SET ...`) and the
-/// two-statement fallback (`UPDATE ... SET ...`) code paths.
+/// `Unset` ops emit `col = NULL` and consume no placeholder slot.
 fn build_writeop_set_clause(
     payload: &[(String, crate::inputs::WriteOp)],
     dialect: &dyn crate::dialect::SqlDialect,
@@ -917,29 +936,17 @@ impl NestedWriteOp {
                     return Ok(());
                 }
                 let dialect = engine.dialect();
-                let mut set_fragments: Vec<String> = Vec::with_capacity(payload.len());
-                let mut params: Vec<FilterValue> = Vec::with_capacity(payload.len() + 1);
-                let mut next_placeholder = 1usize;
-                for (col, op) in payload {
-                    let (frag, maybe_val) = op.to_set_fragment(
-                        &dialect.quote_ident(&col),
-                        &dialect.placeholder(next_placeholder),
-                    );
-                    set_fragments.push(frag);
-                    if let Some(val) = maybe_val {
-                        params.push(val);
-                        next_placeholder += 1;
-                    }
-                }
-                params.push(pk);
+                let (set_text, mut update_params) = build_writeop_set_clause(&payload, dialect, 1);
+                let next_placeholder = update_params.len() + 1;
+                update_params.push(pk);
                 let sql = format!(
                     "UPDATE {} SET {} WHERE {} = {}",
                     dialect.quote_ident(target_table),
-                    set_fragments.join(", "),
+                    set_text,
                     dialect.quote_ident(target_pk),
                     dialect.placeholder(next_placeholder),
                 );
-                let affected = engine.execute_raw(&sql, params).await?;
+                let affected = engine.execute_raw(&sql, update_params).await?;
                 if affected != 1 {
                     return Err(crate::error::QueryError::not_found(target_table)
                         .with_context("Nested Update by PK"));
@@ -957,22 +964,10 @@ impl NestedWriteOp {
                     return Ok(());
                 }
                 let dialect = engine.dialect();
-                let mut set_fragments: Vec<String> = Vec::with_capacity(payload.len());
-                let mut params: Vec<FilterValue> = Vec::with_capacity(payload.len() + 1);
-                let mut next_placeholder = 1usize;
-                for (col, op) in payload {
-                    let (frag, maybe_val) = op.to_set_fragment(
-                        &dialect.quote_ident(&col),
-                        &dialect.placeholder(next_placeholder),
-                    );
-                    set_fragments.push(frag);
-                    if let Some(val) = maybe_val {
-                        params.push(val);
-                        next_placeholder += 1;
-                    }
-                }
-                let fk_placeholder = dialect.placeholder(next_placeholder);
-                next_placeholder += 1;
+                let (set_text, mut params) = build_writeop_set_clause(&payload, dialect, 1);
+                let fk_placeholder_idx = params.len() + 1;
+                let fk_placeholder = dialect.placeholder(fk_placeholder_idx);
+                let next_placeholder = fk_placeholder_idx + 1;
                 params.push(parent_pk.clone());
 
                 let is_unconstrained = matches!(filter, Filter::None);
@@ -980,7 +975,7 @@ impl NestedWriteOp {
                     format!(
                         "UPDATE {} SET {} WHERE {} = {}",
                         dialect.quote_ident(target_table),
-                        set_fragments.join(", "),
+                        set_text,
                         dialect.quote_ident(foreign_key),
                         fk_placeholder,
                     )
@@ -991,7 +986,7 @@ impl NestedWriteOp {
                     format!(
                         "UPDATE {} SET {} WHERE {} = {} AND ({})",
                         dialect.quote_ident(target_table),
-                        set_fragments.join(", "),
+                        set_text,
                         dialect.quote_ident(foreign_key),
                         fk_placeholder,
                         filter_sql,
@@ -1011,58 +1006,135 @@ impl NestedWriteOp {
             } => {
                 let dialect = engine.dialect();
 
-                // Probe the dialect for single-statement upsert support.
-                // Build the SET fragment with placeholders positioned
-                // AFTER the INSERT's column values (insert occupies
-                // $1..$N where N = create_payload.len() + 1 for the FK).
-                let insert_arity = create_payload.len() + 1;
-                let (single_set_text, single_set_params) =
-                    build_writeop_set_clause(&update_payload, dialect, insert_arity + 1);
-                let target_pk_quoted = dialect.quote_ident(target_pk);
-                let conflict_cols = [target_pk_quoted.as_str()];
-                let upsert_clause = dialect.upsert_clause(&conflict_cols, &single_set_text);
+                // Guard: document-store engines (NotSql) panic on any SQL
+                // emission helper. Short-circuit before touching the dialect.
+                if !dialect.supports_upsert() {
+                    return Err(crate::error::QueryError::unsupported(format!(
+                        "Nested Upsert is not supported by the `{}` engine",
+                        std::any::type_name::<dyn crate::dialect::SqlDialect>()
+                    )));
+                }
 
-                if !upsert_clause.is_empty() {
-                    // Single-statement path:
-                    //   INSERT INTO child (cols + fk) VALUES ($1..$N) ON CONFLICT (...) DO UPDATE SET ...
-                    if create_payload.is_empty() {
-                        // No insert columns means we can't build a
-                        // single-statement upsert (and the
-                        // zero-affected fallback would also fail). Keep
-                        // the existing behavior: surface as not_found.
-                        return Err(crate::error::QueryError::not_found(target_table)
-                            .with_context("Nested Upsert: row absent and create payload empty"));
-                    }
+                // Guard: an upsert with no payloads is a no-op.
+                if update_payload.is_empty() && create_payload.is_empty() {
+                    return Ok(());
+                }
+
+                // Guard: create_payload must not be empty — we can't INSERT
+                // a row with no columns.
+                if create_payload.is_empty() {
+                    return Err(crate::error::QueryError::invalid_input(
+                        "create_payload",
+                        "Nested Upsert requires at least one create column when no row to update",
+                    ));
+                }
+
+                // Probe the dialect for single-statement upsert support by
+                // checking whether upsert_clause returns a non-empty string.
+                //
+                // For the normal path (non-empty update_payload): build the
+                // SET fragment with placeholders positioned AFTER the INSERT's
+                // column values (insert occupies $1..$N where N =
+                // create_payload.len() + 1 for the FK).
+                //
+                // On PG-family dialects the `start_ph` arg positions SET-clause
+                // placeholders after the INSERT VALUES placeholders ($N+1, $N+2, ...).
+                // On MySQL the placeholder text is always `?` — the SET-vs-VALUES split
+                // is enforced solely by the param-push order: INSERT values are pushed
+                // first below, then SET params via `values.extend(probe_set_params)`.
+                let insert_arity = create_payload.len() + 1; // cols + FK
+                let (probe_set_text, probe_set_params) =
+                    build_writeop_set_clause(&update_payload, dialect, insert_arity + 1);
+
+                // Builds columns + values + placeholders + quoted_cols from
+                // create_payload + foreign_key + parent_pk. Used by both the
+                // single-statement and two-statement INSERT phases below.
+                let build_insert_columns_and_values = || {
                     let mut columns: Vec<String> =
                         create_payload.iter().map(|(c, _)| c.clone()).collect();
                     let mut values: Vec<FilterValue> =
-                        create_payload.into_iter().map(|(_, v)| v).collect();
+                        create_payload.iter().map(|(_, v)| v.clone()).collect();
                     columns.push(foreign_key.to_string());
                     values.push(parent_pk.clone());
                     let placeholders: Vec<String> =
                         (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
                     let quoted_cols: Vec<String> =
                         columns.iter().map(|c| dialect.quote_ident(c)).collect();
-                    values.extend(single_set_params);
-                    // Drop the `pk` value — the single-statement form
-                    // never references it; the conflict target is
-                    // derived from the inserted row's PK column (which
-                    // the codegen guarantees is present when
-                    // create_payload is populated by the macro).
+                    (columns, values, placeholders, quoted_cols)
+                };
+
+                // Pass raw (unquoted) target_pk — upsert_clause implementations
+                // are responsible for quoting identifiers internally.
+                let conflict_cols = [target_pk];
+                let upsert_clause_text = dialect.upsert_clause(&conflict_cols, &probe_set_text);
+
+                if !upsert_clause_text.is_empty() {
+                    // Single-statement path:
+                    //   INSERT INTO child (cols + fk) VALUES ($1..$N) ON CONFLICT (...) DO UPDATE SET ...
+                    //   or (empty update_payload): INSERT … ON CONFLICT DO NOTHING / INSERT IGNORE
+                    let (_, mut values, placeholders, quoted_cols) =
+                        build_insert_columns_and_values();
+
+                    // Drop the `pk` value — the single-statement form never
+                    // references it; the conflict target is derived from the
+                    // inserted row's PK column (which the codegen guarantees
+                    // is present when create_payload is populated by the macro).
                     let _ = pk;
+
+                    let effective_upsert_clause = if update_payload.is_empty() {
+                        // Pure-insert semantics: collapse to conditional INSERT.
+                        // Use upsert_do_nothing_clause for dialect-specific DO NOTHING syntax.
+                        // MySQL returns the idempotent self-assign form; PG/SQLite/DuckDB
+                        // return ON CONFLICT (...) DO NOTHING.
+                        let do_nothing = dialect.upsert_do_nothing_clause(&conflict_cols);
+                        if do_nothing.is_empty() {
+                            // Fallback dialect (MSSQL/CQL) with empty upsert_do_nothing_clause
+                            // but non-empty upsert_clause_text: very rare. Treat as no-op.
+                            return Ok(());
+                        }
+                        do_nothing
+                    } else {
+                        values.extend(probe_set_params);
+                        upsert_clause_text
+                    };
+
                     let sql = format!(
                         "INSERT INTO {} ({}) VALUES ({}){}",
                         dialect.quote_ident(target_table),
                         quoted_cols.join(", "),
                         placeholders.join(", "),
-                        upsert_clause,
+                        effective_upsert_clause,
                     );
                     engine.execute_raw(&sql, values).await?;
                     return Ok(());
                 }
 
-                // Two-statement fallback for dialects without
-                // ON CONFLICT / ON DUPLICATE KEY (MSSQL, CQL, NotSql).
+                // Two-statement fallback for dialects without native upsert syntax
+                // (MSSQL, CQL). NotSql engines short-circuit above with QueryError::unsupported.
+                //
+                // TODO(upsert-toctou): `affected_rows == 0` cannot distinguish
+                // "no row matched" from "row matched but no columns changed"
+                // (MSSQL `@@ROWCOUNT`, CQL row-count semantics). A no-op UPDATE
+                // would incorrectly trigger the INSERT, producing a PK unique
+                // violation. Wrapping in an explicit transaction requires plumbing
+                // not yet available here; tracked for a follow-up PR.
+                if update_payload.is_empty() {
+                    // Pure-insert semantics on fallback path: skip the UPDATE
+                    // entirely and emit a bare INSERT. If the row already exists
+                    // the engine will surface a PK/unique violation, which is
+                    // the correct behaviour for an insert-or-fail path on dialects
+                    // without native upsert syntax.
+                    let (_, values, placeholders, quoted_cols) = build_insert_columns_and_values();
+                    let insert_sql = format!(
+                        "INSERT INTO {} ({}) VALUES ({})",
+                        dialect.quote_ident(target_table),
+                        quoted_cols.join(", "),
+                        placeholders.join(", "),
+                    );
+                    engine.execute_raw(&insert_sql, values).await?;
+                    return Ok(());
+                }
+
                 // Phase 1: attempt UPDATE.
                 let (set_text, mut update_params) =
                     build_writeop_set_clause(&update_payload, dialect, 1);
@@ -1080,23 +1152,7 @@ impl NestedWriteOp {
                     return Ok(());
                 }
                 // Phase 2: row didn't exist — INSERT it with the FK spliced in.
-                if create_payload.is_empty() {
-                    // Defensive: an upsert with empty create_payload and
-                    // zero affected_rows has nothing to insert. Surface
-                    // as not_found so the caller doesn't silently no-op.
-                    return Err(crate::error::QueryError::not_found(target_table)
-                        .with_context("Nested Upsert: row absent and create payload empty"));
-                }
-                let mut columns: Vec<String> =
-                    create_payload.iter().map(|(c, _)| c.clone()).collect();
-                let mut values: Vec<FilterValue> =
-                    create_payload.into_iter().map(|(_, v)| v).collect();
-                columns.push(foreign_key.to_string());
-                values.push(parent_pk.clone());
-                let placeholders: Vec<String> =
-                    (1..=values.len()).map(|i| dialect.placeholder(i)).collect();
-                let quoted_cols: Vec<String> =
-                    columns.iter().map(|c| dialect.quote_ident(c)).collect();
+                let (_, values, placeholders, quoted_cols) = build_insert_columns_and_values();
                 let insert_sql = format!(
                     "INSERT INTO {} ({}) VALUES ({})",
                     dialect.quote_ident(target_table),
@@ -1301,6 +1357,13 @@ mod tests {
     /// Captured (sql, params) entries from the mock engine.
     type StatementLog = Arc<Mutex<Vec<(String, Vec<FilterValue>)>>>;
 
+    #[derive(Clone, Copy)]
+    enum DialectKind {
+        Postgres,
+        Mssql,
+        NotSql,
+    }
+
     /// Recording mock engine for [`NestedWriteOp::execute`] tests.
     ///
     /// Captures the (sql, params) of every [`QueryEngine::execute_raw`]
@@ -1312,6 +1375,7 @@ mod tests {
     struct RecordingEngine {
         recorded: StatementLog,
         affected: Arc<Mutex<Vec<u64>>>,
+        dialect_kind: DialectKind,
     }
 
     impl RecordingEngine {
@@ -1319,6 +1383,7 @@ mod tests {
             Self {
                 recorded: Arc::new(Mutex::new(Vec::new())),
                 affected: Arc::new(Mutex::new(Vec::new())),
+                dialect_kind: DialectKind::Postgres,
             }
         }
 
@@ -1331,6 +1396,28 @@ mod tests {
             Self {
                 recorded: Arc::new(Mutex::new(Vec::new())),
                 affected: Arc::new(Mutex::new(rev)),
+                dialect_kind: DialectKind::Postgres,
+            }
+        }
+
+        fn mssql() -> Self {
+            Self {
+                dialect_kind: DialectKind::Mssql,
+                ..Self::new()
+            }
+        }
+
+        fn mssql_with_affected(seq: Vec<u64>) -> Self {
+            Self {
+                dialect_kind: DialectKind::Mssql,
+                ..Self::with_affected(seq)
+            }
+        }
+
+        fn notsql() -> Self {
+            Self {
+                dialect_kind: DialectKind::NotSql,
+                ..Self::new()
             }
         }
 
@@ -1341,7 +1428,11 @@ mod tests {
 
     impl crate::traits::QueryEngine for RecordingEngine {
         fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
-            &crate::dialect::Postgres
+            match self.dialect_kind {
+                DialectKind::Postgres => &crate::dialect::Postgres,
+                DialectKind::Mssql => &crate::dialect::Mssql,
+                DialectKind::NotSql => &crate::dialect::NotSql,
+            }
         }
 
         fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
@@ -1937,103 +2028,20 @@ mod tests {
         let (sql, params) = &stmts[0];
         assert!(sql.contains("INSERT INTO"), "got: {sql}");
         assert!(sql.contains("posts"), "got: {sql}");
-        assert!(sql.contains("ON CONFLICT"), "got: {sql}");
+        assert!(sql.contains("ON CONFLICT (\"id\")"), "got: {sql}");
         assert!(sql.contains("DO UPDATE SET"), "got: {sql}");
-        assert!(sql.contains("\"id\""), "got: {sql}");
         // INSERT supplies $1 (title), $2 (author_id=parent_pk);
         // SET fragment uses $3 (views increment).
+        assert!(
+            sql.contains("VALUES ($1, $2)"),
+            "INSERT VALUES placeholders: {sql}"
+        );
         assert!(sql.contains("$3"), "got: {sql}");
         // Two insert values + one SET value.
         assert_eq!(params.len(), 3);
         assert_eq!(params[0], FilterValue::String("new".to_string()));
         assert_eq!(params[1], FilterValue::Int(7));
         assert_eq!(params[2], FilterValue::Int(1));
-    }
-
-    /// MSSQL dialect mock: a `RecordingEngine` sibling whose
-    /// `dialect()` returns [`crate::dialect::Mssql`]. Used to exercise
-    /// the two-statement upsert fallback (MSSQL's `upsert_clause`
-    /// returns empty, so the executor must fall back to the
-    /// `UPDATE`-then-`INSERT` shape).
-    #[derive(Clone)]
-    struct MssqlRecordingEngine {
-        inner: RecordingEngine,
-    }
-
-    impl MssqlRecordingEngine {
-        fn new() -> Self {
-            Self {
-                inner: RecordingEngine::new(),
-            }
-        }
-
-        fn with_affected(seq: Vec<u64>) -> Self {
-            Self {
-                inner: RecordingEngine::with_affected(seq),
-            }
-        }
-
-        fn statements(&self) -> Vec<(String, Vec<FilterValue>)> {
-            self.inner.statements()
-        }
-    }
-
-    impl crate::traits::QueryEngine for MssqlRecordingEngine {
-        fn dialect(&self) -> &dyn crate::dialect::SqlDialect {
-            &crate::dialect::Mssql
-        }
-        fn query_many<T: Model + crate::row::FromRow + Send + 'static>(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
-            self.inner.query_many(sql, params)
-        }
-        fn query_one<T: Model + crate::row::FromRow + Send + 'static>(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<T>> {
-            self.inner.query_one(sql, params)
-        }
-        fn query_optional<T: Model + crate::row::FromRow + Send + 'static>(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<Option<T>>> {
-            self.inner.query_optional(sql, params)
-        }
-        fn execute_insert<T: Model + crate::row::FromRow + Send + 'static>(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<T>> {
-            self.inner.execute_insert(sql, params)
-        }
-        fn execute_update<T: Model + crate::row::FromRow + Send + 'static>(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
-            self.inner.execute_update(sql, params)
-        }
-        fn execute_delete(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<u64>> {
-            self.inner.execute_delete(sql, params)
-        }
-        fn execute_raw(
-            &self,
-            sql: &str,
-            params: Vec<FilterValue>,
-        ) -> BoxFuture<'_, QueryResult<u64>> {
-            self.inner.execute_raw(sql, params)
-        }
-        fn count(&self, sql: &str, params: Vec<FilterValue>) -> BoxFuture<'_, QueryResult<u64>> {
-            self.inner.count(sql, params)
-        }
     }
 
     #[tokio::test]
@@ -2043,7 +2051,7 @@ mod tests {
         // fall back to the existing two-statement UPDATE-then-INSERT
         // form. Default affected-rows = 1 means UPDATE matches a row
         // and the INSERT phase must not run.
-        let engine = MssqlRecordingEngine::new();
+        let engine = RecordingEngine::mssql();
         let op = NestedWriteOp::Upsert {
             relation: "posts",
             target_table: "posts",
@@ -2061,14 +2069,18 @@ mod tests {
             1,
             "expected only the UPDATE — INSERT should not have run"
         );
-        let (sql, _) = &stmts[0];
+        let (sql, update_params) = &stmts[0];
         assert!(sql.starts_with("UPDATE"), "got: {sql}");
         assert!(!sql.contains("ON CONFLICT"), "got: {sql}");
         assert!(!sql.contains("ON DUPLICATE"), "got: {sql}");
-        // MSSQL uses bracket-quoted identifiers and @P-prefixed
-        // placeholders.
+        // MSSQL uses bracket-quoted identifiers and @P-prefixed placeholders.
         assert!(sql.contains("[posts]"), "got: {sql}");
-        assert!(sql.contains("@P"), "got: {sql}");
+        assert!(sql.contains("@P1"), "SET clause should use @P1: {sql}");
+        assert!(sql.contains("@P2"), "WHERE clause should use @P2: {sql}");
+        // Two params: the increment value ($1) and the pk ($2).
+        assert_eq!(update_params.len(), 2);
+        assert_eq!(update_params[0], FilterValue::Int(1)); // increment value
+        assert_eq!(update_params[1], FilterValue::Int(99)); // pk
     }
 
     #[tokio::test]
@@ -2076,7 +2088,7 @@ mod tests {
         use crate::inputs::WriteOp;
         // First execute_raw (UPDATE) returns 0; the executor must
         // proceed to emit a separate INSERT.
-        let engine = MssqlRecordingEngine::with_affected(vec![0, 1]);
+        let engine = RecordingEngine::mssql_with_affected(vec![0, 1]);
         let op = NestedWriteOp::Upsert {
             relation: "posts",
             target_table: "posts",
@@ -2321,5 +2333,161 @@ mod tests {
         assert!(op_ctx.contains("ConnectOrCreate"), "got: {op_ctx}");
         // No SQL should have been emitted.
         assert!(engine.statements().is_empty());
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_single_statement_empty_update_payload_emits_do_nothing() {
+        // PG dialect → single-statement path. Empty update_payload should emit
+        // INSERT INTO ... VALUES (...) ON CONFLICT (target_pk) DO NOTHING
+        // (per the upsert_do_nothing_clause helper added in 8f01cab).
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected one INSERT ... DO NOTHING; got {stmts:#?}"
+        );
+        let (sql, params) = &stmts[0];
+        assert!(sql.starts_with("INSERT INTO"), "got: {sql}");
+        assert!(sql.contains("posts"), "got: {sql}");
+        assert!(sql.contains("ON CONFLICT (\"id\")"), "got: {sql}");
+        assert!(sql.contains("DO NOTHING"), "got: {sql}");
+        // Two insert values (title + FK); no SET params.
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], FilterValue::String("new".into()));
+        assert_eq!(params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_two_statement_fallback_empty_update_payload_emits_bare_insert() {
+        // MSSQL dialect → two-statement fallback. On the fallback path,
+        // empty update_payload skips the UPDATE entirely and emits a bare INSERT
+        // (if the row already exists the engine surfaces a PK unique violation,
+        // which is correct insert-or-fail semantics on dialects without native
+        // upsert syntax). See production code comment at the
+        // `if update_payload.is_empty()` guard in the two-statement fallback path.
+        let engine = RecordingEngine::mssql();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(stmts.len(), 1, "expected one bare INSERT; got {stmts:#?}");
+        let (sql, params) = &stmts[0];
+        assert!(sql.starts_with("INSERT INTO"), "got: {sql}");
+        assert!(sql.contains("[posts]"), "got: {sql}");
+        assert!(!sql.contains("ON CONFLICT"), "got: {sql}");
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], FilterValue::String("new".into()));
+        assert_eq!(params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_single_statement_all_unset_update_payload() {
+        use crate::inputs::WriteOp;
+        // Unset emits `col = NULL` literal (no placeholder consumed).
+        // The placeholder accounting must remain consistent: only INSERT
+        // values consume placeholders.
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![("deleted_at".to_string(), WriteOp::Unset)],
+        };
+        op.execute(&engine, &FilterValue::Int(7)).await.unwrap();
+
+        let stmts = engine.statements();
+        assert_eq!(
+            stmts.len(),
+            1,
+            "expected one INSERT...ON CONFLICT statement; got {stmts:#?}"
+        );
+        let (sql, params) = &stmts[0];
+        assert!(sql.starts_with("INSERT INTO"), "got: {sql}");
+        assert!(
+            sql.contains("ON CONFLICT (\"id\") DO UPDATE SET"),
+            "got: {sql}"
+        );
+        assert!(sql.contains("\"deleted_at\" = NULL"), "got: {sql}");
+        // Only INSERT params: title + FK. No SET param (Unset consumes none).
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], FilterValue::String("new".into()));
+        assert_eq!(params[1], FilterValue::Int(7));
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_empty_create_payload_returns_invalid_input() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::new();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        };
+        let err = op.execute(&engine, &FilterValue::Int(7)).await.unwrap_err();
+        assert_eq!(
+            err.code,
+            crate::error::ErrorCode::InvalidParameter,
+            "expected InvalidParameter (invalid_input), got: {err:?}"
+        );
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("create_payload") || msg.contains("create column"),
+            "msg: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_op_upsert_on_notsql_returns_unsupported_not_panic() {
+        use crate::inputs::WriteOp;
+        let engine = RecordingEngine::notsql();
+        let op = NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("x".into()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        };
+        let err = op.execute(&engine, &FilterValue::Int(7)).await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Upsert is not supported")
+                || msg.contains("unsupported")
+                || msg.contains("Unsupported"),
+            "msg: {msg}"
+        );
+        assert_eq!(
+            engine.statements().len(),
+            0,
+            "no SQL should have been emitted"
+        );
     }
 }

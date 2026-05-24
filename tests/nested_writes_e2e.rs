@@ -865,14 +865,17 @@ async fn nested_upsert_single_statement_on_postgres_dialect() {
         "expected single INSERT...ON CONFLICT, got: {upsert_sql}"
     );
     assert!(upsert_sql.contains("posts"), "got: {upsert_sql}");
-    assert!(upsert_sql.contains("ON CONFLICT"), "got: {upsert_sql}");
-    assert!(upsert_sql.contains("DO UPDATE SET"), "got: {upsert_sql}");
     assert!(
-        upsert_sql.contains("\"id\""),
-        "conflict target must reference target_pk: {upsert_sql}"
+        upsert_sql.contains("ON CONFLICT (\"id\")"),
+        "anchored conflict target: {upsert_sql}"
     );
+    assert!(upsert_sql.contains("DO UPDATE SET"), "got: {upsert_sql}");
     // INSERT supplies $1 (title), $2 (author_id=parent PK);
     // SET fragment uses $3 (views increment).
+    assert!(
+        upsert_sql.contains("VALUES ($1, $2)"),
+        "INSERT VALUES placeholders: {upsert_sql}"
+    );
     assert!(upsert_sql.contains("$3"), "got: {upsert_sql}");
     assert_eq!(upsert_params.len(), 3);
     assert_eq!(upsert_params[0], FilterValue::String("new".into()));
@@ -1385,4 +1388,49 @@ async fn upsert_with_nested_in_both_branches_only_one_fires() {
             "affected={affected} stmts={stmts:#?}"
         );
     }
+}
+
+#[tokio::test]
+async fn nested_upsert_two_statement_on_mssql_dialect_update_path() {
+    use prax_query::inputs::WriteOp;
+    // MSSQL dialect, UPDATE returns 1 → INSERT does not fire.
+    // This exercises the affected_rows > 0 branch on the two-statement fallback.
+    let engine = RecordingEngine::with_affected_mssql(vec![1]);
+    let c = prax_orm::PraxClient::new(engine.clone());
+
+    let _u: User = c
+        .user()
+        .create()
+        .set("email", "owner@x.com")
+        .with(NestedWriteOp::Upsert {
+            relation: "posts",
+            target_table: "posts",
+            foreign_key: "author_id",
+            target_pk: "id",
+            pk: FilterValue::Int(99),
+            create_payload: vec![("title".to_string(), FilterValue::String("new".into()))],
+            update_payload: vec![("views".to_string(), WriteOp::Increment(FilterValue::Int(1)))],
+        })
+        .exec()
+        .await
+        .expect("create + two-statement upsert update-only path");
+
+    let stmts = engine.statements();
+    assert_eq!(
+        stmts.len(),
+        2,
+        "parent insert + UPDATE only (no second INSERT); got {stmts:#?}"
+    );
+    let (update_sql, _) = &stmts[1];
+    assert!(update_sql.starts_with("UPDATE"), "got: {update_sql}");
+    assert!(update_sql.contains("[posts]"), "got: {update_sql}");
+    assert!(!update_sql.contains("ON CONFLICT"), "got: {update_sql}");
+    // No INSERT into posts should have fired.
+    assert!(
+        !stmts
+            .iter()
+            .skip(1)
+            .any(|(s, _)| s.starts_with("INSERT INTO") && s.contains("[posts]")),
+        "no INSERT INTO posts expected; got {stmts:#?}"
+    );
 }

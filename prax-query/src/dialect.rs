@@ -51,7 +51,39 @@ pub trait SqlDialect: Send + Sync + sealed::Sealed {
 
     /// Emit the ON CONFLICT / ON DUPLICATE KEY clause (leading space
     /// included) that converts an INSERT into an upsert.
+    ///
+    /// **Identifier convention**: identifiers in `conflict_cols` MUST be
+    /// passed **unquoted** (raw column names). Implementations are
+    /// responsible for quoting them per dialect via `self.quote_ident`.
     fn upsert_clause(&self, conflict_cols: &[&str], update_set: &str) -> String;
+
+    /// Whether this dialect supports SQL emission for upsert / nested-write
+    /// generation. Returns `false` for document-store dialects (`NotSql`)
+    /// that `unimplemented!()` on `quote_ident` / `placeholder` /
+    /// `upsert_clause`. Callers must check this before issuing any SQL
+    /// via the dialect.
+    fn supports_sql_emission(&self) -> bool {
+        true
+    }
+
+    /// True if this dialect's `upsert_clause` can produce a usable
+    /// single-statement `INSERT ... ON CONFLICT/ON DUPLICATE` form, and
+    /// (separately) if `placeholder` and `quote_ident` are real
+    /// implementations. False for document-store/NotSql dialects whose
+    /// SQL-emitting methods are `unimplemented!()`.
+    fn supports_upsert(&self) -> bool {
+        true
+    }
+
+    /// Emit a `DO NOTHING`/insert-ignore clause for the conflict target.
+    /// Default empty (fallback dialects skip the single-statement path
+    /// entirely). PG/SQLite/DuckDB return ` ON CONFLICT (...) DO NOTHING`;
+    /// MySQL returns ` ON DUPLICATE KEY UPDATE id = id` (no-op self-assign).
+    ///
+    /// Inputs are raw identifiers; the dialect quotes them internally.
+    fn upsert_do_nothing_clause(&self, _conflict_cols: &[&str]) -> String {
+        String::new()
+    }
 
     /// SQL keyword that begins a transaction. Defaults to `BEGIN`.
     fn begin_sql(&self) -> &'static str {
@@ -125,7 +157,12 @@ impl SqlDialect for Postgres {
         true
     }
     fn upsert_clause(&self, c: &[&str], s: &str) -> String {
-        format!(" ON CONFLICT ({}) DO UPDATE SET {}", c.join(", "), s)
+        let quoted: Vec<String> = c.iter().map(|col| self.quote_ident(col)).collect();
+        format!(" ON CONFLICT ({}) DO UPDATE SET {}", quoted.join(", "), s)
+    }
+    fn upsert_do_nothing_clause(&self, c: &[&str]) -> String {
+        let quoted: Vec<String> = c.iter().map(|col| self.quote_ident(col)).collect();
+        format!(" ON CONFLICT ({}) DO NOTHING", quoted.join(", "))
     }
 }
 
@@ -140,13 +177,26 @@ impl SqlDialect for Sqlite {
         format!("\"{}\"", i.replace('"', "\"\""))
     }
     fn upsert_clause(&self, c: &[&str], s: &str) -> String {
-        format!(" ON CONFLICT ({}) DO UPDATE SET {}", c.join(", "), s)
+        let quoted: Vec<String> = c.iter().map(|col| self.quote_ident(col)).collect();
+        format!(" ON CONFLICT ({}) DO UPDATE SET {}", quoted.join(", "), s)
+    }
+    fn upsert_do_nothing_clause(&self, c: &[&str]) -> String {
+        let quoted: Vec<String> = c.iter().map(|col| self.quote_ident(col)).collect();
+        format!(" ON CONFLICT ({}) DO NOTHING", quoted.join(", "))
     }
 }
 
 impl SqlDialect for Mysql {
     fn placeholder(&self, _i: usize) -> String {
         "?".into()
+    }
+    fn upsert_do_nothing_clause(&self, c: &[&str]) -> String {
+        let col = c.first().copied().unwrap_or("id");
+        format!(
+            " ON DUPLICATE KEY UPDATE {} = {}",
+            self.quote_ident(col),
+            self.quote_ident(col)
+        )
     }
     fn returning_clause(&self, _cols: &str) -> String {
         // MySQL 8.0 does NOT support `INSERT ... RETURNING` / `UPDATE ...
@@ -252,6 +302,12 @@ impl SqlDialect for NotSql {
     fn upsert_clause(&self, _c: &[&str], _s: &str) -> String {
         unimplemented!("NotSql::upsert_clause — see NotSql::placeholder for details")
     }
+    fn supports_sql_emission(&self) -> bool {
+        false
+    }
+    fn supports_upsert(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -290,9 +346,10 @@ mod tests {
 
     #[test]
     fn upsert_postgres_is_on_conflict() {
+        // upsert_clause quotes the raw ident internally.
         assert_eq!(
             Postgres.upsert_clause(&["email"], "name = EXCLUDED.name"),
-            " ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name"
+            " ON CONFLICT (\"email\") DO UPDATE SET name = EXCLUDED.name"
         );
     }
 
