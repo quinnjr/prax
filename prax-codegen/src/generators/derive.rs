@@ -1692,13 +1692,14 @@ mod tests {
         );
         let code = result.unwrap().to_string();
 
-        // `PostCount` must NOT appear in the generated code.
-        // Models with zero outgoing relations are not count-able at the
-        // type level — attempting `_count` on them will be a compile-time
-        // error enforced in Task 14 macro lowering / Task 15 trybuild.
+        // The phase-5.5 relation-count substruct `struct PostCount { ... }`
+        // must NOT be emitted for a relation-free model. Note the trailing
+        // space discriminates it from the phase-6 aggregate types
+        // `PostCountSelect` / `PostCountSelectResult`, which ARE emitted for
+        // every model (count! / aggregate! work regardless of relations).
         assert!(
-            !code.contains("PostCount"),
-            "unexpected PostCount in generated code for a relation-free model"
+            !code.contains("struct PostCount "),
+            "unexpected relation-count `struct PostCount` for a relation-free model"
         );
     }
 
