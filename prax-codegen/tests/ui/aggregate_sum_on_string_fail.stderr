@@ -1,0 +1,5 @@
+error: field `email` is not numeric; `_sum` requires a numeric column (Int, BigInt, Float, or Decimal)
+ --> tests/ui/aggregate_sum_on_string_fail.rs:7:17
+  |
+7 |         _sum: { email: true },
+  |                 ^^^^^

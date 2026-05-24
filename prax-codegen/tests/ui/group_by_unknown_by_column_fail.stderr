@@ -1,0 +1,5 @@
+error: unknown column `notacol`
+ --> tests/ui/group_by_unknown_by_column_fail.rs:7:9
+  |
+7 |         by: [notacol],
+  |         ^^

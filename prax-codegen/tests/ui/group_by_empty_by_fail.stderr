@@ -1,0 +1,5 @@
+error: group_by! requires at least one column in `by:`
+ --> tests/ui/group_by_empty_by_fail.rs:7:9
+  |
+7 |         by: [],
+  |         ^^

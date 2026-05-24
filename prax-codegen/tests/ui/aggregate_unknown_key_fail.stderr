@@ -1,0 +1,5 @@
+error: unknown top-level key `_foo` for `aggregate!`. Allowed keys: ["where", "_count", "_sum", "_avg", "_min", "_max"]
+ --> tests/ui/aggregate_unknown_key_fail.rs:7:9
+  |
+7 |         _foo: { id: true },
+  |         ^^^^
