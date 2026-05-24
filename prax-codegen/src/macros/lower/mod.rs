@@ -3,8 +3,10 @@
 //! Each submodule lowers one piece of the per-model input shape.
 //! Filled in by tasks 7-10.
 
+pub(crate) mod aggregate_select;
 pub(crate) mod data_input;
 pub(crate) mod data_relation;
+pub(crate) mod having;
 pub(crate) mod include_input;
 pub(crate) mod order_by_input;
 pub(crate) mod scalar_filter;

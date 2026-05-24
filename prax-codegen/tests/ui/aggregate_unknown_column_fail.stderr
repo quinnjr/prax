@@ -1,0 +1,5 @@
+error: unknown column `notacol` on model `User`
+ --> tests/ui/aggregate_unknown_column_fail.rs:7:19
+  |
+7 |         _count: { notacol: true },
+  |                   ^^^^^^^

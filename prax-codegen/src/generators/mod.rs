@@ -1,5 +1,6 @@
 //! Code generators for Prax models, enums, types, and views.
 
+pub(crate) mod aggregate;
 pub(crate) mod count_struct;
 mod derive;
 mod derive_client;

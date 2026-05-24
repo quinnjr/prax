@@ -1,0 +1,5 @@
+error: value for `_count.email` must be `true` (only opt-in is supported)
+ --> tests/ui/aggregate_value_not_true_fail.rs:7:19
+  |
+7 |         _count: { email: false },
+  |                   ^^^^^

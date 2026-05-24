@@ -1,0 +1,10 @@
+error: aggregate! requires at least one of _count, _sum, _avg, _min, _max
+ --> tests/ui/aggregate_no_blocks_fail.rs:6:13
+  |
+6 |       let _ = prax_codegen::aggregate!(client.user, {
+  |  _____________^
+7 | |         where: { id: 1 },
+8 | |     });
+  | |______^
+  |
+  = note: this error originates in the macro `prax_codegen::aggregate` (in Nightly builds, run with -Z macro-backtrace for more info)

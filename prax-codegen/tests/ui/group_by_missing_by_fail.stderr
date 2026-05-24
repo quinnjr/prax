@@ -1,0 +1,10 @@
+error: group_by! requires a `by: [...]` list of columns
+ --> tests/ui/group_by_missing_by_fail.rs:6:13
+  |
+6 |       let _ = prax_codegen::group_by!(client.user, {
+  |  _____________^
+7 | |         _count: { _all: true },
+8 | |     });
+  | |______^
+  |
+  = note: this error originates in the macro `prax_codegen::group_by` (in Nightly builds, run with -Z macro-backtrace for more info)

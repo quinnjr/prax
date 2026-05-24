@@ -255,6 +255,21 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             .collect();
     let count_struct_tokens = super::count_struct::emit_count_struct(name, &count_struct_outgoing);
 
+    let scalar_meta: Vec<super::aggregate::ScalarFieldMeta<'_>> = field_infos
+        .iter()
+        .filter(|f| f.relation.is_none() && f.aggregate.is_none())
+        .map(|f| super::aggregate::ScalarFieldMeta {
+            ident: &f.name,
+            ty: &f.ty,
+            column_name: f.column_name.as_str(),
+            is_numeric: super::aggregate::rust_type_is_numeric(&f.ty),
+            is_sortable: super::aggregate::rust_type_is_sortable(&f.ty),
+        })
+        .collect();
+    let aggregate_select_inputs = super::aggregate::emit_select_inputs(name, &scalar_meta);
+    let aggregate_result_structs = super::aggregate::emit_result_structs(name, &scalar_meta);
+    let aggregate_args = super::aggregate::emit_args_and_columns_enum(name, &scalar_meta);
+
     // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
     // no relations still get an impl — it errors on any unknown name,
     // preserving the uniform `ModelRelationLoader` bound on find
@@ -480,6 +495,8 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     // definition is always emitted; the trait impl is gated on visibility.
     let is_pub = matches!(input.vis, Visibility::Public(_));
     let gate_impl = |tokens: TokenStream| if is_pub { tokens } else { TokenStream::new() };
+    let aggregate_accessors =
+        super::aggregate::emit_accessors_and_extensions(name, &scalar_meta, is_pub);
     let maybe_where_input_impl = gate_impl(where_input_impl);
     let maybe_where_unique_impl = gate_impl(where_unique_impl);
     let maybe_include_impl = gate_impl(include_impl);
@@ -562,6 +579,24 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             #order_by_struct
             #create_struct
             #update_struct
+
+            // Per-model aggregate select-shape input structs (phase 6):
+            // <Model>{Count,Sum,Avg,Min,Max}Select.
+            #aggregate_select_inputs
+
+            // Per-model aggregate result output structs (phase 6):
+            // <Model>{CountSelectResult,SumResult,AvgResult,MinResult,MaxResult,
+            // AggregateResult,GroupByResult}.
+            #aggregate_result_structs
+
+            // Per-model GroupByColumn enum, AggregateArgs, GroupByArgs,
+            // GroupByHaving, GroupByOrderBy (phase 6 T4).
+            #aggregate_args
+
+            // fields_set() / all_set() helpers, typed group_by_columns() on
+            // Client<E>, and with_aggregate_args / with_group_by_args extensions
+            // on AggregateOperation / GroupByOperation (phase 6 T5).
+            #aggregate_accessors
 
             // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
             // The corresponding `impl RelationFilterMeta` blocks are emitted
@@ -1657,13 +1692,14 @@ mod tests {
         );
         let code = result.unwrap().to_string();
 
-        // `PostCount` must NOT appear in the generated code.
-        // Models with zero outgoing relations are not count-able at the
-        // type level — attempting `_count` on them will be a compile-time
-        // error enforced in Task 14 macro lowering / Task 15 trybuild.
+        // The phase-5.5 relation-count substruct `struct PostCount { ... }`
+        // must NOT be emitted for a relation-free model. Note the trailing
+        // space discriminates it from the phase-6 aggregate types
+        // `PostCountSelect` / `PostCountSelectResult`, which ARE emitted for
+        // every model (count! / aggregate! work regardless of relations).
         assert!(
-            !code.contains("PostCount"),
-            "unexpected PostCount in generated code for a relation-free model"
+            !code.contains("struct PostCount "),
+            "unexpected relation-count `struct PostCount` for a relation-free model"
         );
     }
 
