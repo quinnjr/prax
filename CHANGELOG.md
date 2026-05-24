@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Aggregate macros (phase 6).** Three new macros over the existing
+  `AggregateOperation` / `GroupByOperation` runtime:
+  - `count!` gains a `select:` block for Prisma-style per-column
+    non-null counts (`count!(c.user, { select: { _all: true, email:
+    true } })`). Without `select:`, behavior is unchanged (returns
+    `i64`).
+  - `aggregate!` — returns a per-model `<Model>AggregateResult` with
+    `_sum` / `_avg` / `_min` / `_max` / `_count` substructs populated
+    only when their `_<agg>:` block is supplied. Requires at least one
+    aggregate block.
+  - `group_by!` — `by:`, `where:`, the five aggregate blocks, and
+    `having:`. Returns `Vec<<Model>GroupByResult>`.
+- Per-model codegen surface: `<Model>{Count,Sum,Avg,Min,Max}Select`
+  inputs, matching `*Result` outputs, `<Model>AggregateResult`,
+  `<Model>GroupByResult`, `<Model>GroupByColumn` enum,
+  `<Model>AggregateArgs`, `<Model>GroupByArgs`, plus `aggregate()` /
+  `group_by_columns()` accessors and `with_aggregate_args` /
+  `with_group_by_args` extension methods.
+- `HavingCondition` gained `{count,sum,avg,min,max}_{gt,gte,lt,lte,eq,ne}`
+  constructors (previously only a partial `count_*` set).
+- Macro-time diagnostics: `_sum`/`_avg` on a non-numeric column,
+  aggregate on a relation or another aggregate field, unknown column
+  (did-you-mean), empty `by:`, unknown by-column, empty aggregate
+  block, `aggregate!` with no aggregate blocks, unsupported `having`
+  operator, and `group_by!`'s `order_by:` (deferred). Locked via
+  trybuild fixtures.
+
+### Known limitations
+
+- The aggregate macros lower into per-model `AggregateArgs` /
+  `GroupByArgs` structs emitted by the schema-path codegen
+  (`prax_schema!`). The schema-path `relation_helpers` bug (documented
+  since phase 5b) prevents exercising the macro DSL end-to-end against
+  models defined in a workspace test crate, so the e2e and live-PG
+  tests drive the runtime `AggregateOperation` / `GroupByOperation`
+  directly. The macro front-end is covered by trybuild fixtures and
+  codegen unit tests.
+- `AggregateResult::from_row` does not yet hydrate per-column
+  `_count_<col>` aliases, so the per-column count *values* from
+  `count!`'s `select:` are emitted in SQL but not read back into a
+  typed `<Model>CountSelectResult` until that runtime gap is closed.
+  `COUNT(*)` (the `_all` count) works.
+- `having:` thresholds are inlined as numeric literals (SQL-safe — they
+  are `f64`, never user strings), not bound parameters.
+- MongoDB (`$group`) and CQL (`GROUP BY`) engines are out of scope —
+  separate follow-ups.
+- `count_distinct` exists in the runtime but is not exposed via the
+  macro shape; `_min`/`_max` against multiple columns in one call and
+  `group_by!`'s `order_by:` are deferred follow-ups.
+
 ### Changed
 
 - **`NestedWriteOp::Upsert` now emits a single statement on dialects
