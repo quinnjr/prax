@@ -495,6 +495,8 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
     // definition is always emitted; the trait impl is gated on visibility.
     let is_pub = matches!(input.vis, Visibility::Public(_));
     let gate_impl = |tokens: TokenStream| if is_pub { tokens } else { TokenStream::new() };
+    let aggregate_accessors =
+        super::aggregate::emit_accessors_and_extensions(name, &scalar_meta, is_pub);
     let maybe_where_input_impl = gate_impl(where_input_impl);
     let maybe_where_unique_impl = gate_impl(where_unique_impl);
     let maybe_include_impl = gate_impl(include_impl);
@@ -590,6 +592,11 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             // Per-model GroupByColumn enum, AggregateArgs, GroupByArgs,
             // GroupByHaving, GroupByOrderBy (phase 6 T4).
             #aggregate_args
+
+            // fields_set() / all_set() helpers, typed group_by_columns() on
+            // Client<E>, and with_aggregate_args / with_group_by_args extensions
+            // on AggregateOperation / GroupByOperation (phase 6 T5).
+            #aggregate_accessors
 
             // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
             // The corresponding `impl RelationFilterMeta` blocks are emitted

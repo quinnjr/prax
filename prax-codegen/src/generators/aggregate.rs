@@ -337,6 +337,243 @@ pub fn emit_args_and_columns_enum(
     }
 }
 
+/// Emit `fields_set()` / `all_set()` helpers on the select-shape inputs,
+/// a typed `group_by_columns(Vec<ModelGroupByColumn>)` method on `Client<E>`,
+/// and the `with_aggregate_args` / `with_group_by_args` extension impls on
+/// `AggregateOperation` / `GroupByOperation`.
+///
+/// These are spliced into the per-model `pub mod` (same scope as the structs
+/// emitted by `emit_select_inputs` / `emit_args_and_columns_enum`), so
+/// references to the model use `super::#model_ident`.
+///
+/// `where_input_impl_exists` must be true only when a `WhereInput` impl was
+/// actually emitted for this model (i.e. the model struct is `pub`). When
+/// false, the `where_input` branch is compiled out of the extension impls.
+#[allow(dead_code)]
+pub fn emit_accessors_and_extensions(
+    model_ident: &syn::Ident,
+    scalars: &[ScalarFieldMeta<'_>],
+    where_input_impl_exists: bool,
+) -> TokenStream {
+    let agg_args = format_ident!("{}AggregateArgs", model_ident);
+    let gb_args = format_ident!("{}GroupByArgs", model_ident);
+    let count_select = format_ident!("{}CountSelect", model_ident);
+    let sum_select = format_ident!("{}SumSelect", model_ident);
+    let avg_select = format_ident!("{}AvgSelect", model_ident);
+    let min_select = format_ident!("{}MinSelect", model_ident);
+    let max_select = format_ident!("{}MaxSelect", model_ident);
+    let columns_enum = format_ident!("{}GroupByColumn", model_ident);
+
+    let count_set_arms: Vec<TokenStream> = scalars
+        .iter()
+        .map(|f| {
+            let ident = f.ident;
+            let col = f.column_name;
+            quote! {
+                if matches!(self.#ident, ::core::option::Option::Some(true)) {
+                    out.push(#col);
+                }
+            }
+        })
+        .collect();
+
+    let numeric_set_arms: Vec<TokenStream> = scalars
+        .iter()
+        .filter(|f| f.is_numeric)
+        .map(|f| {
+            let ident = f.ident;
+            let col = f.column_name;
+            quote! {
+                if matches!(self.#ident, ::core::option::Option::Some(true)) {
+                    out.push(#col);
+                }
+            }
+        })
+        .collect();
+
+    let sortable_set_arms: Vec<TokenStream> = scalars
+        .iter()
+        .filter(|f| f.is_sortable)
+        .map(|f| {
+            let ident = f.ident;
+            let col = f.column_name;
+            quote! {
+                if matches!(self.#ident, ::core::option::Option::Some(true)) {
+                    out.push(#col);
+                }
+            }
+        })
+        .collect();
+
+    let numeric_set_arms2 = numeric_set_arms.clone();
+    let sortable_set_arms2 = sortable_set_arms.clone();
+
+    let agg_where_branch = if where_input_impl_exists {
+        quote! {
+            if let ::core::option::Option::Some(w) = args.where_input {
+                self = self.r#where(<_ as ::prax_query::inputs::WhereInput>::into_ir(w));
+            }
+        }
+    } else {
+        quote! { let _ = args.where_input; }
+    };
+
+    let gb_where_branch = if where_input_impl_exists {
+        quote! {
+            if let ::core::option::Option::Some(w) = args.where_input {
+                self = self.r#where(
+                    <_ as ::prax_query::inputs::WhereInput>::into_ir(w),
+                );
+            }
+        }
+    } else {
+        quote! { let _ = args.where_input; }
+    };
+
+    quote! {
+        impl #count_select {
+            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#count_set_arms)*
+                out
+            }
+            pub fn all_set(&self) -> bool {
+                matches!(self._all, ::core::option::Option::Some(true))
+            }
+        }
+
+        impl #sum_select {
+            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#numeric_set_arms)*
+                out
+            }
+        }
+
+        impl #avg_select {
+            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#numeric_set_arms2)*
+                out
+            }
+        }
+
+        impl #min_select {
+            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#sortable_set_arms)*
+                out
+            }
+        }
+
+        impl #max_select {
+            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#sortable_set_arms2)*
+                out
+            }
+        }
+
+        impl<E: ::prax_query::traits::QueryEngine + ::core::clone::Clone> Client<E> {
+            pub fn group_by_columns(
+                &self,
+                by: ::std::vec::Vec<#columns_enum>,
+            ) -> ::prax_query::operations::GroupByOperation<super::#model_ident, E> {
+                let cols: ::std::vec::Vec<::std::string::String> =
+                    by.iter().map(|c| c.column_name().to_string()).collect();
+                ::prax_query::operations::GroupByOperation::with_engine(self.engine.clone(), cols)
+            }
+        }
+
+        pub trait AggregateOperationExt<E> {
+            fn with_aggregate_args(self, args: #agg_args) -> Self;
+        }
+
+        impl<E: ::prax_query::traits::QueryEngine + ::core::clone::Clone>
+            AggregateOperationExt<E>
+            for ::prax_query::operations::AggregateOperation<super::#model_ident, E>
+        {
+            fn with_aggregate_args(mut self, args: #agg_args) -> Self {
+                #agg_where_branch
+                if let ::core::option::Option::Some(c) = args._count {
+                    if c.all_set() {
+                        self = self.count();
+                    }
+                    for col in c.fields_set() {
+                        self = self.count_column(col);
+                    }
+                }
+                if let ::core::option::Option::Some(s) = args._sum {
+                    for col in s.fields_set() {
+                        self = self.sum(col);
+                    }
+                }
+                if let ::core::option::Option::Some(a) = args._avg {
+                    for col in a.fields_set() {
+                        self = self.avg(col);
+                    }
+                }
+                if let ::core::option::Option::Some(m) = args._min {
+                    for col in m.fields_set() {
+                        self = self.min(col);
+                    }
+                }
+                if let ::core::option::Option::Some(m) = args._max {
+                    for col in m.fields_set() {
+                        self = self.max(col);
+                    }
+                }
+                self
+            }
+        }
+
+        pub trait GroupByOperationExt<E> {
+            fn with_group_by_args(self, args: #gb_args) -> Self;
+        }
+
+        impl<E: ::prax_query::traits::QueryEngine + ::core::clone::Clone>
+            GroupByOperationExt<E>
+            for ::prax_query::operations::GroupByOperation<super::#model_ident, E>
+        {
+            fn with_group_by_args(mut self, args: #gb_args) -> Self {
+                #gb_where_branch
+                if let ::core::option::Option::Some(c) = args._count {
+                    if c.all_set() || !c.fields_set().is_empty() {
+                        self = self.count();
+                    }
+                }
+                if let ::core::option::Option::Some(s) = args._sum {
+                    for col in s.fields_set() {
+                        self = self.sum(col);
+                    }
+                }
+                if let ::core::option::Option::Some(a) = args._avg {
+                    for col in a.fields_set() {
+                        self = self.avg(col);
+                    }
+                }
+                if let ::core::option::Option::Some(m) = args._min {
+                    for col in m.fields_set() {
+                        self = self.min(col);
+                    }
+                }
+                if let ::core::option::Option::Some(m) = args._max {
+                    for col in m.fields_set() {
+                        self = self.max(col);
+                    }
+                }
+                if let ::core::option::Option::Some(h) = args.having {
+                    for cond in h.conditions {
+                        self = self.having(cond);
+                    }
+                }
+                let _ = args.order_by;
+                self
+            }
+        }
+    }
+}
+
 fn to_pascal_case(snake: &str) -> String {
     let mut out = String::with_capacity(snake.len());
     let mut upper = true;
