@@ -261,6 +261,98 @@ pub fn emit_result_structs(
     }
 }
 
+pub fn emit_args_and_columns_enum(
+    model_ident: &syn::Ident,
+    scalars: &[ScalarFieldMeta<'_>],
+) -> TokenStream {
+    let columns_enum = format_ident!("{}GroupByColumn", model_ident);
+    let args_agg = format_ident!("{}AggregateArgs", model_ident);
+    let args_gb = format_ident!("{}GroupByArgs", model_ident);
+    let where_input = format_ident!("{}WhereInput", model_ident);
+    let count_select = format_ident!("{}CountSelect", model_ident);
+    let sum_select = format_ident!("{}SumSelect", model_ident);
+    let avg_select = format_ident!("{}AvgSelect", model_ident);
+    let min_select = format_ident!("{}MinSelect", model_ident);
+    let max_select = format_ident!("{}MaxSelect", model_ident);
+    let having_ty = format_ident!("{}GroupByHaving", model_ident);
+    let order_by_ty = format_ident!("{}GroupByOrderBy", model_ident);
+
+    let variants = scalars.iter().map(|f| {
+        let v = format_ident!("{}", to_pascal_case(&f.ident.to_string()));
+        quote! { #v }
+    });
+    let column_arms = scalars.iter().map(|f| {
+        let v = format_ident!("{}", to_pascal_case(&f.ident.to_string()));
+        let col = f.column_name;
+        quote! { Self::#v => #col }
+    });
+
+    quote! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum #columns_enum {
+            #(#variants,)*
+        }
+
+        impl #columns_enum {
+            pub fn column_name(&self) -> &'static str {
+                match self {
+                    #(#column_arms,)*
+                }
+            }
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #args_agg {
+            pub where_input: ::core::option::Option<#where_input>,
+            pub _sum:   ::core::option::Option<#sum_select>,
+            pub _avg:   ::core::option::Option<#avg_select>,
+            pub _min:   ::core::option::Option<#min_select>,
+            pub _max:   ::core::option::Option<#max_select>,
+            pub _count: ::core::option::Option<#count_select>,
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #args_gb {
+            pub by:           ::std::vec::Vec<#columns_enum>,
+            pub where_input:  ::core::option::Option<#where_input>,
+            pub _sum:         ::core::option::Option<#sum_select>,
+            pub _avg:         ::core::option::Option<#avg_select>,
+            pub _min:         ::core::option::Option<#min_select>,
+            pub _max:         ::core::option::Option<#max_select>,
+            pub _count:       ::core::option::Option<#count_select>,
+            pub having:       ::core::option::Option<#having_ty>,
+            pub order_by:     ::core::option::Option<#order_by_ty>,
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #having_ty {
+            pub conditions: ::std::vec::Vec<::prax_query::operations::HavingCondition>,
+        }
+
+        #[derive(Debug, Default, Clone)]
+        #[allow(dead_code)]
+        pub struct #order_by_ty {
+            pub items: ::std::vec::Vec<::std::string::String>,
+        }
+    }
+}
+
+fn to_pascal_case(snake: &str) -> String {
+    let mut out = String::with_capacity(snake.len());
+    let mut upper = true;
+    for c in snake.chars() {
+        if c == '_' {
+            upper = true;
+        } else if upper {
+            out.push(c.to_ascii_uppercase());
+            upper = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +466,51 @@ mod tests {
             "must not double-wrap: {min_body}"
         );
         assert!(min_body.contains("Option < DateTime < Utc > >"));
+    }
+
+    #[test]
+    fn emit_args_and_columns_enum_has_variant_per_scalar_and_column_name_impl() {
+        let model_ident: syn::Ident = parse_quote!(User);
+        let team_id_ident: syn::Ident = parse_quote!(team_id);
+        let region_ident: syn::Ident = parse_quote!(region);
+        let i32_ty: syn::Type = parse_quote!(i32);
+        let str_ty: syn::Type = parse_quote!(String);
+        let scalars = vec![
+            ScalarFieldMeta {
+                ident: &team_id_ident,
+                ty: &i32_ty,
+                column_name: "team_id",
+                is_numeric: true,
+                is_sortable: true,
+            },
+            ScalarFieldMeta {
+                ident: &region_ident,
+                ty: &str_ty,
+                column_name: "region",
+                is_numeric: false,
+                is_sortable: true,
+            },
+        ];
+        let s = emit_args_and_columns_enum(&model_ident, &scalars).to_string();
+        assert!(s.contains("enum UserGroupByColumn"));
+        assert!(s.contains("TeamId"));
+        assert!(s.contains("Region"));
+        assert!(s.contains("Self :: TeamId => \"team_id\""));
+        assert!(s.contains("Self :: Region => \"region\""));
+        assert!(s.contains("struct UserAggregateArgs"));
+        assert!(s.contains("struct UserGroupByArgs"));
+        assert!(s.contains("struct UserGroupByHaving"));
+        assert!(s.contains("struct UserGroupByOrderBy"));
+        assert!(s.contains("pub by :"));
+        assert!(s.contains("Vec < UserGroupByColumn >"));
+    }
+
+    #[test]
+    fn to_pascal_case_handles_snake_input() {
+        assert_eq!(to_pascal_case("team_id"), "TeamId");
+        assert_eq!(to_pascal_case("region"), "Region");
+        assert_eq!(to_pascal_case("user_account_id"), "UserAccountId");
+        assert_eq!(to_pascal_case("a"), "A");
     }
 
     #[test]

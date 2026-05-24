@@ -268,6 +268,7 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
         .collect();
     let aggregate_select_inputs = super::aggregate::emit_select_inputs(name, &scalar_meta);
     let aggregate_result_structs = super::aggregate::emit_result_structs(name, &scalar_meta);
+    let aggregate_args = super::aggregate::emit_args_and_columns_enum(name, &scalar_meta);
 
     // Per-model `impl ModelRelationLoader<E>` dispatcher. Models with
     // no relations still get an impl — it errors on any unknown name,
@@ -585,6 +586,10 @@ pub fn derive_model_impl(input: &DeriveInput) -> Result<TokenStream, syn::Error>
             // <Model>{CountSelectResult,SumResult,AvgResult,MinResult,MaxResult,
             // AggregateResult,GroupByResult}.
             #aggregate_result_structs
+
+            // Per-model GroupByColumn enum, AggregateArgs, GroupByArgs,
+            // GroupByHaving, GroupByOrderBy (phase 6 T4).
+            #aggregate_args
 
             // Per-relation `<Model><Relation>FilterMeta` marker structs (Task 8).
             // The corresponding `impl RelationFilterMeta` blocks are emitted
