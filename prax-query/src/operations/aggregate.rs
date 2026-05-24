@@ -712,7 +712,30 @@ pub mod having {
         }
     }
 
-    /// Create a having condition for sum > value.
+    pub fn count_lte(value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::CountAll,
+            op: HavingOp::Lte,
+            value,
+        }
+    }
+
+    pub fn count_eq(value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::CountAll,
+            op: HavingOp::Eq,
+            value,
+        }
+    }
+
+    pub fn count_ne(value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::CountAll,
+            op: HavingOp::Ne,
+            value,
+        }
+    }
+
     pub fn sum_gt(column: impl Into<String>, value: f64) -> HavingCondition {
         HavingCondition {
             field: AggregateField::Sum(column.into()),
@@ -721,11 +744,186 @@ pub mod having {
         }
     }
 
-    /// Create a having condition for avg > value.
+    pub fn sum_gte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Sum(column.into()),
+            op: HavingOp::Gte,
+            value,
+        }
+    }
+
+    pub fn sum_lt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Sum(column.into()),
+            op: HavingOp::Lt,
+            value,
+        }
+    }
+
+    pub fn sum_lte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Sum(column.into()),
+            op: HavingOp::Lte,
+            value,
+        }
+    }
+
+    pub fn sum_eq(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Sum(column.into()),
+            op: HavingOp::Eq,
+            value,
+        }
+    }
+
+    pub fn sum_ne(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Sum(column.into()),
+            op: HavingOp::Ne,
+            value,
+        }
+    }
+
     pub fn avg_gt(column: impl Into<String>, value: f64) -> HavingCondition {
         HavingCondition {
             field: AggregateField::Avg(column.into()),
             op: HavingOp::Gt,
+            value,
+        }
+    }
+
+    pub fn avg_gte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Avg(column.into()),
+            op: HavingOp::Gte,
+            value,
+        }
+    }
+
+    pub fn avg_lt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Avg(column.into()),
+            op: HavingOp::Lt,
+            value,
+        }
+    }
+
+    pub fn avg_lte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Avg(column.into()),
+            op: HavingOp::Lte,
+            value,
+        }
+    }
+
+    pub fn avg_eq(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Avg(column.into()),
+            op: HavingOp::Eq,
+            value,
+        }
+    }
+
+    pub fn avg_ne(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Avg(column.into()),
+            op: HavingOp::Ne,
+            value,
+        }
+    }
+
+    pub fn min_gt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Gt,
+            value,
+        }
+    }
+
+    pub fn min_gte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Gte,
+            value,
+        }
+    }
+
+    pub fn min_lt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Lt,
+            value,
+        }
+    }
+
+    pub fn min_lte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Lte,
+            value,
+        }
+    }
+
+    pub fn min_eq(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Eq,
+            value,
+        }
+    }
+
+    pub fn min_ne(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Min(column.into()),
+            op: HavingOp::Ne,
+            value,
+        }
+    }
+
+    pub fn max_gt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Gt,
+            value,
+        }
+    }
+
+    pub fn max_gte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Gte,
+            value,
+        }
+    }
+
+    pub fn max_lt(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Lt,
+            value,
+        }
+    }
+
+    pub fn max_lte(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Lte,
+            value,
+        }
+    }
+
+    pub fn max_eq(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Eq,
+            value,
+        }
+    }
+
+    pub fn max_ne(column: impl Into<String>, value: f64) -> HavingCondition {
+        HavingCondition {
+            field: AggregateField::Max(column.into()),
+            op: HavingOp::Ne,
             value,
         }
     }
@@ -1383,5 +1581,101 @@ mod tests {
 
         // Empty group columns should not produce GROUP BY
         assert!(!sql.contains("GROUP BY"));
+    }
+
+    #[test]
+    fn test_having_count_lte_eq_ne() {
+        let c = having::count_lte(10.0);
+        assert!(matches!(c.field, AggregateField::CountAll));
+        assert!(matches!(c.op, HavingOp::Lte));
+        assert_eq!(c.value, 10.0);
+
+        let c = having::count_eq(5.0);
+        assert!(matches!(c.op, HavingOp::Eq));
+
+        let c = having::count_ne(0.0);
+        assert!(matches!(c.op, HavingOp::Ne));
+    }
+
+    #[test]
+    fn test_having_sum_variants() {
+        let c = having::sum_gte("views", 100.0);
+        assert!(matches!(&c.field, AggregateField::Sum(col) if col == "views"));
+        assert!(matches!(c.op, HavingOp::Gte));
+
+        let c = having::sum_lt("views", 50.0);
+        assert!(matches!(c.op, HavingOp::Lt));
+
+        let c = having::sum_lte("views", 50.0);
+        assert!(matches!(c.op, HavingOp::Lte));
+
+        let c = having::sum_eq("views", 0.0);
+        assert!(matches!(c.op, HavingOp::Eq));
+
+        let c = having::sum_ne("views", 0.0);
+        assert!(matches!(c.op, HavingOp::Ne));
+    }
+
+    #[test]
+    fn test_having_avg_variants() {
+        let c = having::avg_gte("score", 3.5);
+        assert!(matches!(&c.field, AggregateField::Avg(col) if col == "score"));
+        assert!(matches!(c.op, HavingOp::Gte));
+
+        let c = having::avg_lt("score", 2.0);
+        assert!(matches!(c.op, HavingOp::Lt));
+
+        let c = having::avg_lte("score", 2.0);
+        assert!(matches!(c.op, HavingOp::Lte));
+
+        let c = having::avg_eq("score", 5.0);
+        assert!(matches!(c.op, HavingOp::Eq));
+
+        let c = having::avg_ne("score", 0.0);
+        assert!(matches!(c.op, HavingOp::Ne));
+    }
+
+    #[test]
+    fn test_having_min_variants() {
+        let c = having::min_gt("age", 18.0);
+        assert!(matches!(&c.field, AggregateField::Min(col) if col == "age"));
+        assert!(matches!(c.op, HavingOp::Gt));
+
+        let c = having::min_gte("age", 18.0);
+        assert!(matches!(c.op, HavingOp::Gte));
+
+        let c = having::min_lt("age", 65.0);
+        assert!(matches!(c.op, HavingOp::Lt));
+
+        let c = having::min_lte("age", 65.0);
+        assert!(matches!(c.op, HavingOp::Lte));
+
+        let c = having::min_eq("age", 21.0);
+        assert!(matches!(c.op, HavingOp::Eq));
+
+        let c = having::min_ne("age", 0.0);
+        assert!(matches!(c.op, HavingOp::Ne));
+    }
+
+    #[test]
+    fn test_having_max_variants() {
+        let c = having::max_gt("salary", 50000.0);
+        assert!(matches!(&c.field, AggregateField::Max(col) if col == "salary"));
+        assert!(matches!(c.op, HavingOp::Gt));
+
+        let c = having::max_gte("salary", 50000.0);
+        assert!(matches!(c.op, HavingOp::Gte));
+
+        let c = having::max_lt("salary", 200000.0);
+        assert!(matches!(c.op, HavingOp::Lt));
+
+        let c = having::max_lte("salary", 200000.0);
+        assert!(matches!(c.op, HavingOp::Lte));
+
+        let c = having::max_eq("salary", 100000.0);
+        assert!(matches!(c.op, HavingOp::Eq));
+
+        let c = having::max_ne("salary", 0.0);
+        assert!(matches!(c.op, HavingOp::Ne));
     }
 }
