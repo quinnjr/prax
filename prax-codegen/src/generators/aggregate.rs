@@ -140,6 +140,127 @@ pub fn emit_select_inputs(
     }
 }
 
+fn is_option_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+    {
+        return seg.ident == "Option";
+    }
+    false
+}
+
+fn ensure_optional(ty: &syn::Type) -> TokenStream {
+    if is_option_type(ty) {
+        quote! { #ty }
+    } else {
+        quote! { ::core::option::Option<#ty> }
+    }
+}
+
+/// Emit the seven per-model result-shape output structs:
+///
+/// - `<Model>CountSelectResult` — `i64` per scalar + `_all`.
+/// - `<Model>SumResult` / `<Model>AvgResult` — `Option<f64>` per
+///   numeric column (Sum widens to f64 for cross-dialect consistency;
+///   AggregateResult downcasts via the runtime AggregateResult helpers).
+/// - `<Model>MinResult` / `<Model>MaxResult` — `Option<T>` per sortable
+///   column.
+/// - `<Model>AggregateResult` — five aggregate substructs as
+///   `Option<...>`.
+/// - `<Model>GroupByResult` — same five substructs plus every scalar
+///   column as `Option<T>` (for `by:` columns).
+pub fn emit_result_structs(
+    model_ident: &syn::Ident,
+    scalars: &[ScalarFieldMeta<'_>],
+) -> TokenStream {
+    let count_result = format_ident!("{}CountSelectResult", model_ident);
+    let sum_result = format_ident!("{}SumResult", model_ident);
+    let avg_result = format_ident!("{}AvgResult", model_ident);
+    let min_result = format_ident!("{}MinResult", model_ident);
+    let max_result = format_ident!("{}MaxResult", model_ident);
+    let agg_result = format_ident!("{}AggregateResult", model_ident);
+    let gb_result = format_ident!("{}GroupByResult", model_ident);
+
+    let count_fields = scalars.iter().map(|f| {
+        let ident = f.ident;
+        quote! { pub #ident: i64 }
+    });
+
+    let sum_fields: Vec<TokenStream> = scalars
+        .iter()
+        .filter(|f| f.is_numeric)
+        .map(|f| {
+            let ident = f.ident;
+            quote! { pub #ident: ::core::option::Option<f64> }
+        })
+        .collect();
+    let avg_fields = sum_fields.clone();
+
+    let min_fields: Vec<TokenStream> = scalars
+        .iter()
+        .filter(|f| f.is_sortable)
+        .map(|f| {
+            let ident = f.ident;
+            let outer = ensure_optional(f.ty);
+            quote! { pub #ident: #outer }
+        })
+        .collect();
+    let max_fields = min_fields.clone();
+
+    let gb_scalar_fields = scalars.iter().map(|f| {
+        let ident = f.ident;
+        let outer = ensure_optional(f.ty);
+        quote! { pub #ident: #outer }
+    });
+
+    quote! {
+        #[derive(Debug, Default, Clone)]
+        pub struct #count_result {
+            pub _all: i64,
+            #(#count_fields,)*
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #sum_result {
+            #(#sum_fields,)*
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #avg_result {
+            #(#avg_fields,)*
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #min_result {
+            #(#min_fields,)*
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #max_result {
+            #(#max_fields,)*
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #agg_result {
+            pub _sum:   ::core::option::Option<#sum_result>,
+            pub _avg:   ::core::option::Option<#avg_result>,
+            pub _min:   ::core::option::Option<#min_result>,
+            pub _max:   ::core::option::Option<#max_result>,
+            pub _count: ::core::option::Option<#count_result>,
+        }
+
+        #[derive(Debug, Default, Clone)]
+        pub struct #gb_result {
+            #(#gb_scalar_fields,)*
+            pub _sum:   ::core::option::Option<#sum_result>,
+            pub _avg:   ::core::option::Option<#avg_result>,
+            pub _min:   ::core::option::Option<#min_result>,
+            pub _max:   ::core::option::Option<#max_result>,
+            pub _count: ::core::option::Option<#count_result>,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +288,92 @@ mod tests {
         assert!(rust_type_is_sortable(&ty));
         let ty: syn::Type = parse_quote!(serde_json::Value);
         assert!(!rust_type_is_sortable(&ty));
+    }
+
+    #[test]
+    fn emit_result_structs_count_has_i64_for_all_and_each_scalar() {
+        let model_ident: syn::Ident = parse_quote!(User);
+        let id_ident: syn::Ident = parse_quote!(id);
+        let email_ident: syn::Ident = parse_quote!(email);
+        let id_ty: syn::Type = parse_quote!(i32);
+        let email_ty: syn::Type = parse_quote!(String);
+        let scalars = vec![
+            ScalarFieldMeta {
+                ident: &id_ident,
+                ty: &id_ty,
+                column_name: "id",
+                is_numeric: true,
+                is_sortable: true,
+            },
+            ScalarFieldMeta {
+                ident: &email_ident,
+                ty: &email_ty,
+                column_name: "email",
+                is_numeric: false,
+                is_sortable: true,
+            },
+        ];
+        let s = emit_result_structs(&model_ident, &scalars).to_string();
+        assert!(s.contains("struct UserCountSelectResult"));
+        assert!(s.contains("_all : i64"));
+        assert!(s.contains("id : i64"));
+        assert!(s.contains("email : i64"));
+        let sum_idx = s.find("struct UserSumResult").unwrap();
+        let close = s[sum_idx..].find('}').unwrap();
+        let sum_body = &s[sum_idx..sum_idx + close];
+        assert!(sum_body.contains("id :"));
+        assert!(
+            !sum_body.contains("email :"),
+            "Sum body should not include non-numeric `email`: {sum_body}"
+        );
+    }
+
+    #[test]
+    fn emit_result_structs_group_by_includes_every_scalar_as_optional() {
+        let model_ident: syn::Ident = parse_quote!(User);
+        let team_id_ident: syn::Ident = parse_quote!(team_id);
+        let i32_ty: syn::Type = parse_quote!(i32);
+        let scalars = vec![ScalarFieldMeta {
+            ident: &team_id_ident,
+            ty: &i32_ty,
+            column_name: "team_id",
+            is_numeric: true,
+            is_sortable: true,
+        }];
+        let s = emit_result_structs(&model_ident, &scalars).to_string();
+        assert!(s.contains("struct UserGroupByResult"));
+        let gb_idx = s.find("struct UserGroupByResult").unwrap();
+        let close = s[gb_idx..].find('}').unwrap();
+        let gb_body = &s[gb_idx..gb_idx + close];
+        assert!(gb_body.contains("team_id :"));
+        assert!(
+            gb_body.contains("Option < i32 >")
+                || gb_body.contains(":: core :: option :: Option < i32 >"),
+            "expected Option<i32> in GroupByResult.team_id: {gb_body}"
+        );
+    }
+
+    #[test]
+    fn emit_result_structs_min_max_preserves_existing_option() {
+        let model_ident: syn::Ident = parse_quote!(Post);
+        let deleted_at_ident: syn::Ident = parse_quote!(deleted_at);
+        let opt_ty: syn::Type = parse_quote!(Option<DateTime<Utc>>);
+        let scalars = vec![ScalarFieldMeta {
+            ident: &deleted_at_ident,
+            ty: &opt_ty,
+            column_name: "deleted_at",
+            is_numeric: false,
+            is_sortable: true,
+        }];
+        let s = emit_result_structs(&model_ident, &scalars).to_string();
+        let min_idx = s.find("struct PostMinResult").unwrap();
+        let close = s[min_idx..].find('}').unwrap();
+        let min_body = &s[min_idx..min_idx + close];
+        assert!(
+            !min_body.contains("Option < Option <"),
+            "must not double-wrap: {min_body}"
+        );
+        assert!(min_body.contains("Option < DateTime < Utc > >"));
     }
 
     #[test]
