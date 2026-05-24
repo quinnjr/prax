@@ -225,6 +225,27 @@ pub fn aggregate(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::group_by!` — schema-aware DSL targeting `group_by_columns`.
+/// Accepts `by:` (required), `where:`, `_count:`, `_sum:`, `_avg:`, `_min:`,
+/// `_max:`, and `having:` keys.
+///
+/// ```rust,ignore
+/// prax::group_by!(client.user, {
+///     by: [team_id, region],
+///     where: { active: true },
+///     _count: { _all: true },
+///     _sum: { views: true },
+///     having: { _count: { _all: { gt: 5 } } },
+/// });
+/// ```
+#[proc_macro]
+pub fn group_by(input: TokenStream) -> TokenStream {
+    match macros::ops::group_by::expand_group_by(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::delete!` — schema-aware DSL targeting `delete`. The
 /// `where:` block must match a unique column.
 #[proc_macro]

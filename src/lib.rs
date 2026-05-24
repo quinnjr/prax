@@ -635,6 +635,7 @@ pub use prax_codegen::{count, delete, delete_many, find_first, find_many, find_u
 
 // Aggregate macros (phase 6). See `prax-codegen/src/macros/ops/aggregate.rs`.
 pub use prax_codegen::aggregate;
+pub use prax_codegen::group_by;
 
 // Write-operation macros (phase 5a). See `prax-codegen/src/macros/ops/`.
 pub use prax_codegen::{create, create_many, update, update_many, upsert};
