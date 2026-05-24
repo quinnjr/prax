@@ -4,6 +4,7 @@
 //! top-level `#[proc_macro] fn <op>` wrapper in `lib.rs` calls.
 //! Filled in by tasks 13-15.
 
+pub(crate) mod aggregate;
 pub(crate) mod count;
 pub(crate) mod create;
 pub(crate) mod create_many;

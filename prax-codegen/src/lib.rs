@@ -205,6 +205,26 @@ pub fn count(input: TokenStream) -> TokenStream {
     }
 }
 
+/// `prax::aggregate!` — schema-aware DSL targeting `aggregate`. Accepts
+/// `where:`, `_count:`, `_sum:`, `_avg:`, `_min:`, `_max:` keys. At least one
+/// aggregate key is required.
+///
+/// ```rust,ignore
+/// prax::aggregate!(client.user, {
+///     where: { active: true },
+///     _sum: { views: true, score: true },
+///     _avg: { score: true },
+///     _count: { _all: true },
+/// });
+/// ```
+#[proc_macro]
+pub fn aggregate(input: TokenStream) -> TokenStream {
+    match macros::ops::aggregate::expand_aggregate(input.into()) {
+        Ok(t) => t.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
 /// `prax::delete!` — schema-aware DSL targeting `delete`. The
 /// `where:` block must match a unique column.
 #[proc_macro]
