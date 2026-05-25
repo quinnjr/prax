@@ -984,7 +984,7 @@ impl Filter {
 
     fn to_sql_with_params(
         &self,
-        mut param_idx: usize,
+        param_idx: usize,
         params: &mut Vec<FilterValue>,
         dialect: &dyn crate::dialect::SqlDialect,
     ) -> String {
@@ -997,8 +997,7 @@ impl Filter {
                     format!("{} IS NULL", c)
                 } else {
                     params.push(val.clone());
-                    param_idx += params.len();
-                    format!("{} = {}", c, dialect.placeholder(param_idx))
+                    format!("{} = {}", c, dialect.placeholder(param_idx + 1))
                 }
             }
             Self::NotEquals(col, val) => {
@@ -1007,34 +1006,29 @@ impl Filter {
                     format!("{} IS NOT NULL", c)
                 } else {
                     params.push(val.clone());
-                    param_idx += params.len();
-                    format!("{} != {}", c, dialect.placeholder(param_idx))
+                    format!("{} != {}", c, dialect.placeholder(param_idx + 1))
                 }
             }
 
             Self::Lt(col, val) => {
                 let c = dialect.quote_ident(col);
                 params.push(val.clone());
-                param_idx += params.len();
-                format!("{} < {}", c, dialect.placeholder(param_idx))
+                format!("{} < {}", c, dialect.placeholder(param_idx + 1))
             }
             Self::Lte(col, val) => {
                 let c = dialect.quote_ident(col);
                 params.push(val.clone());
-                param_idx += params.len();
-                format!("{} <= {}", c, dialect.placeholder(param_idx))
+                format!("{} <= {}", c, dialect.placeholder(param_idx + 1))
             }
             Self::Gt(col, val) => {
                 let c = dialect.quote_ident(col);
                 params.push(val.clone());
-                param_idx += params.len();
-                format!("{} > {}", c, dialect.placeholder(param_idx))
+                format!("{} > {}", c, dialect.placeholder(param_idx + 1))
             }
             Self::Gte(col, val) => {
                 let c = dialect.quote_ident(col);
                 params.push(val.clone());
-                param_idx += params.len();
-                format!("{} >= {}", c, dialect.placeholder(param_idx))
+                format!("{} >= {}", c, dialect.placeholder(param_idx + 1))
             }
 
             Self::In(col, values) => {
@@ -1044,10 +1038,10 @@ impl Filter {
                 let c = dialect.quote_ident(col);
                 let placeholders: Vec<_> = values
                     .iter()
-                    .map(|v| {
+                    .enumerate()
+                    .map(|(i, v)| {
                         params.push(v.clone());
-                        param_idx += params.len();
-                        dialect.placeholder(param_idx)
+                        dialect.placeholder(param_idx + i + 1)
                     })
                     .collect();
                 format!("{} IN ({})", c, placeholders.join(", "))
@@ -1059,10 +1053,10 @@ impl Filter {
                 let c = dialect.quote_ident(col);
                 let placeholders: Vec<_> = values
                     .iter()
-                    .map(|v| {
+                    .enumerate()
+                    .map(|(i, v)| {
                         params.push(v.clone());
-                        param_idx += params.len();
-                        dialect.placeholder(param_idx)
+                        dialect.placeholder(param_idx + i + 1)
                     })
                     .collect();
                 format!("{} NOT IN ({})", c, placeholders.join(", "))
@@ -1075,8 +1069,7 @@ impl Filter {
                 } else {
                     params.push(val.clone());
                 }
-                param_idx += params.len();
-                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx + 1))
             }
             Self::StartsWith(col, val) => {
                 let c = dialect.quote_ident(col);
@@ -1085,8 +1078,7 @@ impl Filter {
                 } else {
                     params.push(val.clone());
                 }
-                param_idx += params.len();
-                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx + 1))
             }
             Self::EndsWith(col, val) => {
                 let c = dialect.quote_ident(col);
@@ -1095,8 +1087,7 @@ impl Filter {
                 } else {
                     params.push(val.clone());
                 }
-                param_idx += params.len();
-                format!("{} LIKE {}", c, dialect.placeholder(param_idx))
+                format!("{} LIKE {}", c, dialect.placeholder(param_idx + 1))
             }
 
             Self::IsNull(col) => {
@@ -2501,6 +2492,55 @@ mod tests {
             sql.starts_with(r#""id" IN ("#),
             "expected quoted id on IN, got: {sql}"
         );
+    }
+
+    #[test]
+    fn to_sql_emits_sequential_placeholders() {
+        // Regression: leaf arms previously did `param_idx += params.len()`,
+        // which over-counted and produced non-sequential / out-of-range
+        // placeholders (e.g. IN -> `$1, $3, $6`, AND -> `($1) AND ($3)`).
+        // The 1-based slot of the k-th bound param must be exactly k.
+        use crate::dialect::Postgres;
+
+        // IN with three values -> $1, $2, $3 and params [1,2,3].
+        let f = Filter::In(
+            "id".into(),
+            vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3),
+            ],
+        );
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(sql, r#""id" IN ($1, $2, $3)"#, "IN placeholders: {sql}");
+        assert_eq!(params.len(), 3);
+
+        // Two ANDed equals -> ($1) AND ($2), params [a,b].
+        let f = Filter::And(Box::new([
+            Filter::Equals("a".into(), FilterValue::Int(10)),
+            Filter::Equals("b".into(), FilterValue::Int(20)),
+        ]));
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(sql, r#"("a" = $1 AND "b" = $2)"#, "AND placeholders: {sql}");
+        assert_eq!(params.len(), 2);
+
+        // Mixed nesting: equals + IN under one AND -> $1, ($2, $3).
+        let f = Filter::And(Box::new([
+            Filter::Equals("a".into(), FilterValue::Int(1)),
+            Filter::In("b".into(), vec![FilterValue::Int(2), FilterValue::Int(3)]),
+        ]));
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(
+            sql, r#"("a" = $1 AND "b" IN ($2, $3))"#,
+            "mixed placeholders: {sql}"
+        );
+        assert_eq!(params.len(), 3);
+
+        // Non-zero offset (params already bound before this filter) shifts
+        // the first slot to offset+1.
+        let f = Filter::Equals("a".into(), FilterValue::Int(7));
+        let (sql, _) = f.to_sql(5, &Postgres);
+        assert_eq!(sql, r#""a" = $6"#, "offset placeholder: {sql}");
     }
 
     #[test]
