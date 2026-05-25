@@ -330,9 +330,8 @@ pub fn emit_args_and_columns_enum(
         }
 
         #[derive(Debug, Default, Clone)]
-        #[allow(dead_code)]
         pub struct #order_by_ty {
-            pub items: ::std::vec::Vec<::std::string::String>,
+            pub items: ::std::vec::Vec<::prax_query::types::OrderByField>,
         }
     }
 }
