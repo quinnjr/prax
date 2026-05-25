@@ -23,6 +23,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema-defined models with relations (previously every macro-DSL
   e2e test had to fall back to derive-style models + `RecordingEngine`,
   and the workspace fixture schema was kept relation-free).
+- **`prax_schema!` relation follow-up hardening.** Code-review fixes
+  on top of the above: single relations now generate
+  `Option<Box<Target>>` (was `Option<Target>`) so required relations
+  default cleanly via `FromRow` and self-/mutually-recursive relations
+  stay finitely sized (previously E0072/E0391); each schema-path model
+  emits a `ModelRelationLoader<E>` impl so `.exec()` compiles (the bound
+  is required unconditionally — without it the macro DSL could not
+  execute at all), with includes erroring loudly until functional
+  relation loading lands; relation field modules expose `fetch()`
+  returning an `IncludeSpec` (aligning with the derive path) instead of
+  an `include()` returning the divergent `IncludeParam`, and no longer
+  emit misleading `COLUMN`/`IS_OPTIONAL`/`IS_LIST` consts; the
+  `IncludeParam` default sentinel was renamed `__None` to avoid
+  colliding with a relation field named `none`; and a self-relation
+  whose field name collides with the model's own module name is now
+  rejected with a clear diagnostic. New fixtures cover a multi-word
+  model name (`BlogPost`) and a self-relation (`Category`).
 
 ### Added
 
