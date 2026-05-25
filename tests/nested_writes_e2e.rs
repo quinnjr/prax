@@ -16,9 +16,11 @@
 //!
 //! `create!` macro coverage of nested writes is covered by the
 //! lowering unit tests in
-//! `prax-codegen/src/macros/lower/data_relation.rs`; the schema-aware
-//! macro path will be exercised end-to-end once the schema-path
-//! relation_helpers bug is fixed (deferred).
+//! `prax-codegen/src/macros/lower/data_relation.rs`. The schema-path
+//! `relation_helpers` bug that previously forced these derive-style
+//! mocks is now fixed (regression test: `tests/schema_macro_relations.rs`).
+//! Migrating these nested-write e2e tests onto the schema-path macro DSL
+//! is a separate follow-up.
 
 #![allow(dead_code)]
 
