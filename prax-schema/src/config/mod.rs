@@ -428,7 +428,10 @@ pub struct DebugOverride {
 /// Expand environment variables in the format `${VAR_NAME}`.
 fn expand_env_vars(content: &str) -> String {
     let mut result = content.to_string();
-    let re = regex_lite::Regex::new(r"\$\{([^}]+)\}").unwrap();
+    // Compile the `${...}` pattern once; `expand_env_vars` runs on every
+    // config load and the pattern is constant.
+    static PATTERN: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+    let re = PATTERN.get_or_init(|| regex_lite::Regex::new(r"\$\{([^}]+)\}").unwrap());
 
     for cap in re.captures_iter(content) {
         let var_name = &cap[1];
