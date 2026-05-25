@@ -1,4 +1,4 @@
-error: value for `_count.email` must be `true` (only opt-in is supported)
+error: value for `_count.email` must be `true` or `{ distinct: true }`
  --> tests/ui/count_select_value_not_true_fail.rs:7:19
   |
 7 |         select: { email: 5 },

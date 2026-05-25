@@ -1,0 +1,5 @@
+error: `distinct` is only valid inside `_count`, not `_sum`
+ --> tests/ui/aggregate_sum_distinct_fail.rs:7:17
+  |
+7 |         _sum: { views: { distinct: true } },
+  |                 ^^^^^

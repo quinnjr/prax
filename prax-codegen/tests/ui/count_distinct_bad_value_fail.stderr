@@ -1,0 +1,5 @@
+error: value for `_count.email` must be `true` or `{ distinct: true }`
+ --> tests/ui/count_distinct_bad_value_fail.rs:7:19
+  |
+7 |         _count: { email: { distinct: false } },
+  |                   ^^^^^

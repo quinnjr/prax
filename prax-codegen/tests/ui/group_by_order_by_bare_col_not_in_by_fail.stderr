@@ -1,0 +1,5 @@
+error: order by `region` requires `region` in `by:`
+ --> tests/ui/group_by_order_by_bare_col_not_in_by_fail.rs:9:21
+  |
+9 |         order_by: { region: desc },
+  |                     ^^^^^^

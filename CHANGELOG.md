@@ -33,8 +33,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aggregate on a relation or another aggregate field, unknown column
   (did-you-mean), empty `by:`, unknown by-column, empty aggregate
   block, `aggregate!` with no aggregate blocks, unsupported `having`
-  operator, and `group_by!`'s `order_by:` (deferred). Locked via
-  trybuild fixtures.
+  operator. Locked via trybuild fixtures.
+- **Aggregate macro follow-ups.** `count!` / `aggregate!` `_count`
+  blocks accept `{ col: { distinct: true } }` for `COUNT(DISTINCT col)`
+  (new `prax_query::CountSelectMode` enum; `<Model>CountSelect` columns
+  are `Option<CountSelectMode>`; `GroupByOperation` gains
+  `count_column` / `count_distinct` builders). `group_by!` now supports
+  `order_by: { _sum: { views: desc }, <by_col>: asc }`, ordering by
+  aggregate SELECT-list aliases or group-by columns (removes the
+  phase-6 deferral). New diagnostics (distinct on `_all`, distinct in a
+  non-count block, order-by of an unselected aggregate, order-by of a
+  non-`by:` bare column) locked via trybuild.
+
+### Fixed
+
+- `AggregateResult::from_row` now hydrates per-column non-null counts
+  (`count_columns`) and distinct counts (`count_distinct`) from the
+  `_count_<col>` / `_count_distinct_<col>` aliases that
+  `AggregateField::alias` emits (previously dropped). New
+  `count_of(col)` / `count_distinct_of(col)` accessors. `GroupByResult`
+  grouped per-column counts hydrate via the same path.
 
 ### Known limitations
 
@@ -46,18 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests drive the runtime `AggregateOperation` / `GroupByOperation`
   directly. The macro front-end is covered by trybuild fixtures and
   codegen unit tests.
-- `AggregateResult::from_row` does not yet hydrate per-column
-  `_count_<col>` aliases, so the per-column count *values* from
-  `count!`'s `select:` are emitted in SQL but not read back into a
-  typed `<Model>CountSelectResult` until that runtime gap is closed.
-  `COUNT(*)` (the `_all` count) works.
+- The runtime `AggregateResult` now exposes per-column counts, but
+  mapping them into the typed `<Model>CountSelectResult` struct is
+  still gated on the schema-path `relation_helpers` fix.
 - `having:` thresholds are inlined as numeric literals (SQL-safe — they
   are `f64`, never user strings), not bound parameters.
 - MongoDB (`$group`) and CQL (`GROUP BY`) engines are out of scope —
   separate follow-ups.
-- `count_distinct` exists in the runtime but is not exposed via the
-  macro shape; `_min`/`_max` against multiple columns in one call and
-  `group_by!`'s `order_by:` are deferred follow-ups.
+- `_min`/`_max` against multiple columns in one call, and ordering a
+  `group_by!` by a column that is neither in `by:` nor aggregated, are
+  deferred follow-ups.
 
 ### Changed
 

@@ -15,6 +15,7 @@ use crate::macros::accessor::parse_accessor;
 use crate::macros::dsl::ast::{DslBlock, DslField, DslValue};
 use crate::macros::lower::LowerCtx;
 use crate::macros::lower::aggregate_select::{AggKind, lower_agg_select};
+use crate::macros::lower::group_by_order_by::{AggPresence, lower_group_by_order_by};
 use crate::macros::lower::having::lower_having;
 use crate::macros::lower::where_input::lower_where_input_only;
 use crate::macros::schema_resolve::{resolve_schema, resolve_schema_path, track_schema_dep};
@@ -60,6 +61,7 @@ fn lower_group_by(
     let mut min_block: Option<&DslBlock> = None;
     let mut max_block: Option<&DslBlock> = None;
     let mut having_block: Option<&DslBlock> = None;
+    let mut order_by_block: Option<&DslBlock> = None;
 
     for field in &block.fields {
         let DslField::Pair { key, value, .. } = field else {
@@ -116,10 +118,10 @@ fn lower_group_by(
                 having_block = Some(b);
             }
             "order_by" => {
-                return Err(syn::Error::new(
-                    key.span(),
-                    "`order_by:` on group_by! is not yet implemented in phase 6 — tracked as a follow-up",
-                ));
+                let DslValue::Block(b) = value else {
+                    return Err(syn::Error::new(key.span(), "`order_by:` expects `{ ... }`"));
+                };
+                order_by_block = Some(b);
             }
             _ => {
                 return Err(unknown_top_key_error(
@@ -161,6 +163,7 @@ fn lower_group_by(
     let module_ident = format_ident!("{}", model_name.to_case(Case::Snake));
 
     let mut by_variants: Vec<TokenStream> = Vec::new();
+    let mut by_columns: Vec<String> = Vec::new();
     for item in items {
         let col_str = match item {
             DslValue::BareIdent(i) => i.to_string(),
@@ -194,6 +197,7 @@ fn lower_group_by(
 
         let variant = format_ident!("{}", to_pascal_case(&col_str));
         by_variants.push(quote! { #module_ident::#columns_enum::#variant });
+        by_columns.push(col_str);
     }
 
     let lower_opt = |k: AggKind, b: Option<&DslBlock>| -> syn::Result<TokenStream> {
@@ -233,6 +237,47 @@ fn lower_group_by(
         None => quote! { ::core::option::Option::None },
     };
 
+    let mut present_aggs: Vec<AggPresence> = Vec::new();
+    if let Some(b) = count_block {
+        for k in block_keys(b) {
+            if k == "_all" {
+                present_aggs.push(AggPresence {
+                    kind: AggKind::Count,
+                    column: None,
+                });
+            } else {
+                present_aggs.push(AggPresence {
+                    kind: AggKind::Count,
+                    column: Some(k),
+                });
+            }
+        }
+    }
+    for (blk, kind) in [
+        (sum_block, AggKind::Sum),
+        (avg_block, AggKind::Avg),
+        (min_block, AggKind::Min),
+        (max_block, AggKind::Max),
+    ] {
+        if let Some(b) = blk {
+            for k in block_keys(b) {
+                present_aggs.push(AggPresence {
+                    kind,
+                    column: Some(k),
+                });
+            }
+        }
+    }
+
+    let order_by_ts = match order_by_block {
+        Some(ob) => {
+            let items = lower_group_by_order_by(ob, ctx, &present_aggs, &by_columns)?;
+            let order_by_ty = format_ident!("{}GroupByOrderBy", model_name);
+            quote! { ::core::option::Option::Some(#module_ident::#order_by_ty { items: #items }) }
+        }
+        None => quote! { ::core::option::Option::None },
+    };
+
     let args_ident = format_ident!("{}GroupByArgs", model_name);
     let accessor_expr = &accessor.accessor_expr;
 
@@ -249,11 +294,21 @@ fn lower_group_by(
                 _min: #min_ts,
                 _max: #max_ts,
                 having: #having_ts,
-                order_by: ::core::option::Option::None,
+                order_by: #order_by_ts,
             };
             (#accessor_expr).group_by_columns(__by).with_group_by_args(__args)
         }
     })
+}
+
+fn block_keys(b: &DslBlock) -> Vec<String> {
+    b.fields
+        .iter()
+        .filter_map(|f| match f {
+            DslField::Pair { key, .. } => Some(key.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn to_pascal_case(snake: &str) -> String {

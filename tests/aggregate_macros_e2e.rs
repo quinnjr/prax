@@ -357,3 +357,98 @@ fn aggregate_omits_unspecified_blocks() {
     );
     assert!(params.is_empty(), "no params expected; got: {params:?}");
 }
+
+// ── Test 7: count_distinct — COUNT(DISTINCT col) SQL emission ────────────────
+
+/// `count_distinct("region")` emits `COUNT(DISTINCT region) AS _count_distinct_region`.
+#[test]
+fn distinct_count_emits_count_distinct_sql() {
+    let op: AggregateOperation<User, RecordingEngine> =
+        AggregateOperation::new().count_distinct("region");
+
+    let (sql, params) = op.build_sql(&prax_query::dialect::Postgres);
+
+    assert!(
+        sql.contains("COUNT(DISTINCT region)"),
+        "missing COUNT(DISTINCT region); got: {sql}"
+    );
+    assert!(
+        sql.contains("_count_distinct_region"),
+        "missing alias _count_distinct_region; got: {sql}"
+    );
+    assert!(params.is_empty(), "no params expected; got: {params:?}");
+}
+
+// ── Test 8: group_by order_by — ORDER BY clause emission ─────────────────────
+
+/// `GroupByOperation::new(vec!["team_id"]).sum("views").order_by(OrderByField::desc("_sum_views"))`
+/// emits `ORDER BY _sum_views DESC`.
+#[test]
+fn group_by_order_by_emits_order_by_clause() {
+    let op: GroupByOperation<User, RecordingEngine> = GroupByOperation::new(vec!["team_id".into()])
+        .sum("views")
+        .order_by(OrderByField::desc("_sum_views"));
+
+    let (sql, params) = op.build_sql(&prax_query::dialect::Postgres);
+
+    assert!(
+        sql.contains("ORDER BY"),
+        "missing ORDER BY clause; got: {sql}"
+    );
+    assert!(
+        sql.contains("_sum_views"),
+        "missing _sum_views in ORDER BY; got: {sql}"
+    );
+    assert!(sql.contains("DESC"), "missing DESC in ORDER BY; got: {sql}");
+    assert!(params.is_empty(), "no params expected; got: {params:?}");
+}
+
+// ── Test 9: AggregateResult hydration — per-column + distinct counts ──────────
+
+/// `AggregateResult::from_row` correctly populates `count`, `count_of("email")`,
+/// and `count_distinct_of("email")` from a raw HashMap.
+#[test]
+fn aggregate_result_hydrates_per_column_and_distinct_counts() {
+    use std::collections::HashMap;
+
+    let mut row: HashMap<String, prax_query::filter::FilterValue> = HashMap::new();
+    row.insert(
+        "_count".to_string(),
+        prax_query::filter::FilterValue::Int(10),
+    );
+    row.insert(
+        "_count_email".to_string(),
+        prax_query::filter::FilterValue::Int(8),
+    );
+    row.insert(
+        "_count_distinct_email".to_string(),
+        prax_query::filter::FilterValue::Int(5),
+    );
+
+    let result = prax_query::operations::AggregateResult::from_row(row);
+
+    assert_eq!(
+        result.count,
+        Some(10),
+        "overall COUNT(*) should be 10; got: {:?}",
+        result.count
+    );
+    assert_eq!(
+        result.count_of("email"),
+        Some(8),
+        "COUNT(email) should be 8; got: {:?}",
+        result.count_of("email")
+    );
+    assert_eq!(
+        result.count_distinct_of("email"),
+        Some(5),
+        "COUNT(DISTINCT email) should be 5; got: {:?}",
+        result.count_distinct_of("email")
+    );
+    // The distinct entry must not bleed into count_columns as "distinct_email".
+    assert_eq!(
+        result.count_of("distinct_email"),
+        None,
+        "distinct_email must not appear in count_columns"
+    );
+}

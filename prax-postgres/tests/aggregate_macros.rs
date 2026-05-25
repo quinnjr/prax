@@ -29,6 +29,7 @@ use prax_query::operations::{
     AggregateOperation, AggregateResult, GroupByOperation, GroupByResult,
 };
 use prax_query::traits::{Model, QueryEngine};
+use prax_query::types::OrderByField;
 
 // =============================================================================
 // Harness (mirrors computed_fields.rs)
@@ -93,6 +94,22 @@ impl Model for TeamModel {
     const TABLE_NAME: &'static str = "team_model_placeholder";
     const PRIMARY_KEY: &'static [&'static str] = &["id"];
     const COLUMNS: &'static [&'static str] = &["id", "team_id", "score"];
+}
+
+struct RegionModel;
+impl Model for RegionModel {
+    const MODEL_NAME: &'static str = "RegionModel";
+    const TABLE_NAME: &'static str = "region_model_placeholder";
+    const PRIMARY_KEY: &'static [&'static str] = &["id"];
+    const COLUMNS: &'static [&'static str] = &["id", "region"];
+}
+
+struct ViewsModel;
+impl Model for ViewsModel {
+    const MODEL_NAME: &'static str = "ViewsModel";
+    const TABLE_NAME: &'static str = "views_model_placeholder";
+    const PRIMARY_KEY: &'static [&'static str] = &["id"];
+    const COLUMNS: &'static [&'static str] = &["id", "team_id", "views"];
 }
 
 // =============================================================================
@@ -318,6 +335,169 @@ async fn group_by_with_having_round_trip() {
         .count
         .expect("COUNT(*) should be present in aggregates");
     assert_eq!(count, 4, "team 2 has 4 rows");
+
+    drop_table(&pool, &table).await;
+}
+
+// =============================================================================
+// Test 4 — COUNT(DISTINCT col) round-trip
+//
+// 5 rows with regions 'a','a','b','b','c'.
+// count_column("region") == 5 (non-NULL), count_distinct("region") == 3.
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose (PRAX_E2E=1 + POSTGRES_URL)"]
+async fn distinct_count_round_trip() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("region");
+    drop_table(&pool, &table).await;
+
+    {
+        let conn = pool.get().await.expect("conn");
+        conn.batch_execute(&format!(
+            "CREATE TABLE {table} (id SERIAL PRIMARY KEY, region TEXT NOT NULL)"
+        ))
+        .await
+        .expect("create table");
+
+        conn.batch_execute(&format!(
+            "INSERT INTO {table} (region) VALUES ('a'), ('a'), ('b'), ('b'), ('c')"
+        ))
+        .await
+        .expect("insert rows");
+    }
+
+    let engine = PgEngine::new(pool.clone());
+    let dialect = engine.dialect();
+
+    let op: AggregateOperation<RegionModel, PgEngine> = AggregateOperation::new()
+        .count_column("region")
+        .count_distinct("region");
+    let (sql, params) = op.build_sql(dialect);
+    let sql = sql.replace(RegionModel::TABLE_NAME, &table);
+
+    let mut rows = engine
+        .aggregate_query(&sql, params)
+        .await
+        .expect("aggregate_query");
+
+    let result = AggregateResult::from_row(rows.pop().unwrap_or_default());
+
+    assert_eq!(
+        result.count_of("region"),
+        Some(5),
+        "COUNT(region) should be 5 (5 non-NULL rows)"
+    );
+    assert_eq!(
+        result.count_distinct_of("region"),
+        Some(3),
+        "COUNT(DISTINCT region) should be 3 (a, b, c)"
+    );
+
+    drop_table(&pool, &table).await;
+}
+
+// =============================================================================
+// Test 5 — GROUP BY + ORDER BY round-trip
+//
+// team 1 → sum(views)=100, team 2 → sum(views)=300.
+// ORDER BY _sum_views DESC → team 2 must be first.
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose (PRAX_E2E=1 + POSTGRES_URL)"]
+async fn group_by_order_by_round_trip() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    let pool = pool().await;
+    let table = unique_table("views");
+    drop_table(&pool, &table).await;
+
+    {
+        let conn = pool.get().await.expect("conn");
+        conn.batch_execute(&format!(
+            "CREATE TABLE {table} (id SERIAL PRIMARY KEY, team_id INT NOT NULL, views INT NOT NULL)"
+        ))
+        .await
+        .expect("create table");
+
+        // team 1 → views 40+60=100, team 2 → views 100+200=300
+        conn.batch_execute(&format!(
+            "INSERT INTO {table} (team_id, views) VALUES \
+             (1, 40), (1, 60), \
+             (2, 100), (2, 200)"
+        ))
+        .await
+        .expect("insert rows");
+    }
+
+    let engine = PgEngine::new(pool.clone());
+    let dialect = engine.dialect();
+
+    let op: GroupByOperation<ViewsModel, PgEngine> =
+        GroupByOperation::new(vec!["team_id".to_string()])
+            .sum("views")
+            .order_by(OrderByField::desc("_sum_views"));
+    let (sql, params) = op.build_sql(dialect);
+    let sql = sql.replace(ViewsModel::TABLE_NAME, &table);
+
+    let raw_rows = engine
+        .aggregate_query(&sql, params)
+        .await
+        .expect("aggregate_query for group_by order_by");
+
+    let group_columns = ["team_id"];
+    let results: Vec<GroupByResult> = raw_rows
+        .into_iter()
+        .map(|row| {
+            let mut group_values: HashMap<String, serde_json::Value> = HashMap::new();
+            let mut agg_map: HashMap<String, FilterValue> = HashMap::new();
+            for (k, v) in row {
+                if group_columns.contains(&k.as_str()) {
+                    let json_val = match &v {
+                        FilterValue::Int(n) => serde_json::Value::from(*n),
+                        FilterValue::Float(f) => serde_json::json!(*f),
+                        FilterValue::String(s) => serde_json::Value::String(s.clone()),
+                        FilterValue::Bool(b) => serde_json::Value::Bool(*b),
+                        _ => serde_json::Value::Null,
+                    };
+                    group_values.insert(k, json_val);
+                } else {
+                    agg_map.insert(k, v);
+                }
+            }
+            GroupByResult {
+                group_values,
+                aggregates: AggregateResult::from_row(agg_map),
+            }
+        })
+        .collect();
+
+    assert_eq!(results.len(), 2, "two groups expected (team 1 and team 2)");
+
+    // With ORDER BY _sum_views DESC, team 2 (sum=300) must come first.
+    let first_team_id = results[0]
+        .group_values
+        .get("team_id")
+        .and_then(serde_json::Value::as_i64)
+        .expect("team_id present in first group");
+    assert_eq!(first_team_id, 2, "team 2 should be first (highest sum)");
+
+    let first_sum = results[0]
+        .aggregates
+        .sum_as_f64("views")
+        .expect("SUM(views) present in first group");
+    assert!(
+        (first_sum - 300.0).abs() < 0.001,
+        "team 2 sum should be 300, got {first_sum}"
+    );
 
     drop_table(&pool, &table).await;
 }

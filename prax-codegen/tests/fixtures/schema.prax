@@ -18,6 +18,9 @@ model User {
     created_at  DateTime
     post_count  Int      @count(posts)
     full_name   String   @generated
+    team_id     Int?
+    views       Int?
+    region      String?
 }
 
 model Post {

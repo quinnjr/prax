@@ -1,5 +1,0 @@
-error: `order_by:` on group_by! is not yet implemented in phase 6 — tracked as a follow-up
- --> tests/ui/group_by_order_by_deferred_fail.rs:9:9
-  |
-9 |         order_by: { _sum: { age: desc } },
-  |         ^^^^^^^^

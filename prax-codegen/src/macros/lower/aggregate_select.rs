@@ -73,17 +73,6 @@ pub fn lower_agg_select(
         };
         let key_str = key.to_string();
 
-        if !matches!(value, DslValue::Bool(true)) {
-            return Err(syn::Error::new(
-                key.span(),
-                format!(
-                    "value for `{}.{}` must be `true` (only opt-in is supported)",
-                    kind.key(),
-                    key_str
-                ),
-            ));
-        }
-
         if key_str == "_all" {
             if kind != AggKind::Count {
                 return Err(syn::Error::new(
@@ -91,8 +80,46 @@ pub fn lower_agg_select(
                     format!("`_all` is only valid inside `_count`, not `{}`", kind.key()),
                 ));
             }
+            if let DslValue::Block(_) = value {
+                return Err(syn::Error::new(
+                    key.span(),
+                    "`_all` has no distinct form; use COUNT(*) via `_all: true`",
+                ));
+            }
+            if !matches!(value, DslValue::Bool(true)) {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "value for `{}.{}` must be `true` (only opt-in is supported)",
+                        kind.key(),
+                        key_str
+                    ),
+                ));
+            }
             setters.push(quote! { __s._all = ::core::option::Option::Some(true); });
             continue;
+        }
+
+        if kind != AggKind::Count {
+            if let DslValue::Block(_) = value {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "`distinct` is only valid inside `_count`, not `{}`",
+                        kind.key()
+                    ),
+                ));
+            }
+            if !matches!(value, DslValue::Bool(true)) {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "value for `{}.{}` must be `true` (only opt-in is supported)",
+                        kind.key(),
+                        key_str
+                    ),
+                ));
+            }
         }
 
         let field = ctx.model.get_field(&key_str).ok_or_else(|| {
@@ -145,9 +172,38 @@ pub fn lower_agg_select(
         }
 
         let col_ident = format_ident!("{}", key_str);
-        setters.push(quote! {
-            __s.#col_ident = ::core::option::Option::Some(true);
-        });
+        if kind == AggKind::Count {
+            if let DslValue::Block(b) = value {
+                if !is_distinct_true_block(b) {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        format!(
+                            "value for `_count.{}` must be `true` or `{{ distinct: true }}`",
+                            key_str
+                        ),
+                    ));
+                }
+                setters.push(quote! {
+                    __s.#col_ident = ::core::option::Option::Some(::prax_query::CountSelectMode::Distinct);
+                });
+            } else if matches!(value, DslValue::Bool(true)) {
+                setters.push(quote! {
+                    __s.#col_ident = ::core::option::Option::Some(::prax_query::CountSelectMode::NonNull);
+                });
+            } else {
+                return Err(syn::Error::new(
+                    key.span(),
+                    format!(
+                        "value for `_count.{}` must be `true` or `{{ distinct: true }}`",
+                        key_str
+                    ),
+                ));
+            }
+        } else {
+            setters.push(quote! {
+                __s.#col_ident = ::core::option::Option::Some(true);
+            });
+        }
     }
 
     if setters.is_empty() {
@@ -168,6 +224,15 @@ pub fn lower_agg_select(
             __s
         }
     })
+}
+
+fn is_distinct_true_block(b: &DslBlock) -> bool {
+    b.fields.len() == 1
+        && matches!(
+            b.fields.first(),
+            Some(DslField::Pair { key, value, .. })
+                if *key == "distinct" && matches!(value, DslValue::Bool(true))
+        )
 }
 
 #[allow(dead_code)]
@@ -306,5 +371,38 @@ mod tests {
     fn lower_empty_block_errors() {
         let msg = lower_err("User", AggKind::Count, quote!({}));
         assert!(msg.contains("empty"), "got: {msg}");
+    }
+
+    #[test]
+    fn lower_count_scalar_field_emits_nonnull() {
+        let ts = lower_ok("User", AggKind::Count, quote!({ email: true }));
+        let s = ts.to_string();
+        assert!(s.contains("CountSelectMode :: NonNull"), "got: {s}");
+    }
+
+    #[test]
+    fn lower_count_distinct_field_emits_distinct() {
+        let ts = lower_ok(
+            "User",
+            AggKind::Count,
+            quote!({ email: { distinct: true } }),
+        );
+        let s = ts.to_string();
+        assert!(s.contains("CountSelectMode :: Distinct"), "got: {s}");
+    }
+
+    #[test]
+    fn lower_count_all_distinct_errors() {
+        let msg = lower_err("User", AggKind::Count, quote!({ _all: { distinct: true } }));
+        assert!(msg.contains("no distinct form"), "got: {msg}");
+    }
+
+    #[test]
+    fn lower_sum_distinct_errors() {
+        let msg = lower_err("User", AggKind::Sum, quote!({ age: { distinct: true } }));
+        assert!(
+            msg.contains("distinct") && msg.contains("only valid inside"),
+            "got: {msg}"
+        );
     }
 }
