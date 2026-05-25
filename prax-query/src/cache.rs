@@ -772,12 +772,17 @@ impl SqlTemplateCache {
             .collect();
         entries.sort_by_key(|(_, time)| *time);
 
-        // Evict oldest
-        for (hash, _) in entries.into_iter().take(to_evict) {
-            templates.remove(&hash);
-            // Also remove from key_index
-            key_index.retain(|_, h| *h != hash);
-        }
+        // Collect the set of hashes to evict, remove their templates, then
+        // prune key_index in a single pass (avoids O(evicted * key_index.len())).
+        let evicted: std::collections::HashSet<u64> = entries
+            .into_iter()
+            .take(to_evict)
+            .map(|(hash, _)| {
+                templates.remove(&hash);
+                hash
+            })
+            .collect();
+        key_index.retain(|_, h| !evicted.contains(h));
     }
 }
 
