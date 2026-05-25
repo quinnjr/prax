@@ -235,6 +235,7 @@ pub use operations::{
     AggregateOperation,
     AggregateResult,
     CountOperation,
+    CountSelectMode,
     CreateManyOperation,
     CreateOperation,
     DeleteManyOperation,

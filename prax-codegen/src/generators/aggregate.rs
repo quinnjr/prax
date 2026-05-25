@@ -93,7 +93,7 @@ pub fn emit_select_inputs(
 
     let count_fields = scalars.iter().map(|f| {
         let ident = f.ident;
-        quote! { pub #ident: ::core::option::Option<bool> }
+        quote! { pub #ident: ::core::option::Option<::prax_query::CountSelectMode> }
     });
     let numeric_fields: Vec<_> = scalars
         .iter()
@@ -337,7 +337,7 @@ pub fn emit_args_and_columns_enum(
     }
 }
 
-/// Emit `fields_set()` / `all_set()` helpers on the select-shape inputs,
+/// Emit `nonnull_fields_set()` / `distinct_fields_set()` / `all_set()` helpers on the select-shape inputs,
 /// a typed `group_by_columns(Vec<ModelGroupByColumn>)` method on `Client<E>`,
 /// and the `with_aggregate_args` / `with_group_by_args` extension impls on
 /// `AggregateOperation` / `GroupByOperation`.
@@ -364,13 +364,26 @@ pub fn emit_accessors_and_extensions(
     let max_select = format_ident!("{}MaxSelect", model_ident);
     let columns_enum = format_ident!("{}GroupByColumn", model_ident);
 
-    let count_set_arms: Vec<TokenStream> = scalars
+    let count_nonnull_arms: Vec<TokenStream> = scalars
         .iter()
         .map(|f| {
             let ident = f.ident;
             let col = f.column_name;
             quote! {
-                if matches!(self.#ident, ::core::option::Option::Some(true)) {
+                if matches!(self.#ident, ::core::option::Option::Some(::prax_query::CountSelectMode::NonNull)) {
+                    out.push(#col);
+                }
+            }
+        })
+        .collect();
+
+    let count_distinct_arms: Vec<TokenStream> = scalars
+        .iter()
+        .map(|f| {
+            let ident = f.ident;
+            let col = f.column_name;
+            quote! {
+                if matches!(self.#ident, ::core::option::Option::Some(::prax_query::CountSelectMode::Distinct)) {
                     out.push(#col);
                 }
             }
@@ -432,13 +445,18 @@ pub fn emit_accessors_and_extensions(
 
     quote! {
         impl #count_select {
-            pub fn fields_set(&self) -> ::std::vec::Vec<&'static str> {
-                let mut out = ::std::vec::Vec::new();
-                #(#count_set_arms)*
-                out
-            }
             pub fn all_set(&self) -> bool {
                 matches!(self._all, ::core::option::Option::Some(true))
+            }
+            pub fn nonnull_fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#count_nonnull_arms)*
+                out
+            }
+            pub fn distinct_fields_set(&self) -> ::std::vec::Vec<&'static str> {
+                let mut out = ::std::vec::Vec::new();
+                #(#count_distinct_arms)*
+                out
             }
         }
 
@@ -496,12 +514,9 @@ pub fn emit_accessors_and_extensions(
             fn with_aggregate_args(mut self, args: #agg_args) -> Self {
                 #agg_where_branch
                 if let ::core::option::Option::Some(c) = args._count {
-                    if c.all_set() {
-                        self = self.count();
-                    }
-                    for col in c.fields_set() {
-                        self = self.count_column(col);
-                    }
+                    if c.all_set() { self = self.count(); }
+                    for col in c.nonnull_fields_set() { self = self.count_column(col); }
+                    for col in c.distinct_fields_set() { self = self.count_distinct(col); }
                 }
                 if let ::core::option::Option::Some(s) = args._sum {
                     for col in s.fields_set() {
@@ -538,9 +553,9 @@ pub fn emit_accessors_and_extensions(
             fn with_group_by_args(mut self, args: #gb_args) -> Self {
                 #gb_where_branch
                 if let ::core::option::Option::Some(c) = args._count {
-                    if c.all_set() || !c.fields_set().is_empty() {
-                        self = self.count();
-                    }
+                    if c.all_set() { self = self.count(); }
+                    for col in c.nonnull_fields_set() { self = self.count_column(col); }
+                    for col in c.distinct_fields_set() { self = self.count_distinct(col); }
                 }
                 if let ::core::option::Option::Some(s) = args._sum {
                     for col in s.fields_set() {

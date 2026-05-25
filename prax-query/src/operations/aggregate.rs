@@ -47,6 +47,15 @@ use crate::sql::quote_identifier;
 use crate::traits::{Model, QueryEngine};
 use crate::types::OrderByField;
 
+/// How a `_count` select column is counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CountSelectMode {
+    /// `COUNT(col)` — counts non-null values.
+    NonNull,
+    /// `COUNT(DISTINCT col)`.
+    Distinct,
+}
+
 /// An aggregation field specifier.
 #[derive(Debug, Clone)]
 pub enum AggregateField {

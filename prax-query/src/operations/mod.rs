@@ -31,8 +31,8 @@ mod upsert;
 mod view;
 
 pub use aggregate::{
-    AggregateField, AggregateOperation, AggregateResult, GroupByOperation, GroupByResult,
-    HavingCondition, HavingOp, having,
+    AggregateField, AggregateOperation, AggregateResult, CountSelectMode, GroupByOperation,
+    GroupByResult, HavingCondition, HavingOp, having,
 };
 pub use count::CountOperation;
 pub use create::{CreateManyOperation, CreateOperation};
