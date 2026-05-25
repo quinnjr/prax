@@ -359,7 +359,23 @@ pub fn generate_model_module_with_style(
         .values()
         .map(|field| {
             let field_name = snake_ident(field.name());
-            let field_type = field_type_to_rust(&field.field_type, &field.modifier);
+            // Relation fields reference a sibling model whose struct lives in
+            // its own `mod <target_snake>` at crate root. From inside this
+            // model's module the path is `super::<target_snake>::<Target>`.
+            // Scalar/enum fields use the plain rendering.
+            let field_type = match &field.field_type {
+                FieldType::Model(target) => {
+                    // Must match how the target model's struct ident and module
+                    // are formed: `pascal_ident(model.name())` for the struct,
+                    // `snake_ident(...)` for the module. Using the raw target
+                    // string here would desync for non-PascalCase model names.
+                    let target_type = pascal_ident(target.as_str());
+                    let target_mod = snake_ident(target.as_str());
+                    let base = quote! { super::#target_mod::#target_type };
+                    crate::types::apply_modifier(base, &field.modifier)
+                }
+                _ => field_type_to_rust(&field.field_type, &field.modifier),
+            };
             let field_doc =
                 generate_doc_comment(field.documentation.as_ref().map(|d| d.text.as_str()));
 
@@ -491,13 +507,23 @@ pub fn generate_model_module_with_style(
         &[],
         &[],
     );
-    // The prax_schema! path filters `FieldType::Model(_)` relation
-    // fields out of `from_row_fields` above; pass an empty slice for
-    // relation defaults to keep the `FromRow` shape unchanged.
+    // Relation fields (`FieldType::Model`) are filtered out of
+    // `from_row_fields` (no column to read), but they ARE fields on the
+    // generated struct, so `FromRow` must default them (empty Vec for
+    // list relations, None for optional single relations) — the relation
+    // executor fills them on the `.include()` path. Mirrors the derive
+    // path's `relation_fields` handling.
+    let relation_field_idents: Vec<syn::Ident> = model
+        .fields
+        .values()
+        .filter(|f| matches!(f.field_type, FieldType::Model(_)))
+        .map(|f| snake_ident(f.name()))
+        .collect();
     // The prax_schema! path does not yet interpret aggregate directives
-    // from the .prax AST (Task 11 wires the derive path; schema path follows).
+    // from the .prax AST (the derive path wires them; schema path follows).
     // Pass an empty slice so aggregate fields default to the zero-state.
-    let from_row_impl = super::derive_from_row::emit(&model_name, &from_row_fields, &[], &[]);
+    let from_row_impl =
+        super::derive_from_row::emit(&model_name, &from_row_fields, &relation_field_idents, &[]);
     let model_with_pk_impl = super::derive_model_with_pk::emit(&model_name, &model_with_pk_fields);
     let client_impl = super::derive_client::emit(quote! { #model_name });
 
@@ -715,9 +741,18 @@ fn get_primary_key_fields(model: &Model) -> Vec<String> {
 
 /// Generate the WhereParam enum for a model.
 fn generate_where_param(model: &Model) -> TokenStream {
-    let variants: Vec<_> = model
-        .fields
-        .values()
+    // Relation fields have no scalar `WhereOp` / `COLUMN` in their field
+    // module (they are filtered, not column-compared), so exclude them from
+    // the legacy `WhereParam` enum — same decision as `collect_where_fields`
+    // and the derive path.
+    let scalar_fields = || {
+        model
+            .fields
+            .values()
+            .filter(|f| !matches!(f.field_type, FieldType::Model(_)))
+    };
+
+    let variants: Vec<_> = scalar_fields()
         .map(|field| {
             let name = pascal_ident(field.name());
             let field_mod = snake_ident(field.name());
@@ -725,9 +760,7 @@ fn generate_where_param(model: &Model) -> TokenStream {
         })
         .collect();
 
-    let to_sql_matches: Vec<_> = model
-        .fields
-        .values()
+    let to_sql_matches: Vec<_> = scalar_fields()
         .map(|field| {
             let name = pascal_ident(field.name());
             let field_mod = snake_ident(field.name());
@@ -735,9 +768,7 @@ fn generate_where_param(model: &Model) -> TokenStream {
         })
         .collect();
 
-    let from_filter_arms: Vec<_> = model
-        .fields
-        .values()
+    let from_filter_arms: Vec<_> = scalar_fields()
         .map(|field| {
             let name = pascal_ident(field.name());
             quote! { WhereParam::#name(op) => op.to_filter(), }
@@ -1153,16 +1184,16 @@ fn generate_relation_helpers(model: &Model, _schema: &Schema) -> TokenStream {
         return TokenStream::new();
     }
 
+    // Each relation is a unit variant. A nested-include sub-query payload
+    // (`Option<Box<Target::Query>>`) is intentionally omitted: it was never
+    // wired to the executor and forced `IncludeParam`'s derived `Clone`/`Debug`
+    // to require the legacy `Query` builder to be `Clone`/`Debug`. Re-add a
+    // typed payload when nested includes are actually implemented.
     let include_variants: Vec<_> = relation_fields
         .iter()
         .map(|f| {
             let name = pascal_ident(f.name());
-            let is_list = f.modifier.is_list();
-            if is_list {
-                quote! { #name(Option<Box<super::super::#name::Query>>) }
-            } else {
-                quote! { #name }
-            }
+            quote! { #name }
         })
         .collect();
 

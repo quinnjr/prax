@@ -73,8 +73,39 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
     // `pub mod` never compiled when a numeric field was present. Re-add once
     // the Client exposes a proper `.increment()/.decrement()` update op.
 
-    // Generate filter operations
-    let filters = super::filters::generate_field_filters(field, model.name());
+    // Scalar-only members. Relation fields have no `SelectParam` variant
+    // and no scalar `WhereOp` filters — they are read via the model's
+    // `IncludeParam` (the `include()` helper below), not selected or
+    // filtered as columns. Emitting the scalar plumbing for a relation
+    // references `SelectParam::<Rel>` / `WhereParam::<Rel>` variants and a
+    // `WhereOp::Equals(<RelatedModel>)` value that don't (and shouldn't)
+    // exist.
+    let (select_fn, filters) = if is_relation {
+        (TokenStream::new(), TokenStream::new())
+    } else {
+        let select_fn = quote! {
+            /// Select this field.
+            pub fn select() -> super::SelectParam {
+                super::SelectParam::#field_name_pascal
+            }
+        };
+        let filters = super::filters::generate_field_filters(field, model.name());
+        (select_fn, filters)
+    };
+
+    // For relation fields, expose an `include()` helper returning the
+    // model's `IncludeParam` variant (a unit variant for both list and
+    // single relations — nested-include sub-queries are not yet wired).
+    let include_fn = if is_relation {
+        quote! {
+            /// Include this relation in the query.
+            pub fn include() -> super::IncludeParam {
+                super::IncludeParam::#field_name_pascal
+            }
+        }
+    } else {
+        TokenStream::new()
+    };
 
     quote! {
         #doc
@@ -88,11 +119,8 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
             /// Whether this field is a list.
             pub const IS_LIST: bool = #is_list;
 
-            /// Select this field.
-            pub fn select() -> super::SelectParam {
-                super::SelectParam::#field_name_pascal
-            }
-
+            #select_fn
+            #include_fn
             #order_by
             #set_ops
 

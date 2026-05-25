@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`prax_schema!` now compiles for schemas with relations.** The
+  schema-path model generator nests each model's struct inside
+  `pub mod <model>`, but its relation-referencing codegen emitted
+  paths calibrated for the flat `#[derive(Model)]` layout, producing
+  E0433 ("too many leading `super`") and a cascade (E0425/E0063/E0599/
+  E0277) on any relation. Fixed: relation field types are qualified
+  (`super::<target>::<Target>`), `FromRow` defaults relation fields,
+  `IncludeParam` variants are unit and module-correct, per-relation
+  field modules expose `include()` instead of invalid scalar
+  `select()`/filters, and relations are excluded from the legacy
+  `WhereParam`. This unblocks the macro DSL end-to-end against
+  schema-defined models with relations (previously every macro-DSL
+  e2e test had to fall back to derive-style models + `RecordingEngine`,
+  and the workspace fixture schema was kept relation-free).
+
 ### Added
 
 - **Aggregate macros (phase 6).** Three new macros over the existing
