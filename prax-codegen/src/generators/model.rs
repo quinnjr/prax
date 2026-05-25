@@ -365,7 +365,11 @@ pub fn generate_model_module_with_style(
             // Scalar/enum fields use the plain rendering.
             let field_type = match &field.field_type {
                 FieldType::Model(target) => {
-                    let target_type = format_ident!("{}", target.to_string());
+                    // Must match how the target model's struct ident and module
+                    // are formed: `pascal_ident(model.name())` for the struct,
+                    // `snake_ident(...)` for the module. Using the raw target
+                    // string here would desync for non-PascalCase model names.
+                    let target_type = pascal_ident(target.as_str());
                     let target_mod = snake_ident(target.as_str());
                     let base = quote! { super::#target_mod::#target_type };
                     crate::types::apply_modifier(base, &field.modifier)

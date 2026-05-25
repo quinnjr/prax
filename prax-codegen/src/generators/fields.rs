@@ -94,9 +94,8 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
     };
 
     // For relation fields, expose an `include()` helper returning the
-    // model's `IncludeParam` variant. List relations carry an optional
-    // boxed sub-query (`None` = include all); single relations are a unit
-    // variant.
+    // model's `IncludeParam` variant (a unit variant for both list and
+    // single relations — nested-include sub-queries are not yet wired).
     let include_fn = if is_relation {
         quote! {
             /// Include this relation in the query.
