@@ -522,6 +522,20 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
         self
     }
 
+    /// Add a per-column non-null count (`COUNT(col)`).
+    pub fn count_column(mut self, column: impl Into<String>) -> Self {
+        self.agg_fields
+            .push(AggregateField::CountColumn(column.into()));
+        self
+    }
+
+    /// Add a distinct count (`COUNT(DISTINCT col)`).
+    pub fn count_distinct(mut self, column: impl Into<String>) -> Self {
+        self.agg_fields
+            .push(AggregateField::CountDistinct(column.into()));
+        self
+    }
+
     /// Add sum of a column.
     pub fn sum(mut self, column: impl Into<String>) -> Self {
         self.agg_fields.push(AggregateField::Sum(column.into()));
@@ -1612,6 +1626,20 @@ mod tests {
 
         // Empty group columns should not produce GROUP BY
         assert!(!sql.contains("GROUP BY"));
+    }
+
+    #[test]
+    fn group_by_build_sql_emits_count_column_and_distinct() {
+        let op: GroupByOperation<TestModel, MockEngine> =
+            GroupByOperation::new(vec!["team_id".to_string()])
+                .count_column("email")
+                .count_distinct("region");
+        let (sql, _) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("COUNT(email) AS _count_email"), "got: {sql}");
+        assert!(
+            sql.contains("COUNT(DISTINCT region) AS _count_distinct_region"),
+            "got: {sql}"
+        );
     }
 
     #[test]
