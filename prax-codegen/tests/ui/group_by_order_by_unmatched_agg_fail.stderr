@@ -1,0 +1,5 @@
+error: order by `_sum.views` requires a matching `_sum: { views }` block
+ --> tests/ui/group_by_order_by_unmatched_agg_fail.rs:9:29
+  |
+9 |         order_by: { _sum: { views: desc } },
+  |                             ^^^^^

@@ -1,0 +1,5 @@
+error: `_all` has no distinct form; use COUNT(*) via `_all: true`
+ --> tests/ui/count_distinct_on_all_fail.rs:7:19
+  |
+7 |         _count: { _all: { distinct: true } },
+  |                   ^^^^
