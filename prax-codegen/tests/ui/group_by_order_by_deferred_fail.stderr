@@ -1,5 +1,0 @@
-error: order by `_sum.age` requires a matching `_sum: { age }` block
- --> tests/ui/group_by_order_by_deferred_fail.rs:9:29
-  |
-9 |         order_by: { _sum: { age: desc } },
-  |                             ^^^
