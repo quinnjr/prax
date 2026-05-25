@@ -14,13 +14,11 @@ use crate::macros::lower::aggregate_select::AggKind;
 /// An aggregate present in the group_by! call, for validating that an
 /// order-by aggregate references something actually selected.
 /// `column == None` means `_count`'s `_all`.
-#[allow(dead_code)]
 pub struct AggPresence {
     pub kind: AggKind,
     pub column: Option<String>,
 }
 
-#[allow(dead_code)]
 pub fn lower_group_by_order_by(
     block: &DslBlock,
     _ctx: &LowerCtx<'_>,

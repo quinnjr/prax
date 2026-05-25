@@ -581,7 +581,11 @@ pub fn emit_accessors_and_extensions(
                         self = self.having(cond);
                     }
                 }
-                let _ = args.order_by;
+                if let ::core::option::Option::Some(ob) = args.order_by {
+                    for o in ob.items {
+                        self = self.order_by(o);
+                    }
+                }
                 self
             }
         }
