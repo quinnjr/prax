@@ -105,6 +105,10 @@ impl AggregateField {
 pub struct AggregateResult {
     /// Total count (if requested).
     pub count: Option<i64>,
+    /// Per-column non-null counts, keyed by column (`COUNT(col)`).
+    pub count_columns: std::collections::HashMap<String, i64>,
+    /// Per-column distinct counts, keyed by column (`COUNT(DISTINCT col)`).
+    pub count_distinct: std::collections::HashMap<String, i64>,
     /// Sum results keyed by column name.
     pub sum: std::collections::HashMap<String, f64>,
     /// Average results keyed by column name.
@@ -134,6 +138,14 @@ impl AggregateResult {
                 if let FilterValue::Int(n) = v {
                     out.count = Some(n);
                 }
+            } else if let Some(col) = k.strip_prefix("_count_distinct_") {
+                if let Some(n) = value_to_i64(&v) {
+                    out.count_distinct.insert(col.to_string(), n);
+                }
+            } else if let Some(col) = k.strip_prefix("_count_") {
+                if let Some(n) = value_to_i64(&v) {
+                    out.count_columns.insert(col.to_string(), n);
+                }
             } else if let Some(col) = k.strip_prefix("_sum_") {
                 if let Some(f) = value_to_f64(&v) {
                     out.sum.insert(col.to_string(), f);
@@ -149,6 +161,16 @@ impl AggregateResult {
             }
         }
         out
+    }
+
+    /// Non-null count of a column (`COUNT(col)`), if present.
+    pub fn count_of(&self, column: &str) -> Option<i64> {
+        self.count_columns.get(column).copied()
+    }
+
+    /// Distinct count of a column (`COUNT(DISTINCT col)`), if present.
+    pub fn count_distinct_of(&self, column: &str) -> Option<i64> {
+        self.count_distinct.get(column).copied()
     }
 
     /// Pull the sum of a column as `f64` if present.
@@ -171,6 +193,15 @@ impl AggregateResult {
     /// is numeric.
     pub fn max_as_f64(&self, column: &str) -> Option<f64> {
         self.max.get(column).and_then(|v| v.as_f64())
+    }
+}
+
+fn value_to_i64(v: &crate::filter::FilterValue) -> Option<i64> {
+    use crate::filter::FilterValue;
+    match v {
+        FilterValue::Int(n) => Some(*n),
+        FilterValue::String(s) => s.parse::<i64>().ok(),
+        _ => None,
     }
 }
 
@@ -1677,5 +1708,22 @@ mod tests {
 
         let c = having::max_ne("salary", 0.0);
         assert!(matches!(c.op, HavingOp::Ne));
+    }
+
+    #[test]
+    fn from_row_hydrates_per_column_and_distinct_counts() {
+        use crate::filter::FilterValue;
+        use std::collections::HashMap;
+        let mut row = HashMap::new();
+        row.insert("_count".to_string(), FilterValue::Int(5));
+        row.insert("_count_email".to_string(), FilterValue::Int(3));
+        row.insert("_count_distinct_email".to_string(), FilterValue::Int(2));
+        let r = AggregateResult::from_row(row);
+        assert_eq!(r.count, Some(5));
+        assert_eq!(r.count_of("email"), Some(3));
+        assert_eq!(r.count_distinct_of("email"), Some(2));
+        // The distinct entry must NOT leak into count_columns keyed
+        // "distinct_email" via the _count_ prefix (ordering trap).
+        assert_eq!(r.count_columns.get("distinct_email"), None);
     }
 }
