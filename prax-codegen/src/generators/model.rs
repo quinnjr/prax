@@ -372,7 +372,28 @@ pub fn generate_model_module_with_style(
                     let target_type = pascal_ident(target.as_str());
                     let target_mod = snake_ident(target.as_str());
                     let base = quote! { super::#target_mod::#target_type };
-                    crate::types::apply_modifier(base, &field.modifier)
+                    // Relation fields are never populated from the database
+                    // row — the relation executor fills them after the main
+                    // query via the ModelRelationLoader impl. At construction
+                    // time (FromRow::from_row) they are initialized to
+                    // Default::default(), so they must be Default-constructible.
+                    //
+                    // List relations are `Vec<Target>` (empty default). Single
+                    // relations are `Option<Box<Target>>`, not `Option<Target>`,
+                    // for two reasons:
+                    //   1. A Required modifier would otherwise produce a bare
+                    //      `Target`, which is not Default (E0277).
+                    //   2. A self- or mutually-recursive single relation (e.g.
+                    //      `model Category { parent Category? }`) embedded by
+                    //      value is an infinitely-sized type (E0072/E0391). The
+                    //      `Box` provides the indirection that breaks the cycle;
+                    //      `Vec` already does this for list relations.
+                    // `None` is still the default and a valid initializer.
+                    if field.modifier.is_list() {
+                        quote! { Vec<#base> }
+                    } else {
+                        quote! { Option<Box<#base>> }
+                    }
                 }
                 _ => field_type_to_rust(&field.field_type, &field.modifier),
             };
@@ -435,7 +456,27 @@ pub fn generate_model_module_with_style(
         })
         .collect();
 
-    // Generate field modules
+    // Generate field modules. Guard against self-relation name collisions
+    // before doing anything else: a relation field whose snake name equals
+    // the model's own module name (e.g. `model Node { node Node? }`) would
+    // emit `pub mod node` inside `pub mod node`, making `super::node::Node`
+    // resolve into the inner field module instead of the sibling model module
+    // (E0433). Reject such schemas with a clear diagnostic.
+    for field in model.fields.values() {
+        if matches!(field.field_type, FieldType::Model(_))
+            && snake_ident(field.name()) == module_name
+        {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "relation field `{}` collides with model `{}`'s own module name; \
+                     rename the field to resolve the ambiguity",
+                    field.name(),
+                    model.name()
+                ),
+            ));
+        }
+    }
     let field_modules: Vec<_> = model
         .fields
         .values()
@@ -620,6 +661,22 @@ pub fn generate_model_module_with_style(
     let count_struct_tokens =
         super::count_struct::emit_count_struct(&model_name, &count_struct_outgoing);
 
+    // Emit a `ModelRelationLoader<E>` impl so schema-path models satisfy the
+    // bound `FindManyOperation::exec` requires unconditionally — without it,
+    // calling `.exec()` on any schema-path model is a compile error (E0277),
+    // making the macro DSL unusable for actual query execution.
+    //
+    // We emit the empty-`rels` stub: it errors at runtime on any relation name.
+    // A functional loader would need per-relation `Relation` marker types
+    // (with FK metadata) emitted into each relation field module — mirroring
+    // the derive path's `relation_accessors::emit`. That is a larger feature
+    // (relation loading on the schema path) and is tracked as a follow-up;
+    // until then `include()` on a schema-path model fails loudly with
+    // "unknown relation" rather than silently or at compile time. The impl is
+    // emitted inside the model module so `for #model_name` binds the local
+    // struct (the schema path nests the struct in `pub mod #module_name`).
+    let relation_loader_impl = super::derive_relation_loader::emit(&model_name, &[]);
+
     Ok(quote! {
         #doc
         pub mod #module_name {
@@ -672,6 +729,10 @@ pub fn generate_model_module_with_style(
             #from_row_impl
             #model_with_pk_impl
             #client_impl
+
+            // Stub ModelRelationLoader<E> — see rationale above. Restores
+            // `.exec()` on schema-path models; errors on any relation include.
+            #relation_loader_impl
 
             // Query/Actions pre-compiled-SQL builders (legacy, being replaced by Client<E>).
             #query_builder
@@ -1199,10 +1260,14 @@ fn generate_relation_helpers(model: &Model, _schema: &Schema) -> TokenStream {
 
     quote! {
         /// Include related records in the query.
+        ///
+        /// The `__None` sentinel (not `None`) is used as the `#[default]`
+        /// variant so that a relation field named `none` does not produce a
+        /// duplicate `None` variant, which would be a compile error.
         #[derive(Debug, Clone, Default)]
         pub enum IncludeParam {
             #[default]
-            None,
+            __None,
             #(#include_variants,)*
         }
     }

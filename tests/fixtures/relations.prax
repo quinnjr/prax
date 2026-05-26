@@ -14,3 +14,24 @@ model Post {
     author_id Int
     author    Author? @relation(fields: [author_id], references: [id])
 }
+
+// Multi-word model name: exercises snake_case module naming (`blog_post`)
+// and PascalCase struct/path resolution (`super::author::Author`).
+model BlogPost {
+    id        Int     @id @auto
+    title     String
+    author_id Int
+    author    Author? @relation(fields: [author_id], references: [id])
+}
+
+// Self-relation: the relation target is the model itself. The field names
+// (`parent`, `children`) deliberately differ from the model's own module
+// name (`category`) so the self-relation collision guard does not fire —
+// `super::category::Category` must resolve back to this model.
+model Category {
+    id        Int        @id @auto
+    name      String
+    parent_id Int
+    parent    Category?  @relation(fields: [parent_id], references: [id])
+    children  Category[] @relation(fields: [id], references: [parent_id])
+}

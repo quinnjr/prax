@@ -93,23 +93,32 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
         (select_fn, filters)
     };
 
-    // For relation fields, expose an `include()` helper returning the
-    // model's `IncludeParam` variant (a unit variant for both list and
-    // single relations — nested-include sub-queries are not yet wired).
-    let include_fn = if is_relation {
+    // For relation fields, expose a `fetch()` helper returning an
+    // `IncludeSpec` keyed by the relation's field name. This mirrors the
+    // derive path's `relation_accessors::emit` output so the two codegen
+    // paths share the same include API. The prior `include()` -> `IncludeParam`
+    // helper was divergent from the derive path and exposed a type that
+    // carries no relation metadata useful to the executor.
+    let fetch_fn = if is_relation {
+        let field_name_str = field.name();
         quote! {
-            /// Include this relation in the query.
-            pub fn include() -> super::IncludeParam {
-                super::IncludeParam::#field_name_pascal
+            /// Build an [`::prax_query::relations::IncludeSpec`] for this
+            /// relation. Used as `include(author::posts::fetch())`.
+            pub fn fetch() -> ::prax_query::relations::IncludeSpec {
+                ::prax_query::relations::IncludeSpec::new(#field_name_str)
             }
         }
     } else {
         TokenStream::new()
     };
 
-    quote! {
-        #doc
-        pub mod #field_name {
+    // COLUMN / IS_OPTIONAL / IS_LIST are meaningful only for scalar fields.
+    // Emitting them for relation fields is misleading: COLUMN would hold the
+    // field name (e.g. "posts"), which is not a real database column. Gate
+    // them behind `!is_relation` so relation field modules contain only the
+    // fetch() helper (and nothing that implies a backing column).
+    let scalar_consts = if !is_relation {
+        quote! {
             /// Database column name.
             pub const COLUMN: &str = #col_name;
 
@@ -118,9 +127,18 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
 
             /// Whether this field is a list.
             pub const IS_LIST: bool = #is_list;
+        }
+    } else {
+        TokenStream::new()
+    };
+
+    quote! {
+        #doc
+        pub mod #field_name {
+            #scalar_consts
 
             #select_fn
-            #include_fn
+            #fetch_fn
             #order_by
             #set_ops
 
