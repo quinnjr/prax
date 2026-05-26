@@ -25,8 +25,53 @@
 //! callers that need decimal values should cast the column to text
 //! (`amount::text`) and parse in application code.
 
+use std::error::Error as StdError;
+
 use prax_query::row::{RowError, RowRef, into_row_error};
 use tokio_postgres::Row;
+use tokio_postgres::types::{FromSql, Kind, Type};
+
+/// `FromSql` shim that accepts any column type and decodes its raw
+/// bytes as UTF-8.
+///
+/// Used to read postgres `ENUM` columns into a Rust `String`, since
+/// `&str: FromSql` only `accepts` TEXT/VARCHAR/BPCHAR/NAME/UNKNOWN
+/// (plus a few citext-shaped names). User-defined enums encode as
+/// raw UTF-8 on the wire — the same shape `text_from_sql` would
+/// produce — so this just runs the bytes through `str::from_utf8`.
+struct AnyText(String);
+
+impl<'a> FromSql<'a> for AnyText {
+    fn from_sql(_ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        Ok(AnyText(std::str::from_utf8(raw)?.to_owned()))
+    }
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+}
+
+/// `FromSql` shim used exclusively for null-probe logic.
+///
+/// `NullProbe` accepts every Postgres wire type and discards the bytes
+/// entirely — we only care whether the column is NULL, not what the
+/// value is. This avoids the UTF-8 conversion failure that `AnyText`
+/// would incur on binary-encoded types (UUID, INTEGER, BYTEA, etc.)
+/// when probing a non-null column.
+///
+/// `Option<NullProbe>` deserialises to `None` on NULL and `Some(NullProbe)`
+/// on any non-null value regardless of the column's OID, making it the
+/// correct type for `RowRef::is_null` overrides on drivers where the
+/// default `get_str_opt` fallback would reject non-text columns.
+struct NullProbe;
+
+impl<'a> FromSql<'a> for NullProbe {
+    fn from_sql(_ty: &Type, _raw: &'a [u8]) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        Ok(NullProbe)
+    }
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+}
 
 /// Newtype wrapper around `tokio_postgres::Row` that implements
 /// `prax_query::row::RowRef`.
@@ -89,6 +134,65 @@ impl RowRef for PgRow {
     fn get_str_opt(&self, c: &str) -> Result<Option<&str>, RowError> {
         into_row_error(c, self.try_get::<_, Option<&str>>(c))
     }
+    /// Override the trait default (which is `get_str + to_string`) so
+    /// we can decode columns whose Postgres-side type is *not* TEXT but
+    /// whose Rust-side codegen has emitted `pub field: String`:
+    ///
+    /// * `UUID` columns — emitted as `String` for Prisma `String @db.Uuid`
+    ///   fields. We decode via `uuid::Uuid::from_sql` and stringify.
+    /// * User-defined `ENUM` columns — also emitted as `String` via
+    ///   `FromColumn`'s `get_string` call (see codegen for `enum`
+    ///   variants). We decode via `AnyText` since `&str: FromSql` does
+    ///   not accept enum types.
+    ///
+    /// Without this override, the row decode fails with `"error
+    /// deserializing column N"` and the whole query bubbles up a
+    /// `[P6003] type conversion error`.
+    ///
+    /// A matching override on `get_string_opt` covers nullable variants.
+    fn get_string(&self, c: &str) -> Result<String, RowError> {
+        let columns = self.0.columns();
+        if let Some(col) = columns.iter().find(|col| col.name() == c) {
+            let ty = col.type_();
+            if *ty == Type::UUID {
+                return into_row_error(c, self.try_get::<_, ::uuid::Uuid>(c))
+                    .map(|u| u.to_string());
+            }
+            if matches!(ty.kind(), Kind::Enum(_)) {
+                return into_row_error(c, self.try_get::<_, AnyText>(c)).map(|t| t.0);
+            }
+        }
+        into_row_error(c, self.try_get::<_, &str>(c)).map(|s| s.to_string())
+    }
+    fn get_string_opt(&self, c: &str) -> Result<Option<String>, RowError> {
+        let columns = self.0.columns();
+        if let Some(col) = columns.iter().find(|col| col.name() == c) {
+            let ty = col.type_();
+            if *ty == Type::UUID {
+                return into_row_error(c, self.try_get::<_, Option<::uuid::Uuid>>(c))
+                    .map(|opt| opt.map(|u| u.to_string()));
+            }
+            if matches!(ty.kind(), Kind::Enum(_)) {
+                return into_row_error(c, self.try_get::<_, Option<AnyText>>(c))
+                    .map(|opt| opt.map(|t| t.0));
+            }
+        }
+        into_row_error(c, self.try_get::<_, Option<&str>>(c)).map(|opt| opt.map(|s| s.to_string()))
+    }
+    /// Override the trait default (which falls back to `get_str_opt`, and
+    /// therefore fails for non-TEXT column types like INTEGER, UUID, etc.)
+    /// with a type-agnostic null probe.
+    ///
+    /// `NullProbe: FromSql` accepts every Postgres wire type and discards
+    /// the payload entirely, so `Option<NullProbe>` deserialises to `None`
+    /// on NULL and `Some(NullProbe)` on any non-null value — regardless of
+    /// the column's OID — without attempting any byte interpretation. This
+    /// is exactly what the blanket `impl<T: FromColumn> FromColumn for
+    /// Option<T>` needs to short-circuit nullable columns of any type.
+    fn is_null(&self, c: &str) -> Result<bool, RowError> {
+        into_row_error(c, self.try_get::<_, Option<NullProbe>>(c)).map(|opt| opt.is_none())
+    }
+
     fn get_bytes(&self, c: &str) -> Result<&[u8], RowError> {
         into_row_error(c, self.try_get::<_, &[u8]>(c))
     }
