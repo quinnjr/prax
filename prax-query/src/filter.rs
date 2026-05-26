@@ -982,6 +982,26 @@ impl Filter {
         (sql, params)
     }
 
+    /// Recursively builds a SQL fragment for this filter, appending each bound
+    /// value to the shared `params` accumulator.
+    ///
+    /// # Placeholder contract
+    ///
+    /// `param_idx` is the count of parameters already bound *before* this node
+    /// (0-based). A leaf arm that binds its k-th value (1-based within that arm)
+    /// must emit `dialect.placeholder(param_idx + k)`: single-value arms use
+    /// `param_idx + 1`, list arms (`In`/`NotIn`) use `param_idx + i + 1` over the
+    /// enumerated values. This keeps the global placeholder sequence dense
+    /// (`$1, $2, $3, …`) and aligned with the order values are pushed onto
+    /// `params`.
+    ///
+    /// `And`/`Or` forward `base + params.len()` to each child (where
+    /// `base = param_idx - params.len()` is the original offset) so later
+    /// siblings account for everything earlier ones bound, without
+    /// double-counting when the And/Or is itself nested. `Not` and
+    /// `ScalarSubquery` forward `param_idx` unchanged. Do NOT advance `param_idx`
+    /// by `params.len()` inside a leaf arm — that over-counts as the shared
+    /// vector grows and reintroduces the historical `$1, $3, $6` mis-numbering bug.
     fn to_sql_with_params(
         &self,
         param_idx: usize,
@@ -1103,9 +1123,14 @@ impl Filter {
                 if filters.is_empty() {
                     return "TRUE".to_string();
                 }
+                // `base` is the original offset (params bound before this whole
+                // build); recover it so each child receives `base + params.len()`.
+                // Using `param_idx + params.len()` would double-count once this
+                // And is itself nested (entry `params.len() > 0`).
+                let base = param_idx - params.len();
                 let parts: Vec<_> = filters
                     .iter()
-                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params, dialect))
+                    .map(|f| f.to_sql_with_params(base + params.len(), params, dialect))
                     .collect();
                 format!("({})", parts.join(" AND "))
             }
@@ -1113,9 +1138,10 @@ impl Filter {
                 if filters.is_empty() {
                     return "FALSE".to_string();
                 }
+                let base = param_idx - params.len();
                 let parts: Vec<_> = filters
                     .iter()
-                    .map(|f| f.to_sql_with_params(param_idx + params.len(), params, dialect))
+                    .map(|f| f.to_sql_with_params(base + params.len(), params, dialect))
                     .collect();
                 format!("({})", parts.join(" OR "))
             }
@@ -2541,6 +2567,116 @@ mod tests {
         let f = Filter::Equals("a".into(), FilterValue::Int(7));
         let (sql, _) = f.to_sql(5, &Postgres);
         assert_eq!(sql, r#""a" = $6"#, "offset placeholder: {sql}");
+
+        // NotIn shares the enumerate path with In -> $1, $2.
+        let f = Filter::NotIn(
+            "status".into(),
+            vec![
+                FilterValue::String("deleted".into()),
+                FilterValue::String("archived".into()),
+            ],
+        );
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(
+            sql, r#""status" NOT IN ($1, $2)"#,
+            "NotIn placeholders: {sql}"
+        );
+        assert_eq!(params.len(), 2);
+
+        // Or distributes params across children just like And.
+        let f = Filter::Or(Box::new([
+            Filter::Equals("a".into(), FilterValue::Int(100)),
+            Filter::Equals("b".into(), FilterValue::Int(200)),
+        ]));
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(sql, r#"("a" = $1 OR "b" = $2)"#, "OR placeholders: {sql}");
+        assert_eq!(params.len(), 2);
+
+        // LIKE-family arm (StartsWith) binds one pattern parameter.
+        let f = Filter::StartsWith("name".into(), "admin".into());
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(sql, r#""name" LIKE $1"#, "StartsWith placeholder: {sql}");
+        assert_eq!(params.len(), 1);
+
+        // Deep nesting: And-of-(And, Equals). Accumulation must carry across
+        // the nested sibling -> $1, $2 inside, then $3 after.
+        let f = Filter::And(Box::new([
+            Filter::And(Box::new([
+                Filter::Equals("a".into(), FilterValue::Int(1)),
+                Filter::Equals("b".into(), FilterValue::Int(2)),
+            ])),
+            Filter::Equals("c".into(), FilterValue::Int(3)),
+        ]));
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(
+            sql, r#"(("a" = $1 AND "b" = $2) AND "c" = $3)"#,
+            "nested AND placeholders: {sql}"
+        );
+        assert_eq!(params.len(), 3);
+
+        // Cross-node nesting: Or inside And.
+        let f = Filter::And(Box::new([
+            Filter::Equals("a".into(), FilterValue::Int(10)),
+            Filter::Or(Box::new([
+                Filter::Equals("b".into(), FilterValue::Int(20)),
+                Filter::Equals("c".into(), FilterValue::Int(30)),
+            ])),
+        ]));
+        let (sql, params) = f.to_sql(0, &Postgres);
+        assert_eq!(
+            sql, r#"("a" = $1 AND ("b" = $2 OR "c" = $3))"#,
+            "And-Or nesting: {sql}"
+        );
+        assert_eq!(params.len(), 3);
+
+        // Multi-value IN at a non-zero offset -> $6, $7, $8.
+        let f = Filter::In(
+            "id".into(),
+            vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3),
+            ],
+        );
+        let (sql, params) = f.to_sql(5, &Postgres);
+        assert_eq!(sql, r#""id" IN ($6, $7, $8)"#, "IN offset: {sql}");
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn to_sql_placeholders_are_dialect_specific() {
+        // The numbering fix must hold across positional and position-less
+        // dialects: SQLite uses `?N`, MySQL uses a bare `?` (index ignored).
+        use crate::dialect::{Mysql, Sqlite};
+
+        let in_filter = || {
+            Filter::In(
+                "id".into(),
+                vec![
+                    FilterValue::Int(1),
+                    FilterValue::Int(2),
+                    FilterValue::Int(3),
+                ],
+            )
+        };
+
+        // SQLite: positional, quoted with double quotes.
+        let (sql, params) = in_filter().to_sql(0, &Sqlite);
+        assert_eq!(sql, r#""id" IN (?1, ?2, ?3)"#, "SQLite IN: {sql}");
+        assert_eq!(params.len(), 3);
+
+        // MySQL: position-less placeholders, backtick-quoted idents.
+        let (sql, params) = in_filter().to_sql(0, &Mysql);
+        assert_eq!(sql, "`id` IN (?, ?, ?)", "MySQL IN: {sql}");
+        assert_eq!(params.len(), 3);
+
+        // SQLite ANDed equals confirm sequential ?N across siblings.
+        let f = Filter::And(Box::new([
+            Filter::Equals("a".into(), FilterValue::Int(10)),
+            Filter::Equals("b".into(), FilterValue::Int(20)),
+        ]));
+        let (sql, _) = f.to_sql(0, &Sqlite);
+        assert_eq!(sql, r#"("a" = ?1 AND "b" = ?2)"#, "SQLite AND: {sql}");
     }
 
     #[test]
