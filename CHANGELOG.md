@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Postgres `String`↔non-TEXT column round-tripping.** `FilterValue::String`
+  was bound straight through as a Rust `String`, which tokio-postgres rejects
+  against `UUID`/`TIMESTAMPTZ`/`TIMESTAMP`/`DATE`/`TIME`/`ENUM` columns with
+  `WrongType`. Binding now goes through a `PgString` `ToSql` shim that inspects
+  the target column type and re-parses to the correct Rust type (e.g. `uuid::Uuid`,
+  `chrono::DateTime<Utc>`). On the read side, `PgRow::get_string`/`get_string_opt`
+  decode `UUID` and user-defined `ENUM` columns that codegen emits as `String`,
+  and `PgRow::is_null` uses a type-agnostic null probe so `Option<T>` works on
+  any column type, not just TEXT. Adds an `#[ignore]`/`PRAX_E2E`-gated
+  `uuid_binding` regression test. (Recovered from the never-merged
+  `fix/postgres-uuid-string-binding` branch; the placeholder commit it also
+  carried is superseded by the `Filter::to_sql` fix below.)
+
 - **`Filter::to_sql` emitted mis-numbered bind placeholders.** Every leaf
   arm advanced the parameter index with `param_idx += params.len()`, which
   accumulates as the shared `params` vector grows instead of stepping by
