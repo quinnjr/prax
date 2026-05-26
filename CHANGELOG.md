@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Filter::to_sql` emitted mis-numbered bind placeholders.** Every leaf
+  arm advanced the parameter index with `param_idx += params.len()`, which
+  accumulates as the shared `params` vector grows instead of stepping by
+  one. Any filter binding more than one parameter produced non-sequential,
+  out-of-range placeholders — e.g. `IN ($1, $3, $6)` for three values and
+  `($1) AND ($3)` for two ANDed conditions — which fail at execution on
+  Postgres/positional dialects (`there is no parameter $N`). Leaf arms now
+  emit `param_idx + 1` (and `param_idx + i + 1` for `IN`/`NOT IN` lists),
+  matching the contract the `ScalarSubquery` arm already documented. A
+  related latent bug in the `And`/`Or` arms was also fixed: they forwarded
+  `param_idx + params.len()` to children, which double-counts once the
+  `And`/`Or` is itself nested (e.g. an `Or` inside an `And` emitted
+  `("a" = $1 AND ("b" = $3 OR "c" = $4))` instead of `$2, $3`). They now
+  forward `base + params.len()` where `base = param_idx - params.len()` is
+  the original offset. Single-condition and single-level filters were
+  unaffected, which is why existing unit tests (asserting only column
+  quoting) and the feature-gated live DB tests never caught it. Added
+  regression tests asserting exact sequential numbering across nested
+  boolean groups, the `NotIn`/`Or`/`LIKE` arms, non-zero offsets, and the
+  SQLite/MySQL dialects.
+
 - **`prax_schema!` now compiles for schemas with relations.** The
   schema-path model generator nests each model's struct inside
   `pub mod <model>`, but its relation-referencing codegen emitted
