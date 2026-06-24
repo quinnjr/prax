@@ -27,6 +27,13 @@ ignore = [
     # solely for ORM-comparison benchmarks (benches/orm_comparison.rs) and
     # is never shipped to users.
     { id = "RUSTSEC-2026-0111", reason = "diesel SQLite UTF-8 unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0134", reason = "diesel Mysql date/time padding-bytes unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0135", reason = "diesel SQLite batch-insert debug/display transmute unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0136", reason = "diesel COPY FROM/TO command injection: dev-only (ORM benchmark comparison against Diesel); prax never calls diesel's COPY APIs and diesel is not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0137", reason = "diesel SqliteAggregate unaligned access: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0172", reason = "diesel SQLite deserialize_readonly_database use-after-free: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0138", reason = "diesel-async Mysql date/time padding-bytes unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
+    { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained (build-time proc-macro via mysql-common-derive and sea-bae, both reached only through the dev-only ORM benchmark crates); no safe upgrade and not in the runtime dep tree" },
 
     # idna 0.2.x Punycode bug: reached via trust-dns-proto 0.21 -> mongodb 2.8.
     # mongodb 3.x drops trust-dns for hickory-resolver which uses idna 1.x.

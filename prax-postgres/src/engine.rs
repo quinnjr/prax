@@ -468,11 +468,13 @@ impl<T: Model> PgQueryBuilder<T> {
 /// type-dispatch at runtime on `Column::type_()` and project into a
 /// [`FilterValue`].
 ///
-/// NULL maps to `FilterValue::Null`. NUMERIC is returned as
-/// `FilterValue::String` because the workspace's tokio-postgres
-/// feature set doesn't enable `with-rust_decimal-*`; the aggregate
-/// result folder's numeric parser reads the text form back into a
-/// float for sum/avg accessors.
+/// NULL maps to `FilterValue::Null`. NUMERIC (what AVG returns) is
+/// decoded through `rust_decimal::Decimal` — tokio-postgres has no
+/// `FromSql for String` impl for NUMERIC, so the `db-tokio-postgres`
+/// feature of `rust_decimal` supplies the decoder — and then rendered
+/// to its text form as `FilterValue::String`; the aggregate result
+/// folder's numeric parser reads that text back into a float for the
+/// sum/avg accessors.
 ///
 /// Unknown types fall through to `try_get::<String>` so a novel
 /// column type doesn't silently drop. Decoding failures record
@@ -520,7 +522,19 @@ fn decode_aggregate_cell(
             .flatten()
             .map(FilterValue::Float)
             .unwrap_or(FilterValue::Null),
-        Type::TEXT | Type::VARCHAR | Type::CHAR | Type::NAME | Type::BPCHAR | Type::NUMERIC => row
+        // NUMERIC has no `FromSql for String` impl in tokio-postgres, so it
+        // must be decoded through `rust_decimal::Decimal` (enabled via the
+        // crate's `db-tokio-postgres` feature) and then rendered to its text
+        // form. The aggregate result folder parses this back into an f64 for
+        // the sum/avg accessors. This is the type AVG() returns, so getting it
+        // wrong silently drops every average.
+        Type::NUMERIC => row
+            .try_get::<_, Option<rust_decimal::Decimal>>(idx)
+            .ok()
+            .flatten()
+            .map(|d| FilterValue::String(d.to_string()))
+            .unwrap_or(FilterValue::Null),
+        Type::TEXT | Type::VARCHAR | Type::CHAR | Type::NAME | Type::BPCHAR => row
             .try_get::<_, Option<String>>(idx)
             .ok()
             .flatten()

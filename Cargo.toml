@@ -142,7 +142,7 @@ chrono = { version = "0.4", features = ["serde"] }
 walkdir = "2.5"
 
 # LRU cache (used by prax-postgres prepared-statement cache)
-lru = "0.12"
+lru = "0.16"
 
 # Testing
 insta = { version = "1.40", features = ["yaml"] }

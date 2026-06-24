@@ -40,7 +40,10 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Decimal
-rust_decimal = { workspace = true }
+# `db-tokio-postgres` adds the `FromSql`/`ToSql` impls for NUMERIC <-> Decimal
+# (tokio-postgres 0.7 ships no `with-rust_decimal-*` feature gate of its own),
+# which `decode_aggregate_cell` needs to read AVG()/NUMERIC aggregate cells.
+rust_decimal = { workspace = true, features = ["db-tokio-postgres"] }
 
 # Tracing
 tracing = "0.1"
