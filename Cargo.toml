@@ -112,7 +112,7 @@ sqlite-vector-rs = "0.2.2"
 duckdb = { version = "1.4", features = ["bundled", "json", "parquet", "chrono", "serde_json", "uuid"] }
 
 # ScyllaDB (high-performance Cassandra-compatible)
-scylla = "0.14"
+scylla = "0.15"
 
 # Apache Cassandra driver (pure Rust)
 cdrs-tokio = "9.0"
