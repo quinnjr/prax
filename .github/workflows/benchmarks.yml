@@ -29,7 +29,7 @@ jobs:
     # baseline) and on manual dispatch for ad-hoc regression checks.
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0  # Full history for baseline comparison
 
@@ -112,7 +112,7 @@ jobs:
     name: Throughput Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -154,7 +154,7 @@ jobs:
     name: Memory Efficiency Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -195,7 +195,7 @@ jobs:
     name: Async Performance Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -234,7 +234,7 @@ jobs:
     needs: [benchmark-regression, throughput-benchmarks, memory-benchmarks, async-benchmarks]
     if: always()
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
