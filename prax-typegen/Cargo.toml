@@ -23,7 +23,7 @@ path = "src/lib.rs"
 [dependencies]
 prax-schema.workspace = true
 clap = { version = "4", features = ["derive"] }
-convert_case = "0.6"
+convert_case = "0.10"
 thiserror = "2.0"
 
 [dev-dependencies]
