@@ -108,6 +108,27 @@ impl PreparedStatementCache {
         debug!("Statement cache cleared");
     }
 
+    /// Forget a single cached SQL string, so the next `get_or_prepare` for it
+    /// records a miss and re-prepares.
+    ///
+    /// Used to recover from PostgreSQL `0A000 "cached plan must not change
+    /// result type"`: DDL altered a referenced table's result columns while a
+    /// prepared statement for this SQL was cached on the connection. Dropping
+    /// the key here, combined with a fresh (uncached) prepare on the retry,
+    /// re-plans against the current schema. Returns whether the key was
+    /// present.
+    pub fn evict(&self, sql: &str) -> bool {
+        let mut cache = self
+            .prepared_queries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let existed = cache.pop(sql).is_some();
+        if existed {
+            debug!(sql = %sql, "Evicted stale prepared statement from cache");
+        }
+        existed
+    }
+
     /// Get the number of cached statement keys.
     pub fn len(&self) -> usize {
         let cache = self
@@ -171,5 +192,25 @@ mod tests {
         assert!(inner.peek("A").is_some());
         assert!(inner.peek("B").is_none(), "B should have been evicted");
         assert!(inner.peek("C").is_some());
+    }
+
+    #[test]
+    fn test_evict_removes_only_the_named_sql() {
+        let cache = PreparedStatementCache::new(10);
+        {
+            let mut inner = cache.prepared_queries.lock().unwrap();
+            inner.put("SELECT 1".to_string(), ());
+            inner.put("SELECT 2".to_string(), ());
+        }
+        // Evicting a present key reports true and drops just that entry.
+        assert!(cache.evict("SELECT 1"));
+        {
+            let inner = cache.prepared_queries.lock().unwrap();
+            assert!(inner.peek("SELECT 1").is_none());
+            assert!(inner.peek("SELECT 2").is_some());
+        }
+        // Evicting an absent key is a no-op reporting false.
+        assert!(!cache.evict("SELECT 1"));
+        assert!(!cache.evict("never cached"));
     }
 }
