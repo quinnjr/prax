@@ -595,3 +595,89 @@ async fn e2e_query_one_with_multiple_rows_behavior() {
 
     drop_table(&pool, &table).await;
 }
+
+// =============================================================================
+// Stale cached plan recovery (0A000)
+// =============================================================================
+
+/// Reproduces PostgreSQL `0A000 "cached plan must not change result type"`
+/// and asserts the connection wrapper recovers in place.
+///
+/// The bug: a connection prepares (and caches) a `SELECT *`/`RETURNING *`
+/// plan, then DDL widens the table's result columns; the next execute of the
+/// cached plan on that same connection raises `0A000`. Before the fix this
+/// surfaced as a terminal generic error and only a process restart (dropping
+/// every pooled prepared statement) recovered.
+///
+/// A single-connection pool forces both statements onto the same backend so
+/// the cached plan is genuinely reused. The second `SELECT *` must succeed —
+/// the wrapper evicts the stale statement, re-prepares uncached, and retries.
+#[tokio::test]
+#[ignore = "requires running PostgreSQL via docker-compose"]
+async fn e2e_recovers_from_stale_cached_plan_after_ddl() {
+    if skip_unless_e2e().is_none() {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    }
+    // max_connections(1): every acquire is the SAME backend, so the prepared
+    // plan cached on the first SELECT is the one the second SELECT reuses.
+    let url = skip_unless_e2e().expect("PRAX_E2E=1 and POSTGRES_URL required");
+    let pool = PgPoolBuilder::new()
+        .url(url)
+        .max_connections(1)
+        .connection_timeout(Duration::from_secs(10))
+        .build()
+        .await
+        .expect("connect to postgres");
+
+    let table = unique_table("staleplan");
+    drop_table(&pool, &table).await;
+
+    let conn = pool.get().await.expect("conn");
+    conn.batch_execute(&format!(
+        "CREATE TABLE {table} (id SERIAL PRIMARY KEY, name TEXT NOT NULL)"
+    ))
+    .await
+    .expect("create table");
+    conn.batch_execute(&format!("INSERT INTO {table} (name) VALUES ('alice')"))
+        .await
+        .expect("seed row");
+
+    let select_star = format!("SELECT * FROM {table}");
+
+    // First execute: prepares and caches the plan (2 result columns).
+    let rows = conn
+        .query(&select_star, &[])
+        .await
+        .expect("initial select *");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].len(), 2, "expected id,name before DDL");
+
+    // DDL widens the result shape of the cached plan.
+    conn.batch_execute(&format!(
+        "ALTER TABLE {table} ADD COLUMN score INTEGER NOT NULL DEFAULT 0"
+    ))
+    .await
+    .expect("alter table add column");
+
+    // Re-executing the SAME `SELECT *` on the SAME connection would raise
+    // 0A000 "cached plan must not change result type". With the fix, the
+    // wrapper re-prepares and this succeeds, now returning 3 columns.
+    let rows = conn
+        .query(&select_star, &[])
+        .await
+        .expect("select * after DDL must self-heal, not error with 0A000");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].len(),
+        3,
+        "recovered plan must reflect the added column (id,name,score)"
+    );
+    let score: i32 = rows[0].get(2);
+    assert_eq!(score, 0);
+
+    // Release the single pooled connection before cleanup — a 1-connection
+    // pool would otherwise deadlock when drop_table tries to acquire.
+    drop(conn);
+    drop_table(&pool, &table).await;
+}

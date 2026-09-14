@@ -64,12 +64,24 @@ impl From<SqlxError> for QueryError {
                 // Classify database errors by SQLSTATE code rather than by
                 // substring-matching the message (mirrors prax-postgres).
                 sqlx::Error::Database(db_err) => match db_err.code().as_deref() {
-                    // unique violation / foreign key violation
-                    Some("23505") | Some("23503") => {
+                    // unique / foreign key / check violation
+                    Some("23505") | Some("23503") | Some("23514") => {
                         QueryError::constraint_violation("", e.to_string())
                     }
                     // not-null violation
                     Some("23502") => QueryError::invalid_input("", e.to_string()),
+                    // Stale server-side prepared plan after DDL — transient,
+                    // retryable. 0A000 is the shared FEATURE_NOT_SUPPORTED
+                    // class, so gate on the specific cached-plan message from
+                    // the DbError (not the outer Display); other 0A000
+                    // conditions stay terminal.
+                    Some("0A000")
+                        if db_err
+                            .message()
+                            .contains("cached plan must not change result type") =>
+                    {
+                        QueryError::stale_plan(e.to_string())
+                    }
                     _ => QueryError::database(e.to_string()),
                 },
                 _ => QueryError::database(e.to_string()),
@@ -218,6 +230,44 @@ mod tests {
         let err = SqlxError::from(sqlx::Error::Database(Box::new(db_err)));
         let query_err: QueryError = err.into();
         assert_eq!(query_err.code, prax_query::ErrorCode::DatabaseError);
+    }
+
+    #[test]
+    fn test_sqlx_check_violation_maps_to_constraint() {
+        // SQLSTATE 23514 (check violation) classifies as a constraint error.
+        let db_err = MockDbError {
+            message: "new row violates check constraint".to_string(),
+            code: Some("23514".to_string()),
+        };
+        let err = SqlxError::from(sqlx::Error::Database(Box::new(db_err)));
+        let query_err: QueryError = err.into();
+        assert!(query_err.is_constraint_violation());
+    }
+
+    #[test]
+    fn test_sqlx_stale_cached_plan_is_retryable() {
+        // 0A000 with the cached-plan message is transient and retryable.
+        let db_err = MockDbError {
+            message: "cached plan must not change result type".to_string(),
+            code: Some("0A000".to_string()),
+        };
+        let err = SqlxError::from(sqlx::Error::Database(Box::new(db_err)));
+        let query_err: QueryError = err.into();
+        assert_eq!(query_err.code, prax_query::ErrorCode::SerializationFailure);
+        assert!(query_err.is_retryable());
+    }
+
+    #[test]
+    fn test_sqlx_other_0a000_stays_generic() {
+        // A genuine "feature not supported" 0A000 is terminal.
+        let db_err = MockDbError {
+            message: "cannot insert into a view".to_string(),
+            code: Some("0A000".to_string()),
+        };
+        let err = SqlxError::from(sqlx::Error::Database(Box::new(db_err)));
+        let query_err: QueryError = err.into();
+        assert_eq!(query_err.code, prax_query::ErrorCode::DatabaseError);
+        assert!(!query_err.is_retryable());
     }
 
     #[test]

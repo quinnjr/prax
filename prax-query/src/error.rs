@@ -569,6 +569,27 @@ impl QueryError {
         .with_help("Deadlocks occur when two transactions wait for each other's locks")
     }
 
+    /// Create a stale-cached-plan error.
+    ///
+    /// PostgreSQL raises `0A000 "cached plan must not change result type"`
+    /// when a server-side prepared statement is reused after DDL has altered
+    /// the result columns of the tables it references (for example, a pooled
+    /// connection that prepared a statement before an `ALTER TABLE … ADD
+    /// COLUMN`). The condition is transient: discarding the stale plan and
+    /// re-preparing against the current schema resolves it, so this maps to
+    /// the retryable [`ErrorCode::SerializationFailure`] class rather than the
+    /// terminal generic [`ErrorCode::DatabaseError`]. That lets the retry
+    /// middleware re-run the query transparently on a fresh statement instead
+    /// of surfacing an opaque `P5005` to the caller.
+    pub fn stale_plan(message: impl Into<String>) -> Self {
+        Self::new(ErrorCode::SerializationFailure, message.into())
+            .with_suggestion("Retry the query; the cached plan will be re-prepared")
+            .with_help(
+                "A prepared statement was reused after DDL changed a referenced table's result \
+                 columns. This is transient and clears on re-prepare.",
+            )
+    }
+
     /// Create an SQL syntax error.
     pub fn sql_syntax(message: impl Into<String>, sql: impl Into<String>) -> Self {
         let message = message.into();
@@ -872,6 +893,16 @@ mod tests {
         assert!(QueryError::deadlock().is_retryable());
         assert!(QueryError::pool_exhausted(10).is_retryable());
         assert!(!QueryError::not_found("User").is_retryable());
+    }
+
+    #[test]
+    fn test_stale_plan_is_retryable() {
+        // A stale cached-plan error (Postgres 0A000) is transient: it must be
+        // classified retryable so the retry middleware re-prepares rather than
+        // surfacing a terminal generic database error.
+        let err = QueryError::stale_plan("cached plan must not change result type");
+        assert_eq!(err.code, ErrorCode::SerializationFailure);
+        assert!(err.is_retryable());
     }
 
     #[test]

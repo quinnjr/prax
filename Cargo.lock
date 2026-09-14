@@ -331,7 +331,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -342,7 +342,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1588,9 +1588,9 @@ dependencies = [
 
 [[package]]
 name = "crossbeam-epoch"
-version = "0.9.18"
+version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b82ac4a3c2ca9c3460964f020e1402edd5753411d7737aa39c3714ad1b5420e"
+checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -2206,7 +2206,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2651,6 +2651,11 @@ name = "hashbrown"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4f467dd6dccf739c208452f8014c75c18bb8301b050ad1cfb27153803edb0f51"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -2864,7 +2869,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tokio",
  "tower-service",
  "tracing",
@@ -3123,7 +3128,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3423,6 +3428,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f66e8d5d03f609abc3a39e6f08e4164ebf1447a732906d39eb9b99b7919ef39"
 dependencies = [
  "hashbrown 0.16.1",
+]
+
+[[package]]
+name = "lru"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff9840bcc50b71349309900da0ce7279aa336ae71d73250b07998932c7d97c25"
+dependencies = [
+ "hashbrown 0.17.0",
 ]
 
 [[package]]
@@ -3863,7 +3877,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4489,7 +4503,7 @@ dependencies = [
 
 [[package]]
 name = "prax-actix"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -4504,7 +4518,7 @@ dependencies = [
 
 [[package]]
 name = "prax-armature"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -4519,7 +4533,7 @@ dependencies = [
 
 [[package]]
 name = "prax-axum"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -4538,7 +4552,7 @@ dependencies = [
 
 [[package]]
 name = "prax-cassandra"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "cdrs-tokio",
@@ -4564,7 +4578,7 @@ dependencies = [
 
 [[package]]
 name = "prax-codegen"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "convert_case 0.6.0",
  "insta",
@@ -4582,7 +4596,7 @@ dependencies = [
 
 [[package]]
 name = "prax-duckdb"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4604,7 +4618,7 @@ dependencies = [
 
 [[package]]
 name = "prax-import"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "convert_case 0.6.0",
  "criterion 0.5.1",
@@ -4631,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "prax-migrate"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4650,7 +4664,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mongodb"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "bson",
@@ -4672,7 +4686,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mssql"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "bb8",
@@ -4698,7 +4712,7 @@ dependencies = [
 
 [[package]]
 name = "prax-mysql"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4718,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "prax-orm"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "bson",
  "cargo-husky",
@@ -4764,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "prax-orm-cli"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "assert_cmd",
  "chrono",
@@ -4794,7 +4808,7 @@ dependencies = [
 
 [[package]]
 name = "prax-pgvector"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "half",
  "pgvector",
@@ -4812,13 +4826,13 @@ dependencies = [
 
 [[package]]
 name = "prax-postgres"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "bytes",
  "chrono",
  "deadpool-postgres",
  "futures",
- "lru 0.16.4",
+ "lru 0.18.4",
  "postgres-types",
  "postgres_rustls",
  "prax-query",
@@ -4839,7 +4853,7 @@ dependencies = [
 
 [[package]]
 name = "prax-query"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -4870,7 +4884,7 @@ dependencies = [
 
 [[package]]
 name = "prax-schema"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "criterion 0.8.2",
  "indexmap",
@@ -4893,13 +4907,13 @@ dependencies = [
 
 [[package]]
 name = "prax-scylladb"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
  "criterion 0.8.2",
  "futures",
- "lru 0.16.4",
+ "lru 0.18.4",
  "openssl",
  "parking_lot",
  "prax-query",
@@ -4919,7 +4933,7 @@ dependencies = [
 
 [[package]]
 name = "prax-sqlite"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4943,7 +4957,7 @@ dependencies = [
 
 [[package]]
 name = "prax-sqlx"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4963,7 +4977,7 @@ dependencies = [
 
 [[package]]
 name = "prax-typegen"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "clap",
  "convert_case 0.6.0",
@@ -5159,7 +5173,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.2",
  "rustls 0.23.40",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -5196,7 +5210,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -5675,7 +5689,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6368,7 +6382,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6866,7 +6880,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6885,7 +6899,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7949,7 +7963,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

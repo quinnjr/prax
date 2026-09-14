@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-14
+
+### Fixed
+
+- **postgres**: recover in place from `0A000 "cached plan must not change
+  result type"`. When DDL alters the result columns of a table referenced by
+  a cached prepared statement (e.g. `ALTER TABLE … ADD COLUMN`), a long-lived
+  pooled connection's next execute of that plan raised `0A000`, which the
+  driver reported as a terminal generic `DatabaseError` — a hard failure that
+  previously only a full process restart cleared. The non-transactional
+  connection methods now detect this, evict the SQL from the statement cache,
+  re-prepare it uncached (deadpool's `prepare_cached` would return the same
+  invalidated statement), and re-execute once against the current schema.
+  Detection reads the `DbError` message, since tokio-postgres renders a DB
+  error's `Display` as just `"db error"`. In a transaction the error aborts
+  the transaction, so it cannot be retried in place; there it is classified
+  retryable (`SerializationFailure`) so a caller retrying the whole
+  transaction recovers. Both paths are gated on the specific cached-plan
+  message, so genuine `FEATURE_NOT_SUPPORTED` errors stay terminal.
+- **query**: `HAVING` thresholds on count aggregates (`COUNT(*)`,
+  `COUNT(col)`, `COUNT(DISTINCT col)`) now bind as integers. They were bound
+  as `f64`, which Postgres rejected against the `BIGINT`/`Int8` count
+  expression with "error serializing parameter" (`Int8` vs `f64`). `SUM`/
+  `AVG`/`MIN`/`MAX` thresholds keep float binding.
+- **postgres/sqlx**: map SQLSTATE `23514` (check-constraint violation) to a
+  constraint-violation error rather than a generic database error.
+
+### Changed
+
+- **deps**: bump `lru` to 0.18 and `crossbeam-epoch` to 0.9.21, clearing
+  RUSTSEC-2026-0253 (use-after-free in `LruCache::pop()`, which the new
+  stale-plan recovery exercises) and RUSTSEC-2026-0204.
+
 ## [0.12.0] - 2026-08-22
 
 ### Breaking
