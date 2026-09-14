@@ -118,6 +118,20 @@ impl AggregateField {
             Self::Max(col) => format!("_max_{}", col),
         }
     }
+
+    /// Whether this aggregate yields an integer count.
+    ///
+    /// `COUNT(*)`, `COUNT(col)` and `COUNT(DISTINCT col)` all return SQL
+    /// `BIGINT`/`Int8`, so a `HAVING` comparison against one must bind its
+    /// threshold as an integer — binding an `f64` makes the driver reject
+    /// the parameter with a type mismatch (`Int8` vs `f64`). `SUM`/`AVG`/
+    /// `MIN`/`MAX` are value-typed and keep float binding.
+    pub fn is_count(&self) -> bool {
+        matches!(
+            self,
+            Self::CountAll | Self::CountColumn(_) | Self::CountDistinct(_)
+        )
+    }
 }
 
 /// Result of an aggregation query.
@@ -686,9 +700,17 @@ impl<M: Model, E: QueryEngine> GroupByOperation<M, E> {
         }
 
         // Add HAVING clause — the comparison value is bound as a parameter,
-        // never interpolated into the SQL text.
+        // never interpolated into the SQL text. A count aggregate returns an
+        // integer (Postgres Int8), so its threshold must bind as an integer;
+        // binding an f64 there is rejected by the driver as a type mismatch.
+        // Value aggregates (SUM/AVG/MIN/MAX) keep float binding.
         if let Some(having) = &self.having {
-            params.push(crate::filter::FilterValue::Float(having.value));
+            let value = if having.field.is_count() {
+                crate::filter::FilterValue::Int(having.value as i64)
+            } else {
+                crate::filter::FilterValue::Float(having.value)
+            };
+            params.push(value);
             sql.push_str(&format!(
                 " HAVING {} {} {}",
                 having.field.to_sql_dialect(dialect),
@@ -1490,7 +1512,7 @@ mod tests {
 
         // The HAVING value is bound as a parameter, not interpolated.
         assert!(sql.contains("HAVING COUNT(*) > $1"), "got: {sql}");
-        assert_eq!(params, vec![FilterValue::Float(5.0)]);
+        assert_eq!(params, vec![FilterValue::Int(5)]);
     }
 
     #[test]
@@ -1505,10 +1527,7 @@ mod tests {
 
         assert!(sql.contains(r#"WHERE "active" = $1"#), "got: {sql}");
         assert!(sql.contains("HAVING COUNT(*) > $2"), "got: {sql}");
-        assert_eq!(
-            params,
-            vec![FilterValue::Bool(true), FilterValue::Float(5.0)]
-        );
+        assert_eq!(params, vec![FilterValue::Bool(true), FilterValue::Int(5)]);
     }
 
     #[test]
@@ -1525,7 +1544,7 @@ mod tests {
             "SELECT `department`, COUNT(*) AS `_count` FROM `test_models` \
              GROUP BY `department` HAVING COUNT(*) > ?"
         );
-        assert_eq!(params, vec![FilterValue::Float(5.0)]);
+        assert_eq!(params, vec![FilterValue::Int(5)]);
     }
 
     #[test]
@@ -1666,6 +1685,38 @@ mod tests {
         } else {
             panic!("Expected Sum");
         }
+    }
+
+    #[test]
+    fn having_count_binds_integer_param_not_float() {
+        use crate::filter::FilterValue;
+        // Regression: COUNT(*) is Int8 in Postgres, so a HAVING against it must
+        // bind an integer parameter. Binding an f64 made the driver reject it
+        // with "error serializing parameter 0" (Int8 vs f64).
+        let op: GroupByOperation<TestModel, MockEngine> =
+            GroupByOperation::new(vec!["team_id".to_string()])
+                .count()
+                .having(having::count_gt(3.0));
+        let (sql, params) = op.build_sql(&crate::dialect::Postgres);
+        assert!(sql.contains("HAVING"), "expected HAVING clause: {sql}");
+        assert_eq!(
+            params.last(),
+            Some(&FilterValue::Int(3)),
+            "count HAVING threshold must bind as Int, got {:?}",
+            params.last()
+        );
+
+        // A value aggregate keeps float binding.
+        let op: GroupByOperation<TestModel, MockEngine> =
+            GroupByOperation::new(vec!["team_id".to_string()])
+                .sum("score")
+                .having(having::sum_gt("score", 100.0));
+        let (_sql, params) = op.build_sql(&crate::dialect::Postgres);
+        assert!(
+            matches!(params.last(), Some(FilterValue::Float(_))),
+            "sum HAVING threshold must bind as Float, got {:?}",
+            params.last()
+        );
     }
 
     #[test]

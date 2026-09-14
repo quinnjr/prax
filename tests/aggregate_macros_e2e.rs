@@ -563,7 +563,7 @@ fn group_by_macro_emits_group_by_aggregate_and_having() {
         "missing parameterized HAVING; got: {sql}"
     );
     assert!(
-        params.iter().any(|p| matches!(p, FilterValue::Float(_))),
-        "HAVING param expected; got: {params:?}"
+        params.iter().any(|p| matches!(p, FilterValue::Int(5))),
+        "HAVING count param must bind as Int(5) after the binding fix; got: {params:?}"
     );
 }

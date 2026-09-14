@@ -17,6 +17,36 @@ pub struct PgConnection {
     statement_cache: Arc<PreparedStatementCache>,
 }
 
+/// Whether a driver error is PostgreSQL's `0A000 "cached plan must not change
+/// result type"`.
+///
+/// This is raised when a server-side prepared statement is executed after DDL
+/// altered the result columns of a table it references (e.g. a pooled
+/// connection that prepared the statement before an `ALTER TABLE … ADD
+/// COLUMN`). It is transient: re-preparing against the current schema resolves
+/// it. `0A000` is the shared `FEATURE_NOT_SUPPORTED` class, so the specific
+/// message is required — other `0A000` conditions (genuinely unsupported
+/// features) are terminal and must not trigger recovery.
+fn is_stale_cached_plan(err: &tokio_postgres::Error) -> bool {
+    // The human-readable message lives in the DbError, not in `Display`, which
+    // renders a DB error as just "db error". Reading `to_string()` here would
+    // never match the cached-plan text.
+    match err.as_db_error() {
+        Some(db) => {
+            db.code() == &tokio_postgres::error::SqlState::FEATURE_NOT_SUPPORTED
+                && is_stale_cached_plan_message(db.message())
+        }
+        None => false,
+    }
+}
+
+/// The message half of [`is_stale_cached_plan`], split out so the gate can be
+/// unit-tested without constructing a `tokio_postgres::Error` (which cannot be
+/// built with a chosen SQLSTATE via the public API).
+fn is_stale_cached_plan_message(msg: &str) -> bool {
+    msg.contains("cached plan must not change result type")
+}
+
 impl PgConnection {
     /// Create a new connection wrapper.
     pub(crate) fn new(client: Object, statement_cache: Arc<PreparedStatementCache>) -> Self {
@@ -40,8 +70,15 @@ impl PgConnection {
             .get_or_prepare(&self.client, sql)
             .await?;
 
-        let rows = self.client.query(&stmt, params).await?;
-        Ok(rows)
+        match self.client.query(&stmt, params).await {
+            Ok(rows) => Ok(rows),
+            Err(e) if is_stale_cached_plan(&e) => {
+                let stmt = self.reprepare_after_stale_plan(sql).await?;
+                let rows = self.client.query(&stmt, params).await?;
+                Ok(rows)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Execute a query and return exactly one row.
@@ -57,8 +94,15 @@ impl PgConnection {
             .get_or_prepare(&self.client, sql)
             .await?;
 
-        let row = self.client.query_one(&stmt, params).await?;
-        Ok(row)
+        match self.client.query_one(&stmt, params).await {
+            Ok(row) => Ok(row),
+            Err(e) if is_stale_cached_plan(&e) => {
+                let stmt = self.reprepare_after_stale_plan(sql).await?;
+                let row = self.client.query_one(&stmt, params).await?;
+                Ok(row)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Execute a query and return zero or one row.
@@ -74,8 +118,15 @@ impl PgConnection {
             .get_or_prepare(&self.client, sql)
             .await?;
 
-        let row = self.client.query_opt(&stmt, params).await?;
-        Ok(row)
+        match self.client.query_opt(&stmt, params).await {
+            Ok(row) => Ok(row),
+            Err(e) if is_stale_cached_plan(&e) => {
+                let stmt = self.reprepare_after_stale_plan(sql).await?;
+                let row = self.client.query_opt(&stmt, params).await?;
+                Ok(row)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// Execute a statement and return the number of affected rows.
@@ -91,8 +142,33 @@ impl PgConnection {
             .get_or_prepare(&self.client, sql)
             .await?;
 
-        let count = self.client.execute(&stmt, params).await?;
-        Ok(count)
+        match self.client.execute(&stmt, params).await {
+            Ok(count) => Ok(count),
+            Err(e) if is_stale_cached_plan(&e) => {
+                let stmt = self.reprepare_after_stale_plan(sql).await?;
+                let count = self.client.execute(&stmt, params).await?;
+                Ok(count)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Recover from a stale cached plan (`0A000`): drop the SQL from the
+    /// statement cache and prepare it afresh, bypassing deadpool's per-
+    /// connection cache so the new plan is built against the current schema.
+    ///
+    /// `prepare_cached` would hand back the same invalidated statement, so the
+    /// retry must use the uncached `prepare`. The freshly prepared statement is
+    /// what the caller re-executes; the cache is left empty for this SQL so the
+    /// next ordinary call re-primes it via `get_or_prepare`.
+    async fn reprepare_after_stale_plan(&self, sql: &str) -> PgResult<tokio_postgres::Statement> {
+        debug!(
+            sql = %sql,
+            "Recovering from stale cached plan (0A000): re-preparing statement"
+        );
+        self.statement_cache.evict(sql);
+        let stmt = self.client.prepare(sql).await?;
+        Ok(stmt)
     }
 
     /// Execute a batch of statements in a single round-trip.
@@ -181,6 +257,14 @@ pub struct PgTransaction<'a> {
 }
 
 impl<'a> PgTransaction<'a> {
+    // A stale cached plan (`0A000`) is NOT transparently retried inside a
+    // transaction: the error aborts the transaction, so any subsequent
+    // statement on it fails with `25P02 in_failed_sql_transaction`. Re-running
+    // the one statement cannot succeed here. The error is still classified
+    // retryable (via `classify_sqlstate`), so a caller that retries the whole
+    // transaction recovers on a fresh statement. Only the non-transactional
+    // `PgConnection` methods above self-heal in place.
+
     /// Execute a query and return all rows.
     pub async fn query(
         &self,
@@ -294,6 +378,20 @@ mod tests {
 
     // Integration tests would require a real PostgreSQL connection
     // Unit tests for connection wrapper are limited without mocking
+
+    #[test]
+    fn test_stale_cached_plan_message_gate() {
+        // The exact PostgreSQL wording is recognized.
+        assert!(is_stale_cached_plan_message(
+            "db error: ERROR: cached plan must not change result type"
+        ));
+        // Other 0A000 (FEATURE_NOT_SUPPORTED) messages are not the stale-plan
+        // case and must not trigger recovery.
+        assert!(!is_stale_cached_plan_message(
+            "ERROR: cannot insert into view \"v\""
+        ));
+        assert!(!is_stale_cached_plan_message("some unrelated error"));
+    }
 
     #[test]
     fn test_validate_savepoint_name_accepts_valid_names() {
