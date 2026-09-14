@@ -200,6 +200,12 @@ pub struct MigrateDevArgs {
     /// Path to schema file
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
+
+    /// Emit destructive statements (DROP TABLE/COLUMN/TYPE). Default is
+    /// additive-only: drops are omitted so a stale schema never silently
+    /// destroys data.
+    #[arg(long)]
+    pub allow_destructive: bool,
 }
 
 /// Arguments for `migrate reset`
@@ -247,6 +253,11 @@ pub struct MigrateDiffArgs {
     /// Compare against a specific migration
     #[arg(long)]
     pub from_migration: Option<String>,
+
+    /// Emit destructive statements (DROP TABLE/COLUMN/TYPE). Default is
+    /// additive-only: drops are omitted.
+    #[arg(long)]
+    pub allow_destructive: bool,
 }
 
 /// Arguments for `migrate rollback`

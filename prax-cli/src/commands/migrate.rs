@@ -66,9 +66,19 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
         .name
         .unwrap_or_else(|| format!("migration_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
 
+    // Resolve the current database structure as the diff source (introspected),
+    // or None when no database is reachable (greenfield → full-creation DDL).
+    let source = resolve_source_schema(&config).await?;
+    let migration_sql = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
+
     // 4. Generate migration
     output::step(4, total_steps, "Generating migration...");
-    let migration_path = create_migration(&migrations_dir, &migration_name, &schema)?;
+    if migration_sql.trim().is_empty() {
+        output::newline();
+        success("No changes: the database already matches the schema. No migration created.");
+        return Ok(());
+    }
+    let migration_path = create_migration(&migrations_dir, &migration_name, &migration_sql)?;
 
     // 5. Apply migration (if not --create-only)
     if !args.create_only {
@@ -281,35 +291,38 @@ async fn run_resolve(args: crate::cli::MigrateResolveArgs) -> CliResult<()> {
 async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
     output::header("Migrate Diff");
 
-    let _cwd = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
+    let config = load_config(&cwd)?;
 
-    // Diffing against a stored migration requires database introspection and a
-    // migration snapshot store, neither of which is wired into the CLI.
+    // Diffing against a stored migration requires a migration snapshot store,
+    // which is not wired into the CLI. The live-database source is supported
+    // (that is the whole point of this command); a *specific past migration*
+    // as the source is not.
     if let Some(from_migration) = &args.from_migration {
         return Err(CliError::Migration(format!(
             "--from-migration '{}' is not supported: diffing against a specific \
-             migration requires database introspection and a migration snapshot \
-             store, which are not yet wired into the CLI.",
+             migration requires a migration snapshot store, which is not yet \
+             wired into the CLI. Omit --from-migration to diff against the live \
+             database (or an empty schema when no database is reachable).",
             from_migration
         )));
     }
 
-    // Parse schema
+    // Parse the desired (target) schema.
     output::step(1, 2, "Parsing schema...");
     let loaded = crate::schema_loader::load_schema(args.schema.as_deref())?;
     let schema = loaded.schema;
 
-    // Generate DDL. Note: this is NOT a database diff — database introspection
-    // is not yet implemented, so nothing is compared against live state. The
-    // output is PostgreSQL-flavored DDL for the full schema.
-    output::step(2, 2, "Generating schema DDL (PostgreSQL dialect)...");
-    let ddl_sql = generate_schema_diff(&schema)?;
+    // Resolve the current database structure as the diff source (introspected),
+    // or None when no database is reachable (greenfield → full-creation DDL).
+    output::step(2, 2, "Comparing schema to database...");
+    let source = resolve_source_schema(&config).await?;
+    let ddl_sql = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
 
     output::newline();
-    output::info(
-        "This generates PostgreSQL-flavored DDL for the entire schema; it is not a \
-         diff against database state (database introspection is not yet implemented).",
-    );
+    if ddl_sql.trim().is_empty() {
+        output::info("No changes: the database already matches the schema.");
+    }
 
     output::newline();
     output::section("Generated DDL");
@@ -433,11 +446,7 @@ fn is_migration_applied(migration_path: &Path) -> CliResult<bool> {
     Ok(marker.exists())
 }
 
-fn create_migration(
-    migrations_dir: &Path,
-    name: &str,
-    schema: &prax_schema::ast::Schema,
-) -> CliResult<PathBuf> {
+fn create_migration(migrations_dir: &Path, name: &str, sql: &str) -> CliResult<PathBuf> {
     // Create migration directory
     let timestamp = chrono::Utc::now().format("%Y%m%d%H%M%S");
     let migration_name = format!("{}_{}", timestamp, name);
@@ -445,167 +454,199 @@ fn create_migration(
 
     std::fs::create_dir_all(&migration_path)?;
 
-    // Generate migration SQL
-    let sql = generate_schema_diff(schema)?;
-
     // Write migration.sql
     let sql_path = migration_path.join("migration.sql");
-    std::fs::write(&sql_path, &sql)?;
+    std::fs::write(&sql_path, sql)?;
 
     Ok(migration_path)
 }
 
-fn generate_schema_diff(schema: &prax_schema::ast::Schema) -> CliResult<String> {
-    use prax_schema::ast::{FieldType, ScalarType};
+/// Resolve the current database structure as a diff *source* schema.
+///
+/// Resolution order per the incremental-migrations design:
+/// 1. Introspect the database (default when a `DATABASE_URL` resolves and the
+///    provider is supported) and map the result to a `prax_schema::Schema`.
+/// 2. When no database URL is configured, or the database is unreachable, or
+///    the provider does not support introspection yet, return `None` — the
+///    differ then emits full-creation DDL, preserving the greenfield
+///    `init` → first `migrate dev` flow.
+///
+/// The database itself (via introspection) — not the `_prax_migrations`
+/// history — is the source of truth for structure, so a database migrated by
+/// a foreign runner (empty/absent prax history) still diffs off its real
+/// structure.
+async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema::ast::Schema>> {
+    // No URL configured/available → greenfield source.
+    let Ok(database_url) = get_database_url(config) else {
+        output::list_item("No DATABASE_URL configured; treating as a new database.");
+        return Ok(None);
+    };
 
-    let mut sql = String::new();
+    introspect_source_schema(config, &database_url).await
+}
 
-    sql.push_str("-- Migration generated by Prax\n\n");
+/// Introspect `database_url` and map the result to a diff-source schema.
+///
+/// Introspection is currently PostgreSQL-only (matching `prax db pull`); other
+/// providers return `None` with a note so the greenfield path is used rather
+/// than failing the command. A connection failure is likewise treated as "no
+/// source reachable" (with a warning) rather than a hard error, so
+/// `migrate dev` still works offline for first-time creation.
+#[cfg(feature = "postgres")]
+async fn introspect_source_schema(
+    config: &Config,
+    database_url: &str,
+) -> CliResult<Option<prax_schema::ast::Schema>> {
+    use crate::commands::introspect::postgres::PostgresIntrospector;
+    use crate::commands::introspect::{IntrospectionOptions, Introspector};
+    use crate::commands::schema_from_db::schema_from_database;
 
-    // Generate enums FIRST (before tables that reference them)
-    if !schema.enums.is_empty() {
-        sql.push_str("-- Enum types\n");
-        for enum_def in schema.enums.values() {
-            let enum_name = enum_def
-                .attributes
-                .iter()
-                .find(|a| a.is("map"))
-                .and_then(|a: &prax_schema::ast::Attribute| a.first_arg())
-                .and_then(|v: &prax_schema::ast::AttributeValue| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| to_snake_case(enum_def.name()));
-
-            sql.push_str(&format!(
-                "DO $$ BEGIN\n    CREATE TYPE \"{}\" AS ENUM (",
-                enum_name
-            ));
-
-            let variants: Vec<String> = enum_def
-                .variants
-                .iter()
-                .map(|v| format!("'{}'", v.name()))
-                .collect();
-
-            sql.push_str(&variants.join(", "));
-            sql.push_str(");\nEXCEPTION\n    WHEN duplicate_object THEN null;\nEND $$;\n\n");
-        }
-        sql.push('\n');
-    }
-
-    // Generate CREATE TABLE statements for each model
-    sql.push_str("-- Tables\n");
-    for model in schema.models.values() {
-        let table_name = model.table_name();
-
-        sql.push_str(&format!(
-            "CREATE TABLE IF NOT EXISTS \"{}\" (\n",
-            table_name
+    if !config.database.provider.to_lowercase().contains("postgres") {
+        output::list_item(&format!(
+            "Introspection supports PostgreSQL only; provider '{}' uses the empty \
+             source (full-creation DDL).",
+            config.database.provider
         ));
+        return Ok(None);
+    }
 
-        let mut columns = Vec::new();
-        let mut primary_keys = Vec::new();
+    let introspector = PostgresIntrospector::new(database_url.to_string());
+    let options = IntrospectionOptions::default();
 
-        for field in model.fields.values() {
-            if field.is_relation() {
-                continue;
+    match introspector.introspect(&options).await {
+        Ok(db_schema) => {
+            let result = schema_from_database(&db_schema, Default::default())?;
+            for warning in &result.warnings {
+                output::warn(warning);
             }
-
-            let column_name = field
-                .get_attribute("map")
-                .and_then(|a| a.first_arg())
-                .and_then(|v| v.as_string())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| to_snake_case(field.name()));
-
-            let sql_type = field_type_to_sql(&field.field_type);
-            let mut column_def = format!("    \"{}\" {}", column_name, sql_type);
-
-            // Add constraints
-            if field.is_id() {
-                primary_keys.push(column_name.clone());
-            }
-
-            if field.has_attribute("auto") || field.has_attribute("autoincrement") {
-                // PostgreSQL uses SERIAL types
-                column_def = format!("    \"{}\" SERIAL", column_name);
-            }
-
-            if field.has_attribute("unique") {
-                column_def.push_str(" UNIQUE");
-            }
-
-            if !field.is_optional() && !field.is_id() {
-                column_def.push_str(" NOT NULL");
-            }
-
-            // Default values
-            if let Some(default_attr) = field.get_attribute("default")
-                && let Some(value) = default_attr.first_arg()
-            {
-                let value_str = format_attribute_value(value);
-                column_def.push_str(&format!(
-                    " DEFAULT {}",
-                    sql_default_value(&value_str, &field.field_type)
-                ));
-            }
-
-            columns.push(column_def);
+            Ok(Some(result.schema))
         }
-
-        sql.push_str(&columns.join(",\n"));
-
-        if !primary_keys.is_empty() {
-            sql.push_str(",\n");
-            sql.push_str(&format!(
-                "    PRIMARY KEY (\"{}\")",
-                primary_keys.join("\", \"")
+        Err(e) => {
+            output::warn(&format!(
+                "Could not introspect the database ({e}); treating as a new database. \
+                 Generated SQL will be full-creation DDL."
             ));
-        }
-
-        sql.push_str("\n);\n\n");
-    }
-
-    return Ok(sql);
-
-    fn field_type_to_sql(field_type: &FieldType) -> String {
-        match field_type {
-            FieldType::Scalar(scalar) => match scalar {
-                ScalarType::Int => "INTEGER".to_string(),
-                ScalarType::BigInt => "BIGINT".to_string(),
-                ScalarType::Float => "DOUBLE PRECISION".to_string(),
-                ScalarType::String => "TEXT".to_string(),
-                ScalarType::Boolean => "BOOLEAN".to_string(),
-                ScalarType::DateTime => "TIMESTAMP WITH TIME ZONE".to_string(),
-                ScalarType::Date => "DATE".to_string(),
-                ScalarType::Time => "TIME".to_string(),
-                ScalarType::Json => "JSONB".to_string(),
-                ScalarType::Bytes => "BYTEA".to_string(),
-                ScalarType::Decimal => "DECIMAL".to_string(),
-                ScalarType::Uuid => "UUID".to_string(),
-                ScalarType::Cuid | ScalarType::Cuid2 | ScalarType::NanoId | ScalarType::Ulid => {
-                    "TEXT".to_string()
-                }
-                ScalarType::Vector(dim) => match dim {
-                    Some(d) => format!("vector({})", d),
-                    None => "vector".to_string(),
-                },
-                ScalarType::HalfVector(dim) => match dim {
-                    Some(d) => format!("halfvec({})", d),
-                    None => "halfvec".to_string(),
-                },
-                ScalarType::SparseVector(dim) => match dim {
-                    Some(d) => format!("sparsevec({})", d),
-                    None => "sparsevec".to_string(),
-                },
-                ScalarType::Bit(dim) => match dim {
-                    Some(d) => format!("bit({})", d),
-                    None => "bit".to_string(),
-                },
-            },
-            FieldType::Enum(name) => format!("\"{}\"", to_snake_case(name)),
-            _ => "TEXT".to_string(),
+            Ok(None)
         }
     }
+}
+
+/// Without the `postgres` feature there is no introspection driver, so the
+/// source is always empty (full-creation DDL).
+#[cfg(not(feature = "postgres"))]
+async fn introspect_source_schema(
+    _config: &Config,
+    _database_url: &str,
+) -> CliResult<Option<prax_schema::ast::Schema>> {
+    output::list_item(
+        "Built without the `postgres` feature; introspection is unavailable, using the \
+         empty source (full-creation DDL).",
+    );
+    Ok(None)
+}
+
+/// Map a datasource provider string to a migration `SqlBackend`.
+fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBackend> {
+    use prax_migrate::SqlBackend;
+    match provider.to_lowercase().as_str() {
+        "postgresql" | "postgres" | "pg" => Ok(SqlBackend::Postgres),
+        "mysql" | "mariadb" => Ok(SqlBackend::MySql),
+        "sqlite" | "sqlite3" => Ok(SqlBackend::Sqlite),
+        "mssql" | "sqlserver" | "sql_server" => Ok(SqlBackend::Mssql),
+        "duckdb" => Ok(SqlBackend::DuckDb),
+        other => Err(CliError::Config(format!(
+            "Unsupported database provider for migration generation: '{}'",
+            other
+        ))),
+    }
+}
+
+/// Diff the desired `schema` (target) against an optional introspected
+/// `source`, render the resulting `SchemaDiff` through the provider's dialect
+/// generator, and return the `up` SQL.
+///
+/// When `allow_destructive` is false (the default), drops (tables, columns,
+/// enums, foreign keys, indexes, enum-value removals) are stripped from the
+/// diff before generation so a stale schema never silently destroys data.
+fn generate_migration_sql(
+    schema: &prax_schema::ast::Schema,
+    source: Option<prax_schema::ast::Schema>,
+    config: &Config,
+    allow_destructive: bool,
+) -> CliResult<String> {
+    use prax_migrate::{SchemaDiffer, SqlDialect};
+
+    let backend = sql_backend_for_provider(&config.database.provider)?;
+
+    let differ = SchemaDiffer::new(schema.clone());
+    let differ = match source {
+        Some(src) => differ.with_source(src),
+        None => differ,
+    };
+
+    let mut diff = differ
+        .diff()
+        .map_err(|e| CliError::Migration(format!("Failed to diff schema against database: {e}")))?;
+
+    if !allow_destructive {
+        strip_destructive(&mut diff);
+    }
+
+    let migration = SqlDialect::for_backend(backend).generate_migration(&diff);
+
+    let mut out = String::from("-- Migration generated by Prax\n");
+    if !allow_destructive {
+        out.push_str(
+            "-- Additive-only: destructive statements (DROP) are omitted. Re-run with \
+             --allow-destructive to include them.\n",
+        );
+    }
+    for warning in &migration.warnings {
+        out.push_str(&format!("-- WARNING: {}\n", warning));
+    }
+    out.push('\n');
+    out.push_str(migration.up.trim_end());
+    if !migration.up.trim_end().is_empty() {
+        out.push('\n');
+    }
+
+    // A header-only result (no statements) counts as "no changes" to callers.
+    if migration.up.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    Ok(out)
+}
+
+/// Remove every destructive operation from a `SchemaDiff` in place, leaving
+/// only additive/altering changes. Column *type/nullability/default* alters
+/// are kept (they are not drops); dropped columns, tables, enums, enum values,
+/// foreign keys, indexes, and extensions are removed.
+fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
+    diff.drop_models.clear();
+    diff.drop_enums.clear();
+    diff.drop_views.clear();
+    diff.drop_extensions.clear();
+    diff.drop_indexes.clear();
+
+    for alter in &mut diff.alter_models {
+        alter.drop_fields.clear();
+        alter.drop_indexes.clear();
+        alter.drop_foreign_keys.clear();
+    }
+    // An alter that now carries no changes would still be harmless (the
+    // generator emits nothing for it), but drop the empties for a clean diff.
+    diff.alter_models.retain(|a| {
+        !a.add_fields.is_empty()
+            || !a.alter_fields.is_empty()
+            || !a.add_indexes.is_empty()
+            || !a.add_foreign_keys.is_empty()
+    });
+
+    for alter in &mut diff.alter_enums {
+        alter.remove_values.clear();
+    }
+    diff.alter_enums.retain(|a| !a.add_values.is_empty());
 }
 
 async fn apply_migration(migration_path: &Path, _config: &Config) -> CliResult<()> {
@@ -630,143 +671,218 @@ async fn apply_migration(migration_path: &Path, _config: &Config) -> CliResult<(
     )))
 }
 
-fn sql_default_value(value: &str, field_type: &prax_schema::ast::FieldType) -> String {
-    use prax_schema::ast::{FieldType, ScalarType};
-
-    // Handle enum defaults - need to be quoted as strings
-    if matches!(field_type, FieldType::Enum(_)) {
-        return format!("'{}'", value);
-    }
-
-    match value.to_lowercase().as_str() {
-        "now()" => "CURRENT_TIMESTAMP".to_string(),
-        "uuid()" => "gen_random_uuid()".to_string(),
-        "cuid()" | "cuid2()" | "nanoid()" | "ulid()" => {
-            // These need application-level generation
-            "''".to_string()
-        }
-        "true" => "TRUE".to_string(),
-        "false" => "FALSE".to_string(),
-        _ => {
-            // String-typed defaults arrive double-quoted from
-            // `format_attribute_value`. In SQL, double quotes denote an
-            // identifier, so re-quote as a string literal with single quotes
-            // and escape embedded single quotes (' -> '').
-            let is_string_typed = matches!(
-                field_type,
-                FieldType::Scalar(
-                    ScalarType::String
-                        | ScalarType::Cuid
-                        | ScalarType::Cuid2
-                        | ScalarType::NanoId
-                        | ScalarType::Ulid
-                )
-            );
-
-            if is_string_typed {
-                let inner = value
-                    .strip_prefix('"')
-                    .and_then(|v| v.strip_suffix('"'))
-                    .unwrap_or(value);
-                format!("'{}'", inner.replace('\'', "''"))
-            } else {
-                value.to_string()
-            }
-        }
-    }
-}
-
-fn to_snake_case(name: &str) -> String {
-    let mut result = String::new();
-    for (i, c) in name.chars().enumerate() {
-        if c.is_uppercase() {
-            if i > 0 {
-                result.push('_');
-            }
-            result.push(c.to_lowercase().next().unwrap());
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
-
-fn format_attribute_value(value: &prax_schema::ast::AttributeValue) -> String {
-    use prax_schema::ast::AttributeValue;
-
-    match value {
-        AttributeValue::String(s) => format!("\"{}\"", s),
-        AttributeValue::Int(i) => i.to_string(),
-        AttributeValue::Float(f) => f.to_string(),
-        AttributeValue::Boolean(b) => b.to_string(),
-        AttributeValue::Ident(id) => id.to_string(),
-        AttributeValue::Function(name, args) => {
-            if args.is_empty() {
-                format!("{}()", name)
-            } else {
-                let arg_strs: Vec<String> = args.iter().map(format_attribute_value).collect();
-                format!("{}({})", name, arg_strs.join(", "))
-            }
-        }
-        AttributeValue::Array(items) => {
-            let item_strs: Vec<String> = items.iter().map(format_attribute_value).collect();
-            format!("[{}]", item_strs.join(", "))
-        }
-        AttributeValue::FieldRef(field) => field.to_string(),
-        AttributeValue::FieldRefList(fields) => {
-            format!(
-                "[{}]",
-                fields
-                    .iter()
-                    .map(|f| f.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prax_schema::ast::{FieldType, ScalarType};
 
-    // -- sql_default_value --------------------------------------------------
+    // -- provider -> SqlBackend --------------------------------------------
 
     #[test]
-    fn test_sql_default_value_string_single_quoted() {
-        // format_attribute_value emits string defaults double-quoted; SQL string
-        // literals must be single-quoted (double quotes denote an identifier).
-        let ty = FieldType::Scalar(ScalarType::String);
-        assert_eq!(sql_default_value("\"active\"", &ty), "'active'");
+    fn test_sql_backend_for_provider() {
+        use prax_migrate::SqlBackend;
+        assert_eq!(
+            sql_backend_for_provider("postgresql").unwrap(),
+            SqlBackend::Postgres
+        );
+        assert_eq!(
+            sql_backend_for_provider("postgres").unwrap(),
+            SqlBackend::Postgres
+        );
+        assert_eq!(
+            sql_backend_for_provider("mysql").unwrap(),
+            SqlBackend::MySql
+        );
+        assert_eq!(
+            sql_backend_for_provider("sqlite").unwrap(),
+            SqlBackend::Sqlite
+        );
+        assert!(sql_backend_for_provider("nonsense").is_err());
+    }
+
+    // -- generate_migration_sql: greenfield (no source) --------------------
+
+    fn pg_config() -> Config {
+        Config::default()
+    }
+
+    fn parse(schema: &str) -> prax_schema::ast::Schema {
+        prax_schema::parse_schema(schema).expect("schema parses")
+    }
+
+    const USERS_V1: &str = r#"
+        model User {
+            id    Int    @id @auto
+            email String @unique
+
+            @@map("users")
+        }
+    "#;
+
+    #[test]
+    fn greenfield_generates_full_create_table() {
+        // No source (None) => differ emits full creation DDL.
+        let schema = parse(USERS_V1);
+        let sql = generate_migration_sql(&schema, None, &pg_config(), false).unwrap();
+        assert!(sql.contains("CREATE TABLE \"users\""), "sql: {sql}");
+        assert!(sql.contains("SERIAL"), "auto id -> SERIAL: {sql}");
+        // Incremental generator never uses IF NOT EXISTS (the old bug).
+        assert!(!sql.contains("IF NOT EXISTS"), "sql: {sql}");
     }
 
     #[test]
-    fn test_sql_default_value_string_escapes_quotes() {
-        let ty = FieldType::Scalar(ScalarType::String);
-        assert_eq!(sql_default_value("\"it's\"", &ty), "'it''s'");
+    fn empty_diff_against_identical_source_yields_no_sql() {
+        // Source == target => empty diff => empty SQL (no spurious churn).
+        let schema = parse(USERS_V1);
+        let source = parse(USERS_V1);
+        let sql = generate_migration_sql(&schema, Some(source), &pg_config(), false).unwrap();
+        assert!(sql.trim().is_empty(), "expected no changes, got: {sql}");
     }
 
     #[test]
-    fn test_sql_default_value_non_string_passthrough() {
-        let ty = FieldType::Scalar(ScalarType::Int);
-        assert_eq!(sql_default_value("42", &ty), "42");
+    fn incremental_diff_emits_only_the_delta() {
+        // v2 adds a nullable column and a whole new table with an FK +
+        // composite PK. The migration must ALTER the existing table and
+        // CREATE the new one — and touch nothing that already exists.
+        let source = parse(USERS_V1);
+        let target = parse(
+            r#"
+            model User {
+                id       Int     @id @auto
+                email    String  @unique
+                nickname String?
+
+                @@map("users")
+            }
+
+            model Membership {
+                userId Int  @map("user_id")
+                teamId Int  @map("team_id")
+                user   User @relation(fields: [userId], references: [id])
+
+                @@id([userId, teamId])
+                @@map("memberships")
+            }
+            "#,
+        );
+
+        let sql = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+
+        // Added column on the existing table.
+        assert!(
+            sql.contains("ALTER TABLE \"users\" ADD COLUMN \"nickname\""),
+            "sql: {sql}"
+        );
+        // New table created with a composite primary key.
+        assert!(sql.contains("CREATE TABLE \"memberships\""), "sql: {sql}");
+        assert!(
+            sql.contains("PRIMARY KEY (\"user_id\", \"team_id\")"),
+            "composite PK: {sql}"
+        );
+        // FK constraint present.
+        assert!(sql.contains("FOREIGN KEY"), "fk: {sql}");
+        // Nothing recreates the pre-existing users table.
+        assert!(!sql.contains("CREATE TABLE \"users\""), "sql: {sql}");
     }
 
     #[test]
-    fn test_sql_default_value_enum_single_quoted() {
-        let ty = FieldType::Enum("Role".into());
-        assert_eq!(sql_default_value("ADMIN", &ty), "'ADMIN'");
+    fn additive_only_strips_drops_by_default() {
+        // Source has an extra table + extra column the target no longer
+        // declares. Default (additive-only) must NOT emit any DROP.
+        let source = parse(
+            r#"
+            model User {
+                id       Int     @id @auto
+                email    String  @unique
+                obsolete String?
+
+                @@map("users")
+            }
+            model Legacy {
+                id Int @id @auto
+
+                @@map("legacy")
+            }
+            "#,
+        );
+        let target = parse(USERS_V1);
+
+        let sql =
+            generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
+        assert!(
+            !sql.to_uppercase().contains("DROP"),
+            "additive-only must not drop: {sql}"
+        );
+
+        // With --allow-destructive the drops appear.
+        let sql_destructive =
+            generate_migration_sql(&target, Some(source), &pg_config(), true).unwrap();
+        assert!(
+            sql_destructive.contains("DROP TABLE") && sql_destructive.contains("DROP COLUMN"),
+            "destructive should drop: {sql_destructive}"
+        );
     }
 
     #[test]
-    fn test_sql_default_value_function_and_boolean_defaults() {
-        let ty = FieldType::Scalar(ScalarType::DateTime);
-        assert_eq!(sql_default_value("now()", &ty), "CURRENT_TIMESTAMP");
+    fn diff_and_dev_share_identical_sql_for_same_inputs() {
+        // `migrate diff` and `migrate dev --create-only` both route through
+        // generate_migration_sql, so parity reduces to this helper being
+        // deterministic for identical (target, source, config, flag) inputs.
+        let source = parse(USERS_V1);
+        let target = parse(
+            r#"
+            model User {
+                id       Int     @id @auto
+                email    String  @unique
+                nickname String?
 
-        let ty = FieldType::Scalar(ScalarType::Boolean);
-        assert_eq!(sql_default_value("true", &ty), "TRUE");
-        assert_eq!(sql_default_value("false", &ty), "FALSE");
+                @@map("users")
+            }
+            "#,
+        );
+
+        let a = generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
+        let b = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        assert_eq!(a, b, "same inputs must yield identical SQL");
+        assert!(a.contains("ADD COLUMN \"nickname\""), "sql: {a}");
+    }
+
+    #[test]
+    fn strip_destructive_clears_all_drop_channels() {
+        use prax_migrate::{EnumAlterDiff, ModelAlterDiff, SchemaDiff};
+        let mut diff = SchemaDiff {
+            drop_models: vec!["Legacy".into()],
+            drop_enums: vec!["OldEnum".into()],
+            drop_views: vec!["OldView".into()],
+            drop_extensions: vec!["pgcrypto".into()],
+            alter_enums: vec![EnumAlterDiff {
+                name: "Status".into(),
+                add_values: Vec::new(),
+                remove_values: vec!["DEPRECATED".into()],
+            }],
+            alter_models: vec![ModelAlterDiff {
+                name: "User".into(),
+                table_name: "users".into(),
+                add_fields: Vec::new(),
+                drop_fields: vec!["obsolete".into()],
+                alter_fields: Vec::new(),
+                add_indexes: Vec::new(),
+                drop_indexes: vec!["idx_old".into()],
+                add_foreign_keys: Vec::new(),
+                drop_foreign_keys: vec!["fk_old".into()],
+            }],
+            ..Default::default()
+        };
+
+        strip_destructive(&mut diff);
+
+        assert!(diff.drop_models.is_empty());
+        assert!(diff.drop_enums.is_empty());
+        assert!(diff.drop_views.is_empty());
+        assert!(diff.drop_extensions.is_empty());
+        // The alter_model had only drops -> pruned entirely.
+        assert!(diff.alter_models.is_empty());
+        // The alter_enum had only removals -> pruned entirely.
+        assert!(diff.alter_enums.is_empty());
     }
 
     // -- honest-error paths ---------------------------------------------------
@@ -901,6 +1017,7 @@ mod tests {
             schema: None,
             output: None,
             from_migration: Some("20240101000000_init".to_string()),
+            allow_destructive: false,
         };
 
         match run_diff(args).await {
