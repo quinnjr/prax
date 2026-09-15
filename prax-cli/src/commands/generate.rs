@@ -498,7 +498,7 @@ fn generate_model_module(
                 .and_then(|a| a.first_arg())
                 .and_then(|v| v.as_string())
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| field_name.clone());
+                .unwrap_or_else(|| to_snake_case(field.name()));
             code.push_str(&format!(
                 "            {}: <{} as prax_query::row::FromColumn>::from_column(row, \"{}\")?,\n",
                 field_name, rust_type, column
@@ -1157,6 +1157,63 @@ mod tests {
         assert_eq!(to_snake_case("BoardMember"), "board_member");
         assert_eq!(to_snake_case("User"), "user");
         assert_eq!(to_snake_case("JiraImportConfig"), "jira_import_config");
+    }
+
+    #[test]
+    fn reserved_word_column_reads_from_schema_name_not_raw_ident() {
+        // A field named after a Rust keyword (`type`, `match`) must decode
+        // from its SQL column, not the escaped Rust identifier (`r#type`).
+        // Regression: the FromRow column fallback previously used the raw
+        // ident, emitting from_column(row, "r#type") and failing every row
+        // decode with `invalid column r#type`. An explicit @map must still
+        // win over the fallback.
+        let schema = prax_schema::parse_schema(
+            r#"
+            datasource db { provider = "postgresql" url = "x" }
+            model Card {
+              id       String @id
+              type     String
+              match    String
+              itemKind String @map("kind")
+            }
+            "#,
+        )
+        .expect("schema parses");
+        let model = schema
+            .models
+            .values()
+            .find(|m| m.name() == "Card")
+            .expect("Card");
+        let graph = HashMap::new();
+        let code = generate_model_module(model, &["serde".to_string()], &graph).expect("generate");
+
+        // Unmapped reserved-word fields: column string is the schema name,
+        // never the r#-escaped ident.
+        assert!(
+            code.contains(r#"from_column(row, "type")"#),
+            "expected column `type`, got:\n{code}"
+        );
+        assert!(
+            code.contains(r#"from_column(row, "match")"#),
+            "expected column `match`, got:\n{code}"
+        );
+        assert!(
+            !code.contains(r#"from_column(row, "r#type")"#)
+                && !code.contains(r#"from_column(row, "r#match")"#),
+            "raw ident leaked into a column string:\n{code}"
+        );
+        // The struct fields themselves are still the escaped keywords.
+        assert!(code.contains("pub r#type:"), "field should be r#type");
+        assert!(code.contains("pub r#match:"), "field should be r#match");
+        // An explicit @map wins over the fallback for both field and column.
+        assert!(
+            code.contains(r#"from_column(row, "kind")"#),
+            "@map column should be `kind`:\n{code}"
+        );
+        assert!(
+            code.contains("pub item_kind:"),
+            "mapped field should be item_kind"
+        );
     }
 
     #[test]
