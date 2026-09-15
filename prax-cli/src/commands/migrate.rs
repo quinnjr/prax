@@ -522,8 +522,8 @@ async fn introspect_source_schema(
             }
             Ok(Some(result.schema))
         }
-        // Only "no database reachable" (or a provider we can't introspect
-        // because its feature is off) falls back to greenfield. A reachable
+        // Only "no database reachable", or a backend whose introspection
+        // feature is not compiled in, falls back to greenfield. A reachable
         // database whose query/permission failed is a real error.
         Err(CliError::Unreachable(msg)) => {
             output::warn(&format!(
@@ -532,7 +532,7 @@ async fn introspect_source_schema(
             ));
             Ok(None)
         }
-        Err(CliError::Config(msg)) if msg.contains("requires the") => {
+        Err(CliError::FeatureUnavailable(msg)) => {
             output::list_item(&format!("{msg} Using an empty source (full-creation DDL)."));
             Ok(None)
         }
@@ -548,9 +548,18 @@ fn is_mysql(provider: &str) -> bool {
 /// Extract the database name from a MySQL connection URL
 /// (`mysql://user:pass@host:port/DBNAME?params`). Returns `None` when no
 /// path segment is present.
+///
+/// Credentials are stripped first (split at the last `@`) so a userinfo
+/// component containing a `/` does not get mistaken for the path separator.
 fn mysql_database_from_url(url: &str) -> Option<String> {
     let after_scheme = url.split("://").nth(1)?;
-    let after_authority = after_scheme.split_once('/')?.1;
+    // Drop the `user:pass@` userinfo so its characters can't be read as the
+    // path. The host/port/path remainder is everything after the last `@`.
+    let host_and_path = match after_scheme.rsplit_once('@') {
+        Some((_userinfo, rest)) => rest,
+        None => after_scheme,
+    };
+    let after_authority = host_and_path.split_once('/')?.1;
     let db = after_authority
         .split(['?', '#'])
         .next()
@@ -754,6 +763,11 @@ mod tests {
         // No database path segment → None (falls back to unscoped/default).
         assert_eq!(mysql_database_from_url("mysql://u:p@host:3306"), None);
         assert_eq!(mysql_database_from_url("mysql://u:p@host:3306/"), None);
+        // A `/` inside the credentials must not be mistaken for the path.
+        assert_eq!(
+            mysql_database_from_url("mysql://u:p/w@host:3306/mydb"),
+            Some("mydb".to_string())
+        );
     }
 
     #[tokio::test]

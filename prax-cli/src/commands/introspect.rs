@@ -104,7 +104,7 @@ pub async fn introspect_database(
             #[cfg(not(feature = "postgres"))]
             {
                 let _ = (database_url, options);
-                Err(CliError::Config(
+                Err(CliError::FeatureUnavailable(
                     "PostgreSQL introspection requires the `postgres` feature: rebuild with \
                      --features postgres."
                         .to_string(),
@@ -121,7 +121,7 @@ pub async fn introspect_database(
             #[cfg(not(feature = "mysql"))]
             {
                 let _ = (database_url, options);
-                Err(CliError::Config(
+                Err(CliError::FeatureUnavailable(
                     "MySQL introspection requires the `mysql` feature: rebuild with \
                      --features mysql."
                         .to_string(),
@@ -138,7 +138,7 @@ pub async fn introspect_database(
             #[cfg(not(feature = "sqlite"))]
             {
                 let _ = (database_url, options);
-                Err(CliError::Config(
+                Err(CliError::FeatureUnavailable(
                     "SQLite introspection requires the `sqlite` feature: rebuild with \
                      --features sqlite."
                         .to_string(),
@@ -155,7 +155,7 @@ pub async fn introspect_database(
             #[cfg(not(feature = "mssql"))]
             {
                 let _ = (database_url, options);
-                Err(CliError::Config(
+                Err(CliError::FeatureUnavailable(
                     "MSSQL introspection requires the `mssql` feature: rebuild with \
                      --features mssql."
                         .to_string(),
@@ -617,7 +617,7 @@ pub(crate) const INTROSPECT_CONNECT_TIMEOUT_SECS: u64 = 5;
 /// MySQL and SQLite introspectors share one row-fetch shim instead of each
 /// hand-rolling `raw_sql_query(sql, &[]) -> into_json`.
 #[cfg(any(feature = "mysql", feature = "sqlite"))]
-pub(crate) trait JsonRowSource {
+trait JsonRowSource {
     /// Run `sql` (no bind params) and return each row as a JSON object.
     async fn json_rows(&self, sql: &str) -> CliResult<Vec<serde_json::Value>>;
 }
