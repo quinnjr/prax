@@ -360,18 +360,20 @@ impl SchemaBuilder {
         let name = Ident::new(to_pascal_case(&table.name), span);
         let mut model = Model::new(name, span);
 
-        // Add @@map attribute if table name differs from model name
-        let model_name = to_pascal_case(&table.name);
-        if table.name != model_name && table.name != to_snake_case(&model_name) {
-            model.attributes.push(Attribute::new(
-                Ident::new("map", span),
-                vec![AttributeArg::positional(
-                    AttributeValue::String(table.name.clone()),
-                    span,
-                )],
+        // Always emit @@map with the real table name. The AST `table_name()`
+        // returns the model name when no `@@map` is present and does *not*
+        // lowercase it, so a table `users` reverse-engineered to model `Users`
+        // would otherwise report its table as `Users`. Pinning `@@map` makes
+        // the database table name authoritative — essential for diffing an
+        // introspected schema (keyed by table name) without spurious churn.
+        model.attributes.push(Attribute::new(
+            Ident::new("map", span),
+            vec![AttributeArg::positional(
+                AttributeValue::String(table.name.clone()),
                 span,
-            ));
-        }
+            )],
+            span,
+        ));
 
         // Get columns for this table
         let columns = self.columns.get(&table.name).cloned().unwrap_or_default();
@@ -580,6 +582,16 @@ impl SchemaBuilder {
                             .map(|c| field_name_for_column(c).into())
                             .collect(),
                     ),
+                    span,
+                ),
+                // Preserve the database constraint name so the diff engine
+                // (which keys foreign keys by constraint name) matches this
+                // FK against the same relation in a target schema instead of
+                // proposing a drop/add. Without this, diff.rs auto-derives
+                // `fk_<table>_<cols>`, which will not match a real DB name.
+                AttributeArg::named(
+                    Ident::new("map", span),
+                    AttributeValue::String(fk.name.clone()),
                     span,
                 ),
             ],

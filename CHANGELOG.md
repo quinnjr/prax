@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-09-14
+
+### Added
+
+- **cli**: `prax migrate dev` and `prax migrate diff` now generate true
+  incremental migrations by introspecting the live database and diffing the
+  desired schema against it, instead of emitting the entire schema as
+  `CREATE TABLE IF NOT EXISTS`. Introspection covers PostgreSQL, MySQL,
+  SQLite, and MSSQL (each behind its feature); a new `schema_from_db` mapper
+  turns the introspection result into a schema AST so the differ compares
+  against real structure — including databases migrated by a foreign runner
+  with no prax history. Generation is additive-only by default (no `DROP`);
+  `--allow-destructive` opts back in. When no database is reachable the CLI
+  falls back to full-creation DDL, preserving the greenfield
+  `init` → first `migrate dev` flow. Covers `ALTER … ADD COLUMN`, foreign
+  keys, composite primary keys, and unique/named indexes.
+
+
 ## [0.12.1] - 2026-09-14
 
 ### Fixed

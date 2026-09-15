@@ -540,14 +540,23 @@ impl SchemaDiffer {
     pub fn diff(&self) -> MigrateResult<SchemaDiff> {
         let mut result = SchemaDiff::default();
 
+        // Models are keyed by their database table name (`@@map` or model
+        // name), not the Prax model name: the table is the stable database
+        // identity. This lets a `.prax` model `User @@map("users")` diff
+        // cleanly against an introspected schema whose model is named `Users`
+        // (PascalCase of the table) — same table, no spurious create/drop.
         let source_models: HashMap<&str, &Model> = self
             .source
             .as_ref()
-            .map(|s| s.models.values().map(|m| (m.name(), m)).collect())
+            .map(|s| s.models.values().map(|m| (m.table_name(), m)).collect())
             .unwrap_or_default();
 
-        let target_models: HashMap<&str, &Model> =
-            self.target.models.values().map(|m| (m.name(), m)).collect();
+        let target_models: HashMap<&str, &Model> = self
+            .target
+            .models
+            .values()
+            .map(|m| (m.table_name(), m))
+            .collect();
 
         // Find models to create
         for (name, model) in &target_models {
@@ -737,12 +746,7 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
         .map(field_to_diff)
         .collect();
 
-    let primary_key: Vec<String> = model
-        .fields
-        .values()
-        .filter(|f| f.has_attribute("id"))
-        .map(|f| f.name().to_string())
-        .collect();
+    let primary_key = primary_key_columns(model);
 
     let foreign_keys = extract_foreign_keys(model, schema);
 
@@ -771,6 +775,48 @@ fn model_to_diff(model: &Model, schema: &Schema) -> ModelDiff {
         unique_constraints,
         foreign_keys,
     }
+}
+
+/// Resolve a model's primary-key **column** names.
+///
+/// Prefers a model-level `@@id([a, b, …])` (composite key), falling back to
+/// the field(s) carrying a field-level `@id`. Each referenced field is mapped
+/// to its database column name via `@map` (so a PK on a mapped field emits the
+/// real column). `@@id` argument order is preserved; field-level `@id` uses
+/// the model's field declaration order.
+pub(crate) fn primary_key_columns(model: &Model) -> Vec<String> {
+    // Model-level @@id wins when present.
+    if let Some(attr) = model.get_attribute("id")
+        && let Some(first) = attr.first_arg()
+    {
+        let field_names: Vec<String> = match first {
+            prax_schema::ast::AttributeValue::FieldRef(col) => vec![col.to_string()],
+            prax_schema::ast::AttributeValue::FieldRefList(cols) => {
+                cols.iter().map(|c| c.to_string()).collect()
+            }
+            _ => Vec::new(),
+        };
+        if !field_names.is_empty() {
+            return field_names
+                .iter()
+                .map(|f| index_column_name(model, f))
+                .collect();
+        }
+    }
+
+    // Fall back to field-level @id, in declaration order.
+    model
+        .fields
+        .values()
+        .filter(|f| f.has_attribute("id"))
+        .map(|f| {
+            f.get_attribute("map")
+                .and_then(|a| a.first_arg())
+                .and_then(|v| v.as_string())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| f.name().to_string())
+        })
+        .collect()
 }
 
 /// Map an `@@index`/`@@unique` field reference to its column name,
@@ -1525,6 +1571,81 @@ mod tests {
     fn test_schema_diff_empty() {
         let diff = SchemaDiff::default();
         assert!(diff.is_empty());
+    }
+
+    #[test]
+    fn test_composite_id_becomes_primary_key() {
+        // A model-level @@id([a, b]) must produce a composite primary key in
+        // the create-model diff. Prior to the fix, model_to_diff only looked
+        // at field-level @id and silently produced an empty primary key for
+        // @@id models (the motivating team_members shape).
+        let schema = prax_schema::parse_schema(
+            r#"
+            model Membership {
+                userId Int
+                teamId Int
+
+                @@id([userId, teamId])
+            }
+            "#,
+        )
+        .unwrap();
+        let differ = SchemaDiffer::new(schema);
+        let diff = differ.diff().unwrap();
+
+        let model = diff
+            .create_models
+            .iter()
+            .find(|m| m.name == "Membership")
+            .expect("Membership created");
+        assert_eq!(model.primary_key, vec!["userId", "teamId"]);
+    }
+
+    #[test]
+    fn test_composite_id_respects_field_map() {
+        // @@id referencing fields that carry @map must resolve to the mapped
+        // column names, so the PRIMARY KEY clause references real columns.
+        let schema = prax_schema::parse_schema(
+            r#"
+            model Membership {
+                userId Int @map("user_id")
+                teamId Int @map("team_id")
+
+                @@id([userId, teamId])
+            }
+            "#,
+        )
+        .unwrap();
+        let differ = SchemaDiffer::new(schema);
+        let diff = differ.diff().unwrap();
+        let model = diff
+            .create_models
+            .iter()
+            .find(|m| m.name == "Membership")
+            .expect("Membership created");
+        assert_eq!(model.primary_key, vec!["user_id", "team_id"]);
+    }
+
+    #[test]
+    fn test_field_level_id_respects_map() {
+        // A single field-level @id with @map must resolve to the mapped
+        // column name in the primary key.
+        let schema = prax_schema::parse_schema(
+            r#"
+            model User {
+                userId Int @id @map("user_id")
+            }
+            "#,
+        )
+        .unwrap();
+        let differ = SchemaDiffer::new(schema);
+        let diff = differ.diff().unwrap();
+        let model = diff
+            .create_models
+            .iter()
+            .find(|m| m.name == "User")
+            .expect("User created");
+        assert_eq!(model.primary_key, vec!["user_id"]);
     }
 
     #[test]
