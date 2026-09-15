@@ -124,7 +124,7 @@ fn map_columns(columns: &[ColumnInfo]) -> Vec<MigrateColumn> {
 /// first (falling back to `data_type`). Mapping the normalized type to the
 /// canonical short udt string it recognizes keeps type resolution robust
 /// even when `db_type` carries a display form (e.g. "character varying").
-fn udt_name_for(normalized: &NormalizedType, db_type: &str) -> String {
+fn udt_name_for(normalized: &NormalizedType, _db_type: &str) -> String {
     match normalized {
         NormalizedType::Int | NormalizedType::SmallInt => "int4".to_string(),
         NormalizedType::BigInt => "int8".to_string(),
@@ -149,7 +149,15 @@ fn udt_name_for(normalized: &NormalizedType, db_type: &str) -> String {
         // "ARRAY" data_type as Json. Fall through to db_type so its fallback
         // path applies.
         NormalizedType::Array(_) => "ARRAY".to_string(),
-        NormalizedType::Unknown(_) => db_type.to_string(),
+        // An unrecognized type carries the *udt name* the introspector read
+        // (e.g. a Postgres enum type `global_role`, which reports
+        // `data_type = "USER-DEFINED"` but a real `udt_name`). Pass the udt
+        // name — NOT `db_type` — so the engine can resolve it against the
+        // introspected enum types. Using `db_type` here would hand the engine
+        // the literal `"USER-DEFINED"`, which resolves to nothing and made it
+        // skip every enum-bearing table (appearing as spurious new tables in
+        // the diff).
+        NormalizedType::Unknown(udt) => udt.clone(),
     }
 }
 
@@ -232,26 +240,20 @@ fn referential_action_sql(action: ReferentialAction) -> Option<String> {
 /// that only declares the relation.
 fn map_indexes(
     indexes: &[IndexInfo],
-    foreign_keys: &[ForeignKeyInfo],
+    _foreign_keys: &[ForeignKeyInfo],
     table_name: &str,
 ) -> Vec<MigrateIndex> {
+    // Every non-primary index is carried into the diff source verbatim.
+    //
+    // A previous version dropped non-unique indexes whose columns matched a
+    // foreign key, on the theory that an FK implies an index. PostgreSQL does
+    // NOT auto-create an index for a foreign key (only the *referenced* side's
+    // PK/unique is indexed), so those `<table>_<col>_idx` indexes are real,
+    // intentional objects. Dropping them left the source without them, so a
+    // schema `@@index` on an FK column looked new and churned an index that
+    // already existed. Keep them.
     indexes
         .iter()
-        .filter(|idx| {
-            if idx.is_unique || idx.is_primary {
-                return true;
-            }
-            let cols: Vec<&str> = idx.columns.iter().map(|c| c.name.as_str()).collect();
-            // Drop if some FK's column list is exactly this index's columns.
-            !foreign_keys.iter().any(|fk| {
-                fk.columns.len() == cols.len()
-                    && fk
-                        .columns
-                        .iter()
-                        .map(String::as_str)
-                        .eq(cols.iter().copied())
-            })
-        })
         .map(|idx| MigrateIndex {
             name: idx.name.clone(),
             table_name: table_name.to_string(),

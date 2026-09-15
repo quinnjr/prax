@@ -576,9 +576,17 @@ impl SchemaDiffer {
         }
 
         // Find models to alter
+        //
+        // The source model's foreign keys must resolve against the source
+        // schema (its relation targets are named after PascalCased table
+        // names), so pass it explicitly. `source_models` is only non-empty
+        // when `self.source` is `Some`, so the fallback to target is never
+        // taken in the alter path — it only keeps the call total.
+        let source_schema = self.source.as_ref().unwrap_or(&self.target);
         for (name, target_model) in &target_models {
             if let Some(source_model) = source_models.get(name)
-                && let Some(alter) = diff_models(source_model, target_model, &self.target)
+                && let Some(alter) =
+                    diff_models(source_model, target_model, source_schema, &self.target)
             {
                 result.alter_models.push(alter);
             }
@@ -597,7 +605,11 @@ impl SchemaDiffer {
         for (name, enum_def) in &target_enums {
             if !source_enums.contains_key(name) {
                 result.create_enums.push(EnumDiff {
-                    name: (*name).to_string(),
+                    // Emit the enum's database name (`@@map`), so a schema enum
+                    // `TeamRole @@map("team_role")` creates the `team_role`
+                    // Postgres type — matching how columns reference it and how
+                    // introspection reads it back.
+                    name: enum_def.database_name().to_string(),
                     values: enum_def
                         .variants
                         .iter()
@@ -731,6 +743,47 @@ impl SchemaDiffer {
         let proc_diff = ProcedureDiffer::diff(&source_procedures, &target_procedures);
         if !proc_diff.is_empty() {
             result.procedures = Some(proc_diff);
+        }
+
+        // Normalize enum type names to their database names (`@@map`).
+        //
+        // Field/enum diffs are built with the enum's *schema* name (e.g.
+        // `RepoRole`), but the emitted SQL must reference the real Postgres
+        // type — `repo_role` when the enum carries `@@map("repo_role")`.
+        // Resolve once here so every consumer (CREATE TYPE, ALTER TYPE, DROP
+        // TYPE, and every column's `enum_name`) uses the database name.
+        {
+            use std::collections::HashMap as Map;
+            let enum_db: Map<String, String> = self
+                .target
+                .enums
+                .values()
+                .map(|e| (e.name().to_string(), e.database_name().to_string()))
+                .collect();
+            let resolve =
+                |n: &str| -> String { enum_db.get(n).cloned().unwrap_or_else(|| n.to_string()) };
+            for e in &mut result.alter_enums {
+                e.name = resolve(&e.name);
+            }
+            for n in &mut result.drop_enums {
+                *n = resolve(n);
+            }
+            // create_enums already store database_name(); leave them.
+            let fix_field = |f: &mut FieldDiff| {
+                if let Some(en) = &f.enum_name {
+                    f.enum_name = Some(resolve(en));
+                }
+            };
+            for m in &mut result.create_models {
+                for f in &mut m.fields {
+                    fix_field(f);
+                }
+            }
+            for m in &mut result.alter_models {
+                for f in &mut m.add_fields {
+                    fix_field(f);
+                }
+            }
         }
 
         Ok(result)
@@ -956,9 +1009,31 @@ fn extract_foreign_keys(model: &Model, schema: &Schema) -> Vec<ForeignKeyDiff> {
             _ => continue,
         };
 
-        let columns: Vec<String> = rel.fields.iter().map(|f| f.to_string()).collect();
-        let referenced_columns: Vec<String> =
-            rel.references.iter().map(|r| r.to_string()).collect();
+        // FK columns must be the *database column* names, resolving each
+        // field reference through `@map` — otherwise a `@map`'d field like
+        // `organizationId @map("organization_id")` would emit
+        // `FOREIGN KEY ("organizationId")`, referencing a column that does
+        // not exist. `index_column_name` resolves a field ref against a
+        // model's `@map`.
+        let columns: Vec<String> = rel
+            .fields
+            .iter()
+            .map(|f| index_column_name(model, f))
+            .collect();
+        // Referenced columns resolve against the *referenced* model's `@map`
+        // when it is in the schema; otherwise fall back to the raw ref.
+        let referenced_model = match &field.field_type {
+            FieldType::Model(name) => schema.models.get(name.as_str()),
+            _ => None,
+        };
+        let referenced_columns: Vec<String> = rel
+            .references
+            .iter()
+            .map(|r| match referenced_model {
+                Some(m) => index_column_name(m, r),
+                None => r.to_string(),
+            })
+            .collect();
 
         let constraint_name = rel
             .map
@@ -1042,7 +1117,12 @@ fn field_default_sql(field: &Field) -> Option<String> {
 
 /// Convert a field to a diff.
 fn field_to_diff(field: &Field) -> FieldDiff {
-    let sql_type = field_type_to_sql(&field.field_type);
+    // A `@db.*` native type overrides the scalar's default SQL type — e.g.
+    // `String @db.Uuid` is a `uuid` column, not `TEXT`. Without this, every
+    // `@db.Uuid` column diffs as TEXT-vs-uuid against the real database and
+    // churns on every migration.
+    let sql_type =
+        native_type_to_sql(field).unwrap_or_else(|| field_type_to_sql(&field.field_type));
     let nullable = field.is_optional();
     let is_primary_key = field.has_attribute("id");
     let is_auto_increment = field.has_attribute("auto");
@@ -1050,13 +1130,9 @@ fn field_to_diff(field: &Field) -> FieldDiff {
 
     let default = field_default_sql(field);
 
-    // Get column name from @map attribute or use field name
-    let column_name = field
-        .get_attribute("map")
-        .and_then(|attr| attr.first_arg())
-        .and_then(|v| v.as_string())
-        .unwrap_or_else(|| field.name())
-        .to_string();
+    // Column name resolves `@map`; shared with the diff field-keying so an
+    // added column is named identically to how it is matched.
+    let column_name = field_column_name(field).to_string();
 
     // Extract enum name if this is an enum type
     let enum_name = match &field.field_type {
@@ -1182,6 +1258,73 @@ fn parse_vector_index_kind(value: &str) -> Option<VectorIndexKind> {
 }
 
 /// Convert a field type to SQL.
+/// Map a field's `@db.*` native-type attribute to its SQL type, when present.
+///
+/// A native type overrides the scalar default (e.g. `String @db.Uuid` is a
+/// `uuid` column, not `TEXT`). The emitted strings match what the
+/// introspection source produces for the same column, so an unchanged
+/// `@db`-typed column diffs to nothing. Returns `None` when the field carries
+/// no native type, so the caller falls back to the scalar mapping.
+fn native_type_to_sql(field: &Field) -> Option<String> {
+    // `@db.Uuid` / `@db.VarChar(255)` parse as an attribute whose *name* is
+    // the dotted form `db.Uuid` (the grammar folds the namespace into the
+    // name), so `extract_attributes` — which matches a bare `"db"` — never
+    // captures them. Read the dotted attribute directly: find `db.<Type>` and
+    // take `<Type>` as the native type name, with any parens as args.
+    let attr = field
+        .attributes
+        .iter()
+        .find(|a| a.name().starts_with("db."))?;
+    let type_name = attr.name().strip_prefix("db.")?;
+    let arg_i = |i: usize| -> Option<i64> {
+        attr.args.get(i).and_then(|a| match &a.value {
+            prax_schema::ast::AttributeValue::Int(n) => Some(*n),
+            _ => None,
+        })
+    };
+    let sql = match type_name {
+        n if n.eq_ignore_ascii_case("Uuid") => "UUID".to_string(),
+        n if n.eq_ignore_ascii_case("Text") => "TEXT".to_string(),
+        n if n.eq_ignore_ascii_case("VarChar") || n.eq_ignore_ascii_case("VarChar2") => {
+            match arg_i(0) {
+                Some(len) => format!("VARCHAR({len})"),
+                None => "VARCHAR".to_string(),
+            }
+        }
+        n if n.eq_ignore_ascii_case("Char") => match arg_i(0) {
+            Some(len) => format!("CHAR({len})"),
+            None => "CHAR".to_string(),
+        },
+        n if n.eq_ignore_ascii_case("Boolean") || n.eq_ignore_ascii_case("Bool") => {
+            "BOOLEAN".to_string()
+        }
+        n if n.eq_ignore_ascii_case("SmallInt") => "SMALLINT".to_string(),
+        n if n.eq_ignore_ascii_case("Integer") || n.eq_ignore_ascii_case("Int") => {
+            "INTEGER".to_string()
+        }
+        n if n.eq_ignore_ascii_case("BigInt") => "BIGINT".to_string(),
+        n if n.eq_ignore_ascii_case("Real") => "REAL".to_string(),
+        n if n.eq_ignore_ascii_case("DoublePrecision") => "DOUBLE PRECISION".to_string(),
+        n if n.eq_ignore_ascii_case("Decimal") || n.eq_ignore_ascii_case("Numeric") => {
+            match (arg_i(0), arg_i(1)) {
+                (Some(p), Some(s)) => format!("DECIMAL({p}, {s})"),
+                _ => "DECIMAL".to_string(),
+            }
+        }
+        n if n.eq_ignore_ascii_case("Json") || n.eq_ignore_ascii_case("JsonB") => {
+            "JSONB".to_string()
+        }
+        n if n.eq_ignore_ascii_case("Date") => "DATE".to_string(),
+        n if n.eq_ignore_ascii_case("Time") => "TIME".to_string(),
+        n if n.eq_ignore_ascii_case("Timestamp") => "TIMESTAMP".to_string(),
+        n if n.eq_ignore_ascii_case("Timestamptz") => "TIMESTAMP WITH TIME ZONE".to_string(),
+        n if n.eq_ignore_ascii_case("Bytea") => "BYTEA".to_string(),
+        // Unknown native type: fall back to the scalar mapping.
+        _ => return None,
+    };
+    Some(sql)
+}
+
 fn field_type_to_sql(field_type: &prax_schema::ast::FieldType) -> String {
     use prax_schema::ast::{FieldType, ScalarType};
 
@@ -1228,20 +1371,59 @@ fn field_type_to_sql(field_type: &prax_schema::ast::FieldType) -> String {
     }
 }
 
+/// The database column a field maps to: its `@map("...")` argument when
+/// present, otherwise the field name itself.
+///
+/// Field identity in a diff is the *column* name, not the Rust field name.
+/// An introspected source schema names its fields after the real database
+/// columns (snake_case), while a hand-written target may use a different
+/// field name pinned to that column via `@map` (e.g. `familyId`
+/// `@map("family_id")`). Keying the field comparison on the field name would
+/// see `family_id` and `familyId` as unrelated — proposing a drop and an add
+/// for a column that never changed. Keying on the mapped column name is what
+/// makes a database that already matches its schema diff to empty.
+///
+/// Mirrors [`index_column_name`], which already resolves `@map` for
+/// `@@index`/`@@unique` column references.
+fn field_column_name(field: &Field) -> &str {
+    field
+        .get_attribute("map")
+        .and_then(|a| a.first_arg())
+        .and_then(|v| v.as_string())
+        .unwrap_or_else(|| field.name())
+}
+
 /// Diff two models and return alterations if any.
-fn diff_models(source: &Model, target: &Model, schema: &Schema) -> Option<ModelAlterDiff> {
+///
+/// `source_schema`/`target_schema` are the schemas each model belongs to.
+/// Foreign keys must be resolved against their *own* schema: a source model
+/// synthesized from introspection names its relation target by the
+/// PascalCased table name (`Users`), which only resolves in the source
+/// schema — resolving it against the target (where the model is `User
+/// @@map("users")`) would fail, mis-name the referenced table, and churn
+/// every foreign key.
+fn diff_models(
+    source: &Model,
+    target: &Model,
+    source_schema: &Schema,
+    target_schema: &Schema,
+) -> Option<ModelAlterDiff> {
+    // Fields are keyed by their mapped *column* name (respecting `@map`), not
+    // the Rust field name, so a `@map`'d field and its introspected
+    // column-named counterpart are recognized as the same column rather than a
+    // drop+add pair. See [`field_column_name`].
     let source_fields: HashMap<&str, &Field> = source
         .fields
         .values()
         .filter(|f| !f.is_relation())
-        .map(|f| (f.name(), f))
+        .map(|f| (field_column_name(f), f))
         .collect();
 
     let target_fields: HashMap<&str, &Field> = target
         .fields
         .values()
         .filter(|f| !f.is_relation())
-        .map(|f| (f.name(), f))
+        .map(|f| (field_column_name(f), f))
         .collect();
 
     let mut add_fields = Vec::new();
@@ -1277,38 +1459,50 @@ fn diff_models(source: &Model, target: &Model, schema: &Schema) -> Option<ModelA
     let source_indexes = extract_index_diffs(source);
     let target_indexes = extract_index_diffs(target);
 
-    let source_by_name: std::collections::BTreeMap<&str, &IndexDiff> = source_indexes
-        .iter()
-        .map(|i| (i.name.as_str(), i))
-        .collect();
-    let target_by_name: std::collections::BTreeMap<&str, &IndexDiff> = target_indexes
-        .iter()
-        .map(|i| (i.name.as_str(), i))
-        .collect();
+    // Index identity is its shape — the ordered column list plus uniqueness —
+    // NOT its name. An introspected source names an index by its real
+    // database name (`bots_repository_idx`), while the target derives
+    // `idx_<table>_<cols>`; keying on the name alone would drop the former and
+    // add the latter for an index that already covers the same columns. Keying
+    // on the shape reconciles them: same columns + uniqueness ⇒ same index, no
+    // churn. A genuine definition change (e.g. uniqueness flip) still shows up
+    // because it changes the signature.
+    fn index_sig(i: &IndexDiff) -> (bool, Vec<String>) {
+        (i.unique, i.columns.clone())
+    }
+    let source_by_sig: std::collections::BTreeMap<(bool, Vec<String>), &IndexDiff> =
+        source_indexes.iter().map(|i| (index_sig(i), i)).collect();
+    let target_by_sig: std::collections::BTreeMap<(bool, Vec<String>), &IndexDiff> =
+        target_indexes.iter().map(|i| (index_sig(i), i)).collect();
 
     let mut add_indexes = Vec::new();
     let mut drop_indexes = Vec::new();
 
-    for (name, target_index) in &target_by_name {
-        match source_by_name.get(name) {
+    for (sig, target_index) in &target_by_sig {
+        match source_by_sig.get(sig) {
+            // No index of this shape exists in the database — create it.
             None => add_indexes.push((*target_index).clone()),
-            // Same name but different definition: recreate.
+            // An index of the same shape already exists (any name). Recreate
+            // only when a non-shape property the differ tracks actually
+            // differs; a pure name difference is left alone.
             Some(source_index) if !index_def_eq(source_index, target_index) => {
-                drop_indexes.push((*name).to_string());
+                drop_indexes.push(source_index.name.clone());
                 add_indexes.push((*target_index).clone());
             }
             _ => {}
         }
     }
-    for name in source_by_name.keys() {
-        if !target_by_name.contains_key(name) {
-            drop_indexes.push((*name).to_string());
+    for (sig, source_index) in &source_by_sig {
+        if !target_by_sig.contains_key(sig) {
+            drop_indexes.push(source_index.name.clone());
         }
     }
 
-    // Diff foreign keys
-    let source_fks = extract_foreign_keys(source, schema);
-    let target_fks = extract_foreign_keys(target, schema);
+    // Diff foreign keys. Each side resolves against its own schema so the
+    // introspected source's PascalCase relation targets (`Users`) resolve
+    // there, while the target's (`User`) resolve in the target.
+    let source_fks = extract_foreign_keys(source, source_schema);
+    let target_fks = extract_foreign_keys(target, target_schema);
 
     let source_fk_names: std::collections::HashSet<&str> = source_fks
         .iter()
@@ -1404,8 +1598,15 @@ fn view_to_diff(view: &View, schema: &Schema) -> Option<ViewDiff> {
 
 /// Diff two fields and return alterations if any.
 fn diff_fields(source: &Field, target: &Field) -> Option<FieldAlterDiff> {
-    let source_type = field_type_to_sql(&source.field_type);
-    let target_type = field_type_to_sql(&target.field_type);
+    // Honor `@db.*` native types on both sides (e.g. `String @db.Uuid` is a
+    // `uuid` column, not `TEXT`) so an unchanged native-typed column does not
+    // churn. The introspected source expresses the type as a scalar
+    // (`Scalar(Uuid)` → `UUID`); the hand-written target expresses it as
+    // `String @db.Uuid` — both must resolve to the same SQL type here.
+    let source_type =
+        native_type_to_sql(source).unwrap_or_else(|| field_type_to_sql(&source.field_type));
+    let target_type =
+        native_type_to_sql(target).unwrap_or_else(|| field_type_to_sql(&target.field_type));
 
     let source_nullable = source.is_optional();
     let target_nullable = target.is_optional();
@@ -1599,6 +1800,160 @@ mod tests {
             .find(|m| m.name == "Membership")
             .expect("Membership created");
         assert_eq!(model.primary_key, vec!["userId", "teamId"]);
+    }
+
+    #[test]
+    fn introspected_source_with_fk_does_not_churn() {
+        // Regression: a source schema reverse-engineered from introspection
+        // names each relation target by the PascalCased table name
+        // (`refresh_tokens` FK → `users` → `FieldType::Model("Users")`). The
+        // diff resolved *both* sides' foreign keys against the target schema,
+        // where the model is `User` (not `Users`), so the source FK's
+        // referenced table mis-resolved to the literal "Users" and every FK
+        // (and the columns/tables around it) churned. Each side must resolve
+        // against its own schema.
+        use crate::introspect::{
+            ColumnInfo as IC, ConstraintInfo as ICon, IntrospectionConfig, SchemaBuilder,
+            TableInfo as IT,
+        };
+        let col = |name: &str| IC {
+            name: name.to_string(),
+            data_type: "text".to_string(),
+            udt_name: "text".to_string(),
+            character_maximum_length: None,
+            numeric_precision: None,
+            is_nullable: false,
+            column_default: None,
+            ordinal_position: 0,
+            comment: None,
+        };
+        let table = |name: &str| IT {
+            name: name.to_string(),
+            schema: "public".to_string(),
+            table_type: "BASE TABLE".to_string(),
+            comment: None,
+        };
+        let pk = |t: &str| ICon {
+            name: format!("{t}_pkey"),
+            constraint_type: "PRIMARY KEY".to_string(),
+            table_name: t.to_string(),
+            columns: vec!["id".to_string()],
+            referenced_table: None,
+            referenced_columns: None,
+            on_delete: None,
+            on_update: None,
+        };
+
+        let source = SchemaBuilder::new(IntrospectionConfig::default())
+            .with_tables(vec![table("users"), table("refresh_tokens")])
+            .with_columns("users", vec![col("id")])
+            .with_constraints("users", vec![pk("users")])
+            .with_columns(
+                "refresh_tokens",
+                vec![col("id"), col("family_id"), col("user_id")],
+            )
+            .with_constraints(
+                "refresh_tokens",
+                vec![
+                    pk("refresh_tokens"),
+                    ICon {
+                        name: "fk_refresh_tokens_user".to_string(),
+                        constraint_type: "FOREIGN KEY".to_string(),
+                        table_name: "refresh_tokens".to_string(),
+                        columns: vec!["user_id".to_string()],
+                        referenced_table: Some("users".to_string()),
+                        referenced_columns: Some(vec!["id".to_string()]),
+                        on_delete: Some("CASCADE".to_string()),
+                        on_update: None,
+                    },
+                ],
+            )
+            .build()
+            .unwrap()
+            .schema;
+
+        // Target: the same shape as a hand-written `.prax` — camelCase fields
+        // and models with `@@map`, FK relation pinned to the real constraint
+        // name so it matches the introspected one.
+        let target = prax_schema::parse_schema(
+            r#"
+            model User {
+                id            String        @id
+                refreshTokens RefreshToken[]
+                @@map("users")
+            }
+            model RefreshToken {
+                id       String @id
+                familyId String @map("family_id")
+                userId   String @map("user_id")
+                user     User   @relation(fields: [userId], references: [id], onDelete: Cascade, map: "fk_refresh_tokens_user")
+                @@map("refresh_tokens")
+            }
+            "#,
+        )
+        .unwrap();
+
+        let diff = SchemaDiffer::new(target)
+            .with_source(source)
+            .diff()
+            .unwrap();
+
+        assert!(
+            diff.create_models.is_empty()
+                && diff.drop_models.is_empty()
+                && diff.alter_models.is_empty(),
+            "introspected source with an FK must diff to empty against its \
+             @map'd target, got create={:?} drop={:?} alter={:?}",
+            diff.create_models
+                .iter()
+                .map(|m| &m.name)
+                .collect::<Vec<_>>(),
+            diff.drop_models,
+            diff.alter_models,
+        );
+    }
+
+    #[test]
+    fn mapped_field_does_not_churn_against_introspected_column_name() {
+        // Regression: an introspected source names its fields after the real
+        // database columns (snake_case), while the target `.prax` pins a
+        // camelCase field to that column via `@map`. Keying the field diff on
+        // the field name saw `family_id` (source) and `familyId` (target) as
+        // unrelated, proposing a spurious drop+add for an unchanged column.
+        // Keying on the mapped column name must diff them to nothing.
+        let source = prax_schema::parse_schema(
+            r#"
+            model RefreshToken {
+                id        String @id
+                family_id String
+
+                @@map("refresh_tokens")
+            }
+            "#,
+        )
+        .unwrap();
+        let target = prax_schema::parse_schema(
+            r#"
+            model RefreshToken {
+                id       String @id
+                familyId String @map("family_id")
+
+                @@map("refresh_tokens")
+            }
+            "#,
+        )
+        .unwrap();
+
+        let diff = SchemaDiffer::new(target)
+            .with_source(source)
+            .diff()
+            .unwrap();
+
+        assert!(
+            diff.alter_models.is_empty(),
+            "a @map'd field matching an introspected column must not churn, got: {:?}",
+            diff.alter_models
+        );
     }
 
     #[test]
