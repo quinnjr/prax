@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-09-15
+
+### Fixed
+
+- **migrate**: `migrate dev`/`diff` no longer emit spurious churn when the
+  schema uses `@map`/`@@map` and native types over a snake_case database
+  (any Prisma-style schema). Seven defects that made the introspected diff
+  *source* disagree with an unchanged target are fixed: enum columns
+  (reported as `USER-DEFINED`) skipped whole tables; `map_indexes` dropped
+  real foreign-key-column indexes (Postgres does not auto-index FK columns);
+  fields were keyed by field name rather than mapped column name; a model's
+  foreign keys resolved against the target schema for both sides; `@db.Uuid`
+  and other `@db.*` native types were ignored (parsed as the dotted
+  attribute name `db.Uuid`); enum `@@map` and `CURRENT_TIMESTAMP`/`now()`
+  defaults were not normalized; and indexes were matched by name rather than
+  by shape (columns + uniqueness). An individual unmappable column
+  (`tsvector`/`vector`) is now skipped instead of failing the whole table.
+  Verified: after applying a generated migration against a 69-table
+  snake_case database, a second `migrate dev` reports "No changes".
+
+
 ## [0.12.2] - 2026-09-14
 
 ### Added
