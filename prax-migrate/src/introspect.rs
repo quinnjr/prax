@@ -402,8 +402,24 @@ impl SchemaBuilder {
 
         // Build fields from columns
         for column in &columns {
-            let field = self.build_field(column, &pk_columns, &unique_columns)?;
-            model.add_field(field);
+            // A column whose SQL type can't be represented in the schema AST
+            // (e.g. a Postgres `tsvector` search column or a pgvector
+            // `vector` embedding that lives only in the database, not the
+            // `.prax`) must not sink the whole table: skipping the column
+            // keeps the table present in the diff source, so it is not
+            // mistaken for a brand-new table. The column is simply absent from
+            // the reverse-engineered model; since it is not in the target
+            // schema either, the differ leaves it alone.
+            match self.build_field(column, &pk_columns, &unique_columns) {
+                Ok(field) => model.add_field(field),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: skipping column '{}.{}' — {} (kept out of the diff source; \
+                         the table itself is still introspected)",
+                        table.name, column.name, e
+                    );
+                }
+            }
         }
 
         // Synthesize relation fields from foreign key constraints.
@@ -799,6 +815,25 @@ fn parse_default_value(default: &str) -> Option<AttributeValue> {
             func_name.to_string().into(),
             vec![],
         ));
+    }
+
+    // Bare SQL keyword defaults (no parens) — `CURRENT_TIMESTAMP`, `now`,
+    // `CURRENT_DATE`, `CURRENT_TIME`. These render unquoted, and the target
+    // schema expresses the same thing as `@default(now())` →
+    // `CURRENT_TIMESTAMP`. Normalizing to the matching function form here is
+    // what stops an unchanged timestamp default from churning
+    // (`'CURRENT_TIMESTAMP'` string vs `CURRENT_TIMESTAMP` keyword).
+    match trimmed.to_ascii_uppercase().as_str() {
+        "CURRENT_TIMESTAMP" | "NOW" => {
+            return Some(AttributeValue::Function("now".into(), vec![]));
+        }
+        "CURRENT_DATE" => {
+            return Some(AttributeValue::Function("current_date".into(), vec![]));
+        }
+        "CURRENT_TIME" => {
+            return Some(AttributeValue::Function("current_time".into(), vec![]));
+        }
+        _ => {}
     }
 
     // Unknown default - return as string

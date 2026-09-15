@@ -128,6 +128,19 @@ impl Enum {
         self.name.as_str()
     }
 
+    /// The database type name for this enum: its `@@map("...")` argument when
+    /// present, otherwise the enum name. Mirrors [`Model::table_name`] so a
+    /// schema whose enum is `RepoRole @@map("repo_role")` emits and references
+    /// the real `repo_role` Postgres type instead of `RepoRole`.
+    pub fn database_name(&self) -> &str {
+        self.attributes
+            .iter()
+            .find(|a| a.name() == "map")
+            .and_then(|a| a.first_arg())
+            .and_then(|v| v.as_string())
+            .unwrap_or_else(|| self.name.as_str())
+    }
+
     /// Add a variant to the enum.
     pub fn add_variant(&mut self, variant: EnumVariant) {
         self.variants.push(variant);
