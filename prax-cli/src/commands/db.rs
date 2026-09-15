@@ -90,34 +90,19 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
         sample_size: args.sample_size,
     };
 
-    // Introspect database
+    // Introspect database. Dispatch matches the provider against the canonical
+    // allow-list in `get_database_type` (postgres/postgresql/pg, mysql/mariadb,
+    // sqlite/sqlite3, mssql/sqlserver/sql_server). This is stricter than the
+    // previous `provider.contains("postgres")` substring check: a non-canonical
+    // provider string that used to match loosely now errors as unsupported.
     output::step(1, 3, "Introspecting database...");
 
-    #[cfg(feature = "postgres")]
-    let db_schema = {
-        use crate::commands::introspect::Introspector;
-        use crate::commands::introspect::postgres::PostgresIntrospector;
-
-        if config.database.provider.to_lowercase().contains("postgres") {
-            let introspector = PostgresIntrospector::new(database_url.clone());
-            introspector.introspect(&options).await?
-        } else {
-            return Err(CliError::Config(format!(
-                "Introspection (`prax db pull`) currently supports PostgreSQL only; provider \
-                 '{}' is not supported yet.",
-                config.database.provider
-            )));
-        }
-    };
-
-    #[cfg(not(feature = "postgres"))]
-    let db_schema = {
-        return Err(CliError::Config(
-            "Introspection (`prax db pull`) currently supports PostgreSQL only and requires \
-             the `postgres` feature: recompile with --features postgres."
-                .to_string(),
-        ));
-    };
+    let db_schema = crate::commands::introspect::introspect_database(
+        &config.database.provider,
+        &database_url,
+        &options,
+    )
+    .await?;
 
     // Generate output
     output::step(2, 3, "Generating schema...");

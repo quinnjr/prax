@@ -377,7 +377,7 @@ pub mod queries {
             DatabaseType::MSSQL => {
                 let schema_filter = escape_literal(schema.unwrap_or("dbo"));
                 format!(
-                    "SELECT t.name as table_name, ep.value as comment \
+                    "SELECT t.name as table_name, CAST(ep.value AS NVARCHAR(MAX)) as comment \
                      FROM sys.tables t \
                      LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = 0 AND ep.name = 'MS_Description' \
                      JOIN sys.schemas s ON t.schema_id = s.schema_id \
@@ -450,7 +450,7 @@ pub mod queries {
                         c.max_length as character_maximum_length, \
                         c.precision as numeric_precision, \
                         c.scale as numeric_scale, \
-                        ep.value as comment, \
+                        CAST(ep.value AS NVARCHAR(MAX)) as comment, \
                         c.is_identity as auto_increment \
                      FROM sys.columns c \
                      JOIN sys.types t ON c.user_type_id = t.user_type_id \

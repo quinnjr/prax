@@ -39,6 +39,24 @@ pub enum CliError {
     #[diagnostic(code(prax::database))]
     Database(String),
 
+    /// Database unreachable — the connection could not be established
+    /// (host down, refused, timeout, DNS). Distinct from [`CliError::Database`]
+    /// (connected, but a query failed) so callers such as `migrate dev` can
+    /// treat "no database reachable" as a greenfield source while still
+    /// surfacing genuine query/auth errors against a reachable server.
+    #[error("Database unreachable: {0}")]
+    #[diagnostic(code(prax::database_unreachable))]
+    Unreachable(String),
+
+    /// The requested backend's introspection support was not compiled in
+    /// (its cargo feature is off). Callers such as `migrate dev` treat this
+    /// like an unreachable database (greenfield source) rather than a hard
+    /// error, so it is a distinct variant from [`CliError::Config`] to avoid
+    /// routing on the human-readable message text.
+    #[error("{0}")]
+    #[diagnostic(code(prax::feature_unavailable))]
+    FeatureUnavailable(String),
+
     /// Command error
     #[error("Command error: {0}")]
     #[diagnostic(code(prax::command))]
