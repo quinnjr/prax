@@ -488,11 +488,16 @@ async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema:
 /// Introspect `database_url` and map the result to a diff-source schema.
 ///
 /// Dispatches to the backend matching the configured provider (PostgreSQL,
-/// MySQL, SQLite, MSSQL), each behind its cargo feature. A failure —
-/// unreachable database, or a provider whose introspection feature was not
-/// compiled in — is treated as "no source reachable" (with a warning) rather
-/// than a hard error, so `migrate dev` still works offline for first-time
-/// creation and the greenfield flow is preserved.
+/// MySQL, SQLite, MSSQL), each behind its cargo feature.
+///
+/// Error handling splits two cases so `migrate dev` is both safe and honest:
+/// - **Unreachable database** ([`CliError::Unreachable`]) or a provider whose
+///   introspection feature was not compiled in → treated as "no source"
+///   (greenfield, with a warning), so first-time creation still works offline.
+/// - **Reachable but the introspection query/permission failed**
+///   ([`CliError::Database`] and anything else) → propagated as a hard error,
+///   rather than silently emitting full-creation DDL against a populated
+///   database.
 async fn introspect_source_schema(
     config: &Config,
     database_url: &str,
@@ -500,7 +505,14 @@ async fn introspect_source_schema(
     use crate::commands::introspect::{IntrospectionOptions, introspect_database};
     use crate::commands::schema_from_db::schema_from_database;
 
-    let options = IntrospectionOptions::default();
+    // Scope introspection to a single schema/database where the provider needs
+    // it. MySQL's `information_schema` spans every database on the server, so
+    // without a `table_schema` filter the diff source would pull in unrelated
+    // schemas; derive the database name from the connection URL.
+    let mut options = IntrospectionOptions::default();
+    if is_mysql(&config.database.provider) {
+        options.schema = mysql_database_from_url(database_url);
+    }
 
     match introspect_database(&config.database.provider, database_url, &options).await {
         Ok(db_schema) => {
@@ -510,17 +522,55 @@ async fn introspect_source_schema(
             }
             Ok(Some(result.schema))
         }
-        Err(e) => {
+        // Only "no database reachable" (or a provider we can't introspect
+        // because its feature is off) falls back to greenfield. A reachable
+        // database whose query/permission failed is a real error.
+        Err(CliError::Unreachable(msg)) => {
             output::warn(&format!(
-                "Could not introspect the database ({e}); treating as a new database. \
+                "Database not reachable ({msg}); treating as a new database. \
                  Generated SQL will be full-creation DDL."
             ));
             Ok(None)
         }
+        Err(CliError::Config(msg)) if msg.contains("requires the") => {
+            output::list_item(&format!("{msg} Using an empty source (full-creation DDL)."));
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the provider string denotes MySQL/MariaDB.
+fn is_mysql(provider: &str) -> bool {
+    matches!(provider.to_lowercase().as_str(), "mysql" | "mariadb")
+}
+
+/// Extract the database name from a MySQL connection URL
+/// (`mysql://user:pass@host:port/DBNAME?params`). Returns `None` when no
+/// path segment is present.
+fn mysql_database_from_url(url: &str) -> Option<String> {
+    let after_scheme = url.split("://").nth(1)?;
+    let after_authority = after_scheme.split_once('/')?.1;
+    let db = after_authority
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_matches('/');
+    if db.is_empty() {
+        None
+    } else {
+        Some(db.to_string())
     }
 }
 
 /// Map a datasource provider string to a migration `SqlBackend`.
+///
+/// The provider table is kept in sync with
+/// [`crate::commands::introspect::get_database_type`]: every provider that can
+/// be a diff *source* (introspected) must also render *target* SQL here.
+/// DuckDB is intentionally absent from both — it has no introspector yet — so
+/// `migrate dev` against DuckDB fails cleanly rather than diffing against an
+/// empty source.
 fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBackend> {
     use prax_migrate::SqlBackend;
     match provider.to_lowercase().as_str() {
@@ -528,7 +578,6 @@ fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBacken
         "mysql" | "mariadb" => Ok(SqlBackend::MySql),
         "sqlite" | "sqlite3" => Ok(SqlBackend::Sqlite),
         "mssql" | "sqlserver" | "sql_server" => Ok(SqlBackend::Mssql),
-        "duckdb" => Ok(SqlBackend::DuckDb),
         other => Err(CliError::Config(format!(
             "Unsupported database provider for migration generation: '{}'",
             other
@@ -596,7 +645,11 @@ fn generate_migration_sql(
 /// Remove every destructive operation from a `SchemaDiff` in place, leaving
 /// only additive/altering changes. Column *type/nullability/default* alters
 /// are kept (they are not drops); dropped columns, tables, enums, enum values,
-/// foreign keys, indexes, and extensions are removed.
+/// foreign keys, indexes, extensions, procedures, and triggers are removed.
+///
+/// `alter_views` is intentionally **kept**: a view alter recreates the view
+/// (drop + create), but views hold no data, so recreation is non-destructive
+/// and safe under the additive-only default.
 fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
     diff.drop_models.clear();
     diff.drop_enums.clear();
@@ -622,6 +675,17 @@ fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
         alter.remove_values.clear();
     }
     diff.alter_enums.retain(|a| !a.add_values.is_empty());
+
+    // Procedure and trigger drops are destructive too. The differ carries them
+    // on `SchemaDiff::procedures`; clear both channels and drop the whole
+    // procedure diff if nothing additive/altering remains.
+    if let Some(procs) = diff.procedures.as_mut() {
+        procs.drop.clear();
+        procs.drop_triggers.clear();
+        if procs.is_empty() {
+            diff.procedures = None;
+        }
+    }
 }
 
 async fn apply_migration(migration_path: &Path, _config: &Config) -> CliResult<()> {
@@ -672,6 +736,41 @@ mod tests {
             SqlBackend::Sqlite
         );
         assert!(sql_backend_for_provider("nonsense").is_err());
+        // DuckDB is intentionally not a supported migrate backend (no
+        // introspector) and must be rejected here, matching get_database_type.
+        assert!(sql_backend_for_provider("duckdb").is_err());
+    }
+
+    #[test]
+    fn test_mysql_database_from_url() {
+        assert_eq!(
+            mysql_database_from_url("mysql://u:p@host:3306/mydb"),
+            Some("mydb".to_string())
+        );
+        assert_eq!(
+            mysql_database_from_url("mysql://u:p@host:3306/mydb?ssl=true"),
+            Some("mydb".to_string())
+        );
+        // No database path segment → None (falls back to unscoped/default).
+        assert_eq!(mysql_database_from_url("mysql://u:p@host:3306"), None);
+        assert_eq!(mysql_database_from_url("mysql://u:p@host:3306/"), None);
+    }
+
+    #[tokio::test]
+    async fn test_introspect_database_unsupported_provider_errors() {
+        use crate::commands::introspect::{IntrospectionOptions, introspect_database};
+        // A provider that has no SQL introspector (mongodb) must return a
+        // Config error, not silently succeed.
+        let opts = IntrospectionOptions::default();
+        match introspect_database("mongodb", "mongodb://x/y", &opts).await {
+            Err(CliError::Config(msg)) => {
+                assert!(
+                    msg.contains("Unsupported database provider"),
+                    "unexpected message: {msg}"
+                );
+            }
+            other => panic!("expected CliError::Config, got {other:?}"),
+        }
     }
 
     // -- generate_migration_sql: greenfield (no source) --------------------
@@ -794,6 +893,81 @@ mod tests {
         assert!(
             sql_destructive.contains("DROP TABLE") && sql_destructive.contains("DROP COLUMN"),
             "destructive should drop: {sql_destructive}"
+        );
+    }
+
+    #[test]
+    fn destructive_emits_fk_and_index_drops_stripped_by_default() {
+        // Source declares an FK and a named index that the target drops.
+        // Additive-only must strip both DROP CONSTRAINT and DROP INDEX;
+        // --allow-destructive must emit them.
+        let source = parse(
+            r#"
+            model User {
+                id Int @id @auto
+                @@map("users")
+            }
+            model Post {
+                id       Int @id @auto
+                authorId Int @map("author_id")
+                title    String
+                author   User @relation(fields: [authorId], references: [id], map: "post_author_fk")
+                @@index([title], map: "post_title_idx")
+                @@map("posts")
+            }
+            "#,
+        );
+        // Target keeps the tables but drops the relation (FK) and the index.
+        let target = parse(
+            r#"
+            model User {
+                id Int @id @auto
+                @@map("users")
+            }
+            model Post {
+                id       Int @id @auto
+                authorId Int @map("author_id")
+                title    String
+                @@map("posts")
+            }
+            "#,
+        );
+
+        let additive =
+            generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
+        assert!(
+            !additive.to_uppercase().contains("DROP"),
+            "additive-only must strip FK/index drops: {additive}"
+        );
+
+        let destructive =
+            generate_migration_sql(&target, Some(source), &pg_config(), true).unwrap();
+        assert!(
+            destructive.contains("DROP CONSTRAINT") && destructive.contains("post_author_fk"),
+            "destructive should drop the FK constraint: {destructive}"
+        );
+        assert!(
+            destructive.contains("DROP INDEX") && destructive.contains("post_title_idx"),
+            "destructive should drop the index: {destructive}"
+        );
+    }
+
+    #[test]
+    fn strip_destructive_clears_procedure_and_trigger_drops() {
+        use prax_migrate::{ProcedureDiff, SchemaDiff};
+        let mut diff = SchemaDiff {
+            procedures: Some(ProcedureDiff {
+                drop: vec!["old_proc".into()],
+                drop_triggers: vec!["old_trigger".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        strip_destructive(&mut diff);
+        // With only drops, the procedure diff is emptied and cleared entirely.
+        assert!(
+            diff.procedures.is_none(),
+            "procedure drops must be stripped and the empty diff removed"
         );
     }
 

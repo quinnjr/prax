@@ -624,6 +624,65 @@ mod tests {
     }
 
     #[test]
+    fn introspected_source_with_defaults_round_trips_empty() {
+        // Columns carrying @default must round-trip to an empty diff: the
+        // introspected default expression, parsed by SchemaBuilder, must
+        // render to the same ANSI default the target .prax produces.
+        use prax_migrate::SchemaDiffer;
+
+        let mut active = column("active", NormalizedType::Boolean, false);
+        active.default = Some("true".to_string());
+        let mut score = column("score", NormalizedType::Int, false);
+        score.default = Some("0".to_string());
+        let mut label = column("label", NormalizedType::Text, false);
+        label.default = Some("'draft'".to_string());
+
+        let db = DatabaseSchema {
+            name: "db".to_string(),
+            schema: Some("public".to_string()),
+            tables: vec![TableInfo {
+                name: "widgets".to_string(),
+                schema: Some("public".to_string()),
+                columns: vec![
+                    column("id", NormalizedType::BigInt, false),
+                    active,
+                    score,
+                    label,
+                ],
+                primary_key: vec!["id".to_string()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let target = prax_schema::parse_schema(
+            r#"
+            model Widget {
+                id     BigInt  @id
+                active Boolean @default(true)
+                score  Int     @default(0)
+                label  String  @default("draft")
+                @@map("widgets")
+            }
+            "#,
+        )
+        .unwrap();
+
+        let source = schema_from_database(&db, IntrospectionConfig::default())
+            .unwrap()
+            .schema;
+        let diff = SchemaDiffer::new(target)
+            .with_source(source)
+            .diff()
+            .unwrap();
+        assert!(
+            diff.is_empty(),
+            "defaulted columns should round-trip clean, got: {}",
+            diff.summary()
+        );
+    }
+
+    #[test]
     fn introspected_source_missing_column_yields_only_that_delta() {
         // Foreign-history case: the DB (mapped source) predates a new column;
         // diffing the newer .prax against it must yield exactly one added

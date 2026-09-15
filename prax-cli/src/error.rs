@@ -39,6 +39,15 @@ pub enum CliError {
     #[diagnostic(code(prax::database))]
     Database(String),
 
+    /// Database unreachable — the connection could not be established
+    /// (host down, refused, timeout, DNS). Distinct from [`CliError::Database`]
+    /// (connected, but a query failed) so callers such as `migrate dev` can
+    /// treat "no database reachable" as a greenfield source while still
+    /// surfacing genuine query/auth errors against a reachable server.
+    #[error("Database unreachable: {0}")]
+    #[diagnostic(code(prax::database_unreachable))]
+    Unreachable(String),
+
     /// Command error
     #[error("Command error: {0}")]
     #[diagnostic(code(prax::command))]

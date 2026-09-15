@@ -3,13 +3,15 @@
 //! This module provides the actual database introspection functionality
 //! using the `prax-query` introspection types.
 
-use std::collections::HashMap;
-
 use prax_query::introspection::{
-    ColumnInfo, DatabaseSchema, EnumInfo, ForeignKeyInfo, IndexColumn, IndexInfo,
-    ReferentialAction, SortOrder, TableInfo, ViewInfo, generate_prax_schema, normalize_type,
-    queries,
+    ColumnInfo, DatabaseSchema, ForeignKeyInfo, IndexColumn, IndexInfo, ReferentialAction,
+    SortOrder, TableInfo, generate_prax_schema, normalize_type, queries,
 };
+// `EnumInfo`/`ViewInfo` are only constructed by the PostgreSQL introspector
+// (the other backends build enums/views differently or not at all), so import
+// them only when that feature is compiled to keep single-feature builds clean.
+#[cfg(feature = "postgres")]
+use prax_query::introspection::{EnumInfo, ViewInfo};
 use prax_query::sql::DatabaseType;
 
 use crate::config::Config;
@@ -85,7 +87,6 @@ pub fn default_schema(db_type: DatabaseType) -> &'static str {
 /// engine's `resolve_source_schema`. Each backend is behind its cargo
 /// feature; a provider whose feature was not compiled in returns a clear
 /// `Config` error rather than silently doing nothing.
-#[allow(unused_variables)]
 pub async fn introspect_database(
     provider: &str,
     database_url: &str,
@@ -96,58 +97,70 @@ pub async fn introspect_database(
         DatabaseType::PostgreSQL => {
             #[cfg(feature = "postgres")]
             {
-                return postgres::PostgresIntrospector::new(database_url.to_string())
+                postgres::PostgresIntrospector::new(database_url.to_string())
                     .introspect(options)
-                    .await;
+                    .await
             }
             #[cfg(not(feature = "postgres"))]
-            return Err(CliError::Config(
-                "PostgreSQL introspection requires the `postgres` feature: rebuild with \
-                 --features postgres."
-                    .to_string(),
-            ));
+            {
+                let _ = (database_url, options);
+                Err(CliError::Config(
+                    "PostgreSQL introspection requires the `postgres` feature: rebuild with \
+                     --features postgres."
+                        .to_string(),
+                ))
+            }
         }
         DatabaseType::MySQL => {
             #[cfg(feature = "mysql")]
             {
-                return mysql::MysqlIntrospector::new(database_url.to_string())
+                mysql::MysqlIntrospector::new(database_url.to_string())
                     .introspect(options)
-                    .await;
+                    .await
             }
             #[cfg(not(feature = "mysql"))]
-            return Err(CliError::Config(
-                "MySQL introspection requires the `mysql` feature: rebuild with \
-                 --features mysql."
-                    .to_string(),
-            ));
+            {
+                let _ = (database_url, options);
+                Err(CliError::Config(
+                    "MySQL introspection requires the `mysql` feature: rebuild with \
+                     --features mysql."
+                        .to_string(),
+                ))
+            }
         }
         DatabaseType::SQLite => {
             #[cfg(feature = "sqlite")]
             {
-                return sqlite::SqliteIntrospector::new(database_url.to_string())
+                sqlite::SqliteIntrospector::new(database_url.to_string())
                     .introspect(options)
-                    .await;
+                    .await
             }
             #[cfg(not(feature = "sqlite"))]
-            return Err(CliError::Config(
-                "SQLite introspection requires the `sqlite` feature: rebuild with \
-                 --features sqlite."
-                    .to_string(),
-            ));
+            {
+                let _ = (database_url, options);
+                Err(CliError::Config(
+                    "SQLite introspection requires the `sqlite` feature: rebuild with \
+                     --features sqlite."
+                        .to_string(),
+                ))
+            }
         }
         DatabaseType::MSSQL => {
             #[cfg(feature = "mssql")]
             {
-                return mssql::MssqlIntrospector::new(database_url.to_string())
+                mssql::MssqlIntrospector::new(database_url.to_string())
                     .introspect(options)
-                    .await;
+                    .await
             }
             #[cfg(not(feature = "mssql"))]
-            return Err(CliError::Config(
-                "MSSQL introspection requires the `mssql` feature: rebuild with \
-                 --features mssql."
-                    .to_string(),
-            ));
+            {
+                let _ = (database_url, options);
+                Err(CliError::Config(
+                    "MSSQL introspection requires the `mssql` feature: rebuild with \
+                     --features mssql."
+                        .to_string(),
+                ))
+            }
         }
     }
 }
@@ -158,6 +171,8 @@ pub async fn introspect_database(
 
 #[cfg(feature = "postgres")]
 pub mod postgres {
+    use std::collections::HashMap;
+
     use super::*;
     use tokio_postgres::{Client, NoTls, Row};
 
@@ -198,11 +213,22 @@ pub mod postgres {
 
             // The two connector types produce different `Connection`
             // generics, so drive each arm independently and unify on the
-            // stream-agnostic `Client`.
+            // stream-agnostic `Client`. Each connect is bounded by
+            // `INTROSPECT_CONNECT_TIMEOUT_SECS` so an unreachable-but-not-
+            // refused host does not hang the CLI (parity with the pool-based
+            // backends).
+            let connect_timeout =
+                std::time::Duration::from_secs(super::INTROSPECT_CONNECT_TIMEOUT_SECS);
             let client = if tls_disabled {
-                let (client, connection) = tokio_postgres::connect(&self.connection_string, NoTls)
-                    .await
-                    .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
+                let (client, connection) = tokio::time::timeout(
+                    connect_timeout,
+                    tokio_postgres::connect(&self.connection_string, NoTls),
+                )
+                .await
+                .map_err(|_| {
+                    CliError::Unreachable("Failed to connect: connection timed out".to_string())
+                })?
+                .map_err(|e| CliError::Unreachable(format!("Failed to connect: {}", e)))?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
                         eprintln!("Connection error: {}", e);
@@ -210,12 +236,18 @@ pub mod postgres {
                 });
                 client
             } else {
-                let (client, connection) = tokio_postgres::connect(
-                    &self.connection_string,
-                    prax_postgres::tls::make_tls_connector(),
+                let (client, connection) = tokio::time::timeout(
+                    connect_timeout,
+                    tokio_postgres::connect(
+                        &self.connection_string,
+                        prax_postgres::tls::make_tls_connector(),
+                    ),
                 )
                 .await
-                .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
+                .map_err(|_| {
+                    CliError::Unreachable("Failed to connect: connection timed out".to_string())
+                })?
+                .map_err(|e| CliError::Unreachable(format!("Failed to connect: {}", e)))?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
                         eprintln!("Connection error: {}", e);
@@ -568,7 +600,57 @@ pub mod postgres {
 // Shared helpers for JSON-row backends (MySQL)
 // ============================================================================
 
+/// Bounded connect timeout for introspection pools. Introspection is a
+/// short-lived, interactive step; without a bound an unreachable-but-not-
+/// refused host (e.g. a firewall drop) would hang the CLI. `migrate dev`
+/// relies on this so it can fall back to greenfield when a DB is unreachable.
+#[cfg(any(
+    feature = "postgres",
+    feature = "mysql",
+    feature = "sqlite",
+    feature = "mssql"
+))]
+pub(crate) const INTROSPECT_CONNECT_TIMEOUT_SECS: u64 = 5;
+
+/// A source of introspection rows returned as JSON objects, keyed by column
+/// name. Implemented for the raw engines of the JSON-capable backends so the
+/// MySQL and SQLite introspectors share one row-fetch shim instead of each
+/// hand-rolling `raw_sql_query(sql, &[]) -> into_json`.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+pub(crate) trait JsonRowSource {
+    /// Run `sql` (no bind params) and return each row as a JSON object.
+    async fn json_rows(&self, sql: &str) -> CliResult<Vec<serde_json::Value>>;
+}
+
+#[cfg(feature = "mysql")]
+impl JsonRowSource for prax_mysql::MysqlRawEngine {
+    async fn json_rows(&self, sql: &str) -> CliResult<Vec<serde_json::Value>> {
+        let rows = self
+            .raw_sql_query(sql, &[])
+            .await
+            .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
+        Ok(rows.into_iter().map(|r| r.into_json()).collect())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl JsonRowSource for prax_sqlite::SqliteRawEngine {
+    async fn json_rows(&self, sql: &str) -> CliResult<Vec<serde_json::Value>> {
+        let rows = self
+            .raw_sql_query(sql, &[])
+            .await
+            .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
+        Ok(rows.into_iter().map(|r| r.into_json()).collect())
+    }
+}
+
 /// Simple glob-style pattern matching shared across introspectors.
+///
+/// Supported subset: `*` (match all), `pre*` (prefix), `*suf` (suffix),
+/// `*mid*` (substring/contains). Interior wildcards (e.g. `a*b*c` or
+/// `pre*suf`) are **not** supported — such a pattern falls through to an
+/// exact-string compare and will typically match nothing. Callers should
+/// stick to the four supported shapes for table include/exclude filters.
 #[cfg(any(
     feature = "postgres",
     feature = "mysql",
@@ -622,8 +704,9 @@ fn json_str(row: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// Read a boolean column from a JSON object row, treating MySQL's 1/0 and
-/// "YES"/"NO" forms as booleans.
-#[cfg(any(feature = "mysql", feature = "sqlite"))]
+/// "YES"/"NO" forms as booleans. Only the MySQL introspector needs this;
+/// SQLite reads its PRAGMA booleans via `json_i32(...) != 0`.
+#[cfg(feature = "mysql")]
 fn json_bool(row: &serde_json::Value, key: &str) -> bool {
     match json_get(row, key) {
         Some(serde_json::Value::Bool(b)) => *b,
@@ -668,19 +751,19 @@ pub mod mysql {
         async fn engine(&self) -> CliResult<MysqlRawEngine> {
             let pool = MysqlPool::builder()
                 .url(self.connection_string.clone())
+                .connection_timeout(std::time::Duration::from_secs(
+                    super::INTROSPECT_CONNECT_TIMEOUT_SECS,
+                ))
                 .build()
                 .await
-                .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
+                .map_err(|e| CliError::Unreachable(format!("Failed to connect: {}", e)))?;
             Ok(MysqlRawEngine::new(pool))
         }
 
         /// Run introspection SQL, returning each row as a JSON object.
+        /// Delegates to the shared [`super::JsonRowSource`] shim.
         async fn rows(engine: &MysqlRawEngine, sql: &str) -> CliResult<Vec<serde_json::Value>> {
-            let rows = engine
-                .raw_sql_query(sql, &[])
-                .await
-                .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
-            Ok(rows.into_iter().map(|r| r.into_json()).collect())
+            super::JsonRowSource::json_rows(engine, sql).await
         }
     }
 
@@ -910,18 +993,17 @@ pub mod sqlite {
         async fn engine(&self) -> CliResult<SqliteRawEngine> {
             let pool = SqlitePool::builder()
                 .url(self.connection_string.clone())
+                .connection_timeout(std::time::Duration::from_secs(
+                    super::INTROSPECT_CONNECT_TIMEOUT_SECS,
+                ))
                 .build()
                 .await
-                .map_err(|e| CliError::Database(format!("Failed to open database: {}", e)))?;
+                .map_err(|e| CliError::Unreachable(format!("Failed to open database: {}", e)))?;
             Ok(SqliteRawEngine::new(pool))
         }
 
         async fn rows(engine: &SqliteRawEngine, sql: &str) -> CliResult<Vec<serde_json::Value>> {
-            let rows = engine
-                .raw_sql_query(sql, &[])
-                .await
-                .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
-            Ok(rows.into_iter().map(|r| r.into_json()).collect())
+            super::JsonRowSource::json_rows(engine, sql).await
         }
     }
 
@@ -998,7 +1080,11 @@ pub mod sqlite {
                 name,
                 db_type: decl_type,
                 normalized_type: normalized,
-                nullable: !not_null && pk_pos == 0,
+                // Nullability comes solely from the column's NOT NULL flag;
+                // PK membership is represented separately via is_primary_key
+                // (→ @id), so a composite PK with a nullable member is not
+                // silently forced non-null.
+                nullable: !not_null,
                 default: json_str(row, "dflt_value"),
                 // rowid INTEGER PRIMARY KEY columns auto-increment; detected
                 // below once the PK is known.
@@ -1178,13 +1264,15 @@ pub mod mssql {
         async fn introspect(&self, options: &IntrospectionOptions) -> CliResult<DatabaseSchema> {
             let pool = MssqlPool::builder()
                 .connection_string(self.connection_string.clone())
+                .connection_timeout(std::time::Duration::from_secs(
+                    super::INTROSPECT_CONNECT_TIMEOUT_SECS,
+                ))
                 .build()
                 .await
-                .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
-            let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| CliError::Database(format!("Failed to acquire connection: {}", e)))?;
+                .map_err(|e| CliError::Unreachable(format!("Failed to connect: {}", e)))?;
+            let mut conn = pool.get().await.map_err(|e| {
+                CliError::Unreachable(format!("Failed to acquire connection: {}", e))
+            })?;
 
             let schema_name = options.schema.clone().unwrap_or_else(|| "dbo".to_string());
             let schema_ref = Some(schema_name.as_str());
@@ -1241,6 +1329,12 @@ pub mod mssql {
                         continue;
                     };
                     let data_type = row_str(row, "data_type").unwrap_or_default();
+                    // NOTE: sys.columns.max_length is a BYTE length, not a
+                    // character count — nvarchar(255) reports 510 and MAX
+                    // reports -1. Harmless today because VarChar/Char normalize
+                    // to TEXT (length discarded) in the diff-source mapping; if
+                    // length-sensitive types are added, halve for n-types and
+                    // special-case -1 → MAX before comparing.
                     let max_length = row_i32(row, "character_maximum_length");
                     let precision = row_i32(row, "numeric_precision");
                     let scale = row_i32(row, "numeric_scale");

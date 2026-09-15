@@ -819,7 +819,8 @@ pub(crate) fn primary_key_columns(model: &Model) -> Vec<String> {
         .collect()
 }
 
-/// Map an `@@index`/`@@unique` field reference to its column name,/// respecting the field's `@map` attribute. Shared with the shadow-drift
+/// Map an `@@index`/`@@unique` field reference to its column name,
+/// respecting the field's `@map` attribute. Shared with the shadow-drift
 /// index signatures so both generate identical fallback index names.
 pub(crate) fn index_column_name(model: &Model, field_name: &str) -> String {
     model

@@ -90,7 +90,11 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
         sample_size: args.sample_size,
     };
 
-    // Introspect database
+    // Introspect database. Dispatch matches the provider against the canonical
+    // allow-list in `get_database_type` (postgres/postgresql/pg, mysql/mariadb,
+    // sqlite/sqlite3, mssql/sqlserver/sql_server). This is stricter than the
+    // previous `provider.contains("postgres")` substring check: a non-canonical
+    // provider string that used to match loosely now errors as unsupported.
     output::step(1, 3, "Introspecting database...");
 
     let db_schema = crate::commands::introspect::introspect_database(
