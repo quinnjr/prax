@@ -79,6 +79,79 @@ pub fn default_schema(db_type: DatabaseType) -> &'static str {
     }
 }
 
+/// Introspect a database, dispatching to the backend matching `provider`.
+///
+/// This is the single entry point shared by `db pull` and the migration
+/// engine's `resolve_source_schema`. Each backend is behind its cargo
+/// feature; a provider whose feature was not compiled in returns a clear
+/// `Config` error rather than silently doing nothing.
+#[allow(unused_variables)]
+pub async fn introspect_database(
+    provider: &str,
+    database_url: &str,
+    options: &IntrospectionOptions,
+) -> CliResult<DatabaseSchema> {
+    let db_type = get_database_type(provider)?;
+    match db_type {
+        DatabaseType::PostgreSQL => {
+            #[cfg(feature = "postgres")]
+            {
+                return postgres::PostgresIntrospector::new(database_url.to_string())
+                    .introspect(options)
+                    .await;
+            }
+            #[cfg(not(feature = "postgres"))]
+            return Err(CliError::Config(
+                "PostgreSQL introspection requires the `postgres` feature: rebuild with \
+                 --features postgres."
+                    .to_string(),
+            ));
+        }
+        DatabaseType::MySQL => {
+            #[cfg(feature = "mysql")]
+            {
+                return mysql::MysqlIntrospector::new(database_url.to_string())
+                    .introspect(options)
+                    .await;
+            }
+            #[cfg(not(feature = "mysql"))]
+            return Err(CliError::Config(
+                "MySQL introspection requires the `mysql` feature: rebuild with \
+                 --features mysql."
+                    .to_string(),
+            ));
+        }
+        DatabaseType::SQLite => {
+            #[cfg(feature = "sqlite")]
+            {
+                return sqlite::SqliteIntrospector::new(database_url.to_string())
+                    .introspect(options)
+                    .await;
+            }
+            #[cfg(not(feature = "sqlite"))]
+            return Err(CliError::Config(
+                "SQLite introspection requires the `sqlite` feature: rebuild with \
+                 --features sqlite."
+                    .to_string(),
+            ));
+        }
+        DatabaseType::MSSQL => {
+            #[cfg(feature = "mssql")]
+            {
+                return mssql::MssqlIntrospector::new(database_url.to_string())
+                    .introspect(options)
+                    .await;
+            }
+            #[cfg(not(feature = "mssql"))]
+            return Err(CliError::Config(
+                "MSSQL introspection requires the `mssql` feature: rebuild with \
+                 --features mssql."
+                    .to_string(),
+            ));
+        }
+    }
+}
+
 // ============================================================================
 // PostgreSQL Introspector
 // ============================================================================
@@ -489,27 +562,824 @@ pub mod postgres {
             tokio_postgres::config::Host::Unix(_) => true,
         }
     }
+}
 
-    /// Simple glob-style pattern matching.
-    fn matches_pattern(name: &str, pattern: &str) -> bool {
-        if pattern == "*" {
-            return true;
+// ============================================================================
+// Shared helpers for JSON-row backends (MySQL)
+// ============================================================================
+
+/// Simple glob-style pattern matching shared across introspectors.
+#[cfg(any(
+    feature = "postgres",
+    feature = "mysql",
+    feature = "sqlite",
+    feature = "mssql"
+))]
+fn matches_pattern(name: &str, pattern: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+
+    if pattern.starts_with('*') && pattern.ends_with('*') {
+        let middle = &pattern[1..pattern.len() - 1];
+        return name.contains(middle);
+    }
+
+    if let Some(suffix) = pattern.strip_prefix('*') {
+        return name.ends_with(suffix);
+    }
+
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return name.starts_with(prefix);
+    }
+
+    name == pattern
+}
+
+/// Look up a column in a JSON object row case-insensitively.
+///
+/// MySQL's `information_schema` returns unaliased column names in uppercase
+/// (e.g. `TABLE_NAME`) while aliased expressions keep the alias case, so a
+/// single query row can mix cases. Match the exact key first, then fall back
+/// to a case-insensitive scan.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn json_get<'a>(row: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    if let Some(v) = row.get(key) {
+        return Some(v);
+    }
+    row.as_object()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v)
+}
+
+/// Read an optional string column from a serde_json object row.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn json_str(row: &serde_json::Value, key: &str) -> Option<String> {
+    json_get(row, key)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// Read a boolean column from a JSON object row, treating MySQL's 1/0 and
+/// "YES"/"NO" forms as booleans.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn json_bool(row: &serde_json::Value, key: &str) -> bool {
+    match json_get(row, key) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::Number(n)) => n.as_i64().is_some_and(|i| i != 0),
+        Some(serde_json::Value::String(s)) => {
+            matches!(s.as_str(), "1" | "YES" | "yes" | "true" | "TRUE")
+        }
+        _ => false,
+    }
+}
+
+/// Read an integer column from a JSON object row.
+#[cfg(any(feature = "mysql", feature = "sqlite"))]
+fn json_i32(row: &serde_json::Value, key: &str) -> Option<i32> {
+    match json_get(row, key) {
+        Some(serde_json::Value::Number(n)) => n.as_i64().and_then(|i| i32::try_from(i).ok()),
+        Some(serde_json::Value::String(s)) => s.parse::<i32>().ok(),
+        _ => None,
+    }
+}
+
+// ============================================================================
+// MySQL Introspector
+// ============================================================================
+
+#[cfg(feature = "mysql")]
+pub mod mysql {
+    use super::*;
+    use prax_mysql::{MysqlPool, MysqlRawEngine};
+
+    /// MySQL introspector backed by the `prax-mysql` engine's raw query API.
+    pub struct MysqlIntrospector {
+        connection_string: String,
+    }
+
+    impl MysqlIntrospector {
+        /// Create a new MySQL introspector.
+        pub fn new(connection_string: String) -> Self {
+            Self { connection_string }
         }
 
-        if pattern.starts_with('*') && pattern.ends_with('*') {
-            let middle = &pattern[1..pattern.len() - 1];
-            return name.contains(middle);
+        async fn engine(&self) -> CliResult<MysqlRawEngine> {
+            let pool = MysqlPool::builder()
+                .url(self.connection_string.clone())
+                .build()
+                .await
+                .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
+            Ok(MysqlRawEngine::new(pool))
         }
 
-        if let Some(suffix) = pattern.strip_prefix('*') {
-            return name.ends_with(suffix);
+        /// Run introspection SQL, returning each row as a JSON object.
+        async fn rows(engine: &MysqlRawEngine, sql: &str) -> CliResult<Vec<serde_json::Value>> {
+            let rows = engine
+                .raw_sql_query(sql, &[])
+                .await
+                .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
+            Ok(rows.into_iter().map(|r| r.into_json()).collect())
+        }
+    }
+
+    impl Introspector for MysqlIntrospector {
+        async fn introspect(&self, options: &IntrospectionOptions) -> CliResult<DatabaseSchema> {
+            let engine = self.engine().await?;
+            // MySQL has no schema namespace distinct from the database; the
+            // connection's default database scopes information_schema queries.
+            let schema = options.schema.clone();
+            let schema_ref = schema.as_deref();
+
+            let mut db_schema = DatabaseSchema {
+                name: "database".to_string(),
+                schema: schema.clone(),
+                ..Default::default()
+            };
+
+            let table_rows = Self::rows(
+                &engine,
+                &queries::tables_query(DatabaseType::MySQL, schema_ref),
+            )
+            .await?;
+            for row in &table_rows {
+                let Some(table_name) = json_str(row, "table_name") else {
+                    continue;
+                };
+                if let Some(ref pattern) = options.table_filter
+                    && !matches_pattern(&table_name, pattern)
+                {
+                    continue;
+                }
+                if let Some(ref exclude) = options.exclude_pattern
+                    && matches_pattern(&table_name, exclude)
+                {
+                    continue;
+                }
+
+                db_schema.tables.push(TableInfo {
+                    name: table_name,
+                    schema: schema.clone(),
+                    comment: if options.include_comments {
+                        json_str(row, "comment").filter(|c| !c.is_empty())
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                });
+            }
+
+            for table in &mut db_schema.tables {
+                populate_table(&engine, table, schema_ref, options).await?;
+            }
+
+            Ok(db_schema)
+        }
+    }
+
+    /// Fill a table's columns, primary key, foreign keys, and indexes.
+    async fn populate_table(
+        engine: &MysqlRawEngine,
+        table: &mut TableInfo,
+        schema: Option<&str>,
+        options: &IntrospectionOptions,
+    ) -> CliResult<()> {
+        // Columns
+        let col_rows = MysqlIntrospector::rows(
+            engine,
+            &queries::columns_query(DatabaseType::MySQL, &table.name, schema),
+        )
+        .await?;
+        for row in &col_rows {
+            let Some(name) = json_str(row, "column_name") else {
+                continue;
+            };
+            let data_type = json_str(row, "data_type").unwrap_or_default();
+            let max_length = json_i32(row, "character_maximum_length");
+            let precision = json_i32(row, "numeric_precision");
+            let scale = json_i32(row, "numeric_scale");
+            let normalized = normalize_type(
+                DatabaseType::MySQL,
+                &data_type,
+                max_length,
+                precision,
+                scale,
+            );
+
+            table.columns.push(ColumnInfo {
+                name,
+                db_type: data_type,
+                normalized_type: normalized,
+                nullable: json_bool(row, "nullable"),
+                default: json_str(row, "column_default"),
+                auto_increment: json_bool(row, "auto_increment"),
+                max_length,
+                precision,
+                scale,
+                comment: if options.include_comments {
+                    json_str(row, "comment").filter(|c| !c.is_empty())
+                } else {
+                    None
+                },
+                ..Default::default()
+            });
         }
 
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return name.starts_with(prefix);
+        // Primary key
+        let pk_rows = MysqlIntrospector::rows(
+            engine,
+            &queries::primary_keys_query(DatabaseType::MySQL, &table.name, schema),
+        )
+        .await?;
+        for row in &pk_rows {
+            if let Some(col) = json_str(row, "column_name") {
+                table.primary_key.push(col.clone());
+                if let Some(c) = table.columns.iter_mut().find(|c| c.name == col) {
+                    c.is_primary_key = true;
+                }
+            }
         }
 
-        name == pattern
+        // Foreign keys (grouped by constraint name, columns in order)
+        let fk_rows = MysqlIntrospector::rows(
+            engine,
+            &queries::foreign_keys_query(DatabaseType::MySQL, &table.name, schema),
+        )
+        .await?;
+        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
+            std::collections::HashMap::new();
+        let mut fk_order: Vec<String> = Vec::new();
+        for row in &fk_rows {
+            let Some(cname) = json_str(row, "constraint_name") else {
+                continue;
+            };
+            let fk = fk_map.entry(cname.clone()).or_insert_with(|| {
+                fk_order.push(cname.clone());
+                ForeignKeyInfo {
+                    name: cname.clone(),
+                    columns: Vec::new(),
+                    referenced_table: json_str(row, "referenced_table").unwrap_or_default(),
+                    referenced_schema: json_str(row, "referenced_schema"),
+                    referenced_columns: Vec::new(),
+                    on_delete: ReferentialAction::from_str(
+                        &json_str(row, "delete_rule").unwrap_or_default(),
+                    ),
+                    on_update: ReferentialAction::from_str(
+                        &json_str(row, "update_rule").unwrap_or_default(),
+                    ),
+                }
+            });
+            if let Some(col) = json_str(row, "column_name") {
+                fk.columns.push(col);
+            }
+            if let Some(rc) = json_str(row, "referenced_column") {
+                fk.referenced_columns.push(rc);
+            }
+        }
+        table.foreign_keys = fk_order
+            .into_iter()
+            .filter_map(|n| fk_map.remove(&n))
+            .collect();
+
+        // Indexes (grouped by name, columns in order)
+        let idx_rows = MysqlIntrospector::rows(
+            engine,
+            &queries::indexes_query(DatabaseType::MySQL, &table.name, schema),
+        )
+        .await?;
+        let mut idx_map: std::collections::HashMap<String, IndexInfo> =
+            std::collections::HashMap::new();
+        let mut idx_order: Vec<String> = Vec::new();
+        for row in &idx_rows {
+            let Some(iname) = json_str(row, "index_name") else {
+                continue;
+            };
+            let idx = idx_map.entry(iname.clone()).or_insert_with(|| {
+                idx_order.push(iname.clone());
+                IndexInfo {
+                    name: iname.clone(),
+                    columns: Vec::new(),
+                    is_unique: json_bool(row, "is_unique"),
+                    is_primary: json_bool(row, "is_primary"),
+                    index_type: json_str(row, "index_type"),
+                    filter: json_str(row, "filter"),
+                }
+            });
+            if let Some(col) = json_str(row, "column_name") {
+                idx.columns.push(IndexColumn {
+                    name: col,
+                    order: SortOrder::Asc,
+                    ..Default::default()
+                });
+            }
+        }
+        table.indexes = idx_order
+            .into_iter()
+            .filter_map(|n| idx_map.remove(&n))
+            .collect();
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// SQLite Introspector
+// ============================================================================
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite {
+    use super::*;
+    use prax_sqlite::{SqlitePool, SqliteRawEngine};
+
+    /// SQLite introspector backed by the `prax-sqlite` engine's raw query API.
+    ///
+    /// SQLite exposes structure through PRAGMAs rather than an
+    /// `information_schema`, so this introspector parses PRAGMA output shapes
+    /// (`table_info`, `foreign_key_list`, `index_list`/`index_info`) directly.
+    pub struct SqliteIntrospector {
+        connection_string: String,
+    }
+
+    impl SqliteIntrospector {
+        /// Create a new SQLite introspector.
+        pub fn new(connection_string: String) -> Self {
+            Self { connection_string }
+        }
+
+        async fn engine(&self) -> CliResult<SqliteRawEngine> {
+            let pool = SqlitePool::builder()
+                .url(self.connection_string.clone())
+                .build()
+                .await
+                .map_err(|e| CliError::Database(format!("Failed to open database: {}", e)))?;
+            Ok(SqliteRawEngine::new(pool))
+        }
+
+        async fn rows(engine: &SqliteRawEngine, sql: &str) -> CliResult<Vec<serde_json::Value>> {
+            let rows = engine
+                .raw_sql_query(sql, &[])
+                .await
+                .map_err(|e| CliError::Database(format!("Introspection query failed: {}", e)))?;
+            Ok(rows.into_iter().map(|r| r.into_json()).collect())
+        }
+    }
+
+    impl Introspector for SqliteIntrospector {
+        async fn introspect(&self, options: &IntrospectionOptions) -> CliResult<DatabaseSchema> {
+            let engine = self.engine().await?;
+
+            let mut db_schema = DatabaseSchema {
+                name: "database".to_string(),
+                schema: None,
+                ..Default::default()
+            };
+
+            // SQLite has no schema namespace; the tables_query ignores it.
+            let table_rows =
+                Self::rows(&engine, &queries::tables_query(DatabaseType::SQLite, None)).await?;
+            for row in &table_rows {
+                let Some(table_name) = json_str(row, "table_name") else {
+                    continue;
+                };
+                if let Some(ref pattern) = options.table_filter
+                    && !matches_pattern(&table_name, pattern)
+                {
+                    continue;
+                }
+                if let Some(ref exclude) = options.exclude_pattern
+                    && matches_pattern(&table_name, exclude)
+                {
+                    continue;
+                }
+                db_schema.tables.push(TableInfo {
+                    name: table_name,
+                    ..Default::default()
+                });
+            }
+
+            for table in &mut db_schema.tables {
+                populate_table(&engine, table).await?;
+            }
+
+            Ok(db_schema)
+        }
+    }
+
+    async fn populate_table(engine: &SqliteRawEngine, table: &mut TableInfo) -> CliResult<()> {
+        // PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+        // `pk` is the 1-based ordinal within the primary key (0 = not part).
+        let col_rows = SqliteIntrospector::rows(
+            engine,
+            &queries::columns_query(DatabaseType::SQLite, &table.name, None),
+        )
+        .await?;
+        let mut pk_positions: Vec<(i32, String)> = Vec::new();
+        for row in &col_rows {
+            let Some(name) = json_str(row, "name") else {
+                continue;
+            };
+            let decl_type = json_str(row, "type").unwrap_or_default();
+            // SQLite types can carry a size, e.g. VARCHAR(255); normalize on
+            // the affinity keyword (leading identifier chars).
+            let base_type: String = decl_type
+                .split([' ', '('])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let normalized = normalize_type(DatabaseType::SQLite, &base_type, None, None, None);
+            let not_null = json_i32(row, "notnull").unwrap_or(0) != 0;
+            let pk_pos = json_i32(row, "pk").unwrap_or(0);
+            if pk_pos > 0 {
+                pk_positions.push((pk_pos, name.clone()));
+            }
+
+            table.columns.push(ColumnInfo {
+                name,
+                db_type: decl_type,
+                normalized_type: normalized,
+                nullable: !not_null && pk_pos == 0,
+                default: json_str(row, "dflt_value"),
+                // rowid INTEGER PRIMARY KEY columns auto-increment; detected
+                // below once the PK is known.
+                auto_increment: false,
+                is_primary_key: pk_pos > 0,
+                ..Default::default()
+            });
+        }
+
+        // Primary key columns in PK order.
+        pk_positions.sort_by_key(|(pos, _)| *pos);
+        table.primary_key = pk_positions.into_iter().map(|(_, name)| name).collect();
+
+        // A single INTEGER PRIMARY KEY is an alias for rowid (auto-increment).
+        if table.primary_key.len() == 1
+            && let Some(col) = table
+                .columns
+                .iter_mut()
+                .find(|c| c.name == table.primary_key[0])
+            && col.db_type.to_ascii_lowercase().contains("int")
+        {
+            col.auto_increment = true;
+        }
+
+        // PRAGMA foreign_key_list: id, seq, table, from, to, on_update, on_delete, match
+        // Rows for one FK share `id`; `seq` orders the columns.
+        let fk_rows = SqliteIntrospector::rows(
+            engine,
+            &queries::foreign_keys_query(DatabaseType::SQLite, &table.name, None),
+        )
+        .await?;
+        let mut fk_map: std::collections::BTreeMap<i64, ForeignKeyInfo> =
+            std::collections::BTreeMap::new();
+        for row in &fk_rows {
+            let id = row.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
+            let fk = fk_map.entry(id).or_insert_with(|| ForeignKeyInfo {
+                // SQLite FKs are unnamed; synthesize a stable name so the
+                // diff engine can match them. The .prax must pin this via
+                // @relation(map: "fk_<table>_<col>") to round-trip cleanly.
+                name: String::new(),
+                columns: Vec::new(),
+                referenced_table: json_str(row, "table").unwrap_or_default(),
+                referenced_schema: None,
+                referenced_columns: Vec::new(),
+                on_delete: ReferentialAction::from_str(
+                    &json_str(row, "on_delete").unwrap_or_default(),
+                ),
+                on_update: ReferentialAction::from_str(
+                    &json_str(row, "on_update").unwrap_or_default(),
+                ),
+            });
+            if let Some(from) = json_str(row, "from") {
+                fk.columns.push(from);
+            }
+            if let Some(to) = json_str(row, "to") {
+                fk.referenced_columns.push(to);
+            }
+        }
+        table.foreign_keys = fk_map
+            .into_values()
+            .map(|mut fk| {
+                if fk.name.is_empty() {
+                    fk.name = format!("fk_{}_{}", table.name, fk.columns.join("_"));
+                }
+                fk
+            })
+            .collect();
+
+        // PRAGMA index_list: seq, name, unique, origin, partial
+        // origin 'pk' is the implicit PK index; skip it (already represented).
+        let idx_rows = SqliteIntrospector::rows(
+            engine,
+            &queries::indexes_query(DatabaseType::SQLite, &table.name, None),
+        )
+        .await?;
+        for row in &idx_rows {
+            let Some(idx_name) = json_str(row, "name") else {
+                continue;
+            };
+            let origin = json_str(row, "origin").unwrap_or_default();
+            let is_primary = origin == "pk";
+            let is_unique = json_i32(row, "unique").unwrap_or(0) != 0;
+
+            // PRAGMA index_info(name): seqno, cid, name — the indexed columns.
+            let info_rows = SqliteIntrospector::rows(
+                engine,
+                &format!("PRAGMA index_info('{}')", idx_name.replace('\'', "''")),
+            )
+            .await?;
+            let columns: Vec<IndexColumn> = info_rows
+                .iter()
+                .filter_map(|r| json_str(r, "name"))
+                .map(|name| IndexColumn {
+                    name,
+                    order: SortOrder::Asc,
+                    ..Default::default()
+                })
+                .collect();
+
+            table.indexes.push(IndexInfo {
+                name: idx_name,
+                columns,
+                is_unique,
+                is_primary,
+                index_type: None,
+                filter: None,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+// ============================================================================
+// MSSQL Introspector
+// ============================================================================
+
+#[cfg(feature = "mssql")]
+pub mod mssql {
+    use super::*;
+    use prax_mssql::MssqlPool;
+    use prax_mssql::Row;
+
+    /// MSSQL introspector backed by the `prax-mssql` engine's pooled
+    /// connection. Reads typed `tiberius::Row` columns from the `sys.*`
+    /// catalog queries.
+    pub struct MssqlIntrospector {
+        connection_string: String,
+    }
+
+    impl MssqlIntrospector {
+        /// Create a new MSSQL introspector.
+        pub fn new(connection_string: String) -> Self {
+            Self { connection_string }
+        }
+    }
+
+    /// Read a nullable string column by name.
+    fn row_str(row: &Row, col: &str) -> Option<String> {
+        row.try_get::<&str, _>(col)
+            .ok()
+            .flatten()
+            .map(str::to_string)
+    }
+
+    /// Read a bit/int column as a bool.
+    fn row_bool(row: &Row, col: &str) -> bool {
+        if let Ok(Some(b)) = row.try_get::<bool, _>(col) {
+            return b;
+        }
+        // Some bit-like columns arrive as integers.
+        row_i64(row, col).is_some_and(|i| i != 0)
+    }
+
+    /// Read an integer column, tolerating i16/i32/i64/u8 widths.
+    fn row_i64(row: &Row, col: &str) -> Option<i64> {
+        if let Ok(Some(v)) = row.try_get::<i32, _>(col) {
+            return Some(v as i64);
+        }
+        if let Ok(Some(v)) = row.try_get::<i64, _>(col) {
+            return Some(v);
+        }
+        if let Ok(Some(v)) = row.try_get::<i16, _>(col) {
+            return Some(v as i64);
+        }
+        if let Ok(Some(v)) = row.try_get::<u8, _>(col) {
+            return Some(v as i64);
+        }
+        None
+    }
+
+    fn row_i32(row: &Row, col: &str) -> Option<i32> {
+        row_i64(row, col).and_then(|v| i32::try_from(v).ok())
+    }
+
+    impl Introspector for MssqlIntrospector {
+        async fn introspect(&self, options: &IntrospectionOptions) -> CliResult<DatabaseSchema> {
+            let pool = MssqlPool::builder()
+                .connection_string(self.connection_string.clone())
+                .build()
+                .await
+                .map_err(|e| CliError::Database(format!("Failed to connect: {}", e)))?;
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| CliError::Database(format!("Failed to acquire connection: {}", e)))?;
+
+            let schema_name = options.schema.clone().unwrap_or_else(|| "dbo".to_string());
+            let schema_ref = Some(schema_name.as_str());
+
+            let mut db_schema = DatabaseSchema {
+                name: "database".to_string(),
+                schema: Some(schema_name.clone()),
+                ..Default::default()
+            };
+
+            let table_rows = conn
+                .query(&queries::tables_query(DatabaseType::MSSQL, schema_ref), &[])
+                .await
+                .map_err(|e| CliError::Database(format!("Failed to query tables: {}", e)))?;
+            for row in &table_rows {
+                let Some(table_name) = row_str(row, "table_name") else {
+                    continue;
+                };
+                if let Some(ref pattern) = options.table_filter
+                    && !matches_pattern(&table_name, pattern)
+                {
+                    continue;
+                }
+                if let Some(ref exclude) = options.exclude_pattern
+                    && matches_pattern(&table_name, exclude)
+                {
+                    continue;
+                }
+                db_schema.tables.push(TableInfo {
+                    name: table_name,
+                    schema: Some(schema_name.clone()),
+                    comment: if options.include_comments {
+                        row_str(row, "comment")
+                    } else {
+                        None
+                    },
+                    ..Default::default()
+                });
+            }
+
+            for i in 0..db_schema.tables.len() {
+                let table_name = db_schema.tables[i].name.clone();
+
+                // Columns
+                let col_rows = conn
+                    .query(
+                        &queries::columns_query(DatabaseType::MSSQL, &table_name, schema_ref),
+                        &[],
+                    )
+                    .await
+                    .map_err(|e| CliError::Database(format!("Failed to query columns: {}", e)))?;
+                for row in &col_rows {
+                    let Some(name) = row_str(row, "column_name") else {
+                        continue;
+                    };
+                    let data_type = row_str(row, "data_type").unwrap_or_default();
+                    let max_length = row_i32(row, "character_maximum_length");
+                    let precision = row_i32(row, "numeric_precision");
+                    let scale = row_i32(row, "numeric_scale");
+                    let normalized = normalize_type(
+                        DatabaseType::MSSQL,
+                        &data_type,
+                        max_length,
+                        precision,
+                        scale,
+                    );
+                    db_schema.tables[i].columns.push(ColumnInfo {
+                        name,
+                        db_type: data_type,
+                        normalized_type: normalized,
+                        nullable: row_bool(row, "nullable"),
+                        default: row_str(row, "column_default"),
+                        auto_increment: row_bool(row, "auto_increment"),
+                        max_length,
+                        precision,
+                        scale,
+                        comment: if options.include_comments {
+                            row_str(row, "comment")
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    });
+                }
+
+                // Primary key
+                let pk_rows = conn
+                    .query(
+                        &queries::primary_keys_query(DatabaseType::MSSQL, &table_name, schema_ref),
+                        &[],
+                    )
+                    .await
+                    .map_err(|e| {
+                        CliError::Database(format!("Failed to query primary keys: {}", e))
+                    })?;
+                for row in &pk_rows {
+                    if let Some(col) = row_str(row, "column_name") {
+                        db_schema.tables[i].primary_key.push(col.clone());
+                        if let Some(c) = db_schema.tables[i]
+                            .columns
+                            .iter_mut()
+                            .find(|c| c.name == col)
+                        {
+                            c.is_primary_key = true;
+                        }
+                    }
+                }
+
+                // Foreign keys
+                let fk_rows = conn
+                    .query(
+                        &queries::foreign_keys_query(DatabaseType::MSSQL, &table_name, schema_ref),
+                        &[],
+                    )
+                    .await
+                    .map_err(|e| {
+                        CliError::Database(format!("Failed to query foreign keys: {}", e))
+                    })?;
+                let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
+                    std::collections::HashMap::new();
+                let mut fk_order: Vec<String> = Vec::new();
+                for row in &fk_rows {
+                    let Some(cname) = row_str(row, "constraint_name") else {
+                        continue;
+                    };
+                    let fk = fk_map.entry(cname.clone()).or_insert_with(|| {
+                        fk_order.push(cname.clone());
+                        ForeignKeyInfo {
+                            name: cname.clone(),
+                            columns: Vec::new(),
+                            referenced_table: row_str(row, "referenced_table").unwrap_or_default(),
+                            referenced_schema: row_str(row, "referenced_schema"),
+                            referenced_columns: Vec::new(),
+                            on_delete: ReferentialAction::from_str(
+                                &row_str(row, "delete_rule").unwrap_or_default(),
+                            ),
+                            on_update: ReferentialAction::from_str(
+                                &row_str(row, "update_rule").unwrap_or_default(),
+                            ),
+                        }
+                    });
+                    if let Some(col) = row_str(row, "column_name") {
+                        fk.columns.push(col);
+                    }
+                    if let Some(rc) = row_str(row, "referenced_column") {
+                        fk.referenced_columns.push(rc);
+                    }
+                }
+                db_schema.tables[i].foreign_keys = fk_order
+                    .into_iter()
+                    .filter_map(|n| fk_map.remove(&n))
+                    .collect();
+
+                // Indexes
+                let idx_rows = conn
+                    .query(
+                        &queries::indexes_query(DatabaseType::MSSQL, &table_name, schema_ref),
+                        &[],
+                    )
+                    .await
+                    .map_err(|e| CliError::Database(format!("Failed to query indexes: {}", e)))?;
+                let mut idx_map: std::collections::HashMap<String, IndexInfo> =
+                    std::collections::HashMap::new();
+                let mut idx_order: Vec<String> = Vec::new();
+                for row in &idx_rows {
+                    let Some(iname) = row_str(row, "index_name") else {
+                        continue;
+                    };
+                    let idx = idx_map.entry(iname.clone()).or_insert_with(|| {
+                        idx_order.push(iname.clone());
+                        IndexInfo {
+                            name: iname.clone(),
+                            columns: Vec::new(),
+                            is_unique: row_bool(row, "is_unique"),
+                            is_primary: row_bool(row, "is_primary"),
+                            index_type: row_str(row, "index_type"),
+                            filter: row_str(row, "filter"),
+                        }
+                    });
+                    if let Some(col) = row_str(row, "column_name") {
+                        idx.columns.push(IndexColumn {
+                            name: col,
+                            order: SortOrder::Asc,
+                            ..Default::default()
+                        });
+                    }
+                }
+                db_schema.tables[i].indexes = idx_order
+                    .into_iter()
+                    .filter_map(|n| idx_map.remove(&n))
+                    .collect();
+            }
+
+            Ok(db_schema)
+        }
     }
 }
 

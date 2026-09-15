@@ -73,15 +73,30 @@ tokio-postgres = { workspace = true, optional = true }
 # keep prax-postgres's `tls` feature on.
 prax-postgres = { workspace = true, optional = true }
 
+# Engine crates reused for cross-backend introspection (`migrate dev`/`diff`
+# and `db pull`). Each is optional and enabled by the cargo feature of the
+# same name; the introspectors drive the engines' raw query APIs.
+prax-mysql = { workspace = true, optional = true }
+prax-sqlite = { workspace = true, optional = true }
+prax-mssql = { workspace = true, optional = true }
+
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Engine crates for seeding live databases in the Docker-gated round-trip
+# introspection integration tests (tests/introspect_roundtrip.rs). The test
+# modules are additionally gated on the matching cargo feature.
+prax-mysql = { workspace = true }
+prax-sqlite = { workspace = true }
+prax-mssql = { workspace = true }
+prax-query = { workspace = true }
 
 [features]
 default = ["postgres", "seaorm"]
 postgres = ["tokio-postgres", "prax-postgres"]
-mysql = []
-sqlite = []
-mssql = []
+mysql = ["dep:prax-mysql"]
+sqlite = ["dep:prax-sqlite"]
+mssql = ["dep:prax-mssql"]
 seaorm = ["prax-import/seaorm"]

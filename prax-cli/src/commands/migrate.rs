@@ -487,33 +487,22 @@ async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema:
 
 /// Introspect `database_url` and map the result to a diff-source schema.
 ///
-/// Introspection is currently PostgreSQL-only (matching `prax db pull`); other
-/// providers return `None` with a note so the greenfield path is used rather
-/// than failing the command. A connection failure is likewise treated as "no
-/// source reachable" (with a warning) rather than a hard error, so
-/// `migrate dev` still works offline for first-time creation.
-#[cfg(feature = "postgres")]
+/// Dispatches to the backend matching the configured provider (PostgreSQL,
+/// MySQL, SQLite, MSSQL), each behind its cargo feature. A failure —
+/// unreachable database, or a provider whose introspection feature was not
+/// compiled in — is treated as "no source reachable" (with a warning) rather
+/// than a hard error, so `migrate dev` still works offline for first-time
+/// creation and the greenfield flow is preserved.
 async fn introspect_source_schema(
     config: &Config,
     database_url: &str,
 ) -> CliResult<Option<prax_schema::ast::Schema>> {
-    use crate::commands::introspect::postgres::PostgresIntrospector;
-    use crate::commands::introspect::{IntrospectionOptions, Introspector};
+    use crate::commands::introspect::{IntrospectionOptions, introspect_database};
     use crate::commands::schema_from_db::schema_from_database;
 
-    if !config.database.provider.to_lowercase().contains("postgres") {
-        output::list_item(&format!(
-            "Introspection supports PostgreSQL only; provider '{}' uses the empty \
-             source (full-creation DDL).",
-            config.database.provider
-        ));
-        return Ok(None);
-    }
-
-    let introspector = PostgresIntrospector::new(database_url.to_string());
     let options = IntrospectionOptions::default();
 
-    match introspector.introspect(&options).await {
+    match introspect_database(&config.database.provider, database_url, &options).await {
         Ok(db_schema) => {
             let result = schema_from_database(&db_schema, Default::default())?;
             for warning in &result.warnings {
@@ -529,20 +518,6 @@ async fn introspect_source_schema(
             Ok(None)
         }
     }
-}
-
-/// Without the `postgres` feature there is no introspection driver, so the
-/// source is always empty (full-creation DDL).
-#[cfg(not(feature = "postgres"))]
-async fn introspect_source_schema(
-    _config: &Config,
-    _database_url: &str,
-) -> CliResult<Option<prax_schema::ast::Schema>> {
-    output::list_item(
-        "Built without the `postgres` feature; introspection is unavailable, using the \
-         empty source (full-creation DDL).",
-    );
-    Ok(None)
 }
 
 /// Map a datasource provider string to a migration `SqlBackend`.

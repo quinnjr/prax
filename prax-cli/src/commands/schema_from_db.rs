@@ -63,7 +63,10 @@ pub fn schema_from_database(
         builder = builder
             .with_columns(&table.name, map_columns(&table.columns))
             .with_constraints(&table.name, map_constraints(table))
-            .with_indexes(&table.name, map_indexes(&table.indexes, &table.name));
+            .with_indexes(
+                &table.name,
+                map_indexes(&table.indexes, &table.foreign_keys, &table.name),
+            );
     }
 
     builder = builder.with_enums(map_enums(db));
@@ -221,9 +224,34 @@ fn referential_action_sql(action: ReferentialAction) -> Option<String> {
 
 /// Map indexes, flattening the query layer's `IndexColumn` (which carries sort
 /// order/nulls position) to the engine's plain column-name list.
-fn map_indexes(indexes: &[IndexInfo], table_name: &str) -> Vec<MigrateIndex> {
+///
+/// Non-unique indexes that merely back a foreign key are dropped: several
+/// engines (notably MySQL) auto-create an index for every FK, but the schema
+/// DSL models the relation, not its implicit backing index — emitting it as
+/// `@@index` would make an introspected schema diff dirty against a `.prax`
+/// that only declares the relation.
+fn map_indexes(
+    indexes: &[IndexInfo],
+    foreign_keys: &[ForeignKeyInfo],
+    table_name: &str,
+) -> Vec<MigrateIndex> {
     indexes
         .iter()
+        .filter(|idx| {
+            if idx.is_unique || idx.is_primary {
+                return true;
+            }
+            let cols: Vec<&str> = idx.columns.iter().map(|c| c.name.as_str()).collect();
+            // Drop if some FK's column list is exactly this index's columns.
+            !foreign_keys.iter().any(|fk| {
+                fk.columns.len() == cols.len()
+                    && fk
+                        .columns
+                        .iter()
+                        .map(String::as_str)
+                        .eq(cols.iter().copied())
+            })
+        })
         .map(|idx| MigrateIndex {
             name: idx.name.clone(),
             table_name: table_name.to_string(),

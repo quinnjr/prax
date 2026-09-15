@@ -93,31 +93,12 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     // Introspect database
     output::step(1, 3, "Introspecting database...");
 
-    #[cfg(feature = "postgres")]
-    let db_schema = {
-        use crate::commands::introspect::Introspector;
-        use crate::commands::introspect::postgres::PostgresIntrospector;
-
-        if config.database.provider.to_lowercase().contains("postgres") {
-            let introspector = PostgresIntrospector::new(database_url.clone());
-            introspector.introspect(&options).await?
-        } else {
-            return Err(CliError::Config(format!(
-                "Introspection (`prax db pull`) currently supports PostgreSQL only; provider \
-                 '{}' is not supported yet.",
-                config.database.provider
-            )));
-        }
-    };
-
-    #[cfg(not(feature = "postgres"))]
-    let db_schema = {
-        return Err(CliError::Config(
-            "Introspection (`prax db pull`) currently supports PostgreSQL only and requires \
-             the `postgres` feature: recompile with --features postgres."
-                .to_string(),
-        ));
-    };
+    let db_schema = crate::commands::introspect::introspect_database(
+        &config.database.provider,
+        &database_url,
+        &options,
+    )
+    .await?;
 
     // Generate output
     output::step(2, 3, "Generating schema...");
