@@ -110,10 +110,13 @@ fn format_one(path: &Path, check: bool) -> CliResult<FormatOutcome> {
 }
 
 fn parse_schema(content: &str) -> CliResult<prax_schema::Schema> {
-    // Use validate_schema to ensure field types are properly resolved
-    // (e.g., FieldType::Model -> FieldType::Enum for enum references)
-    prax_schema::validate_schema(content)
-        .map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
+    // Formatting is per-file and syntactic: parse only, without
+    // validation, so files whose relations resolve only after a
+    // multi-file merge still format cleanly. (Validation would also
+    // resolve Model->Enum/Composite field types, but the formatter
+    // renders FieldType::Model/Enum/Composite identically as the bare
+    // name, so the output is unaffected.)
+    prax_schema::parse_schema(content).map_err(|e| CliError::Schema(format!("Syntax error: {}", e)))
 }
 
 /// Format a schema AST into a formatted string
@@ -285,7 +288,7 @@ fn format_enum(output: &mut String, enum_def: &prax_schema::ast::Enum) {
 
         // Format attributes
         for attr in &variant.attributes {
-            output.push_str(&format!(" {}", format_attribute(attr)));
+            output.push_str(&format!(" {}", format_attribute(attr, AttrLevel::Field)));
         }
 
         output.push('\n');
@@ -293,7 +296,10 @@ fn format_enum(output: &mut String, enum_def: &prax_schema::ast::Enum) {
 
     // Enum-level attributes
     for attr in &enum_def.attributes {
-        output.push_str(&format!("\n    {}", format_attribute(attr)));
+        output.push_str(&format!(
+            "\n    {}",
+            format_attribute(attr, AttrLevel::Block)
+        ));
     }
 
     output.push_str("}\n");
@@ -342,7 +348,7 @@ fn format_model(output: &mut String, model: &prax_schema::ast::Model) {
 
         // Format attributes
         for attr in &field.attributes {
-            output.push_str(&format!(" {}", format_attribute(attr)));
+            output.push_str(&format!(" {}", format_attribute(attr, AttrLevel::Field)));
         }
 
         output.push('\n');
@@ -353,7 +359,10 @@ fn format_model(output: &mut String, model: &prax_schema::ast::Model) {
     if !model_attrs.is_empty() {
         output.push('\n');
         for attr in model_attrs {
-            output.push_str(&format!("    {}\n", format_attribute(attr)));
+            output.push_str(&format!(
+                "    {}\n",
+                format_attribute(attr, AttrLevel::Block)
+            ));
         }
     }
 
@@ -393,7 +402,7 @@ fn format_view(output: &mut String, view: &prax_schema::ast::View) {
         output.push_str(&format!("    {} {}", padded_name, padded_type));
 
         for attr in &field.attributes {
-            output.push_str(&format!(" {}", format_attribute(attr)));
+            output.push_str(&format!(" {}", format_attribute(attr, AttrLevel::Field)));
         }
 
         output.push('\n');
@@ -404,7 +413,10 @@ fn format_view(output: &mut String, view: &prax_schema::ast::View) {
     if !view_attrs.is_empty() {
         output.push('\n');
         for attr in view_attrs {
-            output.push_str(&format!("    {}\n", format_attribute(attr)));
+            output.push_str(&format!(
+                "    {}\n",
+                format_attribute(attr, AttrLevel::Block)
+            ));
         }
     }
 
@@ -444,7 +456,7 @@ fn format_composite(output: &mut String, composite: &prax_schema::ast::Composite
         output.push_str(&format!("    {} {}", padded_name, padded_type));
 
         for attr in &field.attributes {
-            output.push_str(&format!(" {}", format_attribute(attr)));
+            output.push_str(&format!(" {}", format_attribute(attr, AttrLevel::Field)));
         }
 
         output.push('\n');
@@ -497,9 +509,24 @@ fn format_field_type(
     }
 }
 
-fn format_attribute(attr: &prax_schema::ast::Attribute) -> String {
-    // For model-level attributes we check if it's a known model attribute
-    let prefix = if attr.is_model_attribute() { "@@" } else { "@" };
+/// Attribute position: selects the `@` vs `@@` prefix.
+///
+/// Several attributes (`id`, `unique`, `map`, `index`) are legal in both
+/// positions, so the prefix must come from position, never from the name.
+#[derive(Clone, Copy)]
+enum AttrLevel {
+    Field,
+    Block,
+}
+
+fn format_attribute(attr: &prax_schema::ast::Attribute, level: AttrLevel) -> String {
+    // The prefix comes from the attribute's position (block-level `@@`
+    // vs field-level `@`), never from its name: name-based guessing
+    // corrupts field-level `@id` into `@@id`.
+    let prefix = match level {
+        AttrLevel::Block => "@@",
+        AttrLevel::Field => "@",
+    };
 
     if attr.args.is_empty() {
         format!("{}{}", prefix, attr.name())

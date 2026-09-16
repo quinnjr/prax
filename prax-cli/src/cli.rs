@@ -131,14 +131,17 @@ pub struct ValidateArgs {
 // Format Command
 // =============================================================================
 
-/// Arguments for the `format` command
+/// Arguments for the `format` command.
+///
+/// Formatting is syntactic-only and per-file: it does not validate
+/// relations or types. Use `prax validate` to type-check.
 #[derive(Args, Debug)]
 pub struct FormatArgs {
     /// Path to schema file
     #[arg(short, long)]
     pub schema: Option<PathBuf>,
 
-    /// Check formatting without writing changes
+    /// Check formatting without writing changes (does not validate)
     #[arg(short, long)]
     pub check: bool,
 }
