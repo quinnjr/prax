@@ -650,8 +650,26 @@ fn parse_generator(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Genera
     Ok(generator)
 }
 
+/// Unwrap one `datasource_value` layer from a pest pair, if present.
+///
+/// The grammar wraps every datasource/generator value in
+/// `datasource_value`; matching on the wrapped pair silently misses
+/// every concrete arm, so normalize before matching. Returns `None`
+/// only for an empty wrapper, which the grammar cannot produce.
+fn unwrap_datasource_value<'a>(
+    pair: &'a pest::iterators::Pair<'_, Rule>,
+) -> Option<pest::iterators::Pair<'a, Rule>> {
+    if pair.as_rule() == Rule::datasource_value {
+        pair.clone().into_inner().next()
+    } else {
+        Some(pair.clone())
+    }
+}
+
 /// Parse a generator toggle value (bool literal or env() call).
 fn parse_generator_toggle(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorToggle {
+    let unwrapped = unwrap_datasource_value(pair);
+    let pair = unwrapped.as_ref().unwrap_or(pair);
     match pair.as_rule() {
         Rule::env_function => {
             let env_var = pair
@@ -664,10 +682,6 @@ fn parse_generator_toggle(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorTo
                 })
                 .unwrap_or_default();
             GeneratorToggle::Env(env_var)
-        }
-        Rule::datasource_value => {
-            let inner = pair.clone().into_inner().next().unwrap();
-            parse_generator_toggle(&inner)
         }
         _ => {
             let s = pair.as_str().trim().trim_matches('"');
@@ -682,6 +696,8 @@ fn parse_generator_toggle(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorTo
 
 /// Parse an arbitrary generator property value.
 fn parse_generator_value(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorValue {
+    let unwrapped = unwrap_datasource_value(pair);
+    let pair = unwrapped.as_ref().unwrap_or(pair);
     match pair.as_rule() {
         Rule::env_function => {
             let env_var = pair
@@ -694,10 +710,6 @@ fn parse_generator_value(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorVal
                 })
                 .unwrap_or_default();
             GeneratorValue::Env(env_var)
-        }
-        Rule::datasource_value => {
-            let inner = pair.clone().into_inner().next().unwrap();
-            parse_generator_value(&inner)
         }
         Rule::string_literal => {
             let s = pair.as_str();
@@ -734,6 +746,18 @@ fn parse_datasource(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Datas
             let key = prop_inner.next().unwrap().as_str();
             let value_pair = prop_inner.next().unwrap();
 
+            // The grammar wraps every value in `datasource_value`, so
+            // unwrap it before matching or the `url`/`extensions` arms
+            // below never fire and the values are silently dropped.
+            let value_pair = match unwrap_datasource_value(&value_pair) {
+                Some(inner) => inner,
+                None => {
+                    return Err(SchemaError::ConfigError {
+                        message: format!("datasource property `{key}` has an empty value"),
+                    });
+                }
+            };
+
             match key {
                 "provider" => {
                     let provider_str = extract_datasource_string(&value_pair);
@@ -760,7 +784,14 @@ fn parse_datasource(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Datas
                             let url = &s[1..s.len() - 1];
                             datasource.url = Some(SmolStr::new(url));
                         }
-                        _ => {}
+                        _ => {
+                            return Err(SchemaError::ConfigError {
+                                message: format!(
+                                    "datasource property `url` must be a string literal or env(...) reference, found `{}`",
+                                    value_pair.as_str()
+                                ),
+                            });
+                        }
                     }
                 }
                 "extensions" => {
@@ -774,6 +805,13 @@ fn parse_datasource(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Datas
                                 datasource.add_extension(ext);
                             }
                         }
+                    } else {
+                        return Err(SchemaError::ConfigError {
+                            message: format!(
+                                "datasource property `extensions` must be an array, found `{}`",
+                                value_pair.as_str()
+                            ),
+                        });
                     }
                 }
                 _ => {
@@ -816,6 +854,21 @@ fn parse_extension_item(
                         ext = ext.with_schema(arg_value);
                     }
                     "version" => {
+                        // The version is interpolated into `VERSION '...'`
+                        // SQL, so restrict its charset at the trust
+                        // boundary instead of emitting an injection
+                        // primitive downstream.
+                        if arg_value.is_empty()
+                            || !arg_value.chars().all(|c| {
+                                c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-'
+                            })
+                        {
+                            return Err(SchemaError::ConfigError {
+                                message: format!(
+                                    "extension version must match [A-Za-z0-9._-]+, found `{arg_value}`"
+                                ),
+                            });
+                        }
                         ext = ext.with_version(arg_value);
                     }
                     _ => {}
@@ -835,13 +888,10 @@ fn extract_datasource_string(pair: &pest::iterators::Pair<'_, Rule>) -> String {
             s[1..s.len() - 1].to_string()
         }
         Rule::identifier => pair.as_str().to_string(),
-        Rule::datasource_value => {
-            if let Some(inner) = pair.clone().into_inner().next() {
-                extract_datasource_string(&inner)
-            } else {
-                pair.as_str().to_string()
-            }
-        }
+        Rule::datasource_value => match unwrap_datasource_value(pair) {
+            Some(inner) => extract_datasource_string(&inner),
+            None => pair.as_str().to_string(),
+        },
         _ => pair.as_str().to_string(),
     }
 }
@@ -2783,5 +2833,142 @@ model User {
         // Both should generate valid MSSQL SQL
         let mssql = modify_policy.to_mssql_sql("dbo.Users", "id");
         assert!(mssql.policy_sql.contains("Security.UserModifyOwn"));
+    }
+
+    // ==================== Datasource Parsing ====================
+
+    #[test]
+    fn test_parse_datasource_url_env() {
+        let schema = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = env("DATABASE_URL")
+            }
+        "#,
+        )
+        .unwrap();
+
+        let ds = schema.datasource.expect("datasource parsed");
+        assert_eq!(ds.provider, crate::ast::DatabaseProvider::PostgreSQL);
+        assert_eq!(ds.url_env.as_deref(), Some("DATABASE_URL"));
+        assert!(ds.url.is_none());
+    }
+
+    #[test]
+    fn test_parse_datasource_url_literal() {
+        let schema = parse_schema(
+            r#"
+            datasource db {
+                provider = "mysql"
+                url = "mysql://localhost/mydb"
+            }
+        "#,
+        )
+        .unwrap();
+
+        let ds = schema.datasource.expect("datasource parsed");
+        assert_eq!(ds.url.as_deref(), Some("mysql://localhost/mydb"));
+        assert!(ds.url_env.is_none());
+    }
+
+    #[test]
+    fn test_parse_datasource_extensions() {
+        let schema = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = env("DATABASE_URL")
+                extensions = [vector(version: "1.2.0"), pg_trgm]
+            }
+        "#,
+        )
+        .unwrap();
+
+        let ds = schema.datasource.expect("datasource parsed");
+        assert_eq!(ds.extensions.len(), 2);
+        assert!(ds.has_extension("vector"));
+        assert!(ds.has_extension("pg_trgm"));
+        let vector = ds
+            .extensions
+            .iter()
+            .find(|e| e.name() == "vector")
+            .expect("vector extension parsed");
+        assert_eq!(vector.version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn test_parse_datasource_url_ident_rejected() {
+        let err = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = not_a_url
+            }
+        "#,
+        )
+        .expect_err("bare-identifier url must be rejected, not silently dropped");
+        assert!(
+            err.to_string().contains("url"),
+            "error should mention `url`: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_datasource_extensions_rejected() {
+        let err = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = env("DATABASE_URL")
+                extensions = "vector"
+            }
+        "#,
+        )
+        .expect_err("non-array extensions must be rejected, not silently dropped");
+        assert!(
+            err.to_string().contains("extensions"),
+            "error should mention `extensions`: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_datasource_extension_version_empty_rejected() {
+        let err = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = env("DATABASE_URL")
+                extensions = [vector(version: "")]
+            }
+        "#,
+        )
+        .expect_err("empty extension version must be rejected");
+        assert!(
+            err.to_string().contains("version"),
+            "error should mention `version`: {err}"
+        );
+    }
+
+    #[test]
+    fn test_parse_datasource_extension_version_plus_rejected() {
+        // Policy pin: the version charset is deliberately strict
+        // ([A-Za-z0-9._-]+). `+` is harmless inside single quotes but
+        // no real-world Postgres extension version uses it, so it stays
+        // rejected rather than widening the injection-relevant charset.
+        let err = parse_schema(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = env("DATABASE_URL")
+                extensions = [vector(version: "1.0+beta")]
+            }
+        "#,
+        )
+        .expect_err("extension version containing `+` must be rejected");
+        assert!(
+            err.to_string().contains("version"),
+            "error should mention `version`: {err}"
+        );
     }
 }

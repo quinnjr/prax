@@ -210,6 +210,8 @@ model   User{
 id Int @id @auto
 name String
 email String @unique
+
+@@map("users")
 }
 "#;
     fs::write(&schema_path, schema_content).unwrap();
@@ -236,6 +238,172 @@ email String @unique
         !formatted.contains("generator client"),
         "format injected a hardcoded generator block:\n{formatted}"
     );
+    // The env() connection URL must survive formatting — dropping it
+    // silently breaks every downstream command that needs it.
+    assert!(
+        formatted
+            .lines()
+            .any(|l| { l.trim_start().starts_with("url") && l.contains(r#"env("DATABASE_URL")"#) }),
+        "format dropped the datasource url:\n{formatted}"
+    );
+    // Field-level attributes keep single-@, block-level keep double-@@.
+    assert!(
+        formatted.contains("@id") && !formatted.contains("@@id"),
+        "field @id corrupted:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("@unique") && !formatted.contains("@@unique"),
+        "field @unique corrupted:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("@@map(\"users\")"),
+        "block @@map lost:\n{formatted}"
+    );
+
+    // Formatting must be idempotent: a second pass changes nothing.
+    let once = formatted.clone();
+    prax_cmd()
+        .args(["format", "--schema", schema_path.to_str().unwrap()])
+        .assert()
+        .success();
+    let twice = fs::read_to_string(&schema_path).unwrap();
+    assert_eq!(once, twice, "format is not idempotent:\n{twice}");
+
+    // And --check must accept the formatted output.
+    prax_cmd()
+        .args([
+            "format",
+            "--check",
+            "--schema",
+            schema_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_format_directory_with_cross_file_relations() {
+    // Multi-file schemas hold relations that only resolve after merging;
+    // formatting is per-file and syntactic, so it must not fail on them.
+    let temp_dir = TempDir::new().unwrap();
+    let schema_dir = temp_dir.path().join("schema");
+    fs::create_dir(&schema_dir).unwrap();
+    fs::write(
+        schema_dir.join("datasource.prax"),
+        "datasource db {\n  provider = \"postgresql\"\n  url = env(\"DATABASE_URL\")\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("user.prax"),
+        "model User {\n  id Int @id\n  posts Post[]\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("post.prax"),
+        "model Post {\n  id Int @id\n  authorId Int\n  author User @relation(fields: [authorId], references: [id])\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("role.prax"),
+        "enum Role {\n  User @map(\"user\")\n  Admin\n\n  @@map(\"role\")\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("active_users.prax"),
+        "view ActiveUsers {\n  id Int @unique\n  email String\n\n  @@map(\"active_users\")\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("address.prax"),
+        "type Address {\n  street String @map(\"street_address\")\n}\n",
+    )
+    .unwrap();
+
+    prax_cmd()
+        .args(["format", "--schema", schema_dir.to_str().unwrap()])
+        .assert()
+        .success();
+
+    // Cross-file content must be preserved, including the datasource url.
+    let user = fs::read_to_string(schema_dir.join("user.prax")).unwrap();
+    assert!(
+        user.contains("posts Post[]"),
+        "format mangled the cross-file relation:\n{user}"
+    );
+    let post = fs::read_to_string(schema_dir.join("post.prax")).unwrap();
+    assert!(
+        post.contains("@relation(fields: [authorId], references: [id])"),
+        "format mangled @relation:\n{post}"
+    );
+    assert!(
+        !post.contains("@@relation"),
+        "field @relation corrupted to @@:\n{post}"
+    );
+    let role = fs::read_to_string(schema_dir.join("role.prax")).unwrap();
+    assert!(
+        role.contains("@map(\"user\")")
+            && !role.contains("@@map(\"user\")")
+            && role.contains("@@map(\"role\")"),
+        "enum attribute positions corrupted:\n{role}"
+    );
+    let view = fs::read_to_string(schema_dir.join("active_users.prax")).unwrap();
+    assert!(
+        view.contains("@unique") && !view.contains("@@unique"),
+        "view field @unique corrupted:\n{view}"
+    );
+    assert!(
+        view.contains("@@map(\"active_users\")"),
+        "view block @@map lost:\n{view}"
+    );
+    let address = fs::read_to_string(schema_dir.join("address.prax")).unwrap();
+    assert!(
+        address.contains("@map(\"street_address\")")
+            && !address.contains("@@map(\"street_address\")"),
+        "composite field @map corrupted:\n{address}"
+    );
+    let datasource = fs::read_to_string(schema_dir.join("datasource.prax")).unwrap();
+    assert!(
+        datasource
+            .lines()
+            .any(|l| l.trim_start().starts_with("url") && l.contains(r#"env("DATABASE_URL")"#)),
+        "format dropped the datasource url:\n{datasource}"
+    );
+}
+
+#[test]
+fn test_format_rejects_syntax_error() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_path = temp_dir.path().join("schema.prax");
+    fs::write(&schema_path, "model User {\n  id Int @id\n").unwrap();
+
+    prax_cmd()
+        .args(["format", "--schema", schema_path.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Syntax error"));
+}
+
+#[test]
+fn test_format_directory_with_malformed_file_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema_dir = temp_dir.path().join("schema");
+    fs::create_dir(&schema_dir).unwrap();
+    fs::write(
+        schema_dir.join("user.prax"),
+        "model User {\n  id Int @id\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        schema_dir.join("bad.prax"),
+        "model Broken {\n  id Int @id\n",
+    )
+    .unwrap();
+
+    prax_cmd()
+        .args(["format", "--schema", schema_dir.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Syntax error"));
 }
 
 #[test]

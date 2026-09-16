@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-09-16
+
+### Fixed
+
+- **format**: `prax format` no longer drops `datasource url` / `extensions`
+  (the parser matched the pest `datasource_value` wrapper instead of the
+  wrapped value, so those arms never fired) and no longer rewrites
+  field-level `@id` / `@unique` / `@map` / `@index` as `@@…` (the prefix is
+  now positional: `@@` at block level, `@` at field level). Output is
+  idempotent.
+- **format**: per-file formatting no longer runs full validation, so files
+  whose relations resolve only after a multi-file merge format cleanly
+  (use `prax validate` to type-check). Malformed `url` / `extensions`
+  shapes are now loud parse errors instead of silent drops.
+
+### Security
+
+- **schema**: extension `version` values are restricted to
+  `[A-Za-z0-9._-]+` at parse time, since the value is interpolated into
+  `VERSION '…'` migration SQL.
+
 ## [0.12.3] - 2026-09-15
 
 ### Fixed
