@@ -63,10 +63,7 @@ pub fn schema_from_database(
         builder = builder
             .with_columns(&table.name, map_columns(&table.columns))
             .with_constraints(&table.name, map_constraints(table))
-            .with_indexes(
-                &table.name,
-                map_indexes(&table.indexes, &table.foreign_keys, &table.name),
-            );
+            .with_indexes(&table.name, map_indexes(&table.indexes, &table.name));
     }
 
     builder = builder.with_enums(map_enums(db));
@@ -239,11 +236,7 @@ fn referential_action_sql(action: ReferentialAction) -> Option<String> {
 /// MySQL introspector itself (`commands::introspect::mysql`), since Postgres
 /// and MSSQL don't auto-index FK columns and shouldn't have their real
 /// `@@index`es dropped.
-fn map_indexes(
-    indexes: &[IndexInfo],
-    _foreign_keys: &[ForeignKeyInfo],
-    table_name: &str,
-) -> Vec<MigrateIndex> {
+fn map_indexes(indexes: &[IndexInfo], table_name: &str) -> Vec<MigrateIndex> {
     // Every non-primary index is carried into the diff source verbatim.
     //
     // A previous version dropped non-unique indexes whose columns matched a

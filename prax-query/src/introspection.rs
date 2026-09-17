@@ -961,12 +961,13 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
 /// `EnumInfo::values`, so a re-introspected diff source's variant names
 /// match what was written to disk here.
 pub fn sanitize_variants(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
     let mut result: Vec<String> = Vec::with_capacity(values.len());
     for raw in values {
         let base = sanitize_identifier(raw);
         let mut candidate = base.clone();
         let mut suffix = 2;
-        while result.contains(&candidate) {
+        while !seen.insert(candidate.clone()) {
             candidate = format!("{}_{}", base, suffix);
             suffix += 1;
         }

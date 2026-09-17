@@ -872,12 +872,13 @@ pub fn sanitize_identifier(raw: &str) -> String {
 /// `EnumInfo::values`, so this diff-source enum's variant names match what
 /// `db pull` wrote to disk.
 pub fn sanitize_variants(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
     let mut result: Vec<String> = Vec::with_capacity(values.len());
     for raw in values {
         let base = sanitize_identifier(raw);
         let mut candidate = base.clone();
         let mut suffix = 2;
-        while result.contains(&candidate) {
+        while !seen.insert(candidate.clone()) {
             candidate = format!("{}_{}", base, suffix);
             suffix += 1;
         }
