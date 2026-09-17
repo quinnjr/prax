@@ -947,6 +947,14 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
     for value in sanitize_variants(&enum_info.values) {
         output.push_str(&format!("    {}\n", value));
     }
+    // Always pin the real DB type name with @@map, mirroring
+    // `prax_migrate::introspect::build_enum` (and `generate_model`'s
+    // `@@map` for tables). `Enum::database_name()` falls back to the
+    // (PascalCased) enum name when no `@@map` is present, so without this
+    // a Postgres enum `user_role` would generate/diff SQL against a type
+    // named `UserRole` — which doesn't exist in the live database — while
+    // the real `user_role` type is left untouched.
+    output.push_str(&format!("    @@map(\"{}\")\n", enum_info.name));
     output.push_str("}\n");
     output
 }
@@ -962,18 +970,33 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
 /// match what was written to disk here.
 pub fn sanitize_variants(values: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::with_capacity(values.len());
-    let mut result: Vec<String> = Vec::with_capacity(values.len());
-    for raw in values {
-        let base = sanitize_identifier(raw);
-        let mut candidate = base.clone();
-        let mut suffix = 2;
-        while !seen.insert(candidate.clone()) {
-            candidate = format!("{}_{}", base, suffix);
-            suffix += 1;
+    values
+        .iter()
+        .map(|raw| disambiguate(&sanitize_identifier(raw), |c| c.to_string(), &mut seen))
+        .collect()
+}
+
+/// Append a numeric suffix to `base` until `key(candidate)` hasn't been
+/// reserved in `used_keys` yet, reserving it and returning that candidate.
+/// Shared by every "two different inputs must not resolve to the same
+/// declared name" case in this module (and by `prax-cli`'s
+/// `reserve_unique_enum_name`, since that crate already depends on this
+/// one) — `key` lets a caller dedupe on a transformed form of the candidate
+/// (e.g. its `PascalCase`) while still returning the untransformed one.
+pub fn disambiguate(
+    base: &str,
+    mut key: impl FnMut(&str) -> String,
+    used_keys: &mut std::collections::HashSet<String>,
+) -> String {
+    let mut suffix = 2;
+    let mut candidate = base.to_string();
+    loop {
+        if used_keys.insert(key(&candidate)) {
+            return candidate;
         }
-        result.push(candidate);
+        candidate = format!("{}_{}", base, suffix);
+        suffix += 1;
     }
-    result
 }
 
 /// Sanitize a raw introspected value into a legal `.prax` identifier
@@ -1551,6 +1574,10 @@ mod tests {
         };
         let declared = generate_enum(&enum_info);
         assert!(declared.starts_with("enum UsersStatus {"));
+        // `@@map` pins the real DB type name so a diff/migration targets
+        // `users_status`, not the PascalCased `UsersStatus` (which doesn't
+        // exist in the live database).
+        assert!(declared.contains("@@map(\"users_status\")"));
         assert_eq!(
             NormalizedType::Enum("users_status".to_string()).to_prax_type(),
             "UsersStatus"

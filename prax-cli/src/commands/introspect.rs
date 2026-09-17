@@ -853,18 +853,8 @@ pub mod mysql {
         base_name: String,
         used_pascal_names: &mut std::collections::HashSet<String>,
     ) -> String {
-        use prax_query::introspection::pascal_case;
-        if used_pascal_names.insert(pascal_case(&base_name)) {
-            return base_name;
-        }
-        let mut suffix = 2;
-        loop {
-            let candidate = format!("{}_{}", base_name, suffix);
-            if used_pascal_names.insert(pascal_case(&candidate)) {
-                return candidate;
-            }
-            suffix += 1;
-        }
+        use prax_query::introspection::{disambiguate, pascal_case};
+        disambiguate(&base_name, pascal_case, used_pascal_names)
     }
 
     /// Synthesize an enum name from a table/column pair, reserving it

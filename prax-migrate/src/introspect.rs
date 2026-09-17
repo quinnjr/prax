@@ -347,6 +347,21 @@ impl SchemaBuilder {
         let name = Ident::new(to_pascal_case(&info.name), span);
         let mut prax_enum = Enum::new(name, span);
 
+        // Always emit @@map with the real enum type name, mirroring
+        // `build_model` above. `Enum::database_name()` falls back to the
+        // (PascalCased) enum name when no `@@map` is present, so without
+        // this a Postgres enum `user_role` would generate/diff SQL against
+        // a type named `UserRole` — which doesn't exist in the live
+        // database — while the real `user_role` type is left untouched.
+        prax_enum.attributes.push(Attribute::new(
+            Ident::new("map", span),
+            vec![AttributeArg::positional(
+                AttributeValue::String(info.name.clone()),
+                span,
+            )],
+            span,
+        ));
+
         for value in sanitize_variants(&info.values) {
             prax_enum.add_variant(EnumVariant::new(Ident::new(value, span), span));
         }
@@ -888,7 +903,7 @@ pub fn sanitize_variants(values: &[String]) -> Vec<String> {
 }
 
 /// Convert snake_case to PascalCase.
-fn to_pascal_case(s: &str) -> String {
+pub fn to_pascal_case(s: &str) -> String {
     s.split('_')
         .filter(|part| !part.is_empty())
         .map(|part| {

@@ -330,6 +330,24 @@ mod tests {
         );
     }
 
+    /// `prax_query::introspection::pascal_case` and
+    /// `prax_migrate::introspect::to_pascal_case` are two more copies of the
+    /// same transform, duplicated for the same crate-layering reason as
+    /// `sanitize_identifier`/`sanitize_variants` above — they must derive
+    /// the same name for the same raw input, or `db pull`'s written schema
+    /// and `migrate dev`'s diff source disagree on an enum/model's name and
+    /// churn every run.
+    #[test]
+    fn pascal_case_matches_between_prax_query_and_prax_migrate() {
+        for raw in ["users_status", "role", "FooBar", "a__b", "1099-forms", ""] {
+            assert_eq!(
+                prax_query::introspection::pascal_case(raw),
+                prax_migrate::introspect::to_pascal_case(raw),
+                "pascal_case({raw:?}) diverged between prax-query and prax-migrate"
+            );
+        }
+    }
+
     #[test]
     fn udt_name_maps_normalized_types_to_recognized_short_names() {
         assert_eq!(udt_name_for(&NormalizedType::Int, ""), "int4");
@@ -477,7 +495,11 @@ mod tests {
         };
 
         let result = schema_from_database(&db, IntrospectionConfig::default()).unwrap();
-        assert!(result.schema.get_enum("Role").is_some());
+        let role_enum = result.schema.get_enum("Role").expect("Role enum");
+        // `@@map` must pin the real Postgres type name, or generated SQL
+        // (CREATE/ALTER/DROP TYPE) targets the nonexistent "Role" instead of
+        // the real "role" type.
+        assert_eq!(role_enum.database_name(), "role");
         let users = result.schema.get_model("Users").expect("Users model");
         let role = users.get_field("role").expect("role field");
         assert!(matches!(&role.field_type, FieldType::Enum(_)));
