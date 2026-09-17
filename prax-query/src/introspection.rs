@@ -944,8 +944,19 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
     // as the one just written here (otherwise every diff proposes dropping
     // one and adding the other, forever).
     let mut output = format!("enum {} {{\n", pascal_case(&enum_info.name));
-    for value in sanitize_variants(&enum_info.values) {
-        output.push_str(&format!("    {}\n", value));
+    let sanitized = sanitize_variants(&enum_info.values);
+    for (raw, value) in enum_info.values.iter().zip(sanitized) {
+        // `EnumVariant::db_value()` falls back to the variant name when no
+        // `@map` is present — the same fallback gap `@@map` above fixes for
+        // the enum's own name. Pin a raw value that needed sanitizing (e.g.
+        // MySQL's `"in-progress"` -> `in_progress`), or the diff source
+        // built from this enum uses the sanitized name instead of the
+        // value actually stored in the database.
+        if value == *raw {
+            output.push_str(&format!("    {}\n", value));
+        } else {
+            output.push_str(&format!("    {} @map(\"{}\")\n", value, raw));
+        }
     }
     // Always pin the real DB type name with @@map, mirroring
     // `prax_migrate::introspect::build_enum` (and `generate_model`'s
@@ -1582,6 +1593,21 @@ mod tests {
             NormalizedType::Enum("users_status".to_string()).to_prax_type(),
             "UsersStatus"
         );
+    }
+
+    #[test]
+    fn test_generate_enum_pins_sanitized_variant_values_with_map() {
+        let enum_info = EnumInfo {
+            name: "task_status".to_string(),
+            schema: None,
+            values: vec!["in-progress".to_string(), "done".to_string()],
+        };
+        let declared = generate_enum(&enum_info);
+        // A value that needed sanitizing gets `@map` with the real value...
+        assert!(declared.contains("in_progress @map(\"in-progress\")"));
+        // ...one that didn't need it (already a legal identifier) doesn't.
+        assert!(declared.contains("    done\n"));
+        assert!(!declared.contains("done @map"));
     }
 
     #[test]

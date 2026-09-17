@@ -506,6 +506,45 @@ mod tests {
     }
 
     #[test]
+    fn enum_variant_needing_sanitization_pins_its_real_value_with_map() {
+        let db = DatabaseSchema {
+            name: "db".to_string(),
+            schema: None,
+            tables: vec![TableInfo {
+                name: "tasks".to_string(),
+                columns: vec![column(
+                    "status",
+                    NormalizedType::Enum("tasks_status".to_string()),
+                    false,
+                )],
+                ..Default::default()
+            }],
+            enums: vec![EnumInfo {
+                name: "tasks_status".to_string(),
+                schema: None,
+                // MySQL enum values are unrestricted text; "in-progress"
+                // isn't a legal `.prax` identifier and gets sanitized to
+                // `in_progress` — `db_value()` must still resolve to the
+                // real value, or generated SQL never matches what's
+                // actually stored in the database.
+                values: vec!["in-progress".to_string(), "done".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let result = schema_from_database(&db, IntrospectionConfig::default()).unwrap();
+        let status_enum = result.schema.get_enum("TasksStatus").expect("enum");
+        let in_progress = status_enum
+            .get_variant("in_progress")
+            .expect("sanitized variant");
+        assert_eq!(in_progress.db_value(), "in-progress");
+        let done = status_enum
+            .get_variant("done")
+            .expect("unsanitized variant");
+        assert_eq!(done.db_value(), "done");
+    }
+
+    #[test]
     fn maps_multi_column_unique_index() {
         let db = DatabaseSchema {
             name: "db".to_string(),

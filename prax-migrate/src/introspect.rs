@@ -362,8 +362,27 @@ impl SchemaBuilder {
             span,
         ));
 
-        for value in sanitize_variants(&info.values) {
-            prax_enum.add_variant(EnumVariant::new(Ident::new(value, span), span));
+        let sanitized = sanitize_variants(&info.values);
+        for (raw, value) in info.values.iter().zip(sanitized) {
+            let mut variant = EnumVariant::new(Ident::new(value.clone(), span), span);
+            // `EnumVariant::db_value()` falls back to the variant name when
+            // no `@map` is present — the same fallback gap `Enum::@@map`
+            // above fixes for the enum's own name. A raw value that needed
+            // sanitizing (e.g. MySQL's `"in-progress"` -> `in_progress`)
+            // must pin the real value here, or generated SQL uses the
+            // sanitized name instead of the value actually stored in the
+            // database.
+            if &value != raw {
+                variant.attributes.push(Attribute::new(
+                    Ident::new("map", span),
+                    vec![AttributeArg::positional(
+                        AttributeValue::String(raw.clone()),
+                        span,
+                    )],
+                    span,
+                ));
+            }
+            prax_enum.add_variant(variant);
         }
 
         prax_enum
