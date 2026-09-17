@@ -59,7 +59,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = "2.0"
 convert_case = "0.6"
-pastey = "0.1"
+pastey = "0.2"
 
 # Async runtime
 tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "io-util", "sync", "time"] }
