@@ -545,6 +545,47 @@ mod tests {
     }
 
     #[test]
+    fn generated_schema_with_quotes_in_enum_values_parses_back_losslessly() {
+        // `generate_prax_schema` (`db pull`'s text writer) and `build_enum`
+        // (the diff source's AST builder) must agree: values containing
+        // `"`/`\` are backslash-escaped on write and unescaped on parse, so
+        // a `db pull` → re-read round-trip preserves the real value instead
+        // of silently mangling it.
+        let db = DatabaseSchema {
+            name: "db".to_string(),
+            schema: None,
+            tables: vec![TableInfo {
+                name: "tasks".to_string(),
+                columns: vec![column(
+                    "status",
+                    NormalizedType::Enum("task_status".to_string()),
+                    false,
+                )],
+                ..Default::default()
+            }],
+            enums: vec![prax_query::introspection::EnumInfo {
+                name: "task_status".to_string(),
+                schema: None,
+                values: vec!["say \"hi\"".to_string(), "a\\b".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let text = prax_query::introspection::generate_prax_schema(&db);
+        let parsed = prax_schema::parse_schema(&text).expect("generated schema must parse");
+        let status = parsed.get_enum("TaskStatus").expect("enum");
+        let values: Vec<&str> = status.variants.iter().map(|v| v.db_value()).collect();
+        assert!(
+            values.contains(&"say \"hi\""),
+            "quote value lost, got: {values:?} from:\n{text}"
+        );
+        assert!(
+            values.contains(&"a\\b"),
+            "backslash value lost, got: {values:?} from:\n{text}"
+        );
+    }
+
+    #[test]
     fn maps_multi_column_unique_index() {
         let db = DatabaseSchema {
             name: "db".to_string(),

@@ -1053,17 +1053,20 @@ pub mod mysql {
         // never declared (which would otherwise churn a DROP INDEX on every
         // `migrate dev`/`diff` run).
         //
+        // The filter only drops an index *named after its FK constraint*
+        // (see `is_fk_backing_index`): that is how MySQL names the implicit
+        // index when the constraint has a symbol, which is always the case
+        // for Prax-managed databases. A same-column index under a different
+        // name is a real user-declared `@@index` MySQL reused, and is kept.
+        //
         // Known limitation: `information_schema.statistics` doesn't record
-        // whether an index was auto-created or is a real, explicitly
-        // declared `@@index` that MySQL happened to reuse to satisfy the
-        // same FK (MySQL creates at most one physical index per matching
-        // column set either way). Such an index is indistinguishable from a
-        // purely implicit one and gets dropped here too, which then shows
-        // up as a spurious "add this index" on the next diff — the same
-        // class of inherent reverse-engineering limitation documented in
-        // `schema_from_db.rs`'s module doc for field names and FK
-        // constraint names. Pin it with an explicit index name that
-        // survives a rebuild, or accept the one-time spurious create.
+        // whether an index was auto-created. An implicit index on an
+        // *unnamed* constraint is column-named rather than
+        // constraint-named, so it survives this filter and still churns —
+        // the same class of inherent reverse-engineering limitation
+        // documented in `schema_from_db.rs`'s module doc for field names
+        // and FK constraint names. Name the constraint (or the index) to
+        // silence it.
         table.indexes = idx_order
             .into_iter()
             .filter_map(|n| idx_map.remove(&n))
@@ -1073,17 +1076,36 @@ pub mod mysql {
         Ok(enums)
     }
 
-    /// Whether `idx` is a non-unique index whose column set exactly matches
-    /// a foreign key's columns — i.e. MySQL's implicit FK-backing index.
+    /// Whether `idx` is MySQL's implicit FK-backing index for one of
+    /// `foreign_keys`: non-unique, non-primary, covering exactly that FK's
+    /// columns *and named after the FK constraint*.
+    ///
+    /// MySQL auto-creates such an index when no usable one exists, naming it
+    /// after the constraint (the `CONSTRAINT` symbol when defined, else the
+    /// `FOREIGN KEY index_name`, else the referencing column). The name check
+    /// is what keeps a real user-declared `@@index` MySQL happened to reuse
+    /// for the FK (same columns, different name) out of the filter —
+    /// `information_schema.statistics` carries no auto-created flag, so the
+    /// name is the only signal.
+    ///
+    /// Residual gaps, inherent to reverse-engineering: an implicit index on
+    /// an *unnamed* constraint is column-named (`tbl_ibfk_N` constraint vs
+    /// `<column>` index), so it is kept and still churns; a user index
+    /// explicitly named exactly like its FK constraint is dropped and shows
+    /// up as a one-time spurious "add index". The former only affects
+    /// databases created outside Prax — Prax DDL always names its
+    /// `CONSTRAINT`s, so its implicit indexes match by name.
     fn is_fk_backing_index(idx: &IndexInfo, foreign_keys: &[ForeignKeyInfo]) -> bool {
         if idx.is_unique || idx.is_primary {
             return false;
         }
         foreign_keys.iter().any(|fk| {
-            fk.columns
-                .iter()
-                .map(String::as_str)
-                .eq(idx.columns.iter().map(|c| c.name.as_str()))
+            fk.name == idx.name
+                && fk
+                    .columns
+                    .iter()
+                    .map(String::as_str)
+                    .eq(idx.columns.iter().map(|c| c.name.as_str()))
         })
     }
 
@@ -1091,15 +1113,17 @@ pub mod mysql {
     mod tests {
         use super::*;
 
-        fn fk(columns: &[&str]) -> ForeignKeyInfo {
+        fn fk(name: &str, columns: &[&str]) -> ForeignKeyInfo {
             ForeignKeyInfo {
+                name: name.to_string(),
                 columns: columns.iter().map(|c| c.to_string()).collect(),
                 ..Default::default()
             }
         }
 
-        fn index(columns: &[&str], is_unique: bool, is_primary: bool) -> IndexInfo {
+        fn index(name: &str, columns: &[&str], is_unique: bool, is_primary: bool) -> IndexInfo {
             IndexInfo {
+                name: name.to_string(),
                 columns: columns
                     .iter()
                     .map(|c| IndexColumn {
@@ -1115,42 +1139,74 @@ pub mod mysql {
 
         #[test]
         fn drops_non_unique_index_matching_fk_columns() {
-            let fks = vec![fk(&["author_id"])];
+            // MySQL names an auto-created FK-backing index after the FK
+            // constraint itself, so a name match is the implicit signal.
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
             assert!(is_fk_backing_index(
-                &index(&["author_id"], false, false),
+                &index("fk_posts_author_id", &["author_id"], false, false),
                 &fks
             ));
         }
 
         #[test]
         fn keeps_unique_index_even_if_it_matches_fk_columns() {
-            let fks = vec![fk(&["author_id"])];
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
             assert!(!is_fk_backing_index(
-                &index(&["author_id"], true, false),
+                &index("fk_posts_author_id", &["author_id"], true, false),
                 &fks
             ));
         }
 
         #[test]
         fn keeps_index_whose_columns_dont_match_any_fk() {
-            let fks = vec![fk(&["author_id"])];
-            assert!(!is_fk_backing_index(&index(&["title"], false, false), &fks));
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index("title_idx", &["title"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_user_declared_index_covering_fk_columns() {
+            // `information_schema.statistics` carries no auto-created flag,
+            // but MySQL names an implicit FK index after the FK constraint —
+            // so an index covering FK columns under a *different* name is a
+            // real user-declared `@@index` MySQL reused, and must be kept.
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index("posts_author_id_idx", &["author_id"], false, false),
+                &fks
+            ));
         }
 
         #[test]
         fn drops_non_unique_index_matching_composite_fk_columns_in_order() {
-            let fks = vec![fk(&["tenant_id", "user_id"])];
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
             assert!(is_fk_backing_index(
-                &index(&["tenant_id", "user_id"], false, false),
+                &index("fk_membership_ids", &["tenant_id", "user_id"], false, false),
                 &fks
             ));
         }
 
         #[test]
         fn keeps_index_whose_composite_columns_match_a_different_order() {
-            let fks = vec![fk(&["tenant_id", "user_id"])];
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
             assert!(!is_fk_backing_index(
-                &index(&["user_id", "tenant_id"], false, false),
+                &index("fk_membership_ids", &["user_id", "tenant_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_composite_user_index_covering_fk_columns() {
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
+            assert!(!is_fk_backing_index(
+                &index(
+                    "membership_tenant_user_idx",
+                    &["tenant_id", "user_id"],
+                    false,
+                    false
+                ),
                 &fks
             ));
         }
