@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-09-17
+
+### Fixed
+
+- **introspection**: MySQL `enum(...)` columns no longer vanish from
+  `migrate dev`/`diff` — they are registered as enums instead of failing
+  type resolution and being skipped.
+- **introspection**: MySQL's implicit FK-backing indexes no longer churn a
+  spurious `DROP INDEX` on every run, and real user-declared `@@index`es
+  covering FK columns are no longer dropped — only indexes named after
+  their FK constraint are filtered.
+- **migrate**: introspected enums pin their real database type name with
+  `@@map` (a Postgres enum `user_role` no longer generates DDL against a
+  nonexistent `UserRole` type), and sanitized variant values are pinned
+  with `@map` so the diff source matches what is stored.
+- **schema**: `.prax` string literals support `\"` and `\\` escapes, and
+  `db pull` writers escape instead of substituting characters, so enum
+  values containing quotes round-trip losslessly. Files written before
+  this change parse byte-identically.
+
 ## [0.12.4] - 2026-09-16
 
 ### Fixed

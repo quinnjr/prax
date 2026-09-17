@@ -63,10 +63,7 @@ pub fn schema_from_database(
         builder = builder
             .with_columns(&table.name, map_columns(&table.columns))
             .with_constraints(&table.name, map_constraints(table))
-            .with_indexes(
-                &table.name,
-                map_indexes(&table.indexes, &table.foreign_keys, &table.name),
-            );
+            .with_indexes(&table.name, map_indexes(&table.indexes, &table.name));
     }
 
     builder = builder.with_enums(map_enums(db));
@@ -233,16 +230,13 @@ fn referential_action_sql(action: ReferentialAction) -> Option<String> {
 /// Map indexes, flattening the query layer's `IndexColumn` (which carries sort
 /// order/nulls position) to the engine's plain column-name list.
 ///
-/// Non-unique indexes that merely back a foreign key are dropped: several
-/// engines (notably MySQL) auto-create an index for every FK, but the schema
-/// DSL models the relation, not its implicit backing index — emitting it as
-/// `@@index` would make an introspected schema diff dirty against a `.prax`
-/// that only declares the relation.
-fn map_indexes(
-    indexes: &[IndexInfo],
-    _foreign_keys: &[ForeignKeyInfo],
-    table_name: &str,
-) -> Vec<MigrateIndex> {
+/// Every index reaching this function is carried through verbatim. MySQL's
+/// implicit FK-backing indexes (which would otherwise churn the diff against
+/// a `.prax` that only declares the relation) are filtered earlier, in the
+/// MySQL introspector itself (`commands::introspect::mysql`), since Postgres
+/// and MSSQL don't auto-index FK columns and shouldn't have their real
+/// `@@index`es dropped.
+fn map_indexes(indexes: &[IndexInfo], table_name: &str) -> Vec<MigrateIndex> {
     // Every non-primary index is carried into the diff source verbatim.
     //
     // A previous version dropped non-unique indexes whose columns matched a
@@ -275,11 +269,17 @@ fn map_enums(db: &DatabaseSchema) -> Vec<MigrateEnum> {
         .map(|e| MigrateEnum {
             name: e.name.clone(),
             values: e.values.clone(),
+            // "public" is only a meaningful default for PostgreSQL, whose
+            // introspector always populates `db.schema` before this runs.
+            // MySQL has no schema-namespace concept and never sets one, so
+            // falling all the way through to a hardcoded "public" here would
+            // mislabel it; leave it empty rather than claim a schema that
+            // doesn't exist.
             schema: e
                 .schema
                 .clone()
                 .or_else(|| db.schema.clone())
-                .unwrap_or_else(|| "public".to_string()),
+                .unwrap_or_default(),
         })
         .collect()
 }
@@ -297,6 +297,54 @@ mod tests {
             normalized_type: normalized,
             nullable,
             ..Default::default()
+        }
+    }
+
+    /// `prax_query::introspection::sanitize_identifier`/`sanitize_variants`
+    /// are duplicated in `prax_migrate::introspect` (that crate depends only
+    /// on `prax-schema`, not on `prax-query`) so `db pull`'s written schema
+    /// and `migrate dev`'s diff source apply the identical transform to a
+    /// MySQL enum's raw values. This crate depends on both, so it's the one
+    /// place that can assert the two copies haven't drifted apart.
+    #[test]
+    fn sanitize_identifier_matches_between_prax_query_and_prax_migrate() {
+        for raw in ["active", "in-progress", "1", "", "it's ok", "日本語"] {
+            assert_eq!(
+                prax_query::introspection::sanitize_identifier(raw),
+                prax_migrate::introspect::sanitize_identifier(raw),
+                "sanitize_identifier({raw:?}) diverged between prax-query and prax-migrate"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_variants_matches_between_prax_query_and_prax_migrate() {
+        let raw = vec![
+            "in-progress".to_string(),
+            "in_progress".to_string(),
+            "done".to_string(),
+        ];
+        assert_eq!(
+            prax_query::introspection::sanitize_variants(&raw),
+            prax_migrate::introspect::sanitize_variants(&raw),
+        );
+    }
+
+    /// `prax_query::introspection::pascal_case` and
+    /// `prax_migrate::introspect::to_pascal_case` are two more copies of the
+    /// same transform, duplicated for the same crate-layering reason as
+    /// `sanitize_identifier`/`sanitize_variants` above — they must derive
+    /// the same name for the same raw input, or `db pull`'s written schema
+    /// and `migrate dev`'s diff source disagree on an enum/model's name and
+    /// churn every run.
+    #[test]
+    fn pascal_case_matches_between_prax_query_and_prax_migrate() {
+        for raw in ["users_status", "role", "FooBar", "a__b", "1099-forms", ""] {
+            assert_eq!(
+                prax_query::introspection::pascal_case(raw),
+                prax_migrate::introspect::to_pascal_case(raw),
+                "pascal_case({raw:?}) diverged between prax-query and prax-migrate"
+            );
         }
     }
 
@@ -447,10 +495,94 @@ mod tests {
         };
 
         let result = schema_from_database(&db, IntrospectionConfig::default()).unwrap();
-        assert!(result.schema.get_enum("Role").is_some());
+        let role_enum = result.schema.get_enum("Role").expect("Role enum");
+        // `@@map` must pin the real Postgres type name, or generated SQL
+        // (CREATE/ALTER/DROP TYPE) targets the nonexistent "Role" instead of
+        // the real "role" type.
+        assert_eq!(role_enum.database_name(), "role");
         let users = result.schema.get_model("Users").expect("Users model");
         let role = users.get_field("role").expect("role field");
         assert!(matches!(&role.field_type, FieldType::Enum(_)));
+    }
+
+    #[test]
+    fn enum_variant_needing_sanitization_pins_its_real_value_with_map() {
+        let db = DatabaseSchema {
+            name: "db".to_string(),
+            schema: None,
+            tables: vec![TableInfo {
+                name: "tasks".to_string(),
+                columns: vec![column(
+                    "status",
+                    NormalizedType::Enum("tasks_status".to_string()),
+                    false,
+                )],
+                ..Default::default()
+            }],
+            enums: vec![EnumInfo {
+                name: "tasks_status".to_string(),
+                schema: None,
+                // MySQL enum values are unrestricted text; "in-progress"
+                // isn't a legal `.prax` identifier and gets sanitized to
+                // `in_progress` — `db_value()` must still resolve to the
+                // real value, or generated SQL never matches what's
+                // actually stored in the database.
+                values: vec!["in-progress".to_string(), "done".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let result = schema_from_database(&db, IntrospectionConfig::default()).unwrap();
+        let status_enum = result.schema.get_enum("TasksStatus").expect("enum");
+        let in_progress = status_enum
+            .get_variant("in_progress")
+            .expect("sanitized variant");
+        assert_eq!(in_progress.db_value(), "in-progress");
+        let done = status_enum
+            .get_variant("done")
+            .expect("unsanitized variant");
+        assert_eq!(done.db_value(), "done");
+    }
+
+    #[test]
+    fn generated_schema_with_quotes_in_enum_values_parses_back_losslessly() {
+        // `generate_prax_schema` (`db pull`'s text writer) and `build_enum`
+        // (the diff source's AST builder) must agree: values containing
+        // `"`/`\` are backslash-escaped on write and unescaped on parse, so
+        // a `db pull` → re-read round-trip preserves the real value instead
+        // of silently mangling it.
+        let db = DatabaseSchema {
+            name: "db".to_string(),
+            schema: None,
+            tables: vec![TableInfo {
+                name: "tasks".to_string(),
+                columns: vec![column(
+                    "status",
+                    NormalizedType::Enum("task_status".to_string()),
+                    false,
+                )],
+                ..Default::default()
+            }],
+            enums: vec![prax_query::introspection::EnumInfo {
+                name: "task_status".to_string(),
+                schema: None,
+                values: vec!["say \"hi\"".to_string(), "a\\b".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        let text = prax_query::introspection::generate_prax_schema(&db);
+        let parsed = prax_schema::parse_schema(&text).expect("generated schema must parse");
+        let status = parsed.get_enum("TaskStatus").expect("enum");
+        let values: Vec<&str> = status.variants.iter().map(|v| v.db_value()).collect();
+        assert!(
+            values.contains(&"say \"hi\""),
+            "quote value lost, got: {values:?} from:\n{text}"
+        );
+        assert!(
+            values.contains(&"a\\b"),
+            "backslash value lost, got: {values:?} from:\n{text}"
+        );
     }
 
     #[test]
