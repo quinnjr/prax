@@ -819,9 +819,19 @@ pub mod mysql {
                 });
             }
 
+            // Tracks every enum name reserved so far, keyed by its final
+            // PascalCase form, across the *entire* run — not just earlier
+            // tables. Two enum columns in the SAME table can collide too
+            // (e.g. `a_b` and `a__b` both PascalCase to `AB`, since
+            // `pascal_case` splits on `_` and an empty segment contributes
+            // nothing), and this needs to catch that just as much as a
+            // cross-table collision.
+            let mut used_enum_names: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for table in &mut db_schema.tables {
                 let table_enums =
-                    populate_table(&engine, table, schema_ref, options, &db_schema.enums).await?;
+                    populate_table(&engine, table, schema_ref, options, &mut used_enum_names)
+                        .await?;
                 db_schema.enums.extend(table_enums);
             }
 
@@ -829,33 +839,28 @@ pub mod mysql {
         }
     }
 
-    /// Pick a synthesized enum name that doesn't collide with one already
-    /// discovered on an earlier table, disambiguating with a numeric suffix.
-    /// Two different `(table, column)` pairs can stringify to the same
-    /// `<table>_<column>` name (e.g. table `order_item` column `status`, and
-    /// table `order` column `item_status`, both synthesize
-    /// `order_item_status`) since `_` is legal in both identifiers — reusing
-    /// a name would type a column against the wrong enum's variants with
-    /// nothing surfaced.
-    fn unique_enum_name(base_name: String, known: &[EnumInfo]) -> String {
-        // Compare the name each enum is actually declared under
-        // (`generate_enum`/`build_enum` both PascalCase it) — two distinct
-        // raw names that only collide after that transform must still be
-        // caught here.
+    /// Reserve a synthesized enum name, disambiguating with a numeric suffix
+    /// on collision. Comparisons are keyed by the PascalCase form — the name
+    /// each enum is actually declared under (`generate_enum`/`build_enum`
+    /// both PascalCase it) — so two distinct raw names that only collide
+    /// after that transform are still caught (e.g. table `order_item`
+    /// column `status` and table `order` column `item_status` both
+    /// synthesize `order_item_status`, since `_` is legal in both
+    /// identifiers). `used_pascal_names` is a single set shared across the
+    /// whole introspection run, so each check is an O(1) hash lookup rather
+    /// than an O(n) scan that grows with every enum column seen so far.
+    fn reserve_unique_enum_name(
+        base_name: String,
+        used_pascal_names: &mut std::collections::HashSet<String>,
+    ) -> String {
         use prax_query::introspection::pascal_case;
-        if !known
-            .iter()
-            .any(|e| pascal_case(&e.name) == pascal_case(&base_name))
-        {
+        if used_pascal_names.insert(pascal_case(&base_name)) {
             return base_name;
         }
         let mut suffix = 2;
         loop {
             let candidate = format!("{}_{}", base_name, suffix);
-            if !known
-                .iter()
-                .any(|e| pascal_case(&e.name) == pascal_case(&candidate))
-            {
+            if used_pascal_names.insert(pascal_case(&candidate)) {
                 return candidate;
             }
             suffix += 1;
@@ -865,13 +870,14 @@ pub mod mysql {
     /// Fill a table's columns, primary key, foreign keys, and indexes.
     /// Returns any enum types discovered on this table's columns (MySQL has
     /// no named enum catalog — each `enum(...)` column gets a synthesized
-    /// `<table>_<column>` enum name, disambiguated against `known_enums`).
+    /// `<table>_<column>` enum name, disambiguated against
+    /// `used_enum_names`).
     async fn populate_table(
         engine: &MysqlRawEngine,
         table: &mut TableInfo,
         schema: Option<&str>,
         options: &IntrospectionOptions,
-        known_enums: &[EnumInfo],
+        used_enum_names: &mut std::collections::HashSet<String>,
     ) -> CliResult<Vec<EnumInfo>> {
         // Columns
         let col_rows = MysqlIntrospector::rows(
@@ -900,7 +906,8 @@ pub mod mysql {
                         table.name, name, column_type
                     )));
                 }
-                let enum_name = unique_enum_name(format!("{}_{}", table.name, name), known_enums);
+                let enum_name =
+                    reserve_unique_enum_name(format!("{}_{}", table.name, name), used_enum_names);
                 enums.push(EnumInfo {
                     name: enum_name.clone(),
                     schema: schema.map(str::to_string),
@@ -1132,33 +1139,53 @@ pub mod mysql {
         }
 
         #[test]
-        fn unique_enum_name_disambiguates_on_collision() {
-            let known = vec![EnumInfo {
-                name: "order_item_status".to_string(),
-                schema: None,
-                values: vec!["a".to_string()],
-            }];
+        fn reserve_unique_enum_name_disambiguates_on_collision() {
+            let mut used = std::collections::HashSet::new();
             assert_eq!(
-                unique_enum_name("order_item_status".to_string(), &known),
+                reserve_unique_enum_name("order_item_status".to_string(), &mut used),
+                "order_item_status"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("order_item_status".to_string(), &mut used),
                 "order_item_status_2"
             );
             assert_eq!(
-                unique_enum_name("order_status".to_string(), &known),
+                reserve_unique_enum_name("order_status".to_string(), &mut used),
                 "order_status"
             );
         }
 
         #[test]
-        fn unique_enum_name_catches_collision_that_only_appears_after_pascal_case() {
+        fn reserve_unique_enum_name_catches_collision_that_only_appears_after_pascal_case() {
             // "FooBar" and "foo_bar" are different raw strings but both
             // PascalCase to "FooBar" — the actual name each enum is
             // declared under (see `generate_enum`/`build_enum`).
-            let known = vec![EnumInfo {
-                name: "FooBar".to_string(),
-                schema: None,
-                values: vec!["a".to_string()],
-            }];
-            assert_eq!(unique_enum_name("foo_bar".to_string(), &known), "foo_bar_2");
+            let mut used = std::collections::HashSet::new();
+            assert_eq!(
+                reserve_unique_enum_name("FooBar".to_string(), &mut used),
+                "FooBar"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("foo_bar".to_string(), &mut used),
+                "foo_bar_2"
+            );
+        }
+
+        #[test]
+        fn reserve_unique_enum_name_catches_collision_within_the_same_table() {
+            // "a_b" and "a__b" are different raw strings but both PascalCase
+            // to "AB" (`pascal_case` splits on `_`; the empty segment from
+            // the double underscore contributes nothing) — two enum columns
+            // on the same table must not both reserve "AB".
+            let mut used = std::collections::HashSet::new();
+            assert_eq!(
+                reserve_unique_enum_name("a_b".to_string(), &mut used),
+                "a_b"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("a__b".to_string(), &mut used),
+                "a__b_2"
+            );
         }
     }
 }

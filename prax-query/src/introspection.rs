@@ -831,11 +831,15 @@ pub fn parse_mysql_enum_values(column_type: &str) -> Vec<String> {
     let trimmed = column_type.trim();
     // MySQL always reports COLUMN_TYPE with a lowercase `enum` keyword, but
     // match case-insensitively anyway since the caller detects the column
-    // via `data_type.eq_ignore_ascii_case("enum")`.
-    let inner = if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("enum(") {
-        trimmed[5..].strip_suffix(')').unwrap_or("")
-    } else {
-        ""
+    // via `data_type.eq_ignore_ascii_case("enum")`. `get(..5)` (not a raw
+    // byte-range index) avoids panicking on non-ASCII input shorter than 5
+    // bytes or whose byte offset 5 isn't a UTF-8 char boundary — this is a
+    // public function callable with arbitrary strings.
+    let inner = match trimmed.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("enum(") => {
+            trimmed[5..].strip_suffix(')').unwrap_or("")
+        }
+        _ => "",
     };
 
     let mut values = Vec::new();
@@ -956,7 +960,7 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
 /// apply the same transform, in the same order, to the same
 /// `EnumInfo::values`, so a re-introspected diff source's variant names
 /// match what was written to disk here.
-fn sanitize_variants(values: &[String]) -> Vec<String> {
+pub fn sanitize_variants(values: &[String]) -> Vec<String> {
     let mut result: Vec<String> = Vec::with_capacity(values.len());
     for raw in values {
         let base = sanitize_identifier(raw);
@@ -981,7 +985,7 @@ fn sanitize_variants(values: &[String]) -> Vec<String> {
 /// can't call this copy directly. Change the transform in both places, or
 /// `db pull`'s written schema and `migrate dev`'s diff source will
 /// sanitize the same raw value differently and churn forever.
-fn sanitize_identifier(raw: &str) -> String {
+pub fn sanitize_identifier(raw: &str) -> String {
     let mapped: String = raw
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -1505,6 +1509,11 @@ mod tests {
             parse_mysql_enum_values("ENUM('active')"),
             vec!["active".to_string()]
         );
+        // Must not panic on non-ASCII input whose byte length happens to be
+        // >= 5 but has no char boundary at byte offset 5.
+        assert_eq!(parse_mysql_enum_values("日本語"), Vec::<String>::new());
+        assert_eq!(parse_mysql_enum_values("日本"), Vec::<String>::new());
+        assert_eq!(parse_mysql_enum_values(""), Vec::<String>::new());
     }
 
     #[test]

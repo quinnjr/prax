@@ -850,7 +850,7 @@ fn parse_default_value(default: &str) -> Option<AttributeValue> {
 /// ⚠️ Duplicated verbatim in that crate rather than shared — this crate
 /// depends only on `prax-schema`, not on `prax-query`. Change the transform
 /// in both places, or the two sides drift and churn every diff.
-fn sanitize_identifier(raw: &str) -> String {
+pub fn sanitize_identifier(raw: &str) -> String {
     let mapped: String = raw
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -871,7 +871,7 @@ fn sanitize_identifier(raw: &str) -> String {
 /// must apply the same transform, in the same order, to the same
 /// `EnumInfo::values`, so this diff-source enum's variant names match what
 /// `db pull` wrote to disk.
-fn sanitize_variants(values: &[String]) -> Vec<String> {
+pub fn sanitize_variants(values: &[String]) -> Vec<String> {
     let mut result: Vec<String> = Vec::with_capacity(values.len());
     for raw in values {
         let base = sanitize_identifier(raw);

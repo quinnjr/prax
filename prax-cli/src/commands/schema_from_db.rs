@@ -307,6 +307,36 @@ mod tests {
         }
     }
 
+    /// `prax_query::introspection::sanitize_identifier`/`sanitize_variants`
+    /// are duplicated in `prax_migrate::introspect` (that crate depends only
+    /// on `prax-schema`, not on `prax-query`) so `db pull`'s written schema
+    /// and `migrate dev`'s diff source apply the identical transform to a
+    /// MySQL enum's raw values. This crate depends on both, so it's the one
+    /// place that can assert the two copies haven't drifted apart.
+    #[test]
+    fn sanitize_identifier_matches_between_prax_query_and_prax_migrate() {
+        for raw in ["active", "in-progress", "1", "", "it's ok", "日本語"] {
+            assert_eq!(
+                prax_query::introspection::sanitize_identifier(raw),
+                prax_migrate::introspect::sanitize_identifier(raw),
+                "sanitize_identifier({raw:?}) diverged between prax-query and prax-migrate"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_variants_matches_between_prax_query_and_prax_migrate() {
+        let raw = vec![
+            "in-progress".to_string(),
+            "in_progress".to_string(),
+            "done".to_string(),
+        ];
+        assert_eq!(
+            prax_query::introspection::sanitize_variants(&raw),
+            prax_migrate::introspect::sanitize_variants(&raw),
+        );
+    }
+
     #[test]
     fn udt_name_maps_normalized_types_to_recognized_short_names() {
         assert_eq!(udt_name_for(&NormalizedType::Int, ""), "int4");
