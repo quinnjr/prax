@@ -740,6 +740,8 @@ fn json_i32(row: &serde_json::Value, key: &str) -> Option<i32> {
 
 #[cfg(feature = "mysql")]
 pub mod mysql {
+    use std::collections::HashSet;
+
     use super::*;
     use prax_mysql::{MysqlPool, MysqlRawEngine};
 
@@ -826,8 +828,7 @@ pub mod mysql {
             // `pascal_case` splits on `_` and an empty segment contributes
             // nothing), and this needs to catch that just as much as a
             // cross-table collision.
-            let mut used_enum_names: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+            let mut used_enum_names: HashSet<String> = HashSet::new();
             for table in &mut db_schema.tables {
                 let table_enums =
                     populate_table(&engine, table, schema_ref, options, &mut used_enum_names)
@@ -851,7 +852,7 @@ pub mod mysql {
     /// than an O(n) scan that grows with every enum column seen so far.
     fn reserve_unique_enum_name(
         base_name: String,
-        used_pascal_names: &mut std::collections::HashSet<String>,
+        used_pascal_names: &mut HashSet<String>,
     ) -> String {
         use prax_query::introspection::{disambiguate, pascal_case};
         disambiguate(&base_name, pascal_case, used_pascal_names)
@@ -866,7 +867,7 @@ pub mod mysql {
     fn synthesize_enum_name(
         table_name: &str,
         column_name: &str,
-        used_enum_names: &mut std::collections::HashSet<String>,
+        used_enum_names: &mut HashSet<String>,
     ) -> String {
         use prax_query::introspection::sanitize_identifier;
         reserve_unique_enum_name(
@@ -889,7 +890,7 @@ pub mod mysql {
         table: &mut TableInfo,
         schema: Option<&str>,
         options: &IntrospectionOptions,
-        used_enum_names: &mut std::collections::HashSet<String>,
+        used_enum_names: &mut HashSet<String>,
     ) -> CliResult<Vec<EnumInfo>> {
         // Columns
         let col_rows = MysqlIntrospector::rows(
@@ -1156,7 +1157,7 @@ pub mod mysql {
 
         #[test]
         fn reserve_unique_enum_name_disambiguates_on_collision() {
-            let mut used = std::collections::HashSet::new();
+            let mut used = HashSet::new();
             assert_eq!(
                 reserve_unique_enum_name("order_item_status".to_string(), &mut used),
                 "order_item_status"
@@ -1176,7 +1177,7 @@ pub mod mysql {
             // "FooBar" and "foo_bar" are different raw strings but both
             // PascalCase to "FooBar" — the actual name each enum is
             // declared under (see `generate_enum`/`build_enum`).
-            let mut used = std::collections::HashSet::new();
+            let mut used = HashSet::new();
             assert_eq!(
                 reserve_unique_enum_name("FooBar".to_string(), &mut used),
                 "FooBar"
@@ -1193,7 +1194,7 @@ pub mod mysql {
             // to "AB" (`pascal_case` splits on `_`; the empty segment from
             // the double underscore contributes nothing) — two enum columns
             // on the same table must not both reserve "AB".
-            let mut used = std::collections::HashSet::new();
+            let mut used = HashSet::new();
             assert_eq!(
                 reserve_unique_enum_name("a_b".to_string(), &mut used),
                 "a_b"
@@ -1206,7 +1207,7 @@ pub mod mysql {
 
         #[test]
         fn synthesize_enum_name_sanitizes_illegal_characters() {
-            let mut used = std::collections::HashSet::new();
+            let mut used = HashSet::new();
             assert_eq!(
                 synthesize_enum_name("1099-forms", "my col", &mut used),
                 "V1099_forms_my_col"

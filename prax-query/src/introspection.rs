@@ -955,7 +955,11 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
         if value == *raw {
             output.push_str(&format!("    {}\n", value));
         } else {
-            output.push_str(&format!("    {} @map(\"{}\")\n", value, raw));
+            output.push_str(&format!(
+                "    {} @map(\"{}\")\n",
+                value,
+                escape_map_value(raw)
+            ));
         }
     }
     // Always pin the real DB type name with @@map, mirroring
@@ -965,7 +969,10 @@ fn generate_enum(enum_info: &EnumInfo) -> String {
     // a Postgres enum `user_role` would generate/diff SQL against a type
     // named `UserRole` — which doesn't exist in the live database — while
     // the real `user_role` type is left untouched.
-    output.push_str(&format!("    @@map(\"{}\")\n", enum_info.name));
+    output.push_str(&format!(
+        "    @@map(\"{}\")\n",
+        escape_map_value(&enum_info.name)
+    ));
     output.push_str("}\n");
     output
 }
@@ -1030,6 +1037,16 @@ pub fn sanitize_identifier(raw: &str) -> String {
         Some(_) => format!("V{}", mapped),
         None => "V".to_string(),
     }
+}
+
+/// Make a raw value safe to embed in a `.prax` string literal
+/// (`@map("...")`/`@@map("...")`). The grammar's `string_content` rule
+/// (`(!"\"" ~ ANY)*`) has no escape mechanism for an embedded `"` — there is
+/// no way to represent one losslessly — so a literal quote is substituted
+/// rather than left to produce an unparseable file. A MySQL enum value can
+/// legally contain any text, including `"`.
+fn escape_map_value(raw: &str) -> String {
+    raw.replace('"', "'")
 }
 
 fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
@@ -1560,6 +1577,12 @@ mod tests {
     }
 
     #[test]
+    fn test_escape_map_value() {
+        assert_eq!(escape_map_value("plain"), "plain");
+        assert_eq!(escape_map_value("say \"hi\""), "say 'hi'");
+    }
+
+    #[test]
     fn test_sanitize_variants_disambiguates_collisions() {
         let raw = vec![
             "in-progress".to_string(),
@@ -1608,6 +1631,20 @@ mod tests {
         // ...one that didn't need it (already a legal identifier) doesn't.
         assert!(declared.contains("    done\n"));
         assert!(!declared.contains("done @map"));
+    }
+
+    #[test]
+    fn test_generate_enum_escapes_embedded_quotes_in_map_value() {
+        // The `.prax` grammar has no escape mechanism for a `"` inside a
+        // string literal, but a MySQL enum value can legally contain one.
+        // Must not emit an unparseable file.
+        let enum_info = EnumInfo {
+            name: "task_status".to_string(),
+            schema: None,
+            values: vec!["say \"hi\"".to_string()],
+        };
+        let declared = generate_enum(&enum_info);
+        assert!(declared.contains("@map(\"say 'hi'\")"));
     }
 
     #[test]
