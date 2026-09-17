@@ -867,6 +867,28 @@ pub mod mysql {
         }
     }
 
+    /// Synthesize an enum name from a table/column pair, reserving it
+    /// against collisions. MySQL table/column identifiers can legally
+    /// contain characters the `.prax` grammar doesn't (a backtick-quoted
+    /// name with spaces, hyphens, etc.), so each component is sanitized
+    /// before joining — otherwise `generate_enum`/`build_enum` would
+    /// PascalCase an already-illegal string into more illegal output.
+    fn synthesize_enum_name(
+        table_name: &str,
+        column_name: &str,
+        used_enum_names: &mut std::collections::HashSet<String>,
+    ) -> String {
+        use prax_query::introspection::sanitize_identifier;
+        reserve_unique_enum_name(
+            format!(
+                "{}_{}",
+                sanitize_identifier(table_name),
+                sanitize_identifier(column_name)
+            ),
+            used_enum_names,
+        )
+    }
+
     /// Fill a table's columns, primary key, foreign keys, and indexes.
     /// Returns any enum types discovered on this table's columns (MySQL has
     /// no named enum catalog — each `enum(...)` column gets a synthesized
@@ -901,19 +923,23 @@ pub mod mysql {
                 let column_type = json_str(row, "udt_name").unwrap_or_default();
                 let values = prax_query::introspection::parse_mysql_enum_values(&column_type);
                 if values.is_empty() {
-                    return Err(CliError::Database(format!(
-                        "Failed to parse enum values for {}.{} from COLUMN_TYPE {:?}",
-                        table.name, name, column_type
-                    )));
+                    // Malformed/unexpected COLUMN_TYPE (e.g. from a
+                    // MySQL-compatible proxy). Fall back to `Unknown` rather
+                    // than aborting the whole introspection run over one
+                    // column — `SchemaBuilder::build_field` already treats
+                    // an unresolvable type as skip-this-column-with-warning
+                    // (not a hard failure), the same graceful-degradation
+                    // path any other unrecognized SQL type takes.
+                    NormalizedType::Unknown(column_type)
+                } else {
+                    let enum_name = synthesize_enum_name(&table.name, &name, used_enum_names);
+                    enums.push(EnumInfo {
+                        name: enum_name.clone(),
+                        schema: schema.map(str::to_string),
+                        values,
+                    });
+                    NormalizedType::Enum(enum_name)
                 }
-                let enum_name =
-                    reserve_unique_enum_name(format!("{}_{}", table.name, name), used_enum_names);
-                enums.push(EnumInfo {
-                    name: enum_name.clone(),
-                    schema: schema.map(str::to_string),
-                    values,
-                });
-                NormalizedType::Enum(enum_name)
             } else {
                 normalize_type(
                     DatabaseType::MySQL,
@@ -1185,6 +1211,15 @@ pub mod mysql {
             assert_eq!(
                 reserve_unique_enum_name("a__b".to_string(), &mut used),
                 "a__b_2"
+            );
+        }
+
+        #[test]
+        fn synthesize_enum_name_sanitizes_illegal_characters() {
+            let mut used = std::collections::HashSet::new();
+            assert_eq!(
+                synthesize_enum_name("1099-forms", "my col", &mut used),
+                "V1099_forms_my_col"
             );
         }
     }
