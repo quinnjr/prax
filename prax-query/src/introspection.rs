@@ -168,7 +168,10 @@ impl NormalizedType {
             Self::Json => "Json".to_string(),
             Self::Uuid => "String".to_string(), // Or custom UUID type
             Self::Array(inner) => format!("{}[]", inner.to_prax_type()),
-            Self::Enum(name) => name.clone(),
+            // Must match the name `generate_enum` declares the enum under
+            // (also PascalCased) — otherwise a field referencing this enum
+            // points at a type the generated schema never declares.
+            Self::Enum(name) => pascal_case(name),
             Self::Unknown(t) => format!("Unsupported<{}>", t),
         }
     }
@@ -808,12 +811,54 @@ fn normalize_mysql_type(
         "date" => NormalizedType::Date,
         "time" => NormalizedType::Time,
         "json" => NormalizedType::Json,
-        t if t.starts_with("enum(") => {
-            // Extract enum name from table context
-            NormalizedType::Enum(t.to_string())
-        }
+        // Enum columns need table/column context to synthesize a name and
+        // aren't normalized here — `prax-cli`'s MySQL introspector
+        // (`commands::introspect::mysql::populate_table`) intercepts
+        // `data_type.eq_ignore_ascii_case("enum")` columns *before* calling
+        // this function, reading `COLUMN_TYPE` (passed here as `udt_name`,
+        // never as `type_name`) via `parse_mysql_enum_values`. Adding a new
+        // MySQL type here that also needs table/column context (e.g.
+        // `set(...)`) requires a second interception point there too — this
+        // match alone never sees enough context to build one.
         t => NormalizedType::Unknown(t.to_string()),
     }
+}
+
+/// Parse the quoted value list out of a MySQL `COLUMN_TYPE` enum string, e.g.
+/// `"enum('active','inactive')"` -> `["active", "inactive"]`. Handles the
+/// `''`-escaped quote MySQL uses for a literal `'` inside a value.
+pub fn parse_mysql_enum_values(column_type: &str) -> Vec<String> {
+    let trimmed = column_type.trim();
+    // MySQL always reports COLUMN_TYPE with a lowercase `enum` keyword, but
+    // match case-insensitively anyway since the caller detects the column
+    // via `data_type.eq_ignore_ascii_case("enum")`.
+    let inner = if trimmed.len() >= 5 && trimmed[..5].eq_ignore_ascii_case("enum(") {
+        trimmed[5..].strip_suffix(')').unwrap_or("")
+    } else {
+        ""
+    };
+
+    let mut values = Vec::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\'' {
+            continue;
+        }
+        let mut value = String::new();
+        while let Some(next) = chars.next() {
+            if next == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    value.push('\'');
+                    chars.next();
+                    continue;
+                }
+                break;
+            }
+            value.push(next);
+        }
+        values.push(value);
+    }
+    values
 }
 
 fn normalize_sqlite_type(type_name: &str) -> NormalizedType {
@@ -890,12 +935,62 @@ pub fn generate_prax_schema(db: &DatabaseSchema) -> String {
 }
 
 fn generate_enum(enum_info: &EnumInfo) -> String {
-    let mut output = format!("enum {} {{\n", enum_info.name);
-    for value in &enum_info.values {
+    // PascalCase the name to match the diff-source builder's
+    // `to_pascal_case`, so a re-introspected source enum has the same name
+    // as the one just written here (otherwise every diff proposes dropping
+    // one and adding the other, forever).
+    let mut output = format!("enum {} {{\n", pascal_case(&enum_info.name));
+    for value in sanitize_variants(&enum_info.values) {
         output.push_str(&format!("    {}\n", value));
     }
     output.push_str("}\n");
     output
+}
+
+/// Sanitize each of an enum's raw values, disambiguating any that collide
+/// after sanitization (e.g. `"in-progress"` and `"in_progress"` both map to
+/// `in_progress`) with a numeric suffix so no enum ends up with two
+/// identically-named variants.
+///
+/// Mirrors `prax_migrate::introspect`'s identically-named helper — both must
+/// apply the same transform, in the same order, to the same
+/// `EnumInfo::values`, so a re-introspected diff source's variant names
+/// match what was written to disk here.
+fn sanitize_variants(values: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::with_capacity(values.len());
+    for raw in values {
+        let base = sanitize_identifier(raw);
+        let mut candidate = base.clone();
+        let mut suffix = 2;
+        while result.contains(&candidate) {
+            candidate = format!("{}_{}", base, suffix);
+            suffix += 1;
+        }
+        result.push(candidate);
+    }
+    result
+}
+
+/// Sanitize a raw introspected value into a legal `.prax` identifier
+/// (`ASCII_ALPHA (ASCII_ALPHANUMERIC | '_')*`). A MySQL enum value can be
+/// arbitrary text (`"in-progress"`, `"1"`, `""`), none of which the schema
+/// grammar's `identifier` rule accepts verbatim.
+///
+/// ⚠️ Duplicated verbatim as `prax_migrate::introspect::sanitize_identifier`
+/// — `prax-migrate` depends only on `prax-schema`, not on this crate, so it
+/// can't call this copy directly. Change the transform in both places, or
+/// `db pull`'s written schema and `migrate dev`'s diff source will
+/// sanitize the same raw value differently and churn forever.
+fn sanitize_identifier(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    match mapped.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => mapped,
+        Some(_) => format!("V{}", mapped),
+        None => "V".to_string(),
+    }
 }
 
 fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
@@ -1272,7 +1367,14 @@ pub mod mongodb {
 // Helpers
 // ============================================================================
 
-fn pascal_case(s: &str) -> String {
+/// Convert `snake_case` (or any `_`-delimited name) to `PascalCase`.
+///
+/// Idempotent on an input that's already `PascalCase` with no underscores
+/// (capitalizing an already-uppercase first character is a no-op), so
+/// callers that pre-derive a `PascalCase` name (e.g. the MySQL introspector
+/// disambiguating a synthesized enum name against this same transform) can
+/// still round-trip it through here safely.
+pub fn pascal_case(s: &str) -> String {
     s.split('_')
         .map(|part| {
             let mut chars = part.chars();
@@ -1375,6 +1477,73 @@ mod tests {
         assert_eq!(
             normalize_mysql_type("datetime", None, None, None),
             NormalizedType::DateTime
+        );
+    }
+
+    #[test]
+    fn test_parse_mysql_enum_values() {
+        assert_eq!(
+            parse_mysql_enum_values("enum('active','inactive')"),
+            vec!["active".to_string(), "inactive".to_string()]
+        );
+        assert_eq!(
+            parse_mysql_enum_values("enum('it''s ok','plain')"),
+            vec!["it's ok".to_string(), "plain".to_string()]
+        );
+        assert_eq!(
+            parse_mysql_enum_values("enum('solo')"),
+            vec!["solo".to_string()]
+        );
+        // Values may contain a literal comma; the parser tracks quotes
+        // rather than splitting on ',', so this must not be split in two.
+        assert_eq!(
+            parse_mysql_enum_values("enum('a,b','c')"),
+            vec!["a,b".to_string(), "c".to_string()]
+        );
+        // COLUMN_TYPE's `enum` keyword is matched case-insensitively.
+        assert_eq!(
+            parse_mysql_enum_values("ENUM('active')"),
+            vec!["active".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_sanitize_identifier() {
+        assert_eq!(sanitize_identifier("active"), "active");
+        assert_eq!(sanitize_identifier("in-progress"), "in_progress");
+        assert_eq!(sanitize_identifier("1"), "V1");
+        assert_eq!(sanitize_identifier(""), "V");
+    }
+
+    #[test]
+    fn test_sanitize_variants_disambiguates_collisions() {
+        let raw = vec![
+            "in-progress".to_string(),
+            "in_progress".to_string(),
+            "done".to_string(),
+        ];
+        assert_eq!(
+            sanitize_variants(&raw),
+            vec![
+                "in_progress".to_string(),
+                "in_progress_2".to_string(),
+                "done".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_enum_to_prax_type_matches_generate_enum_declaration() {
+        let enum_info = EnumInfo {
+            name: "users_status".to_string(),
+            schema: None,
+            values: vec!["active".to_string()],
+        };
+        let declared = generate_enum(&enum_info);
+        assert!(declared.starts_with("enum UsersStatus {"));
+        assert_eq!(
+            NormalizedType::Enum("users_status".to_string()).to_prax_type(),
+            "UsersStatus"
         );
     }
 

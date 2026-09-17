@@ -347,8 +347,8 @@ impl SchemaBuilder {
         let name = Ident::new(to_pascal_case(&info.name), span);
         let mut prax_enum = Enum::new(name, span);
 
-        for value in &info.values {
-            prax_enum.add_variant(EnumVariant::new(Ident::new(value.clone(), span), span));
+        for value in sanitize_variants(&info.values) {
+            prax_enum.add_variant(EnumVariant::new(Ident::new(value, span), span));
         }
 
         prax_enum
@@ -838,6 +838,52 @@ fn parse_default_value(default: &str) -> Option<AttributeValue> {
 
     // Unknown default - return as string
     Some(AttributeValue::String(trimmed.to_string()))
+}
+
+/// Sanitize a raw introspected value into a legal `.prax` identifier
+/// (`ASCII_ALPHA (ASCII_ALPHANUMERIC | '_')*`). Mirrors
+/// `prax_query::introspection::sanitize_identifier` so a re-introspected
+/// source enum's variants match what `db pull` wrote to disk — a MySQL
+/// enum value can be arbitrary text (`"in-progress"`, `"1"`, `""`), none of
+/// which the schema grammar's `identifier` rule accepts verbatim.
+///
+/// ⚠️ Duplicated verbatim in that crate rather than shared — this crate
+/// depends only on `prax-schema`, not on `prax-query`. Change the transform
+/// in both places, or the two sides drift and churn every diff.
+fn sanitize_identifier(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    match mapped.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => mapped,
+        Some(_) => format!("V{}", mapped),
+        None => "V".to_string(),
+    }
+}
+
+/// Sanitize each of an enum's raw values, disambiguating any that collide
+/// after sanitization (e.g. `"in-progress"` and `"in_progress"` both map to
+/// `in_progress`) with a numeric suffix so no enum ends up with two
+/// identically-named variants.
+///
+/// Mirrors `prax_query::introspection`'s identically-named helper — both
+/// must apply the same transform, in the same order, to the same
+/// `EnumInfo::values`, so this diff-source enum's variant names match what
+/// `db pull` wrote to disk.
+fn sanitize_variants(values: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = Vec::with_capacity(values.len());
+    for raw in values {
+        let base = sanitize_identifier(raw);
+        let mut candidate = base.clone();
+        let mut suffix = 2;
+        while result.contains(&candidate) {
+            candidate = format!("{}_{}", base, suffix);
+            suffix += 1;
+        }
+        result.push(candidate);
+    }
+    result
 }
 
 /// Convert snake_case to PascalCase.

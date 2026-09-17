@@ -7,11 +7,17 @@ use prax_query::introspection::{
     ColumnInfo, DatabaseSchema, ForeignKeyInfo, IndexColumn, IndexInfo, ReferentialAction,
     SortOrder, TableInfo, generate_prax_schema, normalize_type, queries,
 };
-// `EnumInfo`/`ViewInfo` are only constructed by the PostgreSQL introspector
-// (the other backends build enums/views differently or not at all), so import
-// them only when that feature is compiled to keep single-feature builds clean.
+// `ViewInfo` is only constructed by the PostgreSQL introspector (the other
+// backends build views differently or not at all); `EnumInfo`/`NormalizedType`
+// are also needed by MySQL, which synthesizes one enum per `enum(...)`
+// column. Import each only when the relevant feature is compiled to keep
+// single-feature builds clean.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use prax_query::introspection::EnumInfo;
+#[cfg(feature = "mysql")]
+use prax_query::introspection::NormalizedType;
 #[cfg(feature = "postgres")]
-use prax_query::introspection::{EnumInfo, ViewInfo};
+use prax_query::introspection::ViewInfo;
 use prax_query::sql::DatabaseType;
 
 use crate::config::Config;
@@ -814,26 +820,66 @@ pub mod mysql {
             }
 
             for table in &mut db_schema.tables {
-                populate_table(&engine, table, schema_ref, options).await?;
+                let table_enums =
+                    populate_table(&engine, table, schema_ref, options, &db_schema.enums).await?;
+                db_schema.enums.extend(table_enums);
             }
 
             Ok(db_schema)
         }
     }
 
+    /// Pick a synthesized enum name that doesn't collide with one already
+    /// discovered on an earlier table, disambiguating with a numeric suffix.
+    /// Two different `(table, column)` pairs can stringify to the same
+    /// `<table>_<column>` name (e.g. table `order_item` column `status`, and
+    /// table `order` column `item_status`, both synthesize
+    /// `order_item_status`) since `_` is legal in both identifiers — reusing
+    /// a name would type a column against the wrong enum's variants with
+    /// nothing surfaced.
+    fn unique_enum_name(base_name: String, known: &[EnumInfo]) -> String {
+        // Compare the name each enum is actually declared under
+        // (`generate_enum`/`build_enum` both PascalCase it) — two distinct
+        // raw names that only collide after that transform must still be
+        // caught here.
+        use prax_query::introspection::pascal_case;
+        if !known
+            .iter()
+            .any(|e| pascal_case(&e.name) == pascal_case(&base_name))
+        {
+            return base_name;
+        }
+        let mut suffix = 2;
+        loop {
+            let candidate = format!("{}_{}", base_name, suffix);
+            if !known
+                .iter()
+                .any(|e| pascal_case(&e.name) == pascal_case(&candidate))
+            {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     /// Fill a table's columns, primary key, foreign keys, and indexes.
+    /// Returns any enum types discovered on this table's columns (MySQL has
+    /// no named enum catalog — each `enum(...)` column gets a synthesized
+    /// `<table>_<column>` enum name, disambiguated against `known_enums`).
     async fn populate_table(
         engine: &MysqlRawEngine,
         table: &mut TableInfo,
         schema: Option<&str>,
         options: &IntrospectionOptions,
-    ) -> CliResult<()> {
+        known_enums: &[EnumInfo],
+    ) -> CliResult<Vec<EnumInfo>> {
         // Columns
         let col_rows = MysqlIntrospector::rows(
             engine,
             &queries::columns_query(DatabaseType::MySQL, &table.name, schema),
         )
         .await?;
+        let mut enums = Vec::new();
         for row in &col_rows {
             let Some(name) = json_str(row, "column_name") else {
                 continue;
@@ -842,13 +888,34 @@ pub mod mysql {
             let max_length = json_i32(row, "character_maximum_length");
             let precision = json_i32(row, "numeric_precision");
             let scale = json_i32(row, "numeric_scale");
-            let normalized = normalize_type(
-                DatabaseType::MySQL,
-                &data_type,
-                max_length,
-                precision,
-                scale,
-            );
+            let normalized = if data_type.eq_ignore_ascii_case("enum") {
+                // `udt_name` carries MySQL's raw `COLUMN_TYPE`, e.g.
+                // `enum('active','inactive')` — the only place the values
+                // are available.
+                let column_type = json_str(row, "udt_name").unwrap_or_default();
+                let values = prax_query::introspection::parse_mysql_enum_values(&column_type);
+                if values.is_empty() {
+                    return Err(CliError::Database(format!(
+                        "Failed to parse enum values for {}.{} from COLUMN_TYPE {:?}",
+                        table.name, name, column_type
+                    )));
+                }
+                let enum_name = unique_enum_name(format!("{}_{}", table.name, name), known_enums);
+                enums.push(EnumInfo {
+                    name: enum_name.clone(),
+                    schema: schema.map(str::to_string),
+                    values,
+                });
+                NormalizedType::Enum(enum_name)
+            } else {
+                normalize_type(
+                    DatabaseType::MySQL,
+                    &data_type,
+                    max_length,
+                    precision,
+                    scale,
+                )
+            };
 
             table.columns.push(ColumnInfo {
                 name,
@@ -957,12 +1024,142 @@ pub mod mysql {
                 });
             }
         }
+        // MySQL auto-creates a non-unique index for every FK column set;
+        // drop it here so the diff source doesn't carry an index the schema
+        // never declared (which would otherwise churn a DROP INDEX on every
+        // `migrate dev`/`diff` run).
+        //
+        // Known limitation: `information_schema.statistics` doesn't record
+        // whether an index was auto-created or is a real, explicitly
+        // declared `@@index` that MySQL happened to reuse to satisfy the
+        // same FK (MySQL creates at most one physical index per matching
+        // column set either way). Such an index is indistinguishable from a
+        // purely implicit one and gets dropped here too, which then shows
+        // up as a spurious "add this index" on the next diff — the same
+        // class of inherent reverse-engineering limitation documented in
+        // `schema_from_db.rs`'s module doc for field names and FK
+        // constraint names. Pin it with an explicit index name that
+        // survives a rebuild, or accept the one-time spurious create.
         table.indexes = idx_order
             .into_iter()
             .filter_map(|n| idx_map.remove(&n))
+            .filter(|idx| !is_fk_backing_index(idx, &table.foreign_keys))
             .collect();
 
-        Ok(())
+        Ok(enums)
+    }
+
+    /// Whether `idx` is a non-unique index whose column set exactly matches
+    /// a foreign key's columns — i.e. MySQL's implicit FK-backing index.
+    fn is_fk_backing_index(idx: &IndexInfo, foreign_keys: &[ForeignKeyInfo]) -> bool {
+        if idx.is_unique || idx.is_primary {
+            return false;
+        }
+        foreign_keys.iter().any(|fk| {
+            fk.columns
+                .iter()
+                .map(String::as_str)
+                .eq(idx.columns.iter().map(|c| c.name.as_str()))
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn fk(columns: &[&str]) -> ForeignKeyInfo {
+            ForeignKeyInfo {
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            }
+        }
+
+        fn index(columns: &[&str], is_unique: bool, is_primary: bool) -> IndexInfo {
+            IndexInfo {
+                columns: columns
+                    .iter()
+                    .map(|c| IndexColumn {
+                        name: c.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                is_unique,
+                is_primary,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn drops_non_unique_index_matching_fk_columns() {
+            let fks = vec![fk(&["author_id"])];
+            assert!(is_fk_backing_index(
+                &index(&["author_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_unique_index_even_if_it_matches_fk_columns() {
+            let fks = vec![fk(&["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index(&["author_id"], true, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_index_whose_columns_dont_match_any_fk() {
+            let fks = vec![fk(&["author_id"])];
+            assert!(!is_fk_backing_index(&index(&["title"], false, false), &fks));
+        }
+
+        #[test]
+        fn drops_non_unique_index_matching_composite_fk_columns_in_order() {
+            let fks = vec![fk(&["tenant_id", "user_id"])];
+            assert!(is_fk_backing_index(
+                &index(&["tenant_id", "user_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_index_whose_composite_columns_match_a_different_order() {
+            let fks = vec![fk(&["tenant_id", "user_id"])];
+            assert!(!is_fk_backing_index(
+                &index(&["user_id", "tenant_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn unique_enum_name_disambiguates_on_collision() {
+            let known = vec![EnumInfo {
+                name: "order_item_status".to_string(),
+                schema: None,
+                values: vec!["a".to_string()],
+            }];
+            assert_eq!(
+                unique_enum_name("order_item_status".to_string(), &known),
+                "order_item_status_2"
+            );
+            assert_eq!(
+                unique_enum_name("order_status".to_string(), &known),
+                "order_status"
+            );
+        }
+
+        #[test]
+        fn unique_enum_name_catches_collision_that_only_appears_after_pascal_case() {
+            // "FooBar" and "foo_bar" are different raw strings but both
+            // PascalCase to "FooBar" — the actual name each enum is
+            // declared under (see `generate_enum`/`build_enum`).
+            let known = vec![EnumInfo {
+                name: "FooBar".to_string(),
+                schema: None,
+                values: vec!["a".to_string()],
+            }];
+            assert_eq!(unique_enum_name("foo_bar".to_string(), &known), "foo_bar_2");
+        }
     }
 }
 

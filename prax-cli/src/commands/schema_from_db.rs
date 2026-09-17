@@ -233,11 +233,12 @@ fn referential_action_sql(action: ReferentialAction) -> Option<String> {
 /// Map indexes, flattening the query layer's `IndexColumn` (which carries sort
 /// order/nulls position) to the engine's plain column-name list.
 ///
-/// Non-unique indexes that merely back a foreign key are dropped: several
-/// engines (notably MySQL) auto-create an index for every FK, but the schema
-/// DSL models the relation, not its implicit backing index — emitting it as
-/// `@@index` would make an introspected schema diff dirty against a `.prax`
-/// that only declares the relation.
+/// Every index reaching this function is carried through verbatim. MySQL's
+/// implicit FK-backing indexes (which would otherwise churn the diff against
+/// a `.prax` that only declares the relation) are filtered earlier, in the
+/// MySQL introspector itself (`commands::introspect::mysql`), since Postgres
+/// and MSSQL don't auto-index FK columns and shouldn't have their real
+/// `@@index`es dropped.
 fn map_indexes(
     indexes: &[IndexInfo],
     _foreign_keys: &[ForeignKeyInfo],
@@ -275,11 +276,17 @@ fn map_enums(db: &DatabaseSchema) -> Vec<MigrateEnum> {
         .map(|e| MigrateEnum {
             name: e.name.clone(),
             values: e.values.clone(),
+            // "public" is only a meaningful default for PostgreSQL, whose
+            // introspector always populates `db.schema` before this runs.
+            // MySQL has no schema-namespace concept and never sets one, so
+            // falling all the way through to a hardcoded "public" here would
+            // mislabel it; leave it empty rather than claim a schema that
+            // doesn't exist.
             schema: e
                 .schema
                 .clone()
                 .or_else(|| db.schema.clone())
-                .unwrap_or_else(|| "public".to_string()),
+                .unwrap_or_default(),
         })
         .collect()
 }
