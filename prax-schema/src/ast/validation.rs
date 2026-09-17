@@ -551,7 +551,7 @@ pub enum ValidationValue {
 impl std::fmt::Display for ValidationValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::String(s) => write!(f, "\"{}\"", s),
+            Self::String(s) => write!(f, "\"{}\"", crate::parser::escape_prax_string(s)),
             Self::Int(i) => write!(f, "{}", i),
             Self::Float(n) => write!(f, "{}", n),
             Self::Bool(b) => write!(f, "{}", b),
@@ -1629,6 +1629,20 @@ mod tests {
         assert_eq!(format!("{}", ValidationValue::Int(42)), "42");
         assert_eq!(format!("{}", ValidationValue::Float(3.14)), "3.14");
         assert_eq!(format!("{}", ValidationValue::Bool(true)), "true");
+    }
+
+    #[test]
+    fn test_validation_value_display_escapes_quotes() {
+        // Display output must re-parse: quotes/backslashes are escaped so
+        // a `@validate.regex("...")` value containing `"` stays one literal.
+        assert_eq!(
+            format!("{}", ValidationValue::String("say \"hi\"".to_string())),
+            "\"say \\\"hi\\\"\""
+        );
+        assert_eq!(
+            format!("{}", ValidationValue::String("a\\b".to_string())),
+            "\"a\\\\b\""
+        );
     }
 
     #[test]

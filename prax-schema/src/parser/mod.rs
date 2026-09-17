@@ -18,6 +18,47 @@ use crate::ast::{
     ServerPropertyValue,
 };
 
+/// Escape a raw value for embedding in a `.prax` string literal (`"..."`).
+///
+/// Mirrors the grammar's `string_content` rule: only `"` and `\` need
+/// escaping. Writers (schema generators, `Display` impls) must use this so
+/// arbitrary text — e.g. a MySQL enum value containing a quote — survives a
+/// write→parse round-trip instead of producing an unparseable file.
+pub fn escape_prax_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+/// Unescape the inner content of a `string_literal` (quotes already
+/// stripped). Only `\"` → `"` and `\\` → `\` are interpreted; any other
+/// `\x` keeps its backslash so schemas written before escape support parse
+/// byte-identically.
+pub fn unescape_prax_string(inner: &str) -> String {
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Strip the surrounding double quotes of a `string_literal` pair's text
+/// and unescape its content (see [`unescape_prax_string`]).
+fn unquote_string_literal(s: &str) -> String {
+    unescape_prax_string(&s[1..s.len() - 1])
+}
+
 /// Parse a schema from a string.
 pub fn parse_schema(input: &str) -> SchemaResult<Schema> {
     debug!(input_len = input.len(), "parse_schema() starting");
@@ -458,9 +499,8 @@ fn parse_attribute_value(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<
     match pair.as_rule() {
         Rule::string_literal => {
             let s = pair.as_str();
-            // Remove quotes
-            let unquoted = &s[1..s.len() - 1];
-            Ok(AttributeValue::String(unquoted.to_string()))
+            // Remove quotes and interpret `\"`/`\\` escapes.
+            Ok(AttributeValue::String(unquote_string_literal(s)))
         }
         Rule::number_literal => {
             let s = pair.as_str();
@@ -515,8 +555,9 @@ fn parse_raw_sql(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<RawSql> 
     let sql = inner.next().unwrap().as_str();
 
     // Remove the surrounding double quotes from the name (the grammar token
-    // is the quoted string literal, consistent with other string parsing here)
-    let name = name.trim().trim_matches('"');
+    // is the quoted string literal, consistent with other string parsing
+    // here) and interpret `\"`/`\\` escapes.
+    let name = unquote_string_literal(name.trim());
 
     // Remove triple quotes
     let sql_content = sql
@@ -660,7 +701,7 @@ fn parse_generator_toggle(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorTo
                 .next()
                 .map(|p| {
                     let s = p.as_str();
-                    SmolStr::new(&s[1..s.len() - 1])
+                    SmolStr::new(unquote_string_literal(s))
                 })
                 .unwrap_or_default();
             GeneratorToggle::Env(env_var)
@@ -690,7 +731,7 @@ fn parse_generator_value(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorVal
                 .next()
                 .map(|p| {
                     let s = p.as_str();
-                    SmolStr::new(&s[1..s.len() - 1])
+                    SmolStr::new(unquote_string_literal(s))
                 })
                 .unwrap_or_default();
             GeneratorValue::Env(env_var)
@@ -701,7 +742,7 @@ fn parse_generator_value(pair: &pest::iterators::Pair<'_, Rule>) -> GeneratorVal
         }
         Rule::string_literal => {
             let s = pair.as_str();
-            GeneratorValue::String(SmolStr::new(&s[1..s.len() - 1]))
+            GeneratorValue::String(SmolStr::new(unquote_string_literal(s)))
         }
         _ => {
             let s = pair.as_str().trim().trim_matches('"');
@@ -750,14 +791,14 @@ fn parse_datasource(pair: pest::iterators::Pair<'_, Rule>) -> SchemaResult<Datas
                                 .next()
                                 .map(|p| {
                                     let s = p.as_str();
-                                    s[1..s.len() - 1].to_string()
+                                    unquote_string_literal(s)
                                 })
                                 .unwrap_or_default();
                             datasource.url_env = Some(SmolStr::new(env_var));
                         }
                         Rule::string_literal => {
                             let s = value_pair.as_str();
-                            let url = &s[1..s.len() - 1];
+                            let url = unquote_string_literal(s);
                             datasource.url = Some(SmolStr::new(url));
                         }
                         _ => {}
@@ -808,7 +849,7 @@ fn parse_extension_item(
                 let arg_value_pair = arg_inner.next().unwrap();
                 let arg_value = {
                     let s = arg_value_pair.as_str();
-                    &s[1..s.len() - 1]
+                    unquote_string_literal(s)
                 };
 
                 match arg_key {
@@ -832,7 +873,7 @@ fn extract_datasource_string(pair: &pest::iterators::Pair<'_, Rule>) -> String {
     match pair.as_rule() {
         Rule::string_literal => {
             let s = pair.as_str();
-            s[1..s.len() - 1].to_string()
+            unquote_string_literal(s)
         }
         Rule::identifier => pair.as_str().to_string(),
         Rule::datasource_value => {
@@ -851,7 +892,7 @@ fn extract_string_from_arg(pair: pest::iterators::Pair<'_, Rule>) -> String {
     match pair.as_rule() {
         Rule::string_literal => {
             let s = pair.as_str();
-            s[1..s.len() - 1].to_string()
+            unquote_string_literal(s)
         }
         Rule::attribute_value => {
             // Unwrap nested attribute_value
@@ -872,9 +913,8 @@ fn parse_server_property_value(
     match pair.as_rule() {
         Rule::string_literal => {
             let s = pair.as_str();
-            // Remove quotes
-            let unquoted = &s[1..s.len() - 1];
-            Ok(ServerPropertyValue::String(unquoted.to_string()))
+            // Remove quotes and interpret `\"`/`\\` escapes.
+            Ok(ServerPropertyValue::String(unquote_string_literal(s)))
         }
         Rule::number_literal => {
             let s = pair.as_str();
@@ -1023,7 +1063,7 @@ fn parse_policy_item(
             let inner = pair.into_inner().next().unwrap();
             if inner.as_rule() == Rule::string_literal {
                 let s = inner.as_str();
-                let schema = &s[1..s.len() - 1]; // Remove quotes
+                let schema = unquote_string_literal(s); // Remove quotes
                 policy.mssql_schema = Some(SmolStr::new(schema));
             }
         }
@@ -1064,8 +1104,8 @@ fn extract_policy_expression(pair: &pest::iterators::Pair<'_, Rule>) -> String {
                 .to_string()
         }
         Rule::string_literal => {
-            // Remove single quotes
-            s[1..s.len() - 1].to_string()
+            // Remove quotes and interpret `\"`/`\\` escapes.
+            unquote_string_literal(s)
         }
         _ => s.to_string(),
     }
@@ -1412,6 +1452,76 @@ mod tests {
         let email = user.get_field("email").unwrap();
         let attrs = email.extract_attributes();
         assert_eq!(attrs.map, Some("email_address".to_string()));
+    }
+
+    #[test]
+    fn test_parse_map_attribute_with_escaped_quote() {
+        // A `\"` escape inside a string literal must round-trip to a
+        // literal `"` — MySQL enum values are arbitrary text and can
+        // contain quotes, which `db pull` pins via `@map("...")`.
+        let schema = parse_schema(
+            r#"
+            model Task {
+                id     Int    @id
+                status String @map("say \"hi\"")
+            }
+        "#,
+        )
+        .unwrap();
+
+        let task = schema.get_model("Task").unwrap();
+        let status = task.get_field("status").unwrap();
+        let attrs = status.extract_attributes();
+        assert_eq!(attrs.map, Some("say \"hi\"".to_string()));
+    }
+
+    #[test]
+    fn test_parse_map_attribute_with_escaped_backslash() {
+        let schema = parse_schema(
+            r#"
+            model Task {
+                id     Int    @id
+                status String @map("a\\b")
+            }
+        "#,
+        )
+        .unwrap();
+
+        let task = schema.get_model("Task").unwrap();
+        let status = task.get_field("status").unwrap();
+        let attrs = status.extract_attributes();
+        assert_eq!(attrs.map, Some("a\\b".to_string()));
+    }
+
+    #[test]
+    fn test_parse_map_attribute_with_unrecognized_escape_stays_literal() {
+        // Only `\"` and `\\` are escapes; any other `\x` keeps its
+        // backslash so schemas written before escape support parse
+        // byte-identically.
+        let schema = parse_schema(
+            r#"
+            model Task {
+                id     Int    @id
+                status String @map("a\nb")
+            }
+        "#,
+        )
+        .unwrap();
+
+        let task = schema.get_model("Task").unwrap();
+        let status = task.get_field("status").unwrap();
+        let attrs = status.extract_attributes();
+        assert_eq!(attrs.map, Some("a\\nb".to_string()));
+    }
+
+    #[test]
+    fn test_escape_unescape_prax_string_round_trips() {
+        for raw in ["plain", "say \"hi\"", "a\\b", "\\\"both\\\"", "trailing\\"] {
+            assert_eq!(unescape_prax_string(&escape_prax_string(raw)), raw);
+        }
+        // Unrecognized escapes keep their backslash (pre-escape files).
+        assert_eq!(unescape_prax_string("a\\nb"), "a\\nb");
+        assert_eq!(escape_prax_string("say \"hi\""), "say \\\"hi\\\"");
     }
 
     #[test]

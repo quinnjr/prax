@@ -256,7 +256,7 @@ pub use error::{SchemaError, SchemaResult};
 pub use loader::{
     LoadError, LoadedSchema, MergeConflict, SourceFile, SourceId, SourceLoc, SourceMap, load,
 };
-pub use parser::{parse_schema, parse_schema_file};
+pub use parser::{escape_prax_string, parse_schema, parse_schema_file};
 pub use validator::{Validator, validate_schema};
 
 /// Prelude module for convenient imports.
@@ -265,6 +265,6 @@ pub mod prelude {
     pub use crate::cache::{DocString, SchemaCache};
     pub use crate::config::PraxConfig;
     pub use crate::error::{SchemaError, SchemaResult};
-    pub use crate::parser::{parse_schema, parse_schema_file};
+    pub use crate::parser::{escape_prax_string, parse_schema, parse_schema_file};
     pub use crate::validator::{Validator, validate_schema};
 }

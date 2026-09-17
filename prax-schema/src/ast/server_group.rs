@@ -292,11 +292,11 @@ pub enum ServerPropertyValue {
 impl std::fmt::Display for ServerPropertyValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::String(s) => write!(f, "\"{}\"", s),
+            Self::String(s) => write!(f, "\"{}\"", crate::parser::escape_prax_string(s)),
             Self::Number(n) => write!(f, "{}", n),
             Self::Boolean(b) => write!(f, "{}", b),
             Self::Identifier(s) => write!(f, "{}", s),
-            Self::EnvVar(var) => write!(f, "env(\"{}\")", var),
+            Self::EnvVar(var) => write!(f, "env(\"{}\")", crate::parser::escape_prax_string(var)),
             Self::Array(arr) => {
                 write!(f, "[")?;
                 for (i, v) in arr.iter().enumerate() {
