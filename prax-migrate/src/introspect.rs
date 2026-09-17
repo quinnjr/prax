@@ -347,8 +347,42 @@ impl SchemaBuilder {
         let name = Ident::new(to_pascal_case(&info.name), span);
         let mut prax_enum = Enum::new(name, span);
 
-        for value in &info.values {
-            prax_enum.add_variant(EnumVariant::new(Ident::new(value.clone(), span), span));
+        // Always emit @@map with the real enum type name, mirroring
+        // `build_model` above. `Enum::database_name()` falls back to the
+        // (PascalCased) enum name when no `@@map` is present, so without
+        // this a Postgres enum `user_role` would generate/diff SQL against
+        // a type named `UserRole` — which doesn't exist in the live
+        // database — while the real `user_role` type is left untouched.
+        prax_enum.attributes.push(Attribute::new(
+            Ident::new("map", span),
+            vec![AttributeArg::positional(
+                AttributeValue::String(info.name.clone()),
+                span,
+            )],
+            span,
+        ));
+
+        let sanitized = sanitize_variants(&info.values);
+        for (raw, value) in info.values.iter().zip(sanitized) {
+            let mut variant = EnumVariant::new(Ident::new(value.clone(), span), span);
+            // `EnumVariant::db_value()` falls back to the variant name when
+            // no `@map` is present — the same fallback gap `Enum::@@map`
+            // above fixes for the enum's own name. A raw value that needed
+            // sanitizing (e.g. MySQL's `"in-progress"` -> `in_progress`)
+            // must pin the real value here, or generated SQL uses the
+            // sanitized name instead of the value actually stored in the
+            // database.
+            if &value != raw {
+                variant.attributes.push(Attribute::new(
+                    Ident::new("map", span),
+                    vec![AttributeArg::positional(
+                        AttributeValue::String(raw.clone()),
+                        span,
+                    )],
+                    span,
+                ));
+            }
+            prax_enum.add_variant(variant);
         }
 
         prax_enum
@@ -840,8 +874,55 @@ fn parse_default_value(default: &str) -> Option<AttributeValue> {
     Some(AttributeValue::String(trimmed.to_string()))
 }
 
+/// Sanitize a raw introspected value into a legal `.prax` identifier
+/// (`ASCII_ALPHA (ASCII_ALPHANUMERIC | '_')*`). Mirrors
+/// `prax_query::introspection::sanitize_identifier` so a re-introspected
+/// source enum's variants match what `db pull` wrote to disk — a MySQL
+/// enum value can be arbitrary text (`"in-progress"`, `"1"`, `""`), none of
+/// which the schema grammar's `identifier` rule accepts verbatim.
+///
+/// ⚠️ Duplicated verbatim in that crate rather than shared — this crate
+/// depends only on `prax-schema`, not on `prax-query`. Change the transform
+/// in both places, or the two sides drift and churn every diff.
+pub fn sanitize_identifier(raw: &str) -> String {
+    let mapped: String = raw
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    match mapped.chars().next() {
+        Some(c) if c.is_ascii_alphabetic() => mapped,
+        Some(_) => format!("V{}", mapped),
+        None => "V".to_string(),
+    }
+}
+
+/// Sanitize each of an enum's raw values, disambiguating any that collide
+/// after sanitization (e.g. `"in-progress"` and `"in_progress"` both map to
+/// `in_progress`) with a numeric suffix so no enum ends up with two
+/// identically-named variants.
+///
+/// Mirrors `prax_query::introspection`'s identically-named helper — both
+/// must apply the same transform, in the same order, to the same
+/// `EnumInfo::values`, so this diff-source enum's variant names match what
+/// `db pull` wrote to disk.
+pub fn sanitize_variants(values: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::with_capacity(values.len());
+    let mut result: Vec<String> = Vec::with_capacity(values.len());
+    for raw in values {
+        let base = sanitize_identifier(raw);
+        let mut candidate = base.clone();
+        let mut suffix = 2;
+        while !seen.insert(candidate.clone()) {
+            candidate = format!("{}_{}", base, suffix);
+            suffix += 1;
+        }
+        result.push(candidate);
+    }
+    result
+}
+
 /// Convert snake_case to PascalCase.
-fn to_pascal_case(s: &str) -> String {
+pub fn to_pascal_case(s: &str) -> String {
     s.split('_')
         .filter(|part| !part.is_empty())
         .map(|part| {

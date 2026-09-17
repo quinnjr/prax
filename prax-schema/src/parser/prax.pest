@@ -85,9 +85,11 @@ doc_line = @{ "///" ~ (!NEWLINE ~ ANY)* }
 // LITERALS
 // ============================================================================
 
-// String literal (double quotes)
+// String literal (double quotes). `\"` and `\\` are escapes for a
+// literal quote/backslash; any other `\x` keeps its backslash so files
+// written before escape support parse byte-identically.
 string_literal = @{ "\"" ~ string_content ~ "\"" }
-string_content = @{ (!"\"" ~ ANY)* }
+string_content = @{ ("\\\"" | "\\\\" | (!"\"" ~ ANY))* }
 
 // Multi-line string (triple quotes)
 multiline_string = @{ "\"\"\"" ~ multiline_content ~ "\"\"\"" }

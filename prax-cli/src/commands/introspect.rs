@@ -7,11 +7,17 @@ use prax_query::introspection::{
     ColumnInfo, DatabaseSchema, ForeignKeyInfo, IndexColumn, IndexInfo, ReferentialAction,
     SortOrder, TableInfo, generate_prax_schema, normalize_type, queries,
 };
-// `EnumInfo`/`ViewInfo` are only constructed by the PostgreSQL introspector
-// (the other backends build enums/views differently or not at all), so import
-// them only when that feature is compiled to keep single-feature builds clean.
+// `ViewInfo` is only constructed by the PostgreSQL introspector (the other
+// backends build views differently or not at all); `EnumInfo`/`NormalizedType`
+// are also needed by MySQL, which synthesizes one enum per `enum(...)`
+// column. Import each only when the relevant feature is compiled to keep
+// single-feature builds clean.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+use prax_query::introspection::EnumInfo;
+#[cfg(feature = "mysql")]
+use prax_query::introspection::NormalizedType;
 #[cfg(feature = "postgres")]
-use prax_query::introspection::{EnumInfo, ViewInfo};
+use prax_query::introspection::ViewInfo;
 use prax_query::sql::DatabaseType;
 
 use crate::config::Config;
@@ -734,6 +740,8 @@ fn json_i32(row: &serde_json::Value, key: &str) -> Option<i32> {
 
 #[cfg(feature = "mysql")]
 pub mod mysql {
+    use std::collections::HashSet;
+
     use super::*;
     use prax_mysql::{MysqlPool, MysqlRawEngine};
 
@@ -813,27 +821,84 @@ pub mod mysql {
                 });
             }
 
+            // Tracks every enum name reserved so far, keyed by its final
+            // PascalCase form, across the *entire* run — not just earlier
+            // tables. Two enum columns in the SAME table can collide too
+            // (e.g. `a_b` and `a__b` both PascalCase to `AB`, since
+            // `pascal_case` splits on `_` and an empty segment contributes
+            // nothing), and this needs to catch that just as much as a
+            // cross-table collision.
+            let mut used_enum_names: HashSet<String> = HashSet::new();
             for table in &mut db_schema.tables {
-                populate_table(&engine, table, schema_ref, options).await?;
+                let table_enums =
+                    populate_table(&engine, table, schema_ref, options, &mut used_enum_names)
+                        .await?;
+                db_schema.enums.extend(table_enums);
             }
 
             Ok(db_schema)
         }
     }
 
+    /// Reserve a synthesized enum name, disambiguating with a numeric suffix
+    /// on collision. Comparisons are keyed by the PascalCase form — the name
+    /// each enum is actually declared under (`generate_enum`/`build_enum`
+    /// both PascalCase it) — so two distinct raw names that only collide
+    /// after that transform are still caught (e.g. table `order_item`
+    /// column `status` and table `order` column `item_status` both
+    /// synthesize `order_item_status`, since `_` is legal in both
+    /// identifiers). `used_pascal_names` is a single set shared across the
+    /// whole introspection run, so each check is an O(1) hash lookup rather
+    /// than an O(n) scan that grows with every enum column seen so far.
+    fn reserve_unique_enum_name(
+        base_name: String,
+        used_pascal_names: &mut HashSet<String>,
+    ) -> String {
+        use prax_query::introspection::{disambiguate, pascal_case};
+        disambiguate(&base_name, pascal_case, used_pascal_names)
+    }
+
+    /// Synthesize an enum name from a table/column pair, reserving it
+    /// against collisions. MySQL table/column identifiers can legally
+    /// contain characters the `.prax` grammar doesn't (a backtick-quoted
+    /// name with spaces, hyphens, etc.), so each component is sanitized
+    /// before joining — otherwise `generate_enum`/`build_enum` would
+    /// PascalCase an already-illegal string into more illegal output.
+    fn synthesize_enum_name(
+        table_name: &str,
+        column_name: &str,
+        used_enum_names: &mut HashSet<String>,
+    ) -> String {
+        use prax_query::introspection::sanitize_identifier;
+        reserve_unique_enum_name(
+            format!(
+                "{}_{}",
+                sanitize_identifier(table_name),
+                sanitize_identifier(column_name)
+            ),
+            used_enum_names,
+        )
+    }
+
     /// Fill a table's columns, primary key, foreign keys, and indexes.
+    /// Returns any enum types discovered on this table's columns (MySQL has
+    /// no named enum catalog — each `enum(...)` column gets a synthesized
+    /// `<table>_<column>` enum name, disambiguated against
+    /// `used_enum_names`).
     async fn populate_table(
         engine: &MysqlRawEngine,
         table: &mut TableInfo,
         schema: Option<&str>,
         options: &IntrospectionOptions,
-    ) -> CliResult<()> {
+        used_enum_names: &mut HashSet<String>,
+    ) -> CliResult<Vec<EnumInfo>> {
         // Columns
         let col_rows = MysqlIntrospector::rows(
             engine,
             &queries::columns_query(DatabaseType::MySQL, &table.name, schema),
         )
         .await?;
+        let mut enums = Vec::new();
         for row in &col_rows {
             let Some(name) = json_str(row, "column_name") else {
                 continue;
@@ -842,13 +907,39 @@ pub mod mysql {
             let max_length = json_i32(row, "character_maximum_length");
             let precision = json_i32(row, "numeric_precision");
             let scale = json_i32(row, "numeric_scale");
-            let normalized = normalize_type(
-                DatabaseType::MySQL,
-                &data_type,
-                max_length,
-                precision,
-                scale,
-            );
+            let normalized = if data_type.eq_ignore_ascii_case("enum") {
+                // `udt_name` carries MySQL's raw `COLUMN_TYPE`, e.g.
+                // `enum('active','inactive')` — the only place the values
+                // are available.
+                let column_type = json_str(row, "udt_name").unwrap_or_default();
+                let values = prax_query::introspection::parse_mysql_enum_values(&column_type);
+                if values.is_empty() {
+                    // Malformed/unexpected COLUMN_TYPE (e.g. from a
+                    // MySQL-compatible proxy). Fall back to `Unknown` rather
+                    // than aborting the whole introspection run over one
+                    // column — `SchemaBuilder::build_field` already treats
+                    // an unresolvable type as skip-this-column-with-warning
+                    // (not a hard failure), the same graceful-degradation
+                    // path any other unrecognized SQL type takes.
+                    NormalizedType::Unknown(column_type)
+                } else {
+                    let enum_name = synthesize_enum_name(&table.name, &name, used_enum_names);
+                    enums.push(EnumInfo {
+                        name: enum_name.clone(),
+                        schema: schema.map(str::to_string),
+                        values,
+                    });
+                    NormalizedType::Enum(enum_name)
+                }
+            } else {
+                normalize_type(
+                    DatabaseType::MySQL,
+                    &data_type,
+                    max_length,
+                    precision,
+                    scale,
+                )
+            };
 
             table.columns.push(ColumnInfo {
                 name,
@@ -957,12 +1048,227 @@ pub mod mysql {
                 });
             }
         }
+        // MySQL auto-creates a non-unique index for every FK column set;
+        // drop it here so the diff source doesn't carry an index the schema
+        // never declared (which would otherwise churn a DROP INDEX on every
+        // `migrate dev`/`diff` run).
+        //
+        // The filter only drops an index *named after its FK constraint*
+        // (see `is_fk_backing_index`): that is how MySQL names the implicit
+        // index when the constraint has a symbol, which is always the case
+        // for Prax-managed databases. A same-column index under a different
+        // name is a real user-declared `@@index` MySQL reused, and is kept.
+        //
+        // Known limitation: `information_schema.statistics` doesn't record
+        // whether an index was auto-created. An implicit index on an
+        // *unnamed* constraint is column-named rather than
+        // constraint-named, so it survives this filter and still churns —
+        // the same class of inherent reverse-engineering limitation
+        // documented in `schema_from_db.rs`'s module doc for field names
+        // and FK constraint names. Name the constraint (or the index) to
+        // silence it.
         table.indexes = idx_order
             .into_iter()
             .filter_map(|n| idx_map.remove(&n))
+            .filter(|idx| !is_fk_backing_index(idx, &table.foreign_keys))
             .collect();
 
-        Ok(())
+        Ok(enums)
+    }
+
+    /// Whether `idx` is MySQL's implicit FK-backing index for one of
+    /// `foreign_keys`: non-unique, non-primary, covering exactly that FK's
+    /// columns *and named after the FK constraint*.
+    ///
+    /// MySQL auto-creates such an index when no usable one exists, naming it
+    /// after the constraint (the `CONSTRAINT` symbol when defined, else the
+    /// `FOREIGN KEY index_name`, else the referencing column). The name check
+    /// is what keeps a real user-declared `@@index` MySQL happened to reuse
+    /// for the FK (same columns, different name) out of the filter —
+    /// `information_schema.statistics` carries no auto-created flag, so the
+    /// name is the only signal.
+    ///
+    /// Residual gaps, inherent to reverse-engineering: an implicit index on
+    /// an *unnamed* constraint is column-named (`tbl_ibfk_N` constraint vs
+    /// `<column>` index), so it is kept and still churns; a user index
+    /// explicitly named exactly like its FK constraint is dropped and shows
+    /// up as a one-time spurious "add index". The former only affects
+    /// databases created outside Prax — Prax DDL always names its
+    /// `CONSTRAINT`s, so its implicit indexes match by name.
+    fn is_fk_backing_index(idx: &IndexInfo, foreign_keys: &[ForeignKeyInfo]) -> bool {
+        if idx.is_unique || idx.is_primary {
+            return false;
+        }
+        foreign_keys.iter().any(|fk| {
+            fk.name == idx.name
+                && fk
+                    .columns
+                    .iter()
+                    .map(String::as_str)
+                    .eq(idx.columns.iter().map(|c| c.name.as_str()))
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn fk(name: &str, columns: &[&str]) -> ForeignKeyInfo {
+            ForeignKeyInfo {
+                name: name.to_string(),
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+                ..Default::default()
+            }
+        }
+
+        fn index(name: &str, columns: &[&str], is_unique: bool, is_primary: bool) -> IndexInfo {
+            IndexInfo {
+                name: name.to_string(),
+                columns: columns
+                    .iter()
+                    .map(|c| IndexColumn {
+                        name: c.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                is_unique,
+                is_primary,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn drops_non_unique_index_matching_fk_columns() {
+            // MySQL names an auto-created FK-backing index after the FK
+            // constraint itself, so a name match is the implicit signal.
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(is_fk_backing_index(
+                &index("fk_posts_author_id", &["author_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_unique_index_even_if_it_matches_fk_columns() {
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index("fk_posts_author_id", &["author_id"], true, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_index_whose_columns_dont_match_any_fk() {
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index("title_idx", &["title"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_user_declared_index_covering_fk_columns() {
+            // `information_schema.statistics` carries no auto-created flag,
+            // but MySQL names an implicit FK index after the FK constraint —
+            // so an index covering FK columns under a *different* name is a
+            // real user-declared `@@index` MySQL reused, and must be kept.
+            let fks = vec![fk("fk_posts_author_id", &["author_id"])];
+            assert!(!is_fk_backing_index(
+                &index("posts_author_id_idx", &["author_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn drops_non_unique_index_matching_composite_fk_columns_in_order() {
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
+            assert!(is_fk_backing_index(
+                &index("fk_membership_ids", &["tenant_id", "user_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_index_whose_composite_columns_match_a_different_order() {
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
+            assert!(!is_fk_backing_index(
+                &index("fk_membership_ids", &["user_id", "tenant_id"], false, false),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn keeps_composite_user_index_covering_fk_columns() {
+            let fks = vec![fk("fk_membership_ids", &["tenant_id", "user_id"])];
+            assert!(!is_fk_backing_index(
+                &index(
+                    "membership_tenant_user_idx",
+                    &["tenant_id", "user_id"],
+                    false,
+                    false
+                ),
+                &fks
+            ));
+        }
+
+        #[test]
+        fn reserve_unique_enum_name_disambiguates_on_collision() {
+            let mut used = HashSet::new();
+            assert_eq!(
+                reserve_unique_enum_name("order_item_status".to_string(), &mut used),
+                "order_item_status"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("order_item_status".to_string(), &mut used),
+                "order_item_status_2"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("order_status".to_string(), &mut used),
+                "order_status"
+            );
+        }
+
+        #[test]
+        fn reserve_unique_enum_name_catches_collision_that_only_appears_after_pascal_case() {
+            // "FooBar" and "foo_bar" are different raw strings but both
+            // PascalCase to "FooBar" — the actual name each enum is
+            // declared under (see `generate_enum`/`build_enum`).
+            let mut used = HashSet::new();
+            assert_eq!(
+                reserve_unique_enum_name("FooBar".to_string(), &mut used),
+                "FooBar"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("foo_bar".to_string(), &mut used),
+                "foo_bar_2"
+            );
+        }
+
+        #[test]
+        fn reserve_unique_enum_name_catches_collision_within_the_same_table() {
+            // "a_b" and "a__b" are different raw strings but both PascalCase
+            // to "AB" (`pascal_case` splits on `_`; the empty segment from
+            // the double underscore contributes nothing) — two enum columns
+            // on the same table must not both reserve "AB".
+            let mut used = HashSet::new();
+            assert_eq!(
+                reserve_unique_enum_name("a_b".to_string(), &mut used),
+                "a_b"
+            );
+            assert_eq!(
+                reserve_unique_enum_name("a__b".to_string(), &mut used),
+                "a__b_2"
+            );
+        }
+
+        #[test]
+        fn synthesize_enum_name_sanitizes_illegal_characters() {
+            let mut used = HashSet::new();
+            assert_eq!(
+                synthesize_enum_name("1099-forms", "my col", &mut used),
+                "V1099_forms_my_col"
+            );
+        }
     }
 }
 
