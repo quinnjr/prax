@@ -730,6 +730,17 @@ pub mod queries {
 // ============================================================================
 
 /// Map database types to normalized types.
+///
+/// ⚠️ MySQL `enum(...)` columns are NOT resolved here: synthesizing the
+/// enum's name needs table/column context this function never sees, so a
+/// raw `COLUMN_TYPE` like `"enum('a','b')"` falls through to
+/// `Unknown`. Callers must intercept `data_type.eq_ignore_ascii_case("enum")`
+/// *before* calling this and read the value list with
+/// [`parse_mysql_enum_values`] instead — see `prax-cli`'s MySQL
+/// introspector (`commands::introspect::mysql::populate_table`), the only
+/// in-repo caller that handles enum columns. Adding a MySQL type here that
+/// also needs table/column context (e.g. `set(...)`) requires a second
+/// interception point there too.
 pub fn normalize_type(
     db_type: DatabaseType,
     type_name: &str,
@@ -1040,13 +1051,14 @@ pub fn sanitize_identifier(raw: &str) -> String {
 }
 
 /// Make a raw value safe to embed in a `.prax` string literal
-/// (`@map("...")`/`@@map("...")`). The grammar's `string_content` rule
-/// (`(!"\"" ~ ANY)*`) has no escape mechanism for an embedded `"` — there is
-/// no way to represent one losslessly — so a literal quote is substituted
-/// rather than left to produce an unparseable file. A MySQL enum value can
-/// legally contain any text, including `"`.
+/// (`@map("...")`/`@@map("...")`). Mirrors the grammar's `string_content`
+/// escape rules (`\"` and `\\`, see `prax-schema`'s `escape_prax_string` —
+/// duplicated here because this crate must not depend on `prax-schema`):
+/// backslashes first, then quotes, so the written file parses back to the
+/// exact raw value. Never substitute characters — a MySQL enum value is
+/// arbitrary text and the diff source must carry it verbatim.
 fn escape_map_value(raw: &str) -> String {
-    raw.replace('"', "'")
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
@@ -1109,7 +1121,7 @@ fn generate_field(col: &ColumnInfo, primary_key: &[String]) -> String {
     // Map if name differs
     let field_name = camel_case(&col.name);
     if field_name != col.name {
-        attrs.push(format!("@map(\"{}\")", col.name));
+        attrs.push(format!("@map(\"{}\")", escape_map_value(&col.name)));
     }
 
     // Build type string
@@ -1175,7 +1187,10 @@ fn generate_model_attributes(table: &TableInfo) -> String {
     // @@map if table name differs from model name
     let model_name = pascal_case(&table.name);
     if model_name.to_lowercase() != table.name.to_lowercase() {
-        output.push_str(&format!("    @@map(\"{}\")\n", table.name));
+        output.push_str(&format!(
+            "    @@map(\"{}\")\n",
+            escape_map_value(&table.name)
+        ));
     }
 
     // Composite primary key
@@ -1221,7 +1236,7 @@ fn generate_view(view: &ViewInfo) -> String {
     }
 
     if let Some(ref def) = view.definition {
-        output.push_str(&format!("\n    @@sql(\"{}\")\n", def.replace('"', "\\\"")));
+        output.push_str(&format!("\n    @@sql(\"{}\")\n", escape_map_value(def)));
     }
 
     output.push_str("}\n");
@@ -1460,7 +1475,7 @@ fn simplify_default(default: &str) -> String {
     }
 
     if d.starts_with("'") && d.ends_with("'") {
-        return format!("\"{}\"", &d[1..d.len() - 1]);
+        return format!("\"{}\"", escape_map_value(&d[1..d.len() - 1]));
     }
 
     if d.eq_ignore_ascii_case("true") || d.eq_ignore_ascii_case("false") {
@@ -1471,7 +1486,7 @@ fn simplify_default(default: &str) -> String {
         return d.to_string();
     }
 
-    format!("dbgenerated(\"{}\")", d.replace('"', "\\\""))
+    format!("dbgenerated(\"{}\")", escape_map_value(d))
 }
 
 #[cfg(test)]
@@ -1579,7 +1594,11 @@ mod tests {
     #[test]
     fn test_escape_map_value() {
         assert_eq!(escape_map_value("plain"), "plain");
-        assert_eq!(escape_map_value("say \"hi\""), "say 'hi'");
+        // Lossless backslash escapes — the `.prax` grammar supports `\"`
+        // and `\\`, so the value must survive a generate→parse round-trip
+        // instead of being silently substituted.
+        assert_eq!(escape_map_value("say \"hi\""), "say \\\"hi\\\"");
+        assert_eq!(escape_map_value("a\\b"), "a\\\\b");
     }
 
     #[test]
@@ -1635,16 +1654,18 @@ mod tests {
 
     #[test]
     fn test_generate_enum_escapes_embedded_quotes_in_map_value() {
-        // The `.prax` grammar has no escape mechanism for a `"` inside a
-        // string literal, but a MySQL enum value can legally contain one.
-        // Must not emit an unparseable file.
+        // The `.prax` grammar supports `\"`/`\\` escapes, so a MySQL enum
+        // value containing `"` must be escaped — never substituted — or
+        // the written file parses back to a different value. Must emit a
+        // parseable file.
         let enum_info = EnumInfo {
             name: "task_status".to_string(),
             schema: None,
-            values: vec!["say \"hi\"".to_string()],
+            values: vec!["say \"hi\"".to_string(), "a\\b".to_string()],
         };
         let declared = generate_enum(&enum_info);
-        assert!(declared.contains("@map(\"say 'hi'\")"));
+        assert!(declared.contains("@map(\"say \\\"hi\\\"\")"));
+        assert!(declared.contains("@map(\"a\\\\b\")"));
     }
 
     #[test]
@@ -1704,6 +1725,9 @@ mod tests {
         assert_eq!(simplify_default("NOW()"), "now()");
         assert_eq!(simplify_default("CURRENT_TIMESTAMP"), "now()");
         assert_eq!(simplify_default("'hello'"), "\"hello\"");
+        // String defaults are `.prax` string literals: embedded quotes and
+        // backslashes must be escaped, not emitted raw.
+        assert_eq!(simplify_default("'say \"hi\"'"), "\"say \\\"hi\\\"\"");
         assert_eq!(simplify_default("42"), "42");
         assert_eq!(simplify_default("true"), "true");
     }
