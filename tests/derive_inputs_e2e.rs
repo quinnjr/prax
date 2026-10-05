@@ -259,3 +259,26 @@ fn user_update_input_lowers_unset_on_nullable() {
         .any(|(c, op)| c == "name" && matches!(op, WriteOp::Unset));
     assert!(has_unset, "expected name = Unset; got {payload:?}");
 }
+
+#[derive(Model, Debug, Clone)]
+#[prax(table = "u8_fixtures")]
+pub struct U8Fixture {
+    #[prax(id, auto)]
+    pub id: i64,
+    pub level: u8,
+    pub opt_level: Option<u8>,
+}
+
+#[test]
+fn u8_fields_still_lower_to_int() {
+    use prax_query::filter::FilterValue;
+
+    let f: Filter = u_8_fixture::level::gt(3).into();
+    assert!(matches!(f, Filter::Gt(ref c, FilterValue::Int(3)) if c == "level"));
+    let f: Filter = u_8_fixture::opt_level::equals(Some(4)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(4))));
+    let f: Filter = u_8_fixture::level::in_(vec![1, 2]).into();
+    assert!(
+        matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1), FilterValue::Int(2)])
+    );
+}

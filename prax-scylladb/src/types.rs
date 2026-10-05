@@ -135,11 +135,15 @@ impl ToCqlValue for FilterValue {
                     serde_json::to_string(json).unwrap_or_default(),
                 ))
             }
-            FilterValue::List(arr) => {
+            FilterValue::List(arr) | FilterValue::Array(arr) => {
                 let values: ScyllaResult<Vec<CqlValue>> =
                     arr.iter().map(ToCqlValue::to_cql).collect();
                 Ok(CqlValue::List(values?))
             }
+            FilterValue::Bytes(b) => Ok(CqlValue::Blob(b.clone())),
+            _ => Err(ScyllaError::TypeConversion(
+                "unsupported FilterValue variant".into(),
+            )),
         }
     }
 }
@@ -484,6 +488,22 @@ impl<T: ToCqlValue> ToCqlValue for Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_cql() {
+        assert!(matches!(
+            FilterValue::Bytes(vec![0, 255]).to_cql().unwrap(),
+            CqlValue::Blob(ref b) if b == &[0u8, 255]
+        ));
+        let list = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())])
+            .to_cql()
+            .unwrap();
+        assert!(matches!(
+            list,
+            CqlValue::List(ref items)
+                if matches!(items.as_slice(), [CqlValue::BigInt(1), CqlValue::Text(t)] if t == "a")
+        ));
+    }
 
     #[test]
     fn test_filter_value_to_cql() {

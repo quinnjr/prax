@@ -642,24 +642,27 @@ impl SqliteRawEngine {
 
 /// Convert a FilterValue to JSON.
 fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
-        }
-    }
+    value.to_json_value()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_value_to_json_encodes_bytes_and_array() {
+        assert_eq!(
+            filter_value_to_json(&FilterValue::Bytes(vec![0, 255])),
+            serde_json::json!("AP8=")
+        );
+        assert_eq!(
+            filter_value_to_json(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ])),
+            serde_json::json!([1, "a"])
+        );
+    }
 
     #[test]
     fn test_quote_ident_simple() {

@@ -404,6 +404,16 @@ impl FromColumn for i32 {
     }
 }
 
+impl FromColumn for u8 {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
+        let v = row.get_i32(column)?;
+        u8::try_from(v).map_err(|_| RowError::TypeConversion {
+            column: column.to_string(),
+            message: format!("value {v} out of range for u8"),
+        })
+    }
+}
+
 impl FromColumn for i64 {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_i64(column)

@@ -23,6 +23,12 @@ pub fn filter_value_to_sql(value: &FilterValue) -> MssqlResult<Box<dyn tiberius:
                 "list values should be handled specially",
             ))
         }
+        FilterValue::Bytes(b) => Ok(Box::new(b.clone())),
+        // Arrays are sent as JSON text (NVARCHAR).
+        FilterValue::Array(_) => Ok(Box::new(value.to_json_value().to_string())),
+        _ => Err(MssqlError::type_conversion(
+            "unsupported FilterValue variant",
+        )),
     }
 }
 
@@ -189,6 +195,18 @@ pub mod dialect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_bind() {
+        assert!(filter_value_to_sql(&FilterValue::Bytes(vec![0, 255])).is_ok());
+        assert!(
+            filter_value_to_sql(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ]))
+            .is_ok()
+        );
+    }
 
     #[test]
     fn test_filter_value_to_sql() {

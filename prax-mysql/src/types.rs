@@ -14,24 +14,9 @@ pub fn filter_value_to_mysql(value: &FilterValue) -> Value {
         FilterValue::Float(f) => Value::from(*f),
         FilterValue::String(s) => Value::from(s.as_str()),
         FilterValue::Json(j) => Value::from(j.to_string()),
-        FilterValue::List(list) => {
-            // For lists, we serialize to JSON
-            let json_array: Vec<JsonValue> = list
-                .iter()
-                .map(|v| match v {
-                    FilterValue::Null => JsonValue::Null,
-                    FilterValue::Bool(b) => JsonValue::Bool(*b),
-                    FilterValue::Int(i) => JsonValue::Number((*i).into()),
-                    FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-                        .map(JsonValue::Number)
-                        .unwrap_or(JsonValue::Null),
-                    FilterValue::String(s) => JsonValue::String(s.clone()),
-                    FilterValue::Json(j) => j.clone(),
-                    FilterValue::List(_) => JsonValue::Null, // Nested lists not directly supported
-                })
-                .collect();
-            Value::from(serde_json::to_string(&json_array).unwrap_or_default())
-        }
+        FilterValue::Bytes(b) => Value::Bytes(b.clone()),
+        // Lists and arrays serialise to JSON text.
+        _ => Value::from(value.to_json_value().to_string()),
     }
 }
 
@@ -123,6 +108,21 @@ fn base64_encode(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_mysql_values() {
+        assert_eq!(
+            filter_value_to_mysql(&FilterValue::Bytes(vec![0, 255])),
+            Value::Bytes(vec![0, 255])
+        );
+        assert_eq!(
+            filter_value_to_mysql(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ])),
+            Value::from("[1,\"a\"]")
+        );
+    }
 
     #[test]
     fn test_filter_value_to_mysql_null() {

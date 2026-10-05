@@ -194,6 +194,11 @@ pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync
                 "list values should be handled specially",
             ))
         }
+        FilterValue::Bytes(b) => Ok(Box::new(b.clone())),
+        FilterValue::Array(_) => Err(PgError::type_conversion(
+            "FilterValue::Array binding is not implemented yet",
+        )),
+        _ => Err(PgError::type_conversion("unsupported FilterValue variant")),
     }
 }
 
@@ -254,6 +259,24 @@ pub mod pg_types {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_binds_as_bytea() {
+        let param = filter_value_to_sql(&FilterValue::Bytes(vec![0, 255])).unwrap();
+        let mut buf = bytes::BytesMut::new();
+        param.to_sql_checked(&Type::BYTEA, &mut buf).unwrap();
+        assert_eq!(&buf[..], &[0u8, 255][..]);
+    }
+
+    #[test]
+    fn array_binding_is_interim_error() {
+        let value = FilterValue::Array(vec![FilterValue::Int(1)]);
+        let err = filter_value_to_sql(&value).expect_err("array must error for now");
+        assert!(
+            err.to_string()
+                .contains("FilterValue::Array binding is not implemented yet")
+        );
+    }
 
     #[test]
     fn test_filter_value_to_sql() {

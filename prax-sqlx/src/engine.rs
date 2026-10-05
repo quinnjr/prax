@@ -486,6 +486,17 @@ fn bind_pg_param<'q>(
                 "list values not supported in raw binds; use typed IN filters",
             ));
         }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(_) => {
+            return Err(SqlxError::type_conversion(
+                "FilterValue::Array binding is not implemented yet",
+            ));
+        }
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
+            ));
+        }
     })
 }
 
@@ -506,6 +517,13 @@ fn bind_mysql_param<'q>(
                 "list values not supported in raw binds; use typed IN filters",
             ));
         }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(_) => query.bind(value.to_json_value().to_string()),
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
+            ));
+        }
     })
 }
 
@@ -524,6 +542,13 @@ fn bind_sqlite_param<'q>(
         FilterValue::List(_) => {
             return Err(SqlxError::type_conversion(
                 "list values not supported in raw binds; use typed IN filters",
+            ));
+        }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(_) => query.bind(value.to_json_value().to_string()),
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
             ));
         }
     })
@@ -1204,6 +1229,39 @@ mod tests {
             .expect("list bind must be rejected");
         assert!(
             matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("list values")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn bind_sqlite_param_accepts_bytes_and_array() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(bind_sqlite_param(sqlx::query::<sqlx::Sqlite>("SELECT ?1"), &bytes).is_ok());
+        assert!(bind_sqlite_param(sqlx::query::<sqlx::Sqlite>("SELECT ?1"), &array).is_ok());
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn bind_mysql_param_accepts_bytes_and_array() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(bind_mysql_param(sqlx::query::<sqlx::MySql>("SELECT ?"), &bytes).is_ok());
+        assert!(bind_mysql_param(sqlx::query::<sqlx::MySql>("SELECT ?"), &array).is_ok());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn bind_pg_param_bytes_ok_array_interim_error() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &bytes).is_ok());
+        let array = FilterValue::Array(vec![FilterValue::Int(1)]);
+        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &array)
+            .err()
+            .expect("array bind is an interim error");
+        assert!(
+            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("not implemented yet")),
             "unexpected error: {err}"
         );
     }

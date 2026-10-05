@@ -987,6 +987,26 @@ fn classify_field_type(ty: &Type) -> TypeCategory {
     }
 }
 
+/// True when `ty` is `u8` or `Option<u8>`.
+///
+/// `FilterValue` has no `From<u8>` (so `Vec<u8>` can convert to `Bytes`),
+/// so `u8` fields must lower through `i64::from` instead of `.into()`.
+fn is_u8_type(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    let Some(segment) = type_path.path.segments.last() else {
+        return false;
+    };
+    if segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return matches!(inner, Type::Path(p) if p.path.is_ident("u8"));
+    }
+    segment.ident == "u8"
+}
+
 /// Generate a field module from derive macro field info.
 fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
     let field_name = &field.name;
@@ -1028,9 +1048,35 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
     }
 
     // Collect to_filter match arms in the same conditional shape.
+    //
+    // `u8` / `Option<u8>` fields convert via `i64::from` because
+    // `FilterValue` has no `From<u8>`.
+    let u8_field = is_u8_type(ty);
+    let conv = |v: TokenStream| -> TokenStream {
+        match (u8_field, is_optional) {
+            (false, _) => quote! { #v.into() },
+            (true, false) => quote! { ::prax_query::filter::FilterValue::Int(i64::from(#v)) },
+            (true, true) => {
+                quote! { ::prax_query::filter::FilterValue::from(#v.map(i64::from)) }
+            }
+        }
+    };
+    let conv_each = |conv_v: TokenStream| -> TokenStream {
+        if u8_field {
+            quote! { .map(|v| #conv_v) }
+        } else {
+            quote! { .map(Into::into) }
+        }
+    };
     let mut arms = vec![
-        quote! { Self::Equals(v) => Filter::Equals(col, v.into()) },
-        quote! { Self::Not(v) => Filter::NotEquals(col, v.into()) },
+        {
+            let c = conv(quote! { v });
+            quote! { Self::Equals(v) => Filter::Equals(col, #c) }
+        },
+        {
+            let c = conv(quote! { v });
+            quote! { Self::Not(v) => Filter::NotEquals(col, #c) }
+        },
     ];
 
     if is_optional {
@@ -1040,16 +1086,16 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 
     match category {
         TypeCategory::Numeric => {
+            let c = conv(quote! { v });
+            let each = conv_each(c.clone());
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, v.into()) });
-            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, v.into()) });
-            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, v.into()) });
-            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, v.into()) });
+            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, #c) });
+            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, #c) });
+            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, #c) });
+            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, #c) });
         }
         TypeCategory::String => {
             arms.push(

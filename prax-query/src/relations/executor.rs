@@ -92,7 +92,8 @@ pub(crate) fn filter_value_key(v: &FilterValue) -> String {
         FilterValue::Float(f) => f.to_string(),
         FilterValue::Null => "<null>".into(),
         FilterValue::Json(v) => v.to_string(),
-        FilterValue::List(_) => {
+        FilterValue::Bytes(b) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
+        FilterValue::List(_) | FilterValue::Array(_) => {
             panic!("relation executor does not support composite keys yet (FilterValue::List)")
         }
     }

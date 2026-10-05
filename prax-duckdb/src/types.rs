@@ -13,29 +13,15 @@ pub fn filter_value_to_duckdb(value: &FilterValue) -> Value {
         FilterValue::Float(f) => Value::Double(*f),
         FilterValue::String(s) => Value::Text(s.clone()),
         FilterValue::Json(j) => Value::Text(j.to_string()),
-        FilterValue::List(list) => {
-            // DuckDB supports arrays, but for simplicity convert to JSON
-            let json_array: Vec<JsonValue> = list.iter().map(filter_value_to_json).collect();
-            Value::Text(serde_json::to_string(&json_array).unwrap_or_default())
-        }
+        FilterValue::Bytes(b) => Value::Blob(b.clone()),
+        // DuckDB supports native lists; for now they are sent as JSON text.
+        _ => Value::Text(value.to_json_value().to_string()),
     }
 }
 
 /// Convert a FilterValue to a JSON value.
 pub fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
-        }
-    }
+    value.to_json_value()
 }
 
 /// Split a unit-denominated count into whole seconds and sub-second nanos.
@@ -288,12 +274,10 @@ impl duckdb::ToSql for DuckDbParam<'_> {
             FilterValue::Float(f) => Ok(ToSqlOutput::Owned(Value::Double(*f))),
             FilterValue::String(s) => Ok(ToSqlOutput::Owned(Value::Text(s.clone()))),
             FilterValue::Json(j) => Ok(ToSqlOutput::Owned(Value::Text(j.to_string()))),
-            FilterValue::List(list) => {
-                let json_array: Vec<JsonValue> = list.iter().map(filter_value_to_json).collect();
-                Ok(ToSqlOutput::Owned(Value::Text(
-                    serde_json::to_string(&json_array).unwrap_or_default(),
-                )))
-            }
+            FilterValue::Bytes(b) => Ok(ToSqlOutput::Owned(Value::Blob(b.clone()))),
+            _ => Ok(ToSqlOutput::Owned(Value::Text(
+                self.0.to_json_value().to_string(),
+            ))),
         }
     }
 }
@@ -301,6 +285,20 @@ impl duckdb::ToSql for DuckDbParam<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_duckdb_values() {
+        assert!(matches!(
+            filter_value_to_duckdb(&FilterValue::Bytes(vec![0, 255])),
+            Value::Blob(ref b) if b == &[0u8, 255]
+        ));
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(matches!(
+            filter_value_to_duckdb(&array),
+            Value::Text(ref t) if t == "[1,\"a\"]"
+        ));
+        assert_eq!(filter_value_to_json(&array), serde_json::json!([1, "a"]));
+    }
 
     #[test]
     fn test_filter_value_to_duckdb() {
