@@ -174,6 +174,64 @@ impl ToSql for PgNull {
     tokio_postgres::types::to_sql_checked!();
 }
 
+/// One element of a `FilterValue::Array` parameter. Delegates to the scalar
+/// binders so each element adapts to the array's element type (e.g. a
+/// `PgString` into `uuid[]`). `Vec<PgElem>: ToSql` (tokio-postgres) supplies
+/// the array wire format and rejects non-array target types.
+#[derive(Debug)]
+enum PgElem {
+    Null(PgNull),
+    Bool(bool),
+    Int(PgInt),
+    Float(f64),
+    String(PgString),
+    Json(serde_json::Value),
+    Bytes(Vec<u8>),
+}
+
+impl PgElem {
+    fn try_from_value(value: &FilterValue) -> PgResult<Self> {
+        Ok(match value {
+            FilterValue::Null => Self::Null(PgNull),
+            FilterValue::Bool(b) => Self::Bool(*b),
+            FilterValue::Int(i) => Self::Int(PgInt(*i)),
+            FilterValue::Float(f) => Self::Float(*f),
+            FilterValue::String(s) => Self::String(PgString(s.clone())),
+            FilterValue::Json(j) => Self::Json(j.clone()),
+            FilterValue::Bytes(b) => Self::Bytes(b.clone()),
+            _ => {
+                return Err(PgError::type_conversion(
+                    "nested arrays are not supported in FilterValue::Array",
+                ));
+            }
+        })
+    }
+}
+
+impl ToSql for PgElem {
+    fn to_sql(
+        &self,
+        ty: &Type,
+        out: &mut bytes::BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        match self {
+            Self::Null(v) => v.to_sql(ty, out),
+            Self::Bool(v) => v.to_sql(ty, out),
+            Self::Int(v) => v.to_sql(ty, out),
+            Self::Float(v) => v.to_sql(ty, out),
+            Self::String(v) => v.to_sql(ty, out),
+            Self::Json(v) => v.to_sql(ty, out),
+            Self::Bytes(v) => v.to_sql(ty, out),
+        }
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
 /// Convert a FilterValue to a type that can be used as a PostgreSQL parameter.
 pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync + Send>> {
     match value {
@@ -184,20 +242,21 @@ pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync
         FilterValue::String(s) => Ok(Box::new(PgString(s.clone()))),
         FilterValue::Json(j) => Ok(Box::new(j.clone())),
         FilterValue::List(_) => {
-            // Lists are deliberately unsupported in raw binds. Typed IN
-            // filters expand to scalar placeholders upstream
+            // Typed IN filters expand to scalar placeholders upstream
             // (prax-query/src/filter.rs), so this arm only fires for
-            // hand-built raw queries via `Sql::bind`. Callers needing list
-            // binds should use `= ANY($n)` array binds or the typed filter
-            // path.
+            // hand-built raw queries via `Sql::bind`.
             Err(PgError::type_conversion(
-                "list values should be handled specially",
+                "FilterValue::List expands to placeholders; bind FilterValue::Array for an array parameter.",
             ))
         }
         FilterValue::Bytes(b) => Ok(Box::new(b.clone())),
-        FilterValue::Array(_) => Err(PgError::type_conversion(
-            "FilterValue::Array binding is not implemented yet",
-        )),
+        FilterValue::Array(items) => {
+            let elems = items
+                .iter()
+                .map(PgElem::try_from_value)
+                .collect::<PgResult<Vec<_>>>()?;
+            Ok(Box::new(elems))
+        }
         _ => Err(PgError::type_conversion("unsupported FilterValue variant")),
     }
 }
@@ -269,13 +328,24 @@ mod tests {
     }
 
     #[test]
-    fn array_binding_is_interim_error() {
-        let value = FilterValue::Array(vec![FilterValue::Int(1)]);
-        let err = filter_value_to_sql(&value).expect_err("array must error for now");
-        assert!(
-            err.to_string()
-                .contains("FilterValue::Array binding is not implemented yet")
-        );
+    fn nested_list_or_array_in_array_is_rejected() {
+        for inner in [FilterValue::List(vec![]), FilterValue::Array(vec![])] {
+            let err = filter_value_to_sql(&FilterValue::Array(vec![inner]))
+                .expect_err("nested collections must error");
+            assert!(matches!(err, PgError::TypeConversion(_)));
+            assert!(err.to_string().contains("nested"), "{err}");
+        }
+    }
+
+    #[test]
+    fn array_binds_as_int_array() {
+        let value = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::Null]);
+        let param = filter_value_to_sql(&value).unwrap();
+        let mut buf = bytes::BytesMut::new();
+        param.to_sql_checked(&Type::INT4_ARRAY, &mut buf).unwrap();
+        assert!(!buf.is_empty());
+        // Non-array target types are rejected, not panicked on.
+        assert!(param.to_sql_checked(&Type::INT4, &mut buf).is_err());
     }
 
     #[test]
