@@ -108,6 +108,10 @@ impl PgHelpers {
     ///
     /// The channel is a PostgreSQL identifier and is quoted via
     /// `quote_identifier`; pass trusted channel names only.
+    #[deprecated(
+        since = "0.13.0",
+        note = "LISTEN on a pooled connection never receives notifications; use sqlx::postgres::PgListener"
+    )]
     pub async fn listen(pool: &PgPool, channel: &str) -> SqlxResult<()> {
         let sql = format!(
             "LISTEN {}",
@@ -117,18 +121,15 @@ impl PgHelpers {
         Ok(())
     }
 
-    /// Execute NOTIFY.
+    /// Send a notification via `SELECT pg_notify($1, $2)`.
     ///
-    /// The channel is a PostgreSQL identifier and is quoted via
-    /// `quote_identifier`; single quotes in the payload are escaped
-    /// (`'` -> `''`). Pass trusted channel names only.
+    /// Both the channel and the payload are bound as parameters.
     pub async fn notify(pool: &PgPool, channel: &str, payload: &str) -> SqlxResult<()> {
-        let sql = format!(
-            "NOTIFY {}, '{}'",
-            quote_identifier(DatabaseBackend::Postgres, channel),
-            payload.replace('\'', "''")
-        );
-        sqlx::query(&sql).execute(pool).await?;
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(channel)
+            .bind(payload)
+            .execute(pool)
+            .await?;
         Ok(())
     }
 }

@@ -487,17 +487,90 @@ fn bind_pg_param<'q>(
             ));
         }
         FilterValue::Bytes(b) => query.bind(b.as_slice()),
-        FilterValue::Array(_) => {
-            return Err(SqlxError::type_conversion(
-                "FilterValue::Array binding is not implemented yet",
-            ));
-        }
+        FilterValue::Array(items) => match pg_array_kind(items)? {
+            PgArrayKind::Int => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::Int(i) => Some(*i),
+                _ => None,
+            })),
+            PgArrayKind::Float => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::Float(f) => Some(*f),
+                _ => None,
+            })),
+            PgArrayKind::Bool => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::Bool(b) => Some(*b),
+                _ => None,
+            })),
+            PgArrayKind::Text => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::String(s) => Some(s.clone()),
+                _ => None,
+            })),
+            PgArrayKind::Json => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::Json(j) => Some(j.clone()),
+                _ => None,
+            })),
+            PgArrayKind::Bytes => query.bind(pg_array_elems(items, |v| match v {
+                FilterValue::Bytes(b) => Some(b.clone()),
+                _ => None,
+            })),
+        },
         _ => {
             return Err(SqlxError::type_conversion(
                 "unsupported FilterValue variant",
             ));
         }
     })
+}
+
+/// Element type chosen for a Postgres array bind.
+#[cfg(feature = "postgres")]
+#[derive(Debug, PartialEq, Eq)]
+enum PgArrayKind {
+    Int,
+    Float,
+    Bool,
+    Text,
+    Json,
+    Bytes,
+}
+
+/// Choose the array element kind from the first non-`Null` element.
+///
+/// Empty and all-`Null` arrays fall back to `Text` (they bind as `text[]`,
+/// a documented limitation: the server cannot infer a better element type).
+/// Mixed kinds and nested `List`/`Array` elements are rejected.
+#[cfg(feature = "postgres")]
+fn pg_array_kind(items: &[FilterValue]) -> SqlxResult<PgArrayKind> {
+    let mismatch =
+        || SqlxError::type_conversion("FilterValue::Array elements must share one scalar kind");
+    let mut kind: Option<PgArrayKind> = None;
+    for item in items {
+        let k = match item {
+            FilterValue::Null => continue,
+            FilterValue::Int(_) => PgArrayKind::Int,
+            FilterValue::Float(_) => PgArrayKind::Float,
+            FilterValue::Bool(_) => PgArrayKind::Bool,
+            FilterValue::String(_) => PgArrayKind::Text,
+            FilterValue::Json(_) => PgArrayKind::Json,
+            FilterValue::Bytes(_) => PgArrayKind::Bytes,
+            _ => return Err(mismatch()),
+        };
+        match &kind {
+            None => kind = Some(k),
+            Some(existing) if *existing == k => {}
+            Some(_) => return Err(mismatch()),
+        }
+    }
+    Ok(kind.unwrap_or(PgArrayKind::Text))
+}
+
+/// Map array items to `Option<T>` (`Null` -> `None`). `pg_array_kind` has
+/// already validated that every non-`Null` item matches `pick`.
+#[cfg(feature = "postgres")]
+fn pg_array_elems<T>(
+    items: &[FilterValue],
+    pick: impl Fn(&FilterValue) -> Option<T>,
+) -> Vec<Option<T>> {
+    items.iter().map(pick).collect()
 }
 
 #[cfg(feature = "mysql")]
@@ -1253,16 +1326,68 @@ mod tests {
 
     #[cfg(feature = "postgres")]
     #[test]
-    fn bind_pg_param_bytes_ok_array_interim_error() {
+    fn bind_pg_param_bytes_and_arrays_ok() {
         let bytes = FilterValue::Bytes(vec![0, 255]);
         assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &bytes).is_ok());
-        let array = FilterValue::Array(vec![FilterValue::Int(1)]);
-        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &array)
+        for array in [
+            FilterValue::Array(vec![FilterValue::Int(1), FilterValue::Null]),
+            FilterValue::Array(vec![FilterValue::Float(1.5)]),
+            FilterValue::Array(vec![FilterValue::Bool(true)]),
+            FilterValue::Array(vec![FilterValue::String("a".into())]),
+            FilterValue::Array(vec![FilterValue::Json(serde_json::json!({"a": 1}))]),
+            FilterValue::Array(vec![FilterValue::Bytes(vec![1, 2])]),
+            FilterValue::Array(vec![]),
+            FilterValue::Array(vec![FilterValue::Null]),
+        ] {
+            assert!(
+                bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &array).is_ok(),
+                "{array:?}"
+            );
+        }
+        let mixed = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &mixed)
             .err()
-            .expect("array bind is an interim error");
+            .expect("mixed array must be rejected");
         assert!(
-            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("not implemented yet")),
+            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("share one scalar kind")),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_array_kind_picks_first_non_null() {
+        use FilterValue::*;
+        assert_eq!(pg_array_kind(&[Int(1), Null]).unwrap(), PgArrayKind::Int);
+        assert_eq!(
+            pg_array_kind(&[Null, Float(1.0)]).unwrap(),
+            PgArrayKind::Float
+        );
+        assert_eq!(pg_array_kind(&[Bool(true)]).unwrap(), PgArrayKind::Bool);
+        assert_eq!(
+            pg_array_kind(&[String("a".into())]).unwrap(),
+            PgArrayKind::Text
+        );
+        assert_eq!(
+            pg_array_kind(&[Json(serde_json::json!(1))]).unwrap(),
+            PgArrayKind::Json
+        );
+        assert_eq!(
+            pg_array_kind(&[Bytes(vec![1])]).unwrap(),
+            PgArrayKind::Bytes
+        );
+        assert_eq!(pg_array_kind(&[]).unwrap(), PgArrayKind::Text);
+        assert_eq!(pg_array_kind(&[Null, Null]).unwrap(), PgArrayKind::Text);
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_array_kind_rejects_mixed_and_nested() {
+        use FilterValue::*;
+        assert!(pg_array_kind(&[Int(1), String("a".into())]).is_err());
+        assert!(pg_array_kind(&[Int(1), Float(1.0)]).is_err());
+        assert!(pg_array_kind(&[Array(vec![])]).is_err());
+        assert!(pg_array_kind(&[List(vec![])]).is_err());
+        assert!(pg_array_kind(&[Null, List(vec![])]).is_err());
     }
 }
