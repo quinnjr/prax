@@ -38,13 +38,26 @@
 //!   driver tells the supervisor when the connection ends.
 //! - State that must never be lost to a full queue (the drop count, the
 //!   reconnect flag, the terminal error) lives in atomics / a mutex shared with
-//!   the handle and is checked at the top of [`PgListener::recv`].
+//!   the handle and is checked at the top of [`PgListener::recv`]. Raising a
+//!   flag also wakes a `recv` that is parked on an empty queue.
+//! - The supervisor watches the connection: when the driver reports its end,
+//!   or when a `SELECT 1` ping (sent after a [`ping_interval`] without any
+//!   notification) fails or goes unanswered for another interval, the
+//!   connection is lost. It then either reconnects with exponential backoff,
+//!   re-`LISTEN`s every tracked channel and reports
+//!   [`PgListenerEvent::Reconnected`], or (with [`reconnect`] disabled)
+//!   records the error and stops.
 //!
 //! Dropping the [`PgListener`] closes the command channel; the supervisor then
-//! exits and drops the client, which ends the driver task.
+//! exits (also while waiting to reconnect) and drops the client, which ends
+//! the driver task.
+//!
+//! [`ping_interval`]: PgListenerOptions::ping_interval
+//! [`reconnect`]: PgListenerOptions::reconnect
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -52,9 +65,11 @@ use std::time::Duration;
 use futures::{Stream, StreamExt};
 use prax_query::sql::escape_identifier;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio::time::{self, Interval, MissedTickBehavior};
 use tokio_postgres::{AsyncMessage, NoTls};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::PgConfig;
 use crate::connector::{Connector, select_connector};
@@ -68,6 +83,10 @@ const MAX_CHANNEL_LEN: usize = 63;
 /// strictly shorter than this.
 const PAYLOAD_LIMIT: usize = 8000;
 
+/// Largest notification queue tokio's bounded channel supports (it panics
+/// above this).
+const MAX_BUFFER: usize = tokio::sync::Semaphore::MAX_PERMITS;
+
 /// Tuning for a [`PgListener`]; see [`PgListener::builder`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -77,20 +96,57 @@ pub struct PgListenerOptions {
     /// `false`, connection loss is terminal and [`PgListener::recv`] returns
     /// the error. Default: `true`.
     pub reconnect: bool,
-    /// First reconnect delay; doubles per failed attempt (with jitter).
-    /// Default: 100 ms.
+    /// Delay before the first reconnect attempt; it doubles after every
+    /// failed attempt, up to [`backoff_max`](Self::backoff_max). Each delay
+    /// is scaled by a random factor between 0.5 and 1 (jitter). Must be
+    /// non-zero and at most `backoff_max`. Default: 100 ms.
     pub backoff_initial: Duration,
     /// Upper bound on the reconnect delay. Default: 30 s.
     pub backoff_max: Duration,
     /// TCP keepalive idle time on the listener connection. Default: 60 s.
     pub keepalive_idle: Duration,
-    /// Interval after which an idle connection is checked with `SELECT 1`.
-    /// Default: 30 s.
+    /// Liveness check period. When no notification arrived during an
+    /// interval, `SELECT 1` is sent; if it fails or is not answered within
+    /// another interval, the connection is treated as lost. This detects
+    /// half-open connections long before TCP keepalive does. Must be
+    /// non-zero. Default: 30 s.
     pub ping_interval: Duration,
     /// Capacity of the notification queue. When it is full, further
     /// notifications are dropped and reported as
-    /// [`PgListenerEvent::Lagged`]. Must be at least 1. Default: 1024.
+    /// [`PgListenerEvent::Lagged`]. Must be at least 1 and at most
+    /// `usize::MAX >> 3` (tokio's channel limit). Default: 1024.
     pub buffer: usize,
+}
+
+impl PgListenerOptions {
+    /// Reject values the listener cannot run with (several would otherwise
+    /// panic inside tokio).
+    fn validate(&self) -> PgResult<()> {
+        if self.buffer == 0 {
+            return Err(PgError::config("PgListener buffer must be at least 1"));
+        }
+        if self.buffer > MAX_BUFFER {
+            return Err(PgError::config(format!(
+                "PgListener buffer must be at most {MAX_BUFFER}"
+            )));
+        }
+        if self.ping_interval.is_zero() {
+            return Err(PgError::config(
+                "PgListener ping_interval must be greater than zero",
+            ));
+        }
+        if self.backoff_initial.is_zero() {
+            return Err(PgError::config(
+                "PgListener backoff_initial must be greater than zero",
+            ));
+        }
+        if self.backoff_initial > self.backoff_max {
+            return Err(PgError::config(
+                "PgListener backoff_initial must not exceed backoff_max",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for PgListenerOptions {
@@ -150,7 +206,8 @@ impl PgListenerBuilder {
         self
     }
 
-    /// Reconnect backoff: the first delay and the upper bound.
+    /// Reconnect backoff: the first delay (non-zero) and the upper bound (at
+    /// least `initial`).
     pub fn backoff(mut self, initial: Duration, max: Duration) -> Self {
         self.options.backoff_initial = initial;
         self.options.backoff_max = max;
@@ -163,13 +220,15 @@ impl PgListenerBuilder {
         self
     }
 
-    /// Interval after which an idle connection is checked with `SELECT 1`.
+    /// Liveness check period (non-zero); see
+    /// [`PgListenerOptions::ping_interval`].
     pub fn ping_interval(mut self, interval: Duration) -> Self {
         self.options.ping_interval = interval;
         self
     }
 
-    /// Capacity of the notification queue (at least 1).
+    /// Capacity of the notification queue (at least 1, at most
+    /// `usize::MAX >> 3`).
     pub fn buffer(mut self, buffer: usize) -> Self {
         self.options.buffer = buffer;
         self
@@ -188,9 +247,7 @@ impl PgListenerBuilder {
     /// established.
     pub async fn connect(self) -> PgResult<PgListener> {
         let Self { config, options } = self;
-        if options.buffer == 0 {
-            return Err(PgError::config("PgListener buffer must be at least 1"));
-        }
+        options.validate()?;
 
         let connector = select_connector(&config)?;
         let mut pg_config = config.to_pg_config();
@@ -203,6 +260,7 @@ impl PgListenerBuilder {
         let supervisor = Supervisor {
             pg_config,
             connector,
+            options,
             events: events_tx,
             shared: Arc::clone(&shared),
             channels: BTreeSet::new(),
@@ -270,6 +328,11 @@ impl PgListener {
     /// same string. It must be non-empty, at most 63 bytes and free of NUL.
     /// Subscribing to a channel twice is a no-op.
     ///
+    /// While the listener is waiting to reconnect, this (like
+    /// [`unlisten`](Self::unlisten) and [`unlisten_all`](Self::unlisten_all))
+    /// returns at once and the change is applied when the connection is
+    /// re-established.
+    ///
     /// [`PgConnection::notify`]: crate::connection::PgConnection::notify
     pub async fn listen(&mut self, channel: &str) -> PgResult<()> {
         validate_channel(channel)?;
@@ -317,23 +380,40 @@ impl PgListener {
     ///
     /// Events are reported in priority order: [`PgListenerEvent::Reconnected`]
     /// first, then [`PgListenerEvent::Lagged`], then the next buffered
-    /// notification. Once the connection is gone for good and every buffered
-    /// notification has been read, this returns the error that ended it (and
-    /// a generic "listener closed" error on later calls).
+    /// notification. A `Reconnected` or `Lagged` raised while this is waiting
+    /// is returned at once. Reconnects that happen before the caller gets to
+    /// read them are reported as a single `Reconnected`.
+    ///
+    /// With [`PgListenerOptions::reconnect`] disabled, once the connection is
+    /// lost and every buffered notification has been read, this returns the
+    /// error that ended it (and a generic "listener closed" error on later
+    /// calls).
     ///
     /// Cancel safe: if the future is dropped before completing, no event is
     /// lost.
     pub async fn recv(&mut self) -> PgResult<PgListenerEvent> {
-        if self.shared.reconnected.swap(false, Ordering::AcqRel) {
-            return Ok(PgListenerEvent::Reconnected);
-        }
-        let dropped = self.shared.dropped.swap(0, Ordering::Relaxed);
-        if dropped > 0 {
-            return Ok(PgListenerEvent::Lagged { dropped });
-        }
-        match self.events.recv().await {
-            Some(notification) => Ok(PgListenerEvent::Notification(notification)),
-            None => Err(self.shared.take_terminal().unwrap_or_else(listener_closed)),
+        loop {
+            if self.shared.reconnected.swap(false, Ordering::AcqRel) {
+                return Ok(PgListenerEvent::Reconnected);
+            }
+            let dropped = self.shared.dropped.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                return Ok(PgListenerEvent::Lagged { dropped });
+            }
+            tokio::select! {
+                // Checked first so a raised flag outranks a queued
+                // notification. `Notify` keeps a permit when nobody waits,
+                // so a flag raised between the checks above and this await
+                // still wakes us; a stale permit only costs one extra loop.
+                biased;
+                () = self.shared.wake.notified() => {}
+                notification = self.events.recv() => {
+                    return match notification {
+                        Some(notification) => Ok(PgListenerEvent::Notification(notification)),
+                        None => Err(self.shared.take_terminal().unwrap_or_else(listener_closed)),
+                    };
+                }
+            }
         }
     }
 
@@ -411,6 +491,35 @@ pub(crate) fn unlisten_sql(channel: &str) -> String {
     format!("UNLISTEN {}", escape_identifier(channel))
 }
 
+/// Delay before reconnect attempt `attempt` (0-based):
+/// `min(initial * 2^attempt, max)` scaled by `jitter`, which is clamped to
+/// `[0.5, 1.0]` (NaN counts as 1.0). Never panics, whatever the inputs.
+fn backoff_delay(attempt: u32, initial: Duration, max: Duration, jitter: f64) -> Duration {
+    let capped = 2u32
+        .checked_pow(attempt)
+        .and_then(|factor| initial.checked_mul(factor))
+        .map_or(max, |delay| delay.min(max));
+    let jitter = if jitter.is_nan() {
+        1.0
+    } else {
+        jitter.clamp(0.5, 1.0)
+    };
+    // Not `mul_f64`: rounding can push a delay near `Duration::MAX` past it,
+    // which panics there.
+    Duration::try_from_secs_f64(capped.as_secs_f64() * jitter)
+        .map_or(capped, |delay| delay.min(capped))
+}
+
+/// A jitter factor in `[0.5, 1.0)` for [`backoff_delay`], taken from std's
+/// randomly keyed hasher (every `RandomState` gets fresh keys), so no `rand`
+/// dependency is needed.
+fn jitter() -> f64 {
+    let bits = std::collections::hash_map::RandomState::new().hash_one(());
+    // The top 53 bits as a fraction in [0, 1).
+    let unit = (bits >> 11) as f64 / (1u64 << 53) as f64;
+    0.5 + unit / 2.0
+}
+
 /// Reply slot for a [`Command`].
 type Reply = oneshot::Sender<PgResult<()>>;
 
@@ -430,6 +539,13 @@ struct Shared {
     dropped: AtomicU64,
     /// Set after a reconnect; reported once as `Reconnected`.
     reconnected: AtomicBool,
+    /// Set by the driver whenever a notification (or another asynchronous
+    /// message) arrives, cleared by the supervisor's ping tick: a tick that
+    /// finds it unset sends a ping.
+    traffic: AtomicBool,
+    /// Wakes a `recv` parked on the empty queue when `reconnected` or
+    /// `dropped` is raised.
+    wake: Notify,
     /// Why the listener stopped, returned once the queue is drained.
     terminal: Mutex<Option<PgError>>,
 }
@@ -447,18 +563,43 @@ impl Shared {
     }
 }
 
-/// One live connection: the client commands run on, and the driver task's
+/// One live connection: the client commands run on, the driver task's
 /// end-of-connection signal (`Some(error)` on a connection error, `None` on a
-/// clean close).
+/// clean close), and the driver task itself.
 struct Session {
     client: tokio_postgres::Client,
     closed: oneshot::Receiver<Option<tokio_postgres::Error>>,
+    driver: JoinHandle<()>,
+}
+
+/// What a ping tick found out about the connection.
+enum Liveness {
+    Alive,
+    /// The connection is unusable, for the given reason.
+    Lost(String),
+    /// The handle was dropped while the ping was in flight.
+    HandleDropped,
+}
+
+/// A ping ticker whose first tick is one `period` from now.
+///
+/// Built from `time::interval` (whose first tick completes at once) because
+/// `interval_at(now + period, ..)` and `Interval::reset` panic when
+/// `now + period` overflows, while `interval` falls back to a far-future
+/// deadline.
+async fn ping_ticks(period: Duration) -> Interval {
+    let mut ticks = time::interval(period);
+    // A tick missed while busy (a slow command) is taken late, not in a burst.
+    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticks.tick().await;
+    ticks
 }
 
 /// Background task owning the client and the tracked channel set.
 struct Supervisor {
     pg_config: tokio_postgres::Config,
     connector: Connector,
+    options: PgListenerOptions,
     events: mpsc::Sender<PgNotification>,
     shared: Arc<Shared>,
     /// Channels currently subscribed, to re-`LISTEN` after a reconnect.
@@ -468,7 +609,7 @@ struct Supervisor {
 impl Supervisor {
     /// Open a connection and spawn its driver task.
     async fn connect(&self) -> PgResult<Session> {
-        let (client, closed) = match &self.connector {
+        let (client, (closed, driver)) = match &self.connector {
             Connector::NoTls => {
                 let (client, connection) = self.pg_config.connect(NoTls).await?;
                 (client, self.spawn_driver(connection))
@@ -479,7 +620,11 @@ impl Supervisor {
                 (client, self.spawn_driver(connection))
             }
         };
-        Ok(Session { client, closed })
+        Ok(Session {
+            client,
+            closed,
+            driver,
+        })
     }
 
     /// Spawn the task that drives `connection`, forwarding notifications into
@@ -487,7 +632,10 @@ impl Supervisor {
     fn spawn_driver<S, T>(
         &self,
         mut connection: tokio_postgres::Connection<S, T>,
-    ) -> oneshot::Receiver<Option<tokio_postgres::Error>>
+    ) -> (
+        oneshot::Receiver<Option<tokio_postgres::Error>>,
+        JoinHandle<()>,
+    )
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -495,11 +643,17 @@ impl Supervisor {
         let events = self.events.clone();
         let shared = Arc::clone(&self.shared);
         let (closed_tx, closed_rx) = oneshot::channel();
-        tokio::spawn(async move {
+        let driver = tokio::spawn(async move {
             let mut messages = futures::stream::poll_fn(move |cx| connection.poll_message(cx));
             let outcome = loop {
-                match messages.next().await {
-                    Some(Ok(AsyncMessage::Notification(n))) => {
+                let message = match messages.next().await {
+                    Some(Ok(message)) => message,
+                    Some(Err(e)) => break Some(e),
+                    None => break None,
+                };
+                shared.traffic.store(true, Ordering::Relaxed);
+                match message {
+                    AsyncMessage::Notification(n) => {
                         let notification = PgNotification {
                             channel: n.channel().to_owned(),
                             payload: n.payload().to_owned(),
@@ -509,52 +663,196 @@ impl Supervisor {
                         // connection until the supervisor drops the client.
                         if let Err(mpsc::error::TrySendError::Full(_)) =
                             events.try_send(notification)
+                            && shared.dropped.fetch_add(1, Ordering::Relaxed) == 0
                         {
-                            shared.dropped.fetch_add(1, Ordering::Relaxed);
+                            // First drop since the last report: wake `recv`.
+                            shared.wake.notify_one();
                         }
                     }
-                    Some(Ok(AsyncMessage::Notice(notice))) => debug!(
+                    AsyncMessage::Notice(notice) => debug!(
                         severity = %notice.severity(),
                         code = %notice.code().code(),
                         message = %notice.message(),
                         "notice on PostgreSQL listener connection"
                     ),
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => break Some(e),
-                    None => break None,
+                    _ => {}
                 }
             };
             // The supervisor may already be gone (listener dropped).
             let _ = closed_tx.send(outcome);
         });
-        closed_rx
+        (closed_rx, driver)
     }
 
-    /// Serve commands until the handle is dropped or the connection is lost.
+    /// Serve commands and watch the connection until the handle is dropped,
+    /// or until the connection is lost while reconnecting is disabled.
     async fn run(mut self, mut session: Session, mut commands: mpsc::Receiver<Command>) {
+        let mut ticks = ping_ticks(self.options.ping_interval).await;
         loop {
-            tokio::select! {
+            let cause = tokio::select! {
                 biased;
-                outcome = &mut session.closed => {
-                    match outcome {
-                        Ok(Some(e)) => warn!(error = %e, "PostgreSQL listener connection lost"),
-                        Ok(None) => warn!("PostgreSQL listener connection closed"),
-                        Err(_) => warn!("PostgreSQL listener driver task ended unexpectedly"),
-                    }
-                    // Reconnecting is not implemented yet, so connection loss
-                    // is terminal regardless of `PgListenerOptions::reconnect`.
-                    self.shared
-                        .set_terminal(PgError::connection("listener connection closed"));
-                    return;
-                }
+                outcome = &mut session.closed => match outcome {
+                    Ok(Some(e)) => e.to_string(),
+                    Ok(None) => "connection closed by the server".to_owned(),
+                    Err(_) => "connection driver ended unexpectedly".to_owned(),
+                },
                 command = commands.recv() => match command {
-                    Some(command) => self.execute(&session.client, command).await,
+                    Some(command) => {
+                        self.execute(&session.client, command).await;
+                        continue;
+                    }
                     // The handle was dropped: dropping the client ends the
                     // driver task.
                     None => return,
                 },
+                _ = ticks.tick() => match self.check_alive(&session.client).await {
+                    Liveness::Alive => continue,
+                    Liveness::Lost(cause) => cause,
+                    Liveness::HandleDropped => return,
+                },
+            };
+
+            // The session is lost; from here on it is only replaced or
+            // dropped, never polled again (`closed` may have completed).
+            // Aborting stops a driver stuck on a half-open socket now rather
+            // than when TCP keepalive gives up; a finished driver ignores it.
+            session.driver.abort();
+            warn!(cause = %cause, "PostgreSQL listener connection lost");
+            if !self.options.reconnect {
+                self.shared.set_terminal(PgError::connection(format!(
+                    "listener connection closed: {cause}"
+                )));
+                return;
+            }
+            let Some(new_session) = self.reconnect(&mut commands).await else {
+                // The handle was dropped while reconnecting.
+                return;
+            };
+            session = new_session;
+            // Every tracked channel is subscribed again: report it.
+            self.shared.reconnected.store(true, Ordering::Release);
+            self.shared.wake.notify_one();
+            ticks = ping_ticks(self.options.ping_interval).await;
+        }
+    }
+
+    /// On a ping tick: unless a notification arrived since the last tick,
+    /// check the connection with `SELECT 1`, bounded by `ping_interval` (a
+    /// half-open socket never answers).
+    async fn check_alive(&self, client: &tokio_postgres::Client) -> Liveness {
+        if self.shared.traffic.swap(false, Ordering::Relaxed) {
+            return Liveness::Alive;
+        }
+        let limit = self.options.ping_interval;
+        tokio::select! {
+            biased;
+            () = self.events.closed() => Liveness::HandleDropped,
+            ping = time::timeout(limit, client.simple_query("SELECT 1")) => match ping {
+                Ok(Ok(_)) => Liveness::Alive,
+                Ok(Err(e)) => Liveness::Lost(format!("ping failed: {e}")),
+                Err(_) => Liveness::Lost(format!("ping not answered within {limit:?}")),
+            },
+        }
+    }
+
+    /// Re-establish the connection: before each attempt wait out its
+    /// [`backoff_delay`] (meanwhile recording commands against the tracked
+    /// channel set), then connect and re-`LISTEN` every tracked channel.
+    /// Returns `None` as soon as the handle is dropped.
+    ///
+    /// The whole retry loop lives here, so the lost session's (possibly
+    /// completed) `closed` receiver is never polled again.
+    async fn reconnect(&mut self, commands: &mut mpsc::Receiver<Command>) -> Option<Session> {
+        let mut attempt: u32 = 0;
+        loop {
+            let delay = backoff_delay(
+                attempt,
+                self.options.backoff_initial,
+                self.options.backoff_max,
+                jitter(),
+            );
+            let backoff = time::sleep(delay);
+            tokio::pin!(backoff);
+            loop {
+                tokio::select! {
+                    biased;
+                    command = commands.recv() => match command {
+                        Some(command) => self.record(command),
+                        None => return None,
+                    },
+                    () = &mut backoff => break,
+                }
+            }
+
+            let outcome = tokio::select! {
+                biased;
+                () = self.events.closed() => return None,
+                outcome = self.open_subscribed() => outcome,
+            };
+            attempt = attempt.saturating_add(1);
+            match outcome {
+                Ok(session) => {
+                    info!(
+                        attempts = attempt,
+                        channels = self.channels.len(),
+                        "PostgreSQL listener reconnected"
+                    );
+                    return Some(session);
+                }
+                Err(e) => warn!(
+                    error = %e,
+                    attempt,
+                    "PostgreSQL listener reconnect attempt failed"
+                ),
             }
         }
+    }
+
+    /// Connect and re-`LISTEN` every tracked channel in one round trip,
+    /// bounded by `ping_interval` like a ping.
+    async fn open_subscribed(&self) -> PgResult<Session> {
+        let session = self.connect().await?;
+        if self.channels.is_empty() {
+            return Ok(session);
+        }
+        let sql = self
+            .channels
+            .iter()
+            .map(|channel| listen_sql(channel))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let limit = self.options.ping_interval;
+        let result = match time::timeout(limit, session.client.batch_execute(&sql)).await {
+            Ok(result) => result.map_err(PgError::from),
+            Err(_) => Err(PgError::connection(format!(
+                "LISTEN not answered within {limit:?}"
+            ))),
+        };
+        if let Err(e) = result {
+            session.driver.abort();
+            return Err(e);
+        }
+        Ok(session)
+    }
+
+    /// Apply a command while disconnected: only the tracked channel set
+    /// changes, and the server catches up when the connection is back.
+    fn record(&mut self, command: Command) {
+        let reply = match command {
+            Command::Listen(channel, reply) => {
+                self.channels.insert(channel);
+                reply
+            }
+            Command::Unlisten(channel, reply) => {
+                self.channels.remove(&channel);
+                reply
+            }
+            Command::UnlistenAll(reply) => {
+                self.channels.clear();
+                reply
+            }
+        };
+        let _ = reply.send(Ok(()));
     }
 
     /// Run one command and keep the tracked channel set in step with the
@@ -635,5 +933,152 @@ mod tests {
         assert_eq!(o.keepalive_idle, Duration::from_secs(60));
         assert_eq!(o.ping_interval, Duration::from_secs(30));
         assert_eq!(o.buffer, 1024);
+    }
+
+    #[test]
+    fn backoff_delay_doubles_from_initial_up_to_max() {
+        let initial = Duration::from_millis(100);
+        let max = Duration::from_secs(30);
+        assert_eq!(
+            backoff_delay(0, initial, max, 1.0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            backoff_delay(3, initial, max, 1.0),
+            Duration::from_millis(800)
+        );
+        assert_eq!(backoff_delay(20, initial, max, 1.0), max);
+    }
+
+    #[test]
+    fn backoff_delay_scales_by_jitter() {
+        let initial = Duration::from_millis(100);
+        let max = Duration::from_secs(30);
+        assert_eq!(
+            backoff_delay(3, initial, max, 0.5),
+            Duration::from_millis(400)
+        );
+    }
+
+    #[test]
+    fn backoff_delay_saturates_and_clamps_jitter() {
+        let initial = Duration::from_millis(100);
+        let max = Duration::from_secs(30);
+        // `2^attempt` and `initial * 2^attempt` overflow: the cap applies.
+        assert_eq!(backoff_delay(u32::MAX, initial, max, 1.0), max);
+        assert_eq!(
+            backoff_delay(70, Duration::from_secs(1), Duration::MAX, 1.0),
+            Duration::MAX
+        );
+        // Jitter outside [0.5, 1.0] (or NaN) never shortens the delay below
+        // half or stretches it past the computed value.
+        assert_eq!(
+            backoff_delay(0, initial, max, 0.0),
+            Duration::from_millis(50)
+        );
+        assert_eq!(backoff_delay(0, initial, max, 7.0), initial);
+        assert_eq!(backoff_delay(0, initial, max, f64::NAN), initial);
+    }
+
+    #[test]
+    fn jitter_is_in_range_and_varies() {
+        let samples: Vec<f64> = (0..256).map(|_| jitter()).collect();
+        assert!(
+            samples.iter().all(|j| (0.5..1.0).contains(j)),
+            "{samples:?}"
+        );
+        assert!(samples.iter().any(|j| *j != samples[0]), "{samples:?}");
+    }
+
+    /// One invalid option set per rule `PgListenerOptions::validate` enforces.
+    fn invalid_options() -> Vec<(&'static str, PgListenerOptions)> {
+        let base = PgListenerOptions::default();
+        vec![
+            (
+                "zero buffer",
+                PgListenerOptions {
+                    buffer: 0,
+                    ..base.clone()
+                },
+            ),
+            (
+                "buffer above tokio's channel limit",
+                PgListenerOptions {
+                    buffer: (usize::MAX >> 3) + 1,
+                    ..base.clone()
+                },
+            ),
+            (
+                "zero ping_interval",
+                PgListenerOptions {
+                    ping_interval: Duration::ZERO,
+                    ..base.clone()
+                },
+            ),
+            (
+                "zero backoff_initial",
+                PgListenerOptions {
+                    backoff_initial: Duration::ZERO,
+                    ..base.clone()
+                },
+            ),
+            (
+                "backoff_initial above backoff_max",
+                PgListenerOptions {
+                    backoff_initial: Duration::from_secs(2),
+                    backoff_max: Duration::from_secs(1),
+                    ..base
+                },
+            ),
+        ]
+    }
+
+    #[test]
+    fn options_validate_accepts_defaults_and_boundaries() {
+        assert!(PgListenerOptions::default().validate().is_ok());
+        let boundaries = PgListenerOptions {
+            buffer: usize::MAX >> 3,
+            backoff_initial: Duration::from_secs(1),
+            backoff_max: Duration::from_secs(1),
+            ping_interval: Duration::from_nanos(1),
+            ..PgListenerOptions::default()
+        };
+        assert!(boundaries.validate().is_ok());
+    }
+
+    #[test]
+    fn options_validate_rejects_unusable_values() {
+        for (case, options) in invalid_options() {
+            assert!(
+                matches!(options.validate(), Err(PgError::Config(_))),
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_invalid_options_without_panicking() {
+        // Nothing listens on port 1: validation must fail before connecting.
+        let config = PgConfig::from_url("postgres://prax@127.0.0.1:1/prax").unwrap();
+        for (case, options) in invalid_options() {
+            let result = PgListener::builder(&config)
+                .options(options)
+                .connect()
+                .await;
+            assert!(
+                matches!(result, Err(PgError::Config(_))),
+                "{case}: {result:?}"
+            );
+        }
+        // The largest accepted buffer really builds the channel (tokio panics
+        // one above it); only the unreachable server makes this fail.
+        let result = PgListener::builder(&config)
+            .buffer(usize::MAX >> 3)
+            .connect()
+            .await;
+        assert!(
+            matches!(result, Err(ref e) if !matches!(e, PgError::Config(_))),
+            "{result:?}"
+        );
     }
 }
