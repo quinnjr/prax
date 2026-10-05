@@ -7,8 +7,9 @@ use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 use tracing::{debug, info, warn};
 
-use crate::config::{PgConfig, SslMode};
+use crate::config::PgConfig;
 use crate::connection::PgConnection;
+use crate::connector::{Connector, select_connector};
 use crate::error::{PgError, PgResult};
 use crate::statement::PreparedStatementCache;
 
@@ -34,43 +35,13 @@ impl PgPool {
             recycling_method: RecyclingMethod::Fast,
         };
 
-        // Select the TLS connector by ssl_mode. `Disable` is always
-        // plaintext; TLS-requiring modes use rustls when the `tls` feature is
-        // enabled and fail loudly otherwise (never a silent downgrade).
-        // `Prefer` also connects without the feature, since plaintext is
-        // within its contract.
-        #[cfg(feature = "tls")]
-        let mgr = match config.ssl_mode {
-            SslMode::Disable => Manager::from_config(pg_config, NoTls, mgr_config),
-            // `Prefer` keeps tokio-postgres's built-in behavior: TLS when the
-            // server offers it, plaintext only when the server declines.
-            //
-            // `ssl_root_cert` replaces the webpki roots when set; the error is
-            // raised here rather than at first connect so a bad path or an
-            // unreadable bundle fails pool construction with a message naming
-            // the file, instead of surfacing later as a handshake failure.
-            _ => Manager::from_config(
-                pg_config,
-                crate::tls::make_tls_connector_with_root_cert(config.ssl_root_cert.as_deref())?,
-                mgr_config,
-            ),
-        };
-        #[cfg(not(feature = "tls"))]
-        let mgr = match config.ssl_mode {
-            SslMode::Disable => Manager::from_config(pg_config, NoTls, mgr_config),
-            // Plaintext is within `Prefer`'s contract, so a no-tls build
-            // still connects — nothing is downgraded below what the mode
-            // promises. (Against a server that *offers* TLS the driver
-            // still attempts the handshake and fails with the connector's
-            // no-TLS error; use `Disable` for such servers.)
-            SslMode::Prefer => Manager::from_config(pg_config, NoTls, mgr_config),
-            other => {
-                return Err(PgError::config(format!(
-                    "ssl_mode {:?} requires TLS support; rebuild prax-postgres \
-                     with the `tls` feature (enabled by default)",
-                    other
-                )));
-            }
+        // Select the TLS connector by ssl_mode (see `select_connector` for the
+        // rules). A TLS-requiring mode without the `tls` feature, or an
+        // unreadable `ssl_root_cert`, fails pool construction here.
+        let mgr = match select_connector(&config)? {
+            Connector::NoTls => Manager::from_config(pg_config, NoTls, mgr_config),
+            #[cfg(feature = "tls")]
+            Connector::Rustls(connector) => Manager::from_config(pg_config, connector, mgr_config),
         };
 
         // Build pool - set runtime to tokio for timeout support

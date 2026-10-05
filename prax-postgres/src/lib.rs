@@ -35,9 +35,11 @@
 pub(crate) mod capabilities;
 pub mod config;
 pub mod connection;
+pub(crate) mod connector;
 pub mod deserialize;
 pub mod engine;
 pub mod error;
+pub mod listener;
 pub mod pool;
 pub mod row;
 pub mod row_ref;
@@ -50,6 +52,9 @@ pub use config::{PgConfig, PgConfigBuilder};
 pub use connection::PgConnection;
 pub use engine::PgEngine;
 pub use error::{PgError, PgResult};
+pub use listener::{
+    PgListener, PgListenerBuilder, PgListenerEvent, PgListenerOptions, PgNotification,
+};
 pub use pool::{PgPool, PgPoolBuilder, PoolConfig, PoolStatus};
 pub use row::PgRow;
 pub use statement::PreparedStatementCache;

@@ -9,6 +9,7 @@ use tracing::{debug, trace};
 use prax_query::sql::is_valid_sql_identifier;
 
 use crate::error::{PgError, PgResult};
+use crate::listener::{validate_channel, validate_payload};
 use crate::statement::PreparedStatementCache;
 
 /// A wrapper around a PostgreSQL connection with statement caching.
@@ -178,6 +179,21 @@ impl PgConnection {
         Ok(())
     }
 
+    /// Send a notification on `channel` (`SELECT pg_notify($1, $2)`).
+    ///
+    /// The channel name is matched verbatim (case preserved) by a
+    /// [`PgListener`](crate::listener::PgListener) subscribed to the same
+    /// string. The name must be non-empty, at most 63 bytes and free of NUL,
+    /// and the payload shorter than 8000 bytes; both are checked before
+    /// anything is sent.
+    pub async fn notify(&self, channel: &str, payload: &str) -> PgResult<()> {
+        validate_channel(channel)?;
+        validate_payload(payload)?;
+        self.execute("SELECT pg_notify($1, $2)", &[&channel, &payload])
+            .await?;
+        Ok(())
+    }
+
     /// Begin a transaction.
     pub async fn transaction(&mut self) -> PgResult<PgTransaction<'_>> {
         debug!("Beginning transaction");
@@ -325,6 +341,19 @@ impl<'a> PgTransaction<'a> {
 
         let count = self.txn.execute(&stmt, params).await?;
         Ok(count)
+    }
+
+    /// Send a notification on `channel` (`SELECT pg_notify($1, $2)`) as part
+    /// of this transaction: it is delivered when the transaction commits and
+    /// discarded if it rolls back.
+    ///
+    /// Validation is the same as [`PgConnection::notify`].
+    pub async fn notify(&self, channel: &str, payload: &str) -> PgResult<()> {
+        validate_channel(channel)?;
+        validate_payload(payload)?;
+        self.execute("SELECT pg_notify($1, $2)", &[&channel, &payload])
+            .await?;
+        Ok(())
     }
 
     /// Create a savepoint.
