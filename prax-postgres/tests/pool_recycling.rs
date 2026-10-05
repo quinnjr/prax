@@ -114,9 +114,10 @@ async fn max_lifetime_replaces_aged_connections() {
 
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
-async fn without_max_lifetime_connection_is_kept() {
+async fn unexpired_max_lifetime_keeps_connection() {
     let Some(url) = url() else { return };
-    // Builder default is Some(30min), far above the sleep below.
+    // No explicit lifetime: relies on the builder's default max_lifetime
+    // (30 minutes), far above the sleep below.
     let pool = pool(&url, PgRecycling::Fast, None).await;
 
     let pid1 = backend_pid(&pool).await;

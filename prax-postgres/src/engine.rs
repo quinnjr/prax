@@ -100,8 +100,8 @@ fn map_driver_err<E: Into<crate::error::PgError>>(e: E) -> prax_query::QueryErro
 /// transaction still open: dropping the last `Arc` merely recycles the
 /// `Object`, and no `PgRecycling` method rolls back an open transaction
 /// (`Clean` resets session state but runs inside it), so the next checkout
-/// would silently inherit the live transaction. The armed guard therefore retires the connection
-/// instead: when it holds the last `Arc` handle it takes the `Object`
+/// would silently inherit the live transaction. The armed guard therefore
+/// retires the connection instead: when it holds the last `Arc` handle it takes the `Object`
 /// out of the pool so the session closes and the server aborts the
 /// transaction; when the caller stashed a tx-engine clone the handle
 /// cannot be reclaimed and it can only log.
@@ -497,9 +497,10 @@ impl QueryEngine for PgEngine {
             // but note the pinned `Object` does *not* close on drop:
             // dropping the last `Arc` merely returns it to the pool, and
             // no `PgRecycling` method rolls back an open transaction
-            // (`Clean` resets session state but runs inside it). A failed ROLLBACK on a still-live connection
-            // would therefore leak a still-open transaction back into
-            // the pool, contaminating whatever checks it out next. To
+            // (`Clean` resets session state but runs inside it). A
+            // failed ROLLBACK on a still-live connection would
+            // therefore leak a still-open transaction back into the
+            // pool, contaminating whatever checks it out next. To
             // avoid that, take the connection out of the pool
             // permanently when rollback fails — possible only when this
             // is the last `Arc` handle (if the caller stashed a clone of

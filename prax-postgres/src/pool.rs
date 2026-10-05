@@ -316,8 +316,10 @@ pub enum PgRecycling {
     Fast,
     /// Run a trivial query to verify the connection is alive.
     Verified,
-    /// Reset session state (advisory locks, temp tables, prepared
-    /// statements, session settings) before reuse.
+    /// `Verified` plus a session-state reset: closes cursors, resets
+    /// session settings and authorization, `UNLISTEN *`, releases advisory
+    /// locks, and drops temp tables and sequence state. Prepared
+    /// statements are preserved, so Prax's statement cache stays valid.
     Clean,
 }
 
@@ -356,7 +358,8 @@ pub struct PoolConfig {
     ///
     /// Enforced at checkout: a connection older than this is discarded and
     /// replaced instead of being handed out. Connections are not reaped
-    /// while idle.
+    /// while idle. `Duration::ZERO` replaces the connection on every
+    /// checkout, which effectively disables pooling.
     pub max_lifetime: Option<Duration>,
     /// Recycling method applied when a connection is checked out again.
     pub recycling: PgRecycling,
