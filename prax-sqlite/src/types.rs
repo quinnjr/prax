@@ -16,6 +16,9 @@ pub fn filter_value_to_sqlite(value: &FilterValue) -> Value {
         FilterValue::Json(j) => Value::Text(j.to_string()),
         FilterValue::Bytes(b) => Value::Blob(b.clone()),
         // Lists and arrays serialise to JSON text.
+        FilterValue::List(_) | FilterValue::Array(_) => {
+            Value::Text(value.to_json_value().to_string())
+        }
         _ => Value::Text(value.to_json_value().to_string()),
     }
 }

@@ -1002,7 +1002,10 @@ fn is_u8_type(ty: &Type) -> bool {
         && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
     {
-        return matches!(inner, Type::Path(p) if p.path.is_ident("u8"));
+        return matches!(
+            inner,
+            Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "u8")
+        );
     }
     segment.ident == "u8"
 }

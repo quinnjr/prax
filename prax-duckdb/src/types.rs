@@ -15,6 +15,9 @@ pub fn filter_value_to_duckdb(value: &FilterValue) -> Value {
         FilterValue::Json(j) => Value::Text(j.to_string()),
         FilterValue::Bytes(b) => Value::Blob(b.clone()),
         // DuckDB supports native lists; for now they are sent as JSON text.
+        FilterValue::List(_) | FilterValue::Array(_) => {
+            Value::Text(value.to_json_value().to_string())
+        }
         _ => Value::Text(value.to_json_value().to_string()),
     }
 }
@@ -275,6 +278,9 @@ impl duckdb::ToSql for DuckDbParam<'_> {
             FilterValue::String(s) => Ok(ToSqlOutput::Owned(Value::Text(s.clone()))),
             FilterValue::Json(j) => Ok(ToSqlOutput::Owned(Value::Text(j.to_string()))),
             FilterValue::Bytes(b) => Ok(ToSqlOutput::Owned(Value::Blob(b.clone()))),
+            FilterValue::List(_) | FilterValue::Array(_) => Ok(ToSqlOutput::Owned(Value::Text(
+                self.0.to_json_value().to_string(),
+            ))),
             _ => Ok(ToSqlOutput::Owned(Value::Text(
                 self.0.to_json_value().to_string(),
             ))),

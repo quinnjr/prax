@@ -198,13 +198,20 @@ mod tests {
 
     #[test]
     fn bytes_and_array_bind() {
-        assert!(filter_value_to_sql(&FilterValue::Bytes(vec![0, 255])).is_ok());
-        assert!(
-            filter_value_to_sql(&FilterValue::Array(vec![
-                FilterValue::Int(1),
-                FilterValue::String("a".into())
-            ]))
-            .is_ok()
+        use tiberius::ColumnData;
+        let bytes = filter_value_to_sql(&FilterValue::Bytes(vec![0, 255])).unwrap();
+        assert_eq!(
+            bytes.to_sql(),
+            ColumnData::Binary(Some(std::borrow::Cow::Borrowed(&[0u8, 255][..])))
+        );
+        let array = filter_value_to_sql(&FilterValue::Array(vec![
+            FilterValue::Int(1),
+            FilterValue::String("a".into()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            array.to_sql(),
+            ColumnData::String(Some(std::borrow::Cow::Borrowed("[1,\"a\"]")))
         );
     }
 

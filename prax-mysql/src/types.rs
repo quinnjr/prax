@@ -16,6 +16,9 @@ pub fn filter_value_to_mysql(value: &FilterValue) -> Value {
         FilterValue::Json(j) => Value::from(j.to_string()),
         FilterValue::Bytes(b) => Value::Bytes(b.clone()),
         // Lists and arrays serialise to JSON text.
+        FilterValue::List(_) | FilterValue::Array(_) => {
+            Value::from(value.to_json_value().to_string())
+        }
         _ => Value::from(value.to_json_value().to_string()),
     }
 }

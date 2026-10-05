@@ -28,7 +28,7 @@ pub fn filter_value_to_string(value: &FilterValue) -> String {
             let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
             format!("\\x{hex}")
         }
-        _ => "<unsupported>".to_string(),
+        _ => value.to_json_value().to_string(),
     }
 }
 
