@@ -299,3 +299,22 @@ fn audit_event_update_payload_lowers_to_bytes() {
     assert!(ir.iter().any(|(c, op)| c == "payload"
         && matches!(op, WriteOp::Set(FilterValue::Bytes(b)) if b == &vec![0, 159, 255])));
 }
+
+#[derive(Model, Debug, Clone)]
+#[prax(table = "bytes_unique_items")]
+pub struct BytesUniqueItem {
+    #[prax(id, auto)]
+    pub id: i64,
+    #[prax(unique)]
+    pub token: Vec<u8>,
+}
+
+#[test]
+fn bytes_unique_where_unique_lowers_to_bytes() {
+    use prax_query::inputs::WhereUniqueInput;
+    let w = bytes_unique_item::BytesUniqueItemWhereUniqueInput::Token(vec![0, 159, 255]);
+    assert_eq!(
+        w.into_ir(),
+        Filter::Equals("token".into(), FilterValue::Bytes(vec![0, 159, 255]))
+    );
+}
