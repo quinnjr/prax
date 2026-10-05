@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 use tracing::{debug, info, warn};
 
@@ -32,7 +32,7 @@ impl PgPool {
         let pg_config = config.to_pg_config();
 
         let mgr_config = ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
+            recycling_method: pool_config.recycling.into(),
         };
 
         // Select the TLS connector by ssl_mode (see `select_connector` for the
@@ -55,6 +55,20 @@ impl PgPool {
         }
         if let Some(timeout) = pool_config.idle_timeout {
             builder = builder.recycle_timeout(Some(timeout));
+        }
+
+        // Enforce `max_lifetime`: deadpool runs `pre_recycle` hooks at
+        // checkout, and a hook error discards the object and creates a new
+        // one. Connections are therefore retired lazily, when an aged one
+        // is next checked out.
+        if let Some(max_lifetime) = pool_config.max_lifetime {
+            builder = builder.pre_recycle(Hook::sync_fn(move |_, metrics| {
+                if metrics.created.elapsed() > max_lifetime {
+                    Err(HookError::message("max_lifetime exceeded"))
+                } else {
+                    Ok(())
+                }
+            }));
         }
 
         // Set runtime for timeout support
@@ -290,7 +304,35 @@ pub struct PoolStatus {
     pub waiting: usize,
 }
 
+/// How the pool validates a connection when it is checked out again.
+///
+/// None of these methods roll back an open transaction; `Clean` resets
+/// session state but runs inside whatever transaction is still open.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PgRecycling {
+    /// Only discard connections that are already closed (default).
+    #[default]
+    Fast,
+    /// Run a trivial query to verify the connection is alive.
+    Verified,
+    /// Reset session state (advisory locks, temp tables, prepared
+    /// statements, session settings) before reuse.
+    Clean,
+}
+
+impl From<PgRecycling> for RecyclingMethod {
+    fn from(r: PgRecycling) -> Self {
+        match r {
+            PgRecycling::Fast => RecyclingMethod::Fast,
+            PgRecycling::Verified => RecyclingMethod::Verified,
+            PgRecycling::Clean => RecyclingMethod::Clean,
+        }
+    }
+}
+
 /// Configuration for the connection pool.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Maximum number of connections in the pool.
@@ -312,9 +354,12 @@ pub struct PoolConfig {
     pub idle_timeout: Option<Duration>,
     /// Maximum lifetime of a connection.
     ///
-    /// **Not yet applied**: deadpool-postgres 0.14 exposes no connection
-    /// lifetime knob, so this value is stored but currently unused.
+    /// Enforced at checkout: a connection older than this is discarded and
+    /// replaced instead of being handed out. Connections are not reaped
+    /// while idle.
     pub max_lifetime: Option<Duration>,
+    /// Recycling method applied when a connection is checked out again.
+    pub recycling: PgRecycling,
     /// Number of SQL strings tracked for prepared-statement cache metrics.
     ///
     /// [`PreparedStatementCache`] records only which SQL strings have been
@@ -331,6 +376,7 @@ impl Default for PoolConfig {
             connection_timeout: Some(Duration::from_secs(30)),
             idle_timeout: Some(Duration::from_secs(600)), // 10 minutes
             max_lifetime: Some(Duration::from_secs(1800)), // 30 minutes
+            recycling: PgRecycling::Fast,
             statement_cache_size: 100,
         }
     }
@@ -396,6 +442,12 @@ impl PgPoolBuilder {
         self
     }
 
+    /// Set the recycling method used when a connection is checked out again.
+    pub fn recycling(mut self, recycling: PgRecycling) -> Self {
+        self.pool_config.recycling = recycling;
+        self
+    }
+
     /// Set the prepared statement cache size.
     pub fn statement_cache_size(mut self, size: usize) -> Self {
         self.pool_config.statement_cache_size = size;
@@ -426,6 +478,27 @@ mod tests {
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.min_connections, 1);
         assert_eq!(config.statement_cache_size, 100);
+    }
+
+    #[test]
+    fn test_pool_config_default_recycling_is_fast() {
+        assert_eq!(PoolConfig::default().recycling, PgRecycling::Fast);
+    }
+
+    #[test]
+    fn test_pg_recycling_maps_to_deadpool() {
+        assert!(matches!(
+            RecyclingMethod::from(PgRecycling::Fast),
+            RecyclingMethod::Fast
+        ));
+        assert!(matches!(
+            RecyclingMethod::from(PgRecycling::Verified),
+            RecyclingMethod::Verified
+        ));
+        assert!(matches!(
+            RecyclingMethod::from(PgRecycling::Clean),
+            RecyclingMethod::Clean
+        ));
     }
 
     #[test]

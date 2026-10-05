@@ -55,7 +55,7 @@ pub use error::{PgError, PgResult};
 pub use listener::{
     PgListener, PgListenerBuilder, PgListenerEvent, PgListenerOptions, PgNotification,
 };
-pub use pool::{PgPool, PgPoolBuilder, PoolConfig, PoolStatus};
+pub use pool::{PgPool, PgPoolBuilder, PgRecycling, PoolConfig, PoolStatus};
 pub use row::PgRow;
 pub use statement::PreparedStatementCache;
 

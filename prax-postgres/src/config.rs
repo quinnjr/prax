@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::error::{PgError, PgResult};
 
 /// PostgreSQL connection configuration.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PgConfig {
     /// Database URL.
