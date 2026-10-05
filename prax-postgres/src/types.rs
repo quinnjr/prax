@@ -214,14 +214,47 @@ impl ToSql for PgElem {
         ty: &Type,
         out: &mut bytes::BytesMut,
     ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        // Element-wise `to_sql` is called unchecked by tokio-postgres' array
+        // impl, so every arm must verify the element type itself.
+        fn check(
+            ok: bool,
+            kind: &str,
+            ty: &Type,
+        ) -> Result<(), Box<dyn std::error::Error + Sync + Send>> {
+            if ok {
+                Ok(())
+            } else {
+                Err(format!("cannot bind {kind} array element to postgres type {ty:?}").into())
+            }
+        }
         match self {
             Self::Null(v) => v.to_sql(ty, out),
-            Self::Bool(v) => v.to_sql(ty, out),
+            Self::Bool(v) => {
+                check(<bool as ToSql>::accepts(ty), "bool", ty)?;
+                v.to_sql(ty, out)
+            }
             Self::Int(v) => v.to_sql(ty, out),
-            Self::Float(v) => v.to_sql(ty, out),
-            Self::String(v) => v.to_sql(ty, out),
-            Self::Json(v) => v.to_sql(ty, out),
-            Self::Bytes(v) => v.to_sql(ty, out),
+            Self::Float(v) => {
+                check(<f64 as ToSql>::accepts(ty), "float", ty)?;
+                v.to_sql(ty, out)
+            }
+            Self::String(v) => {
+                let ok = matches!(
+                    *ty,
+                    Type::UUID | Type::TIMESTAMPTZ | Type::TIMESTAMP | Type::DATE | Type::TIME
+                ) || matches!(ty.kind(), Kind::Enum(_))
+                    || <String as ToSql>::accepts(ty);
+                check(ok, "string", ty)?;
+                v.to_sql(ty, out)
+            }
+            Self::Json(v) => {
+                check(<serde_json::Value as ToSql>::accepts(ty), "json", ty)?;
+                v.to_sql(ty, out)
+            }
+            Self::Bytes(v) => {
+                check(<Vec<u8> as ToSql>::accepts(ty), "bytes", ty)?;
+                v.to_sql(ty, out)
+            }
         }
     }
 
@@ -337,15 +370,71 @@ mod tests {
         }
     }
 
+    fn bind_array(
+        items: Vec<FilterValue>,
+        ty: &Type,
+    ) -> (
+        Result<IsNull, Box<dyn std::error::Error + Sync + Send>>,
+        bytes::BytesMut,
+    ) {
+        let param = filter_value_to_sql(&FilterValue::Array(items)).unwrap();
+        let mut buf = bytes::BytesMut::new();
+        let res = param.to_sql_checked(ty, &mut buf);
+        (res, buf)
+    }
+
     #[test]
     fn array_binds_as_int_array() {
-        let value = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::Null]);
-        let param = filter_value_to_sql(&value).unwrap();
-        let mut buf = bytes::BytesMut::new();
-        param.to_sql_checked(&Type::INT4_ARRAY, &mut buf).unwrap();
-        assert!(!buf.is_empty());
+        let items = vec![FilterValue::Int(1), FilterValue::Null];
+        let (res, buf) = bind_array(items.clone(), &Type::INT4_ARRAY);
+        res.unwrap();
+        // Header: ndim=1, has_null=1, elem oid INT4 (23); dim len 2, lbound 1;
+        // then elem 1 (len 4, value 1) and a NULL (len -1).
+        let mut expected = Vec::new();
+        for v in [1i32, 1, 23, 2, 1, 4, 1, -1] {
+            expected.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(&buf[..], &expected[..]);
         // Non-array target types are rejected, not panicked on.
-        assert!(param.to_sql_checked(&Type::INT4, &mut buf).is_err());
+        assert!(bind_array(items, &Type::INT4).0.is_err());
+    }
+
+    #[test]
+    fn array_wrong_element_kind_errors() {
+        let cases = [
+            (FilterValue::Bool(true), Type::TEXT_ARRAY),
+            (FilterValue::Float(1.5), Type::INT4_ARRAY),
+            (FilterValue::Bytes(vec![1]), Type::TEXT_ARRAY),
+            (
+                FilterValue::Json(serde_json::json!({"a": 1})),
+                Type::INT4_ARRAY,
+            ),
+            (FilterValue::String("x".into()), Type::INT4_ARRAY),
+            (FilterValue::Int(1), Type::TEXT_ARRAY),
+        ];
+        for (item, ty) in cases {
+            let (res, _) = bind_array(vec![item.clone()], &ty);
+            assert!(res.is_err(), "{item:?} into {ty:?} must error");
+        }
+    }
+
+    #[test]
+    fn array_matching_element_kinds_bind() {
+        let cases = [
+            (FilterValue::Bool(true), Type::BOOL_ARRAY),
+            (FilterValue::Float(1.5), Type::FLOAT8_ARRAY),
+            (FilterValue::Bytes(vec![1, 2]), Type::BYTEA_ARRAY),
+            (
+                FilterValue::Json(serde_json::json!({"a": 1})),
+                Type::JSONB_ARRAY,
+            ),
+            (FilterValue::String("x".into()), Type::TEXT_ARRAY),
+        ];
+        for (item, ty) in cases {
+            let (res, buf) = bind_array(vec![item.clone()], &ty);
+            res.unwrap_or_else(|e| panic!("{item:?} into {ty:?}: {e}"));
+            assert!(!buf.is_empty());
+        }
     }
 
     #[test]

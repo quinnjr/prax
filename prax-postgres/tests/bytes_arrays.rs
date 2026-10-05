@@ -189,3 +189,46 @@ async fn array_column_round_trips_and_mixed_kinds_error() {
         .await
         .ok();
 }
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn bytea_array_round_trips() {
+    if skip_unless_e2e().is_none() {
+        return;
+    }
+    let pool = pool().await;
+    let engine = PgEngine::new(pool.clone());
+    let table = unique_table("byteaarr");
+    engine
+        .execute_raw(
+            &format!("CREATE TABLE {table} (bs BYTEA[] NOT NULL)"),
+            vec![],
+        )
+        .await
+        .expect("create table");
+    engine
+        .execute_raw(
+            &format!("INSERT INTO {table} (bs) VALUES ($1)"),
+            vec![FilterValue::Array(vec![
+                FilterValue::Bytes(vec![0x00, 0xFF]),
+                FilterValue::Bytes(vec![0x9F]),
+            ])],
+        )
+        .await
+        .expect("insert bytea[]");
+    let row = pool
+        .get()
+        .await
+        .expect("conn")
+        .query_one(&format!("SELECT bs FROM {table}"), &[])
+        .await
+        .expect("select");
+    assert_eq!(
+        row.get::<_, Vec<Vec<u8>>>(0),
+        vec![vec![0x00, 0xFF], vec![0x9F]]
+    );
+    engine
+        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
+        .await
+        .ok();
+}
