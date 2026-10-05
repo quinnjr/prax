@@ -23,8 +23,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use prax_postgres::{
-    PgConfig, PgError, PgListener, PgListenerEvent, PgNotification, PgPool, PgPoolBuilder,
+    PgConfig, PgConnection, PgError, PgListener, PgListenerEvent, PgNotification, PgPool,
+    PgPoolBuilder,
 };
+use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
@@ -104,13 +106,16 @@ async fn backend_count(pool: &PgPool, app: &str) -> i64 {
 }
 
 /// A TCP proxy in front of Postgres that can fake two failures: a frozen
-/// connection stays open but forwards nothing (a half-open socket), and while
-/// refusing, new connections are closed at once (a server that is down).
+/// connection stays open and accepts the client's bytes but never answers
+/// (a peer that ACKs but is stuck), and while refusing, new connections are
+/// closed at once (a server that is down).
 struct TestProxy {
     port: u16,
     accepted: Arc<AtomicUsize>,
     refusing: Arc<AtomicBool>,
     freezers: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
+    /// Frozen connections the client has since closed.
+    hung_up: Arc<AtomicUsize>,
 }
 
 impl TestProxy {
@@ -121,10 +126,12 @@ impl TestProxy {
             accepted: Arc::default(),
             refusing: Arc::default(),
             freezers: Arc::default(),
+            hung_up: Arc::default(),
         };
         let accepted = Arc::clone(&proxy.accepted);
         let refusing = Arc::clone(&proxy.refusing);
         let freezers = Arc::clone(&proxy.freezers);
+        let hung_up = Arc::clone(&proxy.hung_up);
         tokio::spawn(async move {
             while let Ok((mut client, _)) = listener.accept().await {
                 accepted.fetch_add(1, Ordering::SeqCst);
@@ -136,13 +143,16 @@ impl TestProxy {
                 };
                 let (freeze_tx, freeze_rx) = oneshot::channel::<()>();
                 freezers.lock().unwrap().push(freeze_tx);
+                let hung_up = Arc::clone(&hung_up);
                 tokio::spawn(async move {
                     tokio::select! {
                         _ = tokio::io::copy_bidirectional(&mut client, &mut server) => {}
                         Ok(()) = freeze_rx => {
-                            // Keep both sockets open, silently, until the
-                            // test's runtime shuts down.
-                            std::future::pending::<()>().await;
+                            // Swallow whatever the client sends and never
+                            // answer, until the client hangs up.
+                            let mut sink = [0u8; 1024];
+                            while matches!(client.read(&mut sink).await, Ok(n) if n > 0) {}
+                            hung_up.fetch_add(1, Ordering::SeqCst);
                         }
                     }
                 });
@@ -174,6 +184,42 @@ impl TestProxy {
     fn accepted(&self) -> usize {
         self.accepted.load(Ordering::SeqCst)
     }
+
+    /// Frozen connections the client has closed.
+    fn hung_up(&self) -> usize {
+        self.hung_up.load(Ordering::SeqCst)
+    }
+}
+
+/// Config for a LATIN1-encoded database (created on first use and kept, like
+/// the other test databases), in which PostgreSQL rejects channel names it
+/// cannot encode, e.g. `LISTEN "日本"` fails with SQLSTATE 22P05.
+async fn latin1_config(url: &str, pool: &PgPool) -> PgConfig {
+    const DATABASE: &str = "prax_listener_latin1";
+    let conn = pool.get().await.expect("pool conn");
+    if !database_exists(&conn, DATABASE).await {
+        // A concurrent test run may win the race; existence is all we need.
+        let _ = conn
+            .batch_execute(&format!(
+                "CREATE DATABASE {DATABASE} ENCODING 'LATIN1' LC_COLLATE 'C' LC_CTYPE 'C' \
+                 TEMPLATE template0"
+            ))
+            .await;
+        assert!(database_exists(&conn, DATABASE).await, "create {DATABASE}");
+    }
+    let mut config = PgConfig::from_url(url).expect("parse POSTGRES_URL");
+    config.database = DATABASE.to_owned();
+    config
+}
+
+async fn database_exists(conn: &PgConnection, name: &str) -> bool {
+    conn.query_one(
+        "SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)",
+        &[&name],
+    )
+    .await
+    .expect("check database")
+    .get(0)
 }
 
 /// Receive the next event (bounded by [`DELIVERY_TIMEOUT`]) and require it to
@@ -628,4 +674,145 @@ async fn ping_detects_unresponsive_connection_and_reconnects() {
         .expect("notify");
     let n = next_notification(&mut listener).await;
     assert_eq!((n.channel, n.payload), (channel, "alive".to_owned()));
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn command_on_unresponsive_connection_times_out_and_reconnects() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let config = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+
+    let ping = Duration::from_secs(1);
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .ping_interval(ping)
+        .backoff(Duration::from_millis(50), Duration::from_secs(1))
+        .connect()
+        .await
+        .expect("connect listener through proxy");
+    let first = unique_channel("cmd");
+    listener.listen(&first).await.expect("listen");
+
+    // The first ping is only due one interval after connecting, so it is
+    // this LISTEN that meets the frozen connection.
+    proxy.freeze();
+    let stuck = unique_channel("stuck");
+    let err = tokio::time::timeout(ping * 3, listener.listen(&stuck))
+        .await
+        .expect("listen returns instead of hanging")
+        .expect_err("LISTEN on a frozen connection fails");
+    assert!(err.is_timeout(), "got {err:?}");
+
+    // The timeout counted as connection loss.
+    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("Reconnected within timeout")
+        .expect("recv ok");
+    assert_eq!(event, PgListenerEvent::Reconnected);
+
+    // The tracked channel was re-subscribed and commands work again.
+    listener
+        .listen(&stuck)
+        .await
+        .expect("listen after reconnect");
+    let conn = pool.get().await.expect("pool conn");
+    conn.notify(&first, "a").await.expect("notify first");
+    conn.notify(&stuck, "b").await.expect("notify stuck");
+    let a = next_notification(&mut listener).await;
+    let b = next_notification(&mut listener).await;
+    assert_eq!((a.channel, a.payload), (first, "a".to_owned()));
+    assert_eq!((b.channel, b.payload), (stuck, "b".to_owned()));
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn dropping_listener_mid_command_closes_its_connection() {
+    let Some(url) = e2e_url() else { return };
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let config = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
+        let proxy = TestProxy::start(config.host.clone(), config.port).await;
+        // Default 30 s ping interval: the command's own timeout cannot fire
+        // during this test.
+        let mut listener = PgListener::connect(&proxy.route(config))
+            .await
+            .expect("connect listener through proxy");
+        listener
+            .listen(&unique_channel("mid"))
+            .await
+            .expect("listen");
+
+        proxy.freeze();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                listener.listen(&unique_channel("never"))
+            )
+            .await
+            .is_err(),
+            "LISTEN is stuck on the frozen connection"
+        );
+        drop(listener);
+
+        // The supervisor must give up the in-flight query and close the
+        // socket, not wait for an answer that never comes.
+        while proxy.hung_up() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("connection closed within 5 s of dropping the listener");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn reconnect_drops_channels_the_server_rejects() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let latin1 = latin1_config(&url, &pool).await;
+    let latin1_pool = PgPoolBuilder::new()
+        .config(latin1.clone())
+        .max_connections(1)
+        .connection_timeout(Duration::from_secs(10))
+        .build()
+        .await
+        .expect("connect to the LATIN1 database");
+
+    let app = unique_channel("prax_listener");
+    let mut config = latin1;
+    config.application_name = Some(app.clone());
+    let mut listener = PgListener::builder(&config)
+        .backoff(Duration::from_secs(1), Duration::from_secs(1))
+        .connect()
+        .await
+        .expect("connect listener");
+    let good = unique_channel("good");
+    listener.listen(&good).await.expect("listen");
+
+    // Recorded mid-backoff, so the server only sees it on reconnect, where
+    // LATIN1 cannot encode it.
+    assert_eq!(terminate_backend(&pool, &app).await, 1);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let bad = format!("{}_日本", unique_channel("bad"));
+    listener
+        .listen(&bad)
+        .await
+        .expect("recorded while reconnecting");
+
+    // Without the per-channel fallback every attempt fails on `bad`.
+    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("Reconnected within timeout")
+        .expect("recv ok");
+    assert_eq!(event, PgListenerEvent::Reconnected);
+
+    latin1_pool
+        .get()
+        .await
+        .expect("pool conn")
+        .notify(&good, "kept")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!((n.channel, n.payload), (good, "kept".to_owned()));
 }
