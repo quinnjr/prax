@@ -86,6 +86,18 @@ pub trait SupportsScalarSubqueryInSelect: QueryEngine {}
 )]
 pub trait SupportsNestedWrites: QueryEngine {}
 
+/// Engine can lock rows on read (`SELECT ... FOR UPDATE` / `FOR SHARE`, or
+/// the MSSQL table-hint equivalent).
+///
+/// Implemented by the Postgres, MySQL, MSSQL and SQLx engines. This is a
+/// compile-time marker rather than a dialect check because some engines
+/// (DuckDB) borrow a dialect that can render locks they cannot honour.
+#[diagnostic::on_unimplemented(
+    message = "the engine `{Self}` does not support row locks (FOR UPDATE / FOR SHARE)",
+    note = "SQLite, DuckDB, MongoDB and CQL engines cannot lock rows."
+)]
+pub trait SupportsRowLocks: QueryEngine {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

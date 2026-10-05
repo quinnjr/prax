@@ -490,7 +490,7 @@ pub use smallvec;
 pub use crate::capabilities::{
     SupportsArrayOps, SupportsCaseInsensitiveMode, SupportsCorrelatedSubquery,
     SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath, SupportsNestedWrites,
-    SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 pub use crate::inputs::{
     // Containers.

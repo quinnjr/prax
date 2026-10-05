@@ -536,6 +536,12 @@ impl RowLockBuilder {
     }
 }
 
+impl From<RowLockBuilder> for RowLock {
+    fn from(builder: RowLockBuilder) -> Self {
+        builder.build()
+    }
+}
+
 // ============================================================================
 // TABLESAMPLE
 // ============================================================================

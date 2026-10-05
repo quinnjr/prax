@@ -26,6 +26,7 @@ mod delete;
 mod find_first;
 mod find_many;
 mod find_unique;
+pub(crate) mod lock;
 mod update;
 mod upsert;
 mod view;

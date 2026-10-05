@@ -1099,6 +1099,7 @@ impl QueryEngine for SqlxEngine {
 /// lets callers use [`FindManyOperation::with_scalar_projection`] and its
 /// siblings on `SqlxEngine` just like the individual SQL engine crates.
 impl prax_query::capabilities::SupportsScalarSubqueryInSelect for SqlxEngine {}
+impl prax_query::capabilities::SupportsRowLocks for SqlxEngine {}
 
 #[cfg(test)]
 mod tests {

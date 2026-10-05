@@ -2,7 +2,8 @@
 
 use std::marker::PhantomData;
 
-use crate::capabilities::SupportsScalarSubqueryInSelect;
+use crate::advanced::RowLock;
+use crate::capabilities::{SupportsRowLocks, SupportsScalarSubqueryInSelect};
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::projection::ScalarProjection;
@@ -33,6 +34,8 @@ pub struct FindUniqueOperation<E: QueryEngine, M: Model> {
     /// Extra scalar-subquery columns appended to the SELECT clause.
     /// Used by relation-aggregate virtual fields (`@count`, `@sum`, …).
     pub extra_projections: Vec<ScalarProjection>,
+    /// Row lock appended to the statement (`FOR UPDATE`, MSSQL hints, ...).
+    lock: Option<RowLock>,
     _model: PhantomData<M>,
 }
 
@@ -45,6 +48,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
             select: Select::All,
             includes: Vec::new(),
             extra_projections: Vec::new(),
+            lock: None,
             _model: PhantomData,
         }
     }
@@ -117,6 +121,37 @@ where
     }
 }
 
+impl<E, M> FindUniqueOperation<E, M>
+where
+    E: QueryEngine + SupportsRowLocks,
+    M: Model + crate::row::FromRow,
+{
+    /// Lock the selected rows (`SELECT ... FOR UPDATE` and friends).
+    ///
+    /// Locks are held until the surrounding transaction ends. Outside a
+    /// transaction they are released as soon as the statement finishes, so
+    /// they protect nothing; run locking queries inside
+    /// `PraxClient::transaction`. With `include`, only the root query is
+    /// locked; eagerly loaded relations are read without locks.
+    ///
+    /// Unsupported combinations (for example `SKIP LOCKED` with a shared
+    /// lock on MSSQL) and use together with `distinct` fail at `exec`.
+    pub fn lock(mut self, lock: impl Into<RowLock>) -> Self {
+        self.lock = Some(lock.into());
+        self
+    }
+
+    /// Shorthand for `.lock(RowLock::for_update())`.
+    pub fn for_update(self) -> Self {
+        self.lock(RowLock::for_update())
+    }
+
+    /// Shorthand for `.lock(RowLock::for_share())`.
+    pub fn for_share(self) -> Self {
+        self.lock(RowLock::for_share())
+    }
+}
+
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Build the SQL query.
     pub fn build_sql(
@@ -153,6 +188,11 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         // FROM clause
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
+        let lock_sql = super::lock::render(self.lock.as_ref(), dialect);
+        if let Some(hint) = &lock_sql.table_hint {
+            sql.push(' ');
+            sql.push_str(hint);
+        }
 
         // WHERE clause
         if !self.filter.is_none() {
@@ -164,6 +204,11 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         // LIMIT 1 for unique query
         sql.push_str(" LIMIT 1");
 
+        if let Some(suffix) = &lock_sql.suffix {
+            sql.push(' ');
+            sql.push_str(suffix);
+        }
+
         (sql, params)
     }
 
@@ -173,6 +218,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
+        super::lock::validate(self.lock.as_ref(), dialect, false)?;
         let (sql, params) = self.build_sql(dialect);
         let row = self.engine.query_one::<M>(&sql, params).await?;
         // Wrap the single row in a 1-element slice for the loader.
@@ -191,6 +237,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
+        super::lock::validate(self.lock.as_ref(), dialect, false)?;
         let (sql, params) = self.build_sql(dialect);
         match self.engine.query_optional::<M>(&sql, params).await? {
             None => Ok(None),
