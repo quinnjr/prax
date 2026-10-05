@@ -292,20 +292,28 @@ pub struct DateTimeNullableFieldUpdate {
     pub unset: Option<bool>,
 }
 
-/// Update operators for a non-nullable `Bytes` column (base64-encoded).
+/// Update operators for a non-nullable `Bytes` column.
+///
+/// The JSON form of `set` is a base64 string; the Rust form is raw bytes,
+/// which are bound as `FilterValue::Bytes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BytesFieldUpdate {
-    /// `SET column = value`
-    pub set: Option<String>,
+    /// `SET column = value` (base64 in JSON, raw bytes in Rust)
+    #[serde(default, with = "crate::inputs::base64_opt")]
+    pub set: Option<Vec<u8>>,
 }
 
 /// Update operators for a nullable `Bytes` column.
+///
+/// The JSON form of `set` is a base64 string; the Rust form is raw bytes,
+/// which are bound as `FilterValue::Bytes`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct BytesNullableFieldUpdate {
-    /// `SET column = value`
-    pub set: Option<String>,
+    /// `SET column = value` (base64 in JSON, raw bytes in Rust)
+    #[serde(default, with = "crate::inputs::base64_opt")]
+    pub set: Option<Vec<u8>>,
     /// `SET column = NULL`
     pub unset: Option<bool>,
 }

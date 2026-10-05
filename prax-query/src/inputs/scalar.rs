@@ -451,12 +451,9 @@ scalar_filter!(
 scalar_filter!(
     /// Filter for non-nullable `Bytes` (`Vec<u8>`) columns.
     ///
-    /// Encoded as a base64-of-bytes string in FilterValue::String. The
-    /// driver layer decodes back to bytes on the wire.
-    BytesFilter<Vec<u8>> => |v| {
-        use base64::Engine as _;
-        FilterValue::String(base64::engine::general_purpose::STANDARD.encode(&v))
-    },
+    /// Lowered as `FilterValue::Bytes`, which drivers bind as raw bytes
+    /// (e.g. `bytea`). The serde form is unchanged (a JSON array of numbers).
+    BytesFilter<Vec<u8>> => |v| { FilterValue::Bytes(v) },
     /// Filter for nullable `Bytes` columns.
     nullable BytesNullableFilter
 );

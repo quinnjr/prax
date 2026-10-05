@@ -17,6 +17,7 @@
 //! builder.
 
 pub mod args;
+pub(crate) mod base64_opt;
 pub mod relation;
 pub mod scalar;
 pub mod scalar_update;

@@ -9,7 +9,10 @@
 
 use prax_orm::Model;
 use prax_query::filter::Filter;
-use prax_query::inputs::{BoolFilter, IntNullableFilter, StringFilter, WhereInput};
+use prax_query::filter::FilterValue;
+use prax_query::inputs::{
+    BoolFilter, BytesFieldUpdate, IntNullableFilter, StringFilter, WhereInput, WriteOp,
+};
 
 #[derive(Model, Debug, Clone)]
 #[prax(table = "users")]
@@ -281,4 +284,18 @@ fn u8_fields_still_lower_to_int() {
     assert!(
         matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1), FilterValue::Int(2)])
     );
+}
+
+#[test]
+fn audit_event_update_payload_lowers_to_bytes() {
+    use prax_query::inputs::UpdateInput;
+    let ir = audit_event::AuditEventUpdateInput {
+        payload: Some(BytesFieldUpdate {
+            set: Some(vec![0, 159, 255]),
+        }),
+        ..Default::default()
+    }
+    .into_ir();
+    assert!(ir.iter().any(|(c, op)| c == "payload"
+        && matches!(op, WriteOp::Set(FilterValue::Bytes(b)) if b == &vec![0, 159, 255])));
 }
