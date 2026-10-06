@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> The 0.13.0 release itself is cut on `release/0.13.0` after the scalar-lists
+> work lands; no version bump is made here.
+
+### Breaking
+
+- **core**: `FilterValue` is `#[non_exhaustive]`; downstream matches need a
+  `_` arm.
+- **core**: `From<u8> for FilterValue` removed; use `i64::from(x)`.
+  `#[derive(Model)]` `u8` fields keep working (converted via `i64::from`).
+- **core**: `From<Vec<T>>` now yields `FilterValue::Array` (was `List`);
+  `Vec<u8>`/`&[u8]` yield `FilterValue::Bytes`. Use `FilterValue::list(..)`
+  for explicit expansion.
+- **core**: `BytesFilter`/`BytesFieldUpdate` now bind real bytes (fixes base64
+  text being stored in `bytea`). **Data written by 0.12.x through these inputs
+  contains base64 text and may need a one-off repair**
+  (`UPDATE t SET col = decode(convert_from(col, 'UTF8'), 'base64') WHERE …`).
+- **postgres**: `PoolConfig`, `PgConfig` are `#[non_exhaustive]`.
+- **sqlx**: `PgHelpers::listen` deprecated (see Deprecated).
+- **core**: `BytesFieldUpdate.set` / `BytesNullableFieldUpdate.set` are now
+  `Option<Vec<u8>>` (JSON is still base64). `BytesFilter` JSON is unchanged
+  (array of numbers).
+
+### Added
+
+- **postgres**: `PgListener` / `PgListenerBuilder` / `PgListenerOptions` /
+  `PgListenerEvent` (`Notification`, `Reconnected`, `Lagged { dropped }`) /
+  `PgNotification`. Reconnects with exponential backoff and jitter, TCP
+  keepalive plus a `SELECT 1` ping (bounded by `ping_interval`, max one day),
+  emits `Lagged` on buffer overflow, and wakes a blocked `recv()` on
+  `Reconnected`/`Lagged`. `listen`/`unlisten` during backoff are recorded and
+  applied on reconnect; `LISTEN`/`UNLISTEN` are bounded by `ping_interval`;
+  channels the server rejects on re-`LISTEN` (SQLSTATE class 22/42) are
+  dropped with a warning.
+- **postgres**: `PgConnection::notify` / `PgTransaction::notify` using
+  `pg_notify($1, $2)`, with client-side validation (channel at most 63 bytes
+  and no NUL; payload under 8000 bytes).
+- **core**: `FilterValue::Array`, `FilterValue::Bytes`, `FilterValue::list(..)`
+  and `FilterValue::to_json_value()`. Postgres binds `Array` as a typed array
+  parameter with per-element type checks (works with `= ANY($1)`); `prax-sqlx`
+  binds `Array` on Postgres too (empty or all-NULL arrays bind as `text[]` — a
+  documented limitation).
+- **query**: row locking via `.lock(RowLock)`, `.for_update()` and
+  `.for_share()` on `find_many`/`find_first`/`find_unique`, plus
+  `SqlDialect::row_lock_sql`. `.lock()` requires `E: SupportsRowLocks`
+  (implemented for Postgres, MySQL, MSSQL and sqlx engines). Unsupported
+  combinations error at exec time (MySQL: no `NoKeyUpdate`/`KeyShare`/`OF`;
+  MSSQL: no `Share`+`SkipLocked`/`NoKeyUpdate`/`KeyShare`/`OF`); lock plus
+  `distinct` is rejected; with `include` only the root query is locked;
+  outside a transaction the lock is released at statement end.
+- **postgres**: `PgRecycling { Fast (default), Verified, Clean }` via
+  `PoolConfig::recycling` / `PgPoolBuilder::recycling`; `Clean` preserves
+  prepared statements.
+- **core**: `impl FromColumn for u8` (decodes via the `i32` getter: `INT4` on
+  Postgres; `SMALLINT` unsupported).
+
+### Fixed
+
+- **postgres**: `Bytes` filter/update inputs stored base64 text in `bytea`
+  columns (0.12.x data corruption; see the repair SQL under Breaking).
+- **query**: `Bytes` `@unique` lookups (`WhereUniqueInput`) compared against
+  base64 text and never matched.
+- **postgres**: `PoolConfig::max_lifetime` was ignored; it is now enforced at
+  checkout via a `pre_recycle` hook (`Duration::ZERO` disables pooling).
+- **sqlx**: `PgHelpers::notify` built SQL by string escaping; it now uses
+  `pg_notify($1, $2)`.
+- **derive**: `#[derive(Model)]` handles `Option<core::primitive::u8>` fields.
+
+### Deprecated
+
+- **sqlx**: `PgHelpers::listen`; use `PgListener` from `prax-postgres`.
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed

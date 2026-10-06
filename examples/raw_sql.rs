@@ -232,6 +232,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ARRAY PARAMETERS
     // =========================================================================
     println!("--- Array Parameters ---");
+    // A `Vec<T>` binds as a single `FilterValue::Array` parameter, so it works
+    // with `= ANY($1)` on Postgres.
 
     let ids = vec![1, 2, 3, 4, 5];
     let sql = Sql::new("SELECT * FROM users WHERE id = ANY($1)").bind(ids);
