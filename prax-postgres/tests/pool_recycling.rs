@@ -8,16 +8,10 @@
 
 use std::time::Duration;
 
-use prax_postgres::{PgPool, PgPoolBuilder, PgRecycling};
+mod common;
 
-fn url() -> Option<String> {
-    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
-        return None;
-    }
-    Some(std::env::var("POSTGRES_URL").unwrap_or_else(|_| {
-        "postgres://prax:prax_test_password@localhost:5432/prax_test".to_string()
-    }))
-}
+use common::e2e_url as url;
+use prax_postgres::{PgPool, PgPoolBuilder, PgRecycling};
 
 /// Per-test, per-process advisory-lock key (fits the 32-bit `objid` half).
 fn lock_key(test: i64) -> i64 {
@@ -124,6 +118,73 @@ async fn unexpired_max_lifetime_keeps_connection() {
     tokio::time::sleep(Duration::from_millis(1500)).await;
     let pid2 = backend_pid(&pool).await;
     assert_eq!(pid1, pid2, "control: young connection is reused");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn clean_recycling_keeps_prepared_statements() {
+    let Some(url) = url() else { return };
+    let pool = pool(&url, PgRecycling::Clean, None).await;
+
+    let (pid1, before) = {
+        let c = pool.get().await.expect("conn");
+        let n: i32 = 7;
+        let row = c.query_one("SELECT $1::int4", &[&n]).await.expect("q1");
+        assert_eq!(row.get::<_, i32>(0), 7);
+        let pid = c
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("pid")
+            .get::<_, i32>(0);
+        let cnt = c
+            .query_one("SELECT count(*) FROM pg_prepared_statements", &[])
+            .await
+            .expect("count")
+            .get::<_, i64>(0);
+        (pid, cnt)
+    };
+    assert!(before > 0, "statement prepared on first checkout");
+
+    // Next checkout runs Clean on the same backend.
+    let c = pool.get().await.expect("recycled conn");
+    let pid2 = c
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .expect("pid")
+        .get::<_, i32>(0);
+    assert_eq!(pid1, pid2, "same backend reused");
+    let after = c
+        .query_one("SELECT count(*) FROM pg_prepared_statements", &[])
+        .await
+        .expect("count")
+        .get::<_, i64>(0);
+    assert!(
+        after > 0,
+        "Clean recycling must preserve prepared statements"
+    );
+    let n: i32 = 8;
+    let row = c.query_one("SELECT $1::int4", &[&n]).await.expect("q2");
+    assert_eq!(row.get::<_, i32>(0), 8);
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn verified_recycling_replaces_terminated_connection() {
+    let Some(url) = url() else { return };
+    let pool = pool(&url, PgRecycling::Verified, None).await;
+    let observer = pool_observer(&url).await;
+
+    let pid1 = backend_pid(&pool).await;
+    {
+        let o = observer.get().await.expect("observer conn");
+        o.query_one("SELECT pg_terminate_backend($1)", &[&pid1])
+            .await
+            .expect("terminate");
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let pid2 = backend_pid(&pool).await;
+    assert_ne!(pid1, pid2, "terminated connection must be replaced");
 }
 
 async fn pool_observer(url: &str) -> PgPool {

@@ -32,7 +32,7 @@ impl PgPool {
         let pg_config = config.to_pg_config();
 
         let mgr_config = ManagerConfig {
-            recycling_method: pool_config.recycling.into(),
+            recycling_method: pool_config.recycling.to_deadpool(),
         };
 
         // Select the TLS connector by ssl_mode (see `select_connector` for the
@@ -53,17 +53,26 @@ impl PgPool {
                 .wait_timeout(Some(timeout))
                 .create_timeout(Some(timeout));
         }
-        if let Some(timeout) = pool_config.idle_timeout {
+        // Bounds the recycle check (Verified/Clean round trip) at checkout.
+        // A recycle that times out discards the connection and a new one is
+        // created, so a hung connection cannot stall `get()` forever.
+        if let Some(timeout) = pool_config.recycle_timeout {
             builder = builder.recycle_timeout(Some(timeout));
         }
 
         // Enforce `max_lifetime`: deadpool runs `pre_recycle` hooks at
         // checkout, and a hook error discards the object and creates a new
         // one. Connections are therefore retired lazily, when an aged one
-        // is next checked out.
+        // is next checked out. Each connection's deadline is shortened by a
+        // stable per-connection jitter (up to ~10%) so a batch of
+        // connections created together does not expire together.
         if let Some(max_lifetime) = pool_config.max_lifetime {
             builder = builder.pre_recycle(Hook::sync_fn(move |_, metrics| {
-                if metrics.created.elapsed() > max_lifetime {
+                let age = metrics.created.elapsed();
+                let deadline =
+                    max_lifetime.saturating_sub(lifetime_jitter(max_lifetime, &metrics.created));
+                if age > deadline {
+                    debug!(age = ?age, "retiring pooled connection: max_lifetime");
                     Err(HookError::message("max_lifetime exceeded"))
                 } else {
                     Ok(())
@@ -291,6 +300,21 @@ impl PgPool {
     }
 }
 
+/// Stable per-connection offset in `[0, max_lifetime / 10)`, derived from the
+/// connection's creation instant so it is identical on every checkout.
+fn lifetime_jitter(max_lifetime: Duration, created: &std::time::Instant) -> Duration {
+    use std::hash::{Hash, Hasher};
+
+    let window = (max_lifetime / 10).as_nanos();
+    if window == 0 {
+        return Duration::ZERO;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    created.hash(&mut hasher);
+    let nanos = (hasher.finish() as u128) % window;
+    Duration::from_nanos(nanos as u64)
+}
+
 /// Pool status information.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -309,24 +333,41 @@ pub struct PoolStatus {
 ///
 /// None of these methods roll back an open transaction; `Clean` resets
 /// session state but runs inside whatever transaction is still open.
+///
+/// **Session state and multi-tenant / RLS use.** Under `Fast` and `Verified`,
+/// session state (`SET`, `SET ROLE`, `search_path`, custom GUCs such as a
+/// tenant id read by row-level-security policies, advisory locks, temp
+/// tables) persists across checkouts: the next caller of the same physical
+/// connection inherits it. If you rely on such state for isolation, use
+/// [`PgRecycling::Clean`] or scope it with `SET LOCAL` inside a transaction.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PgRecycling {
     /// Only discard connections that are already closed (default).
+    ///
+    /// Does **not** reset session state; see the type-level warning about
+    /// leaking `SET` / `SET ROLE` / tenant GUCs between checkouts. Prefer
+    /// [`PgRecycling::Clean`] for RLS or tenant-scoped workloads.
     #[default]
     Fast,
     /// Run a trivial query to verify the connection is alive.
+    ///
+    /// The check is bounded by [`PoolConfig::recycle_timeout`]. Session
+    /// state is **not** reset (see the type-level warning).
     Verified,
     /// `Verified` plus a session-state reset: closes cursors, resets
     /// session settings and authorization, `UNLISTEN *`, releases advisory
     /// locks, and drops temp tables and sequence state. Prepared
     /// statements are preserved, so Prax's statement cache stays valid.
+    ///
+    /// The check and reset are bounded by [`PoolConfig::recycle_timeout`].
+    /// Recommended for RLS / tenant users.
     Clean,
 }
 
-impl From<PgRecycling> for RecyclingMethod {
-    fn from(r: PgRecycling) -> Self {
-        match r {
+impl PgRecycling {
+    pub(crate) fn to_deadpool(self) -> RecyclingMethod {
+        match self {
             PgRecycling::Fast => RecyclingMethod::Fast,
             PgRecycling::Verified => RecyclingMethod::Verified,
             PgRecycling::Clean => RecyclingMethod::Clean,
@@ -348,21 +389,34 @@ pub struct PoolConfig {
     pub min_connections: usize,
     /// Maximum time to wait for a connection.
     pub connection_timeout: Option<Duration>,
-    /// Timeout for recycling a connection when it is returned to the pool.
+    /// Idle timeout (currently informational).
     ///
-    /// Mapped to deadpool's `recycle_timeout`, which bounds the recycle check
-    /// performed on connection return — it is **not** an idle-reaping timeout.
-    /// deadpool-postgres 0.14 exposes no true idle timeout, so connections are
-    /// not closed after a fixed idle period.
+    /// deadpool-postgres 0.14 exposes no true idle timeout, so this value is
+    /// **not** enforced: connections are not closed after an idle period. It
+    /// does not bound the recycle check; use
+    /// [`PoolConfig::recycle_timeout`] for that.
     pub idle_timeout: Option<Duration>,
+    /// Upper bound on the recycle check run when a connection is checked out
+    /// again (the `Verified` / `Clean` round trip).
+    ///
+    /// Mapped to deadpool's `recycle_timeout`. A recycle that exceeds it
+    /// discards the connection and a fresh one is created. `None` disables
+    /// the bound. Default: 5 seconds.
+    pub recycle_timeout: Option<Duration>,
     /// Maximum lifetime of a connection.
     ///
     /// Enforced at checkout: a connection older than this is discarded and
     /// replaced instead of being handed out. Connections are not reaped
-    /// while idle. `Duration::ZERO` replaces the connection on every
-    /// checkout, which effectively disables pooling.
+    /// while idle. Each connection's limit is shortened by a stable jitter of
+    /// up to ~10% so connections created together do not all expire at once.
+    /// `Duration::ZERO` replaces the connection on every checkout, which
+    /// effectively disables pooling.
     pub max_lifetime: Option<Duration>,
     /// Recycling method applied when a connection is checked out again.
+    ///
+    /// Defaults to [`PgRecycling::Fast`], which does not reset session state
+    /// (`SET`, `SET ROLE`, tenant GUCs persist across checkouts). Use
+    /// [`PgRecycling::Clean`] for RLS / tenant-scoped workloads.
     pub recycling: PgRecycling,
     /// Number of SQL strings tracked for prepared-statement cache metrics.
     ///
@@ -379,6 +433,7 @@ impl Default for PoolConfig {
             min_connections: 1,
             connection_timeout: Some(Duration::from_secs(30)),
             idle_timeout: Some(Duration::from_secs(600)), // 10 minutes
+            recycle_timeout: Some(Duration::from_secs(5)),
             max_lifetime: Some(Duration::from_secs(1800)), // 30 minutes
             recycling: PgRecycling::Fast,
             statement_cache_size: 100,
@@ -434,15 +489,22 @@ impl PgPoolBuilder {
         self
     }
 
-    /// Set the idle timeout.
+    /// Set the idle timeout (informational; see [`PoolConfig::idle_timeout`]).
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.pool_config.idle_timeout = Some(timeout);
         self
     }
 
-    /// Set the maximum connection lifetime.
-    pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
-        self.pool_config.max_lifetime = Some(lifetime);
+    /// Set the bound on the recycle check at checkout
+    /// (see [`PoolConfig::recycle_timeout`]). Pass `None` to disable.
+    pub fn recycle_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.recycle_timeout = timeout.into();
+        self
+    }
+
+    /// Set the maximum connection lifetime. Pass `None` to disable.
+    pub fn max_lifetime(mut self, lifetime: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.max_lifetime = lifetime.into();
         self
     }
 
@@ -492,17 +554,54 @@ mod tests {
     #[test]
     fn test_pg_recycling_maps_to_deadpool() {
         assert!(matches!(
-            RecyclingMethod::from(PgRecycling::Fast),
+            PgRecycling::Fast.to_deadpool(),
             RecyclingMethod::Fast
         ));
         assert!(matches!(
-            RecyclingMethod::from(PgRecycling::Verified),
+            PgRecycling::Verified.to_deadpool(),
             RecyclingMethod::Verified
         ));
         assert!(matches!(
-            RecyclingMethod::from(PgRecycling::Clean),
+            PgRecycling::Clean.to_deadpool(),
             RecyclingMethod::Clean
         ));
+    }
+
+    #[test]
+    fn test_recycle_timeout_default_and_plumbing() {
+        assert_eq!(
+            PoolConfig::default().recycle_timeout,
+            Some(Duration::from_secs(5))
+        );
+        let b = PgPoolBuilder::new().recycle_timeout(Duration::from_millis(250));
+        assert_eq!(
+            b.pool_config.recycle_timeout,
+            Some(Duration::from_millis(250))
+        );
+        let b = PgPoolBuilder::new().recycle_timeout(None);
+        assert_eq!(b.pool_config.recycle_timeout, None);
+    }
+
+    #[test]
+    fn test_max_lifetime_accepts_duration_and_none() {
+        let b = PgPoolBuilder::new().max_lifetime(Duration::from_secs(60));
+        assert_eq!(b.pool_config.max_lifetime, Some(Duration::from_secs(60)));
+        let b = PgPoolBuilder::new().max_lifetime(None);
+        assert_eq!(b.pool_config.max_lifetime, None);
+    }
+
+    #[test]
+    fn test_lifetime_jitter_bounds_and_stability() {
+        let max = Duration::from_secs(1800);
+        let created = std::time::Instant::now();
+        let j = lifetime_jitter(max, &created);
+        assert!(j < max / 10);
+        assert_eq!(j, lifetime_jitter(max, &created), "stable per connection");
+        assert_eq!(
+            lifetime_jitter(Duration::ZERO, &created),
+            Duration::ZERO,
+            "ZERO guarded"
+        );
     }
 
     #[test]
