@@ -356,6 +356,10 @@ impl Returning {
 // ============================================================================
 
 /// Row locking mode.
+///
+/// Build one with [`RowLock::for_update`] and friends; render it with
+/// [`SqlDialect::row_lock_sql`](crate::dialect::SqlDialect::row_lock_sql).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowLock {
     /// Lock strength.
@@ -367,6 +371,7 @@ pub struct RowLock {
 }
 
 /// Lock strength.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockStrength {
     /// FOR UPDATE - exclusive lock.
@@ -380,6 +385,7 @@ pub enum LockStrength {
 }
 
 /// Lock wait behavior.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockWait {
     /// Wait for lock (default).
@@ -412,6 +418,12 @@ impl RowLock {
     }
 
     /// Generate PostgreSQL FOR clause.
+    ///
+    /// `OF` table names are interpolated unquoted.
+    #[deprecated(
+        since = "0.13.0",
+        note = "use SqlDialect::row_lock_sql, which quotes identifiers and rejects unsupported combinations"
+    )]
     pub fn to_postgres_sql(&self) -> String {
         let strength = match self.strength {
             LockStrength::Update => "FOR UPDATE",
@@ -436,6 +448,14 @@ impl RowLock {
     }
 
     /// Generate MySQL FOR clause.
+    ///
+    /// `OF` table names are interpolated unquoted, and strengths MySQL lacks
+    /// are silently degraded (`NoKeyUpdate` becomes `FOR UPDATE`, `KeyShare`
+    /// becomes `FOR SHARE`).
+    #[deprecated(
+        since = "0.13.0",
+        note = "use SqlDialect::row_lock_sql, which quotes identifiers and rejects unsupported combinations"
+    )]
     pub fn to_mysql_sql(&self) -> String {
         let strength = match self.strength {
             LockStrength::Update | LockStrength::NoKeyUpdate => "FOR UPDATE",
@@ -458,6 +478,14 @@ impl RowLock {
     }
 
     /// Generate MSSQL table hint.
+    ///
+    /// Ignores `OF` tables and silently maps strengths SQL Server lacks onto
+    /// the nearest hint (`NoKeyUpdate` becomes `UPDLOCK`, `KeyShare`
+    /// becomes `HOLDLOCK`).
+    #[deprecated(
+        since = "0.13.0",
+        note = "use SqlDialect::row_lock_sql, which quotes identifiers and rejects unsupported combinations"
+    )]
     pub fn to_mssql_hint(&self) -> String {
         let hint = match self.strength {
             LockStrength::Update | LockStrength::NoKeyUpdate => "UPDLOCK, ROWLOCK",
@@ -474,6 +502,11 @@ impl RowLock {
     }
 
     /// Generate SQL for database type.
+    #[deprecated(
+        since = "0.13.0",
+        note = "use SqlDialect::row_lock_sql, which quotes identifiers and rejects unsupported combinations"
+    )]
+    #[allow(deprecated)]
     pub fn to_sql(&self, db_type: DatabaseType) -> QueryResult<String> {
         match db_type {
             DatabaseType::PostgreSQL => Ok(self.to_postgres_sql()),
@@ -1036,6 +1069,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_for_update() {
         let lock = RowLock::for_update().nowait().build();
         let sql = lock.to_postgres_sql();
@@ -1045,6 +1079,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_for_share_skip_locked() {
         let lock = RowLock::for_share().skip_locked().build();
         let sql = lock.to_postgres_sql();
@@ -1054,6 +1089,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_row_lock_mssql() {
         let lock = RowLock::for_update().nowait().build();
         let sql = lock.to_mssql_hint();
