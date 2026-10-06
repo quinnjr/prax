@@ -325,7 +325,7 @@ impl SqliteRawEngine {
 
         let json = result
             .into_iter()
-            .map(|(k, v)| (k, filter_value_to_json(&v)))
+            .map(|(k, v)| (k, v.to_json_value()))
             .collect::<serde_json::Map<_, _>>();
 
         Ok(SqliteJsonRow::new(JsonValue::Object(json)))
@@ -640,29 +640,9 @@ impl SqliteRawEngine {
     }
 }
 
-/// Convert a FilterValue to JSON.
-fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    value.to_json_value()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn filter_value_to_json_encodes_bytes_and_array() {
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bytes(vec![0, 255])),
-            serde_json::json!("AP8=")
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Array(vec![
-                FilterValue::Int(1),
-                FilterValue::String("a".into())
-            ])),
-            serde_json::json!([1, "a"])
-        );
-    }
 
     #[test]
     fn test_quote_ident_simple() {
@@ -676,23 +656,6 @@ mod tests {
         assert_eq!(Sqlite.quote_ident("we\"ird"), "\"we\"\"ird\"");
         assert_eq!(Sqlite.quote_ident("\"quoted\""), "\"\"\"quoted\"\"\"");
         assert_eq!(Sqlite.quote_ident("a\"b\"c"), "\"a\"\"b\"\"c\"");
-    }
-
-    #[test]
-    fn test_filter_value_to_json() {
-        assert_eq!(filter_value_to_json(&FilterValue::Null), JsonValue::Null);
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bool(true)),
-            JsonValue::Bool(true)
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Int(42)),
-            JsonValue::Number(42.into())
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::String("test".to_string())),
-            JsonValue::String("test".to_string())
-        );
     }
 
     #[test]

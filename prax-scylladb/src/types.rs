@@ -9,6 +9,7 @@ use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::error::{ScyllaError, ScyllaResult};
+use prax_query::base64::{Engine as _, engine::general_purpose::STANDARD};
 use prax_query::filter::FilterValue;
 
 /// A wrapper type for CQL values that can be used in queries.
@@ -360,7 +361,7 @@ impl From<ScyllaValue> for JsonValue {
             }
             ScyllaValue::Decimal(v) => JsonValue::String(v.to_string()),
             ScyllaValue::Text(v) => JsonValue::String(v),
-            ScyllaValue::Blob(v) => JsonValue::String(base64_encode(&v)),
+            ScyllaValue::Blob(v) => JsonValue::String(STANDARD.encode(&v)),
             ScyllaValue::Uuid(v) | ScyllaValue::TimeUuid(v) => JsonValue::String(v.to_string()),
             ScyllaValue::Date(v) => JsonValue::String(v.to_string()),
             ScyllaValue::Time(v) => JsonValue::String(v.to_string()),
@@ -391,29 +392,6 @@ impl From<ScyllaValue> for JsonValue {
         }
     }
 }
-
-/// Simple base64 encoding for blob values.
-fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity(data.len() * 4 / 3 + 4);
-    for chunk in data.chunks(3) {
-        let mut n = 0u32;
-        for (i, &byte) in chunk.iter().enumerate() {
-            n |= u32::from(byte) << (16 - 8 * i);
-        }
-        for i in 0..=chunk.len() {
-            let idx = ((n >> (18 - 6 * i)) & 0x3f) as usize;
-            let c = BASE64_CHARS.as_bytes()[idx] as char;
-            result.push(c);
-        }
-    }
-    let padding = (3 - data.len() % 3) % 3;
-    for _ in 0..padding {
-        result.push('=');
-    }
-    result
-}
-
-const BASE64_CHARS: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// Convenience trait for converting to CQL parameters.
 pub trait ToCqlParams {

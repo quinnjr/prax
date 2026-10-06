@@ -59,6 +59,19 @@ impl ToSql for PgInt {
 #[derive(Debug)]
 struct PgString(String);
 
+impl PgString {
+    /// Whether a `PgString` can bind to `ty`. Must match the arms of
+    /// `PgString::to_sql` below: the specially-parsed types, user-defined
+    /// enums, and everything `String` itself accepts.
+    fn binds_to(ty: &Type) -> bool {
+        matches!(
+            *ty,
+            Type::UUID | Type::TIMESTAMPTZ | Type::TIMESTAMP | Type::DATE | Type::TIME
+        ) || matches!(ty.kind(), Kind::Enum(_))
+            || <String as ToSql>::accepts(ty)
+    }
+}
+
 impl ToSql for PgString {
     fn to_sql(
         &self,
@@ -199,9 +212,14 @@ impl PgElem {
             FilterValue::String(s) => Self::String(PgString(s.clone())),
             FilterValue::Json(j) => Self::Json(j.clone()),
             FilterValue::Bytes(b) => Self::Bytes(b.clone()),
-            _ => {
+            FilterValue::List(_) | FilterValue::Array(_) => {
                 return Err(PgError::type_conversion(
                     "nested arrays are not supported in FilterValue::Array",
+                ));
+            }
+            _ => {
+                return Err(PgError::type_conversion(
+                    "unsupported FilterValue variant in FilterValue::Array",
                 ));
             }
         })
@@ -239,12 +257,7 @@ impl ToSql for PgElem {
                 v.to_sql(ty, out)
             }
             Self::String(v) => {
-                let ok = matches!(
-                    *ty,
-                    Type::UUID | Type::TIMESTAMPTZ | Type::TIMESTAMP | Type::DATE | Type::TIME
-                ) || matches!(ty.kind(), Kind::Enum(_))
-                    || <String as ToSql>::accepts(ty);
-                check(ok, "string", ty)?;
+                check(PgString::binds_to(ty), "string", ty)?;
                 v.to_sql(ty, out)
             }
             Self::Json(v) => {
@@ -279,7 +292,7 @@ pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync
             // (prax-query/src/filter.rs), so this arm only fires for
             // hand-built raw queries via `Sql::bind`.
             Err(PgError::type_conversion(
-                "FilterValue::List expands to placeholders; bind FilterValue::Array for an array parameter.",
+                "FilterValue::List cannot be bound as one parameter; use Filter::In for IN (...) or FilterValue::Array with = ANY($1)",
             ))
         }
         FilterValue::Bytes(b) => Ok(Box::new(b.clone())),
@@ -418,23 +431,122 @@ mod tests {
         }
     }
 
+    /// Bind a one-element array and decode it back with `FromSql`.
+    fn assert_roundtrip<T>(item: FilterValue, ty: &Type, expected: T)
+    where
+        T: for<'a> tokio_postgres::types::FromSql<'a> + PartialEq + std::fmt::Debug,
+    {
+        let (res, buf) = bind_array(vec![item.clone()], ty);
+        res.unwrap_or_else(|e| panic!("{item:?} into {ty:?}: {e}"));
+        let decoded = <Vec<T> as tokio_postgres::types::FromSql>::from_sql(ty, &buf)
+            .unwrap_or_else(|e| panic!("decoding {item:?} as {ty:?}: {e}"));
+        assert_eq!(decoded, vec![expected], "{item:?} into {ty:?}");
+    }
+
     #[test]
     fn array_matching_element_kinds_bind() {
-        let cases = [
-            (FilterValue::Bool(true), Type::BOOL_ARRAY),
-            (FilterValue::Float(1.5), Type::FLOAT8_ARRAY),
-            (FilterValue::Bytes(vec![1, 2]), Type::BYTEA_ARRAY),
-            (
-                FilterValue::Json(serde_json::json!({"a": 1})),
-                Type::JSONB_ARRAY,
-            ),
-            (FilterValue::String("x".into()), Type::TEXT_ARRAY),
-        ];
-        for (item, ty) in cases {
-            let (res, buf) = bind_array(vec![item.clone()], &ty);
-            res.unwrap_or_else(|e| panic!("{item:?} into {ty:?}: {e}"));
-            assert!(!buf.is_empty());
+        assert_roundtrip(FilterValue::Bool(true), &Type::BOOL_ARRAY, true);
+        assert_roundtrip(FilterValue::Float(1.5), &Type::FLOAT8_ARRAY, 1.5f64);
+        assert_roundtrip(
+            FilterValue::Bytes(vec![1, 2]),
+            &Type::BYTEA_ARRAY,
+            vec![1u8, 2],
+        );
+        assert_roundtrip(
+            FilterValue::Json(serde_json::json!({"a": 1})),
+            &Type::JSONB_ARRAY,
+            serde_json::json!({"a": 1}),
+        );
+        assert_roundtrip(
+            FilterValue::String("x".into()),
+            &Type::TEXT_ARRAY,
+            "x".to_string(),
+        );
+        assert_roundtrip(FilterValue::Int(7), &Type::INT8_ARRAY, 7i64);
+    }
+
+    #[test]
+    fn string_array_elements_adapt_to_element_type() {
+        let uuid = "67e55044-10b1-426f-9247-bb680e5fe0c8";
+        assert_roundtrip(
+            FilterValue::String(uuid.into()),
+            &Type::UUID_ARRAY,
+            ::uuid::Uuid::from_str(uuid).unwrap(),
+        );
+        assert_roundtrip(
+            FilterValue::String("2024-01-02T03:04:05Z".into()),
+            &Type::TIMESTAMPTZ_ARRAY,
+            ::chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
+                .unwrap()
+                .with_timezone(&::chrono::Utc),
+        );
+        assert_roundtrip(
+            FilterValue::String("2024-01-02T03:04:05.5".into()),
+            &Type::TIMESTAMP_ARRAY,
+            ::chrono::NaiveDateTime::parse_from_str(
+                "2024-01-02T03:04:05.5",
+                "%Y-%m-%dT%H:%M:%S%.f",
+            )
+            .unwrap(),
+        );
+        assert_roundtrip(
+            FilterValue::String("2024-01-02".into()),
+            &Type::DATE_ARRAY,
+            ::chrono::NaiveDate::from_ymd_opt(2024, 1, 2).unwrap(),
+        );
+        assert_roundtrip(
+            FilterValue::String("03:04:05".into()),
+            &Type::TIME_ARRAY,
+            ::chrono::NaiveTime::from_hms_opt(3, 4, 5).unwrap(),
+        );
+    }
+
+    #[test]
+    fn enum_array_binds_string_elements_verbatim() {
+        let mood = Type::new(
+            "mood".into(),
+            990_001,
+            Kind::Enum(vec!["happy".into(), "sad".into()]),
+            "public".into(),
+        );
+        let mood_array = Type::new("_mood".into(), 990_002, Kind::Array(mood), "public".into());
+        let (res, buf) = bind_array(vec![FilterValue::String("happy".into())], &mood_array);
+        res.unwrap();
+        // ndim=1, has_null=0, elem oid, dim len 1, lbound 1, elem len 5, body.
+        let mut expected = Vec::new();
+        for v in [1i32, 0, 990_001, 1, 1, 5] {
+            expected.extend_from_slice(&v.to_be_bytes());
         }
+        expected.extend_from_slice(b"happy");
+        assert_eq!(&buf[..], &expected[..]);
+    }
+
+    #[test]
+    fn string_array_invalid_values_error() {
+        let cases = [
+            ("not-a-uuid", Type::UUID_ARRAY),
+            ("2024-13-45", Type::DATE_ARRAY),
+            ("nope", Type::DATE_ARRAY),
+            ("25:61:61", Type::TIME_ARRAY),
+            ("2024-01-02", Type::TIMESTAMPTZ_ARRAY),
+            ("garbage", Type::TIMESTAMP_ARRAY),
+        ];
+        for (s, ty) in cases {
+            let (res, _) = bind_array(vec![FilterValue::String(s.into())], &ty);
+            assert!(res.is_err(), "{s:?} into {ty:?} must error");
+        }
+    }
+
+    #[test]
+    fn list_bind_error_points_to_alternatives() {
+        let err = filter_value_to_sql(&FilterValue::List(vec![]))
+            .err()
+            .unwrap();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Filter::In") && msg.contains("ANY($1)"),
+            "{msg}"
+        );
     }
 
     #[test]

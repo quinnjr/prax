@@ -1,10 +1,43 @@
 //! PostgreSQL-specific functionality for SQLx.
 
 use crate::config::DatabaseBackend;
-use crate::error::SqlxResult;
+use crate::error::{SqlxError, SqlxResult};
 use crate::types::quote_identifier;
 use sqlx::Row;
 use sqlx::postgres::{PgPool, PgRow};
+
+/// Longest channel name PostgreSQL keeps (`NAMEDATALEN` - 1).
+const MAX_CHANNEL_LEN: usize = 63;
+
+/// A notification payload must be strictly shorter than this many bytes.
+const PAYLOAD_LIMIT: usize = 8000;
+
+/// Client-side checks for `pg_notify` arguments.
+fn validate_notify(channel: &str, payload: &str) -> SqlxResult<()> {
+    if channel.is_empty() {
+        return Err(SqlxError::query(
+            "notification channel name must not be empty",
+        ));
+    }
+    if channel.len() > MAX_CHANNEL_LEN {
+        return Err(SqlxError::query(format!(
+            "notification channel name is {} bytes; PostgreSQL allows at most {MAX_CHANNEL_LEN}",
+            channel.len()
+        )));
+    }
+    if channel.contains('\0') {
+        return Err(SqlxError::query(
+            "notification channel name must not contain NUL",
+        ));
+    }
+    if payload.len() >= PAYLOAD_LIMIT {
+        return Err(SqlxError::query(format!(
+            "notification payload is {} bytes; PostgreSQL requires fewer than {PAYLOAD_LIMIT}",
+            payload.len()
+        )));
+    }
+    Ok(())
+}
 
 /// PostgreSQL-specific query helpers.
 pub struct PgHelpers;
@@ -104,27 +137,18 @@ impl PgHelpers {
         Ok(version)
     }
 
-    /// Execute LISTEN for notifications.
-    ///
-    /// The channel is a PostgreSQL identifier and is quoted via
-    /// `quote_identifier`; pass trusted channel names only.
-    #[deprecated(
-        since = "0.13.0",
-        note = "LISTEN on a pooled connection never receives notifications; use sqlx::postgres::PgListener"
-    )]
-    pub async fn listen(pool: &PgPool, channel: &str) -> SqlxResult<()> {
-        let sql = format!(
-            "LISTEN {}",
-            quote_identifier(DatabaseBackend::Postgres, channel)
-        );
-        sqlx::query(&sql).execute(pool).await?;
-        Ok(())
-    }
-
     /// Send a notification via `SELECT pg_notify($1, $2)`.
     ///
-    /// Both the channel and the payload are bound as parameters.
+    /// Both the channel and the payload are bound as parameters. The channel
+    /// name must be non-empty, at most 63 bytes and free of NUL, and the
+    /// payload shorter than 8000 bytes; both are checked client-side before
+    /// anything is sent, so the error names the offending value instead of
+    /// surfacing as a server error (or silent truncation of the name).
+    ///
+    /// To receive notifications use `sqlx::postgres::PgListener`; `LISTEN`
+    /// on a pooled connection never delivers them.
     pub async fn notify(pool: &PgPool, channel: &str, payload: &str) -> SqlxResult<()> {
+        validate_notify(channel, payload)?;
         sqlx::query("SELECT pg_notify($1, $2)")
             .bind(channel)
             .bind(payload)
@@ -170,6 +194,28 @@ impl AdvisoryLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_notify_accepts_boundaries() {
+        assert!(validate_notify("a", "").is_ok());
+        assert!(validate_notify(&"a".repeat(63), &"p".repeat(7999)).is_ok());
+        // Case and quoting are preserved, not rejected.
+        assert!(validate_notify("Mixed\"Case", "it's").is_ok());
+    }
+
+    #[test]
+    fn validate_notify_rejects_bad_channel_and_payload() {
+        for (channel, payload, needle) in [
+            ("", "x", "empty"),
+            ("a\0b", "x", "NUL"),
+            (&"a".repeat(64), "x", "64 bytes"),
+            ("ok", &"p".repeat(8000), "8000"),
+        ] {
+            let err = validate_notify(channel, payload).expect_err(needle);
+            assert!(matches!(err, SqlxError::Query(_)), "{err}");
+            assert!(err.to_string().contains(needle), "{err}");
+        }
+    }
 
     #[test]
     fn test_array_literal() {
