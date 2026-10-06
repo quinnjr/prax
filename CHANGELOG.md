@@ -155,9 +155,11 @@ Safety:
   `PgNotification::new`). Reconnects with exponential backoff and jitter. The
   backoff only starts over once a re-established connection has stayed up
   for a `ping_interval`. Each connection attempt, TLS and startup handshake
-  included, is bounded by the larger of `PgConfig::connect_timeout` and
-  `ping_interval`. Liveness uses TCP keepalive (`keepalive_idle` at least
-  1 s) plus a `SELECT 1` ping (bounded by `ping_interval`, max one day).
+  included, is bounded by `PgConfig::connect_timeout` plus `ping_interval`
+  (the driver applies `connect_timeout` to each resolved address, so one
+  that times out leaves time for the next). Liveness uses TCP keepalive
+  (`keepalive_idle` at least 1 s) plus a `SELECT 1` ping (bounded by
+  `ping_interval`, max one day).
   Emits `Lagged` on buffer overflow and wakes a blocked `recv()` on
   `Reconnected`/`Lagged`. `listen`/`unlisten` during backoff are recorded
   and applied on reconnect; `LISTEN`/`UNLISTEN` are bounded by

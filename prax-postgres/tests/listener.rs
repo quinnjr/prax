@@ -939,8 +939,8 @@ async fn connect_fails_when_the_server_never_answers_the_handshake() {
     proxy.silence_new();
 
     // The TCP connect succeeds at once, so `connect_timeout` alone never
-    // fires; the handshake is bounded by max(connect_timeout, ping_interval)
-    // = 1 s here.
+    // fires; the handshake is bounded by connect_timeout + ping_interval
+    // = 1.5 s here.
     let started = tokio::time::Instant::now();
     let result = tokio::time::timeout(
         Duration::from_secs(5),
@@ -955,10 +955,11 @@ async fn connect_fails_when_the_server_never_answers_the_handshake() {
         matches!(&err, PgError::Connection(m) if m.contains("handshake")),
         "got {err:?}"
     );
-    // Bounded by connect_timeout (1 s), not the shorter ping_interval.
+    // Bounded by connect_timeout + ping_interval (1.5 s), leaving room to
+    // try a second resolved address after one that timed out.
     let elapsed = started.elapsed();
     assert!(
-        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(3),
+        elapsed >= Duration::from_millis(1400) && elapsed < Duration::from_secs(4),
         "failed after {elapsed:?}"
     );
     assert_eq!(proxy.accepted(), 1, "the attempt reached the server");
@@ -986,17 +987,18 @@ async fn reconnect_keeps_retrying_while_the_server_never_answers() {
     let before = proxy.accepted();
     assert_eq!(terminate_backend(&pool, &app).await, 1);
 
-    // Each attempt gives up after the handshake bound (1 s) and the next
-    // one follows: attempts keep coming instead of stalling on the first.
+    // Each attempt gives up after the handshake bound (1 s + 1 s) and the
+    // next one follows: attempts keep coming instead of stalling on the
+    // first.
     assert!(
-        wait_for_accepted(&proxy, before + 3, Duration::from_secs(10)).await,
+        wait_for_accepted(&proxy, before + 3, Duration::from_secs(15)).await,
         "only {} reconnect attempts",
         proxy.accepted() - before
     );
 
     // A command waits for at most the attempt in flight, then is recorded.
     let late = unique_channel("silent_late");
-    tokio::time::timeout(Duration::from_secs(3), listener.listen(&late))
+    tokio::time::timeout(Duration::from_secs(4), listener.listen(&late))
         .await
         .expect("listen returns while the server is silent")
         .expect("listen while reconnecting");
@@ -1310,7 +1312,8 @@ async fn dropping_listener_mid_reconnect_attempt_stops_at_once() {
     let Some(url) = e2e_url() else { return };
     let pool = pool(&url).await;
     let (mut config, app) = tagged_config(&url);
-    // The handshake bound (30 s) cannot end the stuck attempt in this test.
+    // The handshake bound (30 s + 30 s) cannot end the stuck attempt in
+    // this test.
     config.connect_timeout = Duration::from_secs(30);
     let proxy = TestProxy::start(config.host.clone(), config.port).await;
     let mut listener = PgListener::builder(&proxy.route(config))

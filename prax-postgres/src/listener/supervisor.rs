@@ -349,7 +349,7 @@ impl Supervisor {
     }
 
     /// Open a connection and spawn its driver task, bounded by
-    /// `handshake_timeout` (the larger of `PgConfig::connect_timeout` and
+    /// `handshake_timeout` (`PgConfig::connect_timeout` plus
     /// `ping_interval`).
     ///
     /// `tokio_postgres`'s own `connect_timeout` only covers opening the

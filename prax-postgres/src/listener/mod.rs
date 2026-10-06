@@ -62,7 +62,7 @@
 //!   [`PgListenerEvent::Reconnected`], or (with [`reconnect`] disabled)
 //!   records the error and stops. It also stops once reconnecting gives up
 //!   (see [`max_reconnect_attempts`]). Every connection attempt, handshake
-//!   included, is bounded by the larger of `PgConfig::connect_timeout` and
+//!   included, is bounded by `PgConfig::connect_timeout` plus
 //!   [`ping_interval`]; one that runs out counts as a failed attempt.
 //! - Each new connection runs `SET idle_session_timeout = 0` (bounded by
 //!   [`ping_interval`]; skipped before PostgreSQL 14), so a server default
@@ -110,6 +110,14 @@ const MIN_PING_INTERVAL: Duration = Duration::from_millis(100);
 /// overflow) safe.
 const MAX_PING_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Bound on one whole connection attempt (TCP connect, TLS, startup
+/// handshake). tokio-postgres applies `connect_timeout` to each address the
+/// host resolves to, so the bound adds `ping_interval` to it: an address that
+/// times out still leaves time to try the next one and finish the handshake.
+fn handshake_bound(connect_timeout: Duration, ping_interval: Duration) -> Duration {
+    connect_timeout.saturating_add(ping_interval)
+}
+
 /// Tuning for a [`PgListener`]; see [`PgListener::builder`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
@@ -139,9 +147,11 @@ pub struct PgListenerOptions {
     /// applies to `LISTEN` / `UNLISTEN` commands: one not answered in time
     /// fails with a timeout error and the connection is treated as lost.
     /// Each connection attempt (TCP connect, TLS and the startup handshake)
-    /// is bounded by the larger of this and
-    /// [`PgConfig::connect_timeout`]. Must be at least 100 ms and at most
-    /// one day. Default: 30 s.
+    /// is bounded by [`PgConfig::connect_timeout`] plus this (the driver
+    /// applies `connect_timeout` to each address the host resolves to, so
+    /// an address that times out leaves this long for the next one and the
+    /// handshake). Must be at least 100 ms and at most one day.
+    /// Default: 30 s.
     pub ping_interval: Duration,
     /// Capacity of the notification queue. When it is full, further
     /// notifications are dropped and reported as
@@ -356,7 +366,7 @@ impl PgListenerBuilder {
     /// Fails if the options are invalid, the TLS configuration is unusable
     /// (see the pool's `ssl_mode` rules), or the connection cannot be
     /// established. The attempt, including the TLS and startup handshake,
-    /// is bounded by the larger of [`PgConfig::connect_timeout`] and
+    /// is bounded by [`PgConfig::connect_timeout`] plus
     /// [`PgListenerOptions::ping_interval`]; past that it fails with a
     /// connection error.
     pub async fn connect(self) -> PgResult<PgListener> {
@@ -374,7 +384,7 @@ impl PgListenerBuilder {
         let supervisor = Supervisor::new(
             pg_config,
             connector,
-            config.connect_timeout.max(options.ping_interval),
+            handshake_bound(config.connect_timeout, options.ping_interval),
             options,
             events_tx,
             Arc::clone(&shared),
@@ -705,6 +715,17 @@ mod tests {
         assert!(!debug.contains("hunter2-secret"), "{debug}");
         assert!(!debug.contains("db.internal"), "{debug}");
         assert!(debug.contains("ping_interval"), "{debug}");
+    }
+
+    #[test]
+    fn handshake_bound_leaves_room_after_a_timed_out_address() {
+        // tokio-postgres applies `connect_timeout` per resolved address: an
+        // address that times out must still leave time for the next one.
+        let connect = Duration::from_secs(5);
+        let ping = Duration::from_secs(30);
+        assert_eq!(handshake_bound(connect, ping), connect + ping);
+        assert!(handshake_bound(ping, connect) > ping.max(connect));
+        assert_eq!(handshake_bound(Duration::MAX, ping), Duration::MAX);
     }
 
     #[test]
