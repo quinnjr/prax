@@ -927,10 +927,10 @@ fn is_vec_type(ty: &Type) -> bool {
 /// than a defensive recursive unwrap.
 fn extract_inner_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first()
+        if let Some(segment) = type_path.path.segments.last()
             && segment.ident == "Option"
         {
-            // Unwrap Option<T> and recurse on the inner type.
+            // Unwrap Option<T> (also `std::option::Option<T>`) and recurse.
             if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
                 && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
             {
@@ -959,21 +959,7 @@ enum TypeCategory {
 /// Option<T> to classify the inner type. Returns the category that drives
 /// conditional emission of comparison, string, and IN operators.
 fn classify_field_type(ty: &Type) -> TypeCategory {
-    // Unwrap Option<T> to get the inner type.
-    let type_name = if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first()
-            && segment.ident == "Option"
-            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-        {
-            // Recurse to classify the inner type.
-            return classify_field_type(inner);
-        }
-        // Not Option — extract the last segment as the type name.
-        type_path.path.segments.last().map(|s| s.ident.to_string())
-    } else {
-        None
-    };
+    let type_name = extract_inner_type_name(ty);
 
     match type_name.as_deref() {
         Some(
@@ -987,27 +973,13 @@ fn classify_field_type(ty: &Type) -> TypeCategory {
     }
 }
 
-/// True when `ty` is `u8` or `Option<u8>`.
+/// True when `ty` is `u8` or `Option<u8>` (including path-qualified forms such
+/// as `core::primitive::u8` and `std::option::Option<u8>`).
 ///
 /// `FilterValue` has no `From<u8>` (so `Vec<u8>` can convert to `Bytes`),
-/// so `u8` fields must lower through `i64::from` instead of `.into()`.
+/// so `u8` fields must lower through `ToFilterValue` instead of `.into()`.
 fn is_u8_type(ty: &Type) -> bool {
-    let Type::Path(type_path) = ty else {
-        return false;
-    };
-    let Some(segment) = type_path.path.segments.last() else {
-        return false;
-    };
-    if segment.ident == "Option"
-        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return matches!(
-            inner,
-            Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "u8")
-        );
-    }
-    segment.ident == "u8"
+    extract_inner_type_name(ty).as_deref() == Some("u8")
 }
 
 /// Generate a field module from derive macro field info.
@@ -1052,34 +1024,21 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 
     // Collect to_filter match arms in the same conditional shape.
     //
-    // `u8` / `Option<u8>` fields convert via `i64::from` because
-    // `FilterValue` has no `From<u8>`.
-    let u8_field = is_u8_type(ty);
-    let conv = |v: TokenStream| -> TokenStream {
-        match (u8_field, is_optional) {
-            (false, _) => quote! { #v.into() },
-            (true, false) => quote! { ::prax_query::filter::FilterValue::Int(i64::from(#v)) },
-            (true, true) => {
-                quote! { ::prax_query::filter::FilterValue::from(#v.map(i64::from)) }
-            }
-        }
-    };
-    let conv_each = |conv_v: TokenStream| -> TokenStream {
-        if u8_field {
-            quote! { .map(|v| #conv_v) }
-        } else {
-            quote! { .map(Into::into) }
-        }
+    // `FilterValue` has no `From<u8>`, so `u8` / `Option<u8>` fields cannot
+    // use `.into()`.
+    // `ToFilterValue` handles both `u8` and `Option<u8>` (whichever way the
+    // option is spelled), so u8 fields route every conversion through it.
+    let (scalar, each) = if is_u8_type(ty) {
+        (
+            quote! { ::prax_query::filter::ToFilterValue::to_filter_value(&v) },
+            quote! { .map(|v| ::prax_query::filter::ToFilterValue::to_filter_value(&v)) },
+        )
+    } else {
+        (quote! { v.into() }, quote! { .map(Into::into) })
     };
     let mut arms = vec![
-        {
-            let c = conv(quote! { v });
-            quote! { Self::Equals(v) => Filter::Equals(col, #c) }
-        },
-        {
-            let c = conv(quote! { v });
-            quote! { Self::Not(v) => Filter::NotEquals(col, #c) }
-        },
+        quote! { Self::Equals(v) => Filter::Equals(col, #scalar) },
+        quote! { Self::Not(v) => Filter::NotEquals(col, #scalar) },
     ];
 
     if is_optional {
@@ -1089,23 +1048,19 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 
     match category {
         TypeCategory::Numeric => {
-            let c = conv(quote! { v });
-            let each = conv_each(c.clone());
             arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
                 quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
-            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, #c) });
-            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, #c) });
-            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, #c) });
-            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, #c) });
+            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, #scalar) });
+            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, #scalar) });
+            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, #scalar) });
+            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, #scalar) });
         }
         TypeCategory::String => {
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
             arms.push(
                 quote! { Self::Contains(v) => Filter::Contains(col, FilterValue::String(v)) },
@@ -1119,11 +1074,9 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
         }
         TypeCategory::Boolean => {}
         TypeCategory::Other => {
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
         }
     }
@@ -1248,6 +1201,32 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 mod tests {
     use super::*;
     use syn::parse_quote;
+
+    #[test]
+    fn is_u8_type_recognises_all_spellings() {
+        let yes: Vec<Type> = vec![
+            parse_quote!(u8),
+            parse_quote!(core::primitive::u8),
+            parse_quote!(Option<u8>),
+            parse_quote!(std::option::Option<u8>),
+            parse_quote!(::core::option::Option<u8>),
+            parse_quote!(Option<core::primitive::u8>),
+        ];
+        for ty in &yes {
+            assert!(is_u8_type(ty), "expected u8: {}", quote!(#ty));
+        }
+        let no: Vec<Type> = vec![
+            parse_quote!(u16),
+            parse_quote!(i64),
+            parse_quote!(Option<u16>),
+            parse_quote!(std::option::Option<String>),
+            parse_quote!(Vec<u8>),
+            parse_quote!(&[u8]),
+        ];
+        for ty in &no {
+            assert!(!is_u8_type(ty), "expected not u8: {}", quote!(#ty));
+        }
+    }
 
     #[test]
     fn test_parse_simple_model() {

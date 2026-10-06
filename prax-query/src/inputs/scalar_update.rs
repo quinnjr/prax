@@ -300,7 +300,7 @@ pub struct DateTimeNullableFieldUpdate {
 #[serde(rename_all = "snake_case")]
 pub struct BytesFieldUpdate {
     /// `SET column = value` (base64 in JSON, raw bytes in Rust)
-    #[serde(default, with = "crate::inputs::base64_opt")]
+    #[serde(default, with = "crate::serde_base64::option")]
     pub set: Option<Vec<u8>>,
 }
 
@@ -312,7 +312,7 @@ pub struct BytesFieldUpdate {
 #[serde(rename_all = "snake_case")]
 pub struct BytesNullableFieldUpdate {
     /// `SET column = value` (base64 in JSON, raw bytes in Rust)
-    #[serde(default, with = "crate::inputs::base64_opt")]
+    #[serde(default, with = "crate::serde_base64::option")]
     pub set: Option<Vec<u8>>,
     /// `SET column = NULL`
     pub unset: Option<bool>,

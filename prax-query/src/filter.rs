@@ -183,28 +183,19 @@ pub enum FilterValue {
     String(String),
     /// JSON value.
     Json(serde_json::Value),
-    /// List of values that expands to one placeholder per element
-    /// (`IN (...)`, composite keys).
+    /// A group of values used for composite keys; not expanded when bound.
+    /// Use [`Filter::In`] / `SqlBuilder::bind_in_slice` for `IN (...)`, or
+    /// [`FilterValue::Array`] with `= ANY($1)` on Postgres.
     List(Vec<FilterValue>),
     /// A single array-valued parameter.
     Array(Vec<FilterValue>),
-    /// A single binary parameter. Serialises as base64.
-    Bytes(#[serde(with = "base64_bytes")] Vec<u8>),
-}
-
-mod base64_bytes {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&STANDARD.encode(bytes))
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        let s = String::deserialize(deserializer)?;
-        STANDARD.decode(s).map_err(serde::de::Error::custom)
-    }
+    /// A single binary parameter. Serialises as base64 and is never
+    /// deserialised (a base64 string comes back as [`FilterValue::String`]).
+    #[serde(
+        skip_deserializing,
+        serialize_with = "crate::serde_base64::bytes::serialize"
+    )]
+    Bytes(Vec<u8>),
 }
 
 impl FilterValue {
@@ -213,7 +204,10 @@ impl FilterValue {
         matches!(self, Self::Null)
     }
 
-    /// Build a [`FilterValue::List`] (placeholder expansion) from an iterator.
+    /// Build a [`FilterValue::List`] from an iterator. A group of values used
+    /// for composite keys; not expanded when bound. Use [`Filter::In`] /
+    /// `SqlBuilder::bind_in_slice` for `IN (...)`, or [`FilterValue::Array`]
+    /// with `= ANY($1)` on Postgres.
     pub fn list<I, T>(items: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -222,8 +216,8 @@ impl FilterValue {
         Self::List(items.into_iter().map(Into::into).collect())
     }
 
-    /// Lossless JSON encoding. `Bytes` becomes a base64 string, `List` and
-    /// `Array` become JSON arrays, and non-finite floats become `null`.
+    /// JSON encoding (not type-preserving): `Bytes` becomes a base64 string,
+    /// `List`/`Array` become JSON arrays, and non-finite floats become `null`.
     pub fn to_json_value(&self) -> serde_json::Value {
         use base64::Engine as _;
         match self {
@@ -522,11 +516,15 @@ impl ToFilterValue for serde_json::Value {
         FilterValue::Json(self.clone())
     }
 }
+/// Binary data: since 0.13 a `Vec<u8>` lowers to a single
+/// [`FilterValue::Bytes`] parameter (not a list of integers).
 impl ToFilterValue for Vec<u8> {
     fn to_filter_value(&self) -> FilterValue {
         FilterValue::Bytes(self.clone())
     }
 }
+/// Vectors (e.g. pgvector): since 0.13 a `Vec<f32>` lowers to a single
+/// [`FilterValue::Array`] of [`FilterValue::Float`] parameters.
 impl ToFilterValue for Vec<f32> {
     fn to_filter_value(&self) -> FilterValue {
         // Pgvector columns encode as an array of floats.
@@ -2026,7 +2024,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_serde_is_base64_and_json_encoding_is_lossless() {
+    fn bytes_serde_is_base64_and_json_encoding_is_not_type_preserving() {
         let b = FilterValue::Bytes(vec![0x00, 0xFF, 0x10]);
         assert_eq!(serde_json::to_string(&b).unwrap(), "\"AP8Q\"");
         assert_eq!(b.to_json_value(), serde_json::json!("AP8Q"));

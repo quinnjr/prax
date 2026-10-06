@@ -270,6 +270,9 @@ pub struct U8Fixture {
     pub id: i64,
     pub level: u8,
     pub opt_level: Option<u8>,
+    pub q_level: Option<core::primitive::u8>,
+    pub q_plain: core::primitive::u8,
+    pub std_level: std::option::Option<u8>,
 }
 
 #[test]
@@ -283,6 +286,46 @@ fn u8_fields_still_lower_to_int() {
     let f: Filter = u_8_fixture::level::in_(vec![1, 2]).into();
     assert!(
         matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1), FilterValue::Int(2)])
+    );
+}
+
+#[test]
+fn u8_fields_with_qualified_paths_lower_to_int() {
+    use prax_query::filter::FilterValue;
+
+    let f: Filter = u_8_fixture::q_level::equals(Some(4)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(4))));
+    let f: Filter = u_8_fixture::q_level::equals(None).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Null)));
+    let f: Filter = u_8_fixture::q_plain::equals(7).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(7))));
+    let f: Filter = u_8_fixture::std_level::equals(Some(5)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(5))));
+    let f: Filter = u_8_fixture::std_level::equals(None).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Null)));
+    let f: Filter = u_8_fixture::std_level::in_(vec![Some(1)]).into();
+    assert!(matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1)]));
+    let f: Filter = u_8_fixture::level::not(3).into();
+    assert!(matches!(f, Filter::NotEquals(_, FilterValue::Int(3))));
+    let f: Filter = u_8_fixture::level::not_in(vec![1]).into();
+    assert!(matches!(f, Filter::NotIn(_, ref vs) if vs == &vec![FilterValue::Int(1)]));
+}
+
+#[test]
+fn audit_event_create_input_payload_lowers_to_bytes() {
+    use prax_query::inputs::CreateInput;
+    let ir = audit_event::AuditEventCreateInput {
+        event_id: ::uuid::Uuid::nil(),
+        occurred_at: ::chrono::Utc::now(),
+        payload: vec![0, 159, 255],
+        metadata: ::serde_json::json!({}),
+        amount: None,
+    }
+    .into_ir();
+    assert!(
+        ir.iter().any(|(c, v)| c == "payload"
+            && matches!(v, FilterValue::Bytes(b) if b == &vec![0, 159, 255])),
+        "got {ir:?}"
     );
 }
 

@@ -93,8 +93,9 @@ pub(crate) fn filter_value_key(v: &FilterValue) -> String {
         FilterValue::Null => "<null>".into(),
         FilterValue::Json(v) => v.to_string(),
         FilterValue::Bytes(b) => b.iter().map(|byte| format!("{byte:02x}")).collect(),
-        FilterValue::List(_) | FilterValue::Array(_) => {
-            panic!("relation executor does not support composite keys yet (FilterValue::List)")
+        FilterValue::Array(_) => v.to_json_value().to_string(),
+        FilterValue::List(_) => {
+            panic!("relation executor does not support composite keys yet (got FilterValue::List)")
         }
     }
 }
@@ -102,6 +103,20 @@ pub(crate) fn filter_value_key(v: &FilterValue) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_value_key_bytes_is_lower_hex() {
+        assert_eq!(
+            filter_value_key(&FilterValue::Bytes(vec![0, 255, 159])),
+            "00ff9f"
+        );
+    }
+
+    #[test]
+    fn filter_value_key_array_is_json() {
+        let v = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert_eq!(filter_value_key(&v), r#"[1,"a"]"#);
+    }
 
     #[test]
     fn filter_value_key_int() {
