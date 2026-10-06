@@ -230,6 +230,10 @@ Safety:
 - **derive**: `#[derive(Model)]` handles `u8` fields written as
   `core::primitive::u8`, `std::primitive::u8` or inside
   `Option<..>`/`std::option::Option<..>` in every filter operator.
+- **derive**: `#[derive(Model)]` fields typed `std::option::Option<T>` or
+  `core::option::Option<T>` are nullable like `Option<T>`: they get
+  `is_null()` / `is_not_null()` and nullable where/create/update inputs
+  (they were treated as required columns).
 - **postgres**: listener `Reconnected` / `Lagged` events are ordered after
   the notifications queued before them; a stale liveness flag from the old
   connection no longer carries over a reconnect; a panic in the listener's

@@ -361,3 +361,53 @@ fn bytes_unique_where_unique_lowers_to_bytes() {
         Filter::Equals("token".into(), FilterValue::Bytes(vec![0, 159, 255]))
     );
 }
+
+// `Option` is recognised by its last path segment, so fully qualified
+// spellings are nullable columns like plain `Option<T>`.
+#[derive(Model, Debug, Clone)]
+#[prax(table = "qualified_options")]
+pub struct QualifiedOption {
+    #[prax(id, auto)]
+    pub id: i64,
+    pub nick: std::option::Option<String>,
+    pub score: ::core::option::Option<i32>,
+}
+
+#[test]
+fn qualified_option_fields_get_null_filters() {
+    let f: Filter = qualified_option::nick::is_null().into();
+    assert_eq!(f, Filter::IsNull("nick".into()));
+    let f: Filter = qualified_option::score::is_not_null().into();
+    assert_eq!(f, Filter::IsNotNull("score".into()));
+
+    // The generated inputs treat them as nullable too.
+    let w = qualified_option::QualifiedOptionWhereInput {
+        score: Some(IntNullableFilter {
+            is_null: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(w.into_ir(), Filter::IsNull("score".into()));
+
+    use prax_query::inputs::{CreateInput, IntNullableFieldUpdate, UpdateInput};
+    let ir = qualified_option::QualifiedOptionCreateInput {
+        nick: None,
+        score: None,
+    }
+    .into_ir();
+    assert!(ir.is_empty(), "omitted nullable columns: {ir:?}");
+    let ir = qualified_option::QualifiedOptionUpdateInput {
+        score: Some(IntNullableFieldUpdate {
+            unset: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .into_ir();
+    assert!(
+        ir.iter()
+            .any(|(c, op)| c == "score" && matches!(op, WriteOp::Unset)),
+        "got {ir:?}"
+    );
+}

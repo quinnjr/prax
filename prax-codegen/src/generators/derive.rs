@@ -885,10 +885,16 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
     })
 }
 
-/// Check if a type is `Option<T>`.
+/// Check if a type is `Option<T>`, including qualified spellings such as
+/// `std::option::Option<T>` and `::core::option::Option<T>`.
+///
+/// Matches on the last path segment, like [`extract_inner_type_name`] and
+/// [`classify_field_type`], so every generator agrees on which fields are
+/// nullable.
 fn is_option_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first()
+        && type_path.qself.is_none()
+        && let Some(segment) = type_path.path.segments.last()
     {
         return segment.ident == "Option";
     }
@@ -1268,6 +1274,24 @@ mod tests {
         assert!(is_option_type(&ty));
 
         let ty: Type = parse_quote!(String);
+        assert!(!is_option_type(&ty));
+    }
+
+    #[test]
+    fn is_option_type_matches_qualified_paths() {
+        for ty in [
+            parse_quote!(std::option::Option<String>),
+            parse_quote!(::std::option::Option<i32>),
+            parse_quote!(core::option::Option<u8>),
+            parse_quote!(::core::option::Option<core::primitive::u8>),
+        ] {
+            let ty: Type = ty;
+            assert!(is_option_type(&ty), "{}", quote!(#ty));
+            // Same answer as the type classification, which unwraps it.
+            assert!(classify_field_type(&ty) != TypeCategory::Other);
+        }
+        // `Option` elsewhere in the path is not an `Option` type.
+        let ty: Type = parse_quote!(Option::Wrapper);
         assert!(!is_option_type(&ty));
     }
 
