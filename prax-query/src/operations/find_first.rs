@@ -144,38 +144,15 @@ where
     E: QueryEngine + SupportsRowLocks,
     M: Model + crate::row::FromRow,
 {
-    /// Lock the selected rows (`SELECT ... FOR UPDATE` and friends).
-    ///
-    /// Locks are held until the surrounding transaction ends. Outside a
-    /// transaction they are released as soon as the statement finishes, so
-    /// they protect nothing; run locking queries inside
-    /// `PraxClient::transaction`. With `include`, only the root query is
-    /// locked; eagerly loaded relations are read without locks.
-    ///
-    /// Unsupported combinations (for example `SKIP LOCKED` with a shared
-    /// lock on MSSQL) and use together with `distinct` fail at `exec`.
-    pub fn lock(mut self, lock: impl Into<RowLock>) -> Self {
-        self.lock = Some(lock.into());
-        self
-    }
-
-    /// Shorthand for `.lock(RowLock::for_update())`.
-    pub fn for_update(self) -> Self {
-        self.lock(RowLock::for_update())
-    }
-
-    /// Shorthand for `.lock(RowLock::for_share())`.
-    pub fn for_share(self) -> Self {
-        self.lock(RowLock::for_share())
-    }
+    super::lock::row_lock_methods!();
 }
 
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Build the SQL query.
     ///
-    /// A row lock the dialect cannot express (see [`lock`](Self::lock)) is
-    /// left out of the SQL built here; only `exec` validates the lock and
-    /// reports the error.
+    /// A row lock the dialect cannot express (see `lock`) is left out of
+    /// the SQL built here. Use [`try_build_sql`](Self::try_build_sql) to
+    /// get an error instead.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
@@ -211,10 +188,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
         let lock_sql = super::lock::render(self.lock.as_ref(), dialect);
-        if let Some(hint) = &lock_sql.table_hint {
-            sql.push(' ');
-            sql.push_str(hint);
-        }
+        lock_sql.push_table_hint(&mut sql);
 
         // WHERE clause
         if !self.filter.is_none() {
@@ -232,12 +206,22 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         // LIMIT 1
         sql.push_str(" LIMIT 1");
 
-        if let Some(suffix) = &lock_sql.suffix {
-            sql.push(' ');
-            sql.push_str(suffix);
-        }
+        lock_sql.push_suffix(&mut sql);
 
         (sql, params)
+    }
+
+    /// Build the SQL query, failing if the dialect cannot express the row
+    /// lock.
+    ///
+    /// Unlike [`build_sql`](Self::build_sql), which leaves a rejected lock
+    /// out of the SQL, this reports the error. `exec` uses this method.
+    pub fn try_build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> QueryResult<(String, Vec<crate::filter::FilterValue>)> {
+        super::lock::validate(self.lock.as_ref(), dialect)?;
+        Ok(self.build_sql(dialect))
     }
 
     /// Execute the query and return an optional result.
@@ -246,8 +230,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        super::lock::validate(self.lock.as_ref(), dialect, false)?;
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         match self.engine.query_optional::<M>(&sql, params).await? {
             None => Ok(None),
             Some(row) => {
@@ -267,8 +250,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        super::lock::validate(self.lock.as_ref(), dialect, false)?;
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         let row = self.engine.query_one::<M>(&sql, params).await?;
         let mut parents = vec![row];
         for spec in &self.includes {

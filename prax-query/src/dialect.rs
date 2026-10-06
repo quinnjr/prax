@@ -38,6 +38,33 @@ pub struct RowLockSql {
     pub suffix: Option<String>,
 }
 
+impl RowLockSql {
+    /// Append the table hint (if any), preceded by a space.
+    pub(crate) fn push_table_hint(&self, sql: &mut String) {
+        if let Some(hint) = &self.table_hint {
+            sql.push(' ');
+            sql.push_str(hint);
+        }
+    }
+
+    /// Append the statement-final clause (if any), preceded by a space.
+    pub(crate) fn push_suffix(&self, sql: &mut String) {
+        if let Some(suffix) = &self.suffix {
+            sql.push(' ');
+            sql.push_str(suffix);
+        }
+    }
+}
+
+/// The ` NOWAIT` / ` SKIP LOCKED` tail shared by the `FOR ...` dialects.
+fn wait_suffix(wait: LockWait) -> &'static str {
+    match wait {
+        LockWait::Wait => "",
+        LockWait::NoWait => " NOWAIT",
+        LockWait::SkipLocked => " SKIP LOCKED",
+    }
+}
+
 /// Cross-dialect SQL emission helpers.
 ///
 /// Implementations describe a single database backend's syntax choices.
@@ -187,15 +214,21 @@ impl SqlDialect for Postgres {
             LockStrength::KeyShare => "FOR KEY SHARE",
         });
         if !lock.of_tables.is_empty() {
-            let tables: Vec<String> = lock.of_tables.iter().map(|t| self.quote_ident(t)).collect();
+            // `OF` names must match how the query's FROM clause spells the
+            // table, and FROM interpolates `Model::TABLE_NAME` unquoted. Emit
+            // the same way, so only validated identifiers may reach here.
+            for table in &lock.of_tables {
+                if !crate::sql::is_valid_sql_identifier(table) {
+                    return Err(QueryError::invalid_input(
+                        "lock",
+                        format!("invalid table name in OF clause: {table:?}"),
+                    ));
+                }
+            }
             sql.push_str(" OF ");
-            sql.push_str(&tables.join(", "));
+            sql.push_str(&lock.of_tables.join(", "));
         }
-        match lock.wait {
-            LockWait::Wait => {}
-            LockWait::NoWait => sql.push_str(" NOWAIT"),
-            LockWait::SkipLocked => sql.push_str(" SKIP LOCKED"),
-        }
+        sql.push_str(wait_suffix(lock.wait));
         Ok(RowLockSql {
             table_hint: None,
             suffix: Some(sql),
@@ -260,11 +293,7 @@ impl SqlDialect for Mysql {
                 "MySQL row locks do not support OF <tables>",
             ));
         }
-        match lock.wait {
-            LockWait::Wait => {}
-            LockWait::NoWait => sql.push_str(" NOWAIT"),
-            LockWait::SkipLocked => sql.push_str(" SKIP LOCKED"),
-        }
+        sql.push_str(wait_suffix(lock.wait));
         Ok(RowLockSql {
             table_hint: None,
             suffix: Some(sql),

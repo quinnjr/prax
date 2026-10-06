@@ -112,18 +112,28 @@ let apply = LateralJoin::new(subquery, "alias")
 
 const lockingExample = `use prax_query::advanced::RowLock;
 
-// MSSQL table hints for locking. RowLock generates the hint fragment — a
-// fluent .lock(...) on find_many is not wired up yet.
-let hint = RowLock::for_update().build().to_mssql_hint();
-// WITH (UPDLOCK, ROWLOCK)
+// Row locks go through the find operations and are held until the
+// surrounding transaction ends, so run them inside a transaction.
+client.transaction(|tx| async move {
+    // WITH (UPDLOCK, ROWLOCK) after the table name
+    let jobs = tx.job().find_many().for_update().exec().await?;
 
-// HOLDLOCK for serializable reads
-let hint = RowLock::for_share().build().to_mssql_hint();
-// WITH (HOLDLOCK, ROWLOCK)
+    // Claim rows other transactions have not locked: WITH (UPDLOCK, ROWLOCK, READPAST)
+    let next = tx
+        .job()
+        .find_first()
+        .lock(RowLock::for_update().skip_locked())
+        .exec()
+        .await?;
 
-// READPAST for skipping locked rows
-let hint = RowLock::for_update().skip_locked().build().to_mssql_hint();
-// WITH (UPDLOCK, ROWLOCK, READPAST)`;
+    // Shared lock: WITH (HOLDLOCK, ROWLOCK)
+    let shared = tx.job().find_many().for_share().exec().await?;
+
+    // Unsupported combinations return an error at exec(), before the query
+    // runs: for_share().skip_locked(), FOR NO KEY UPDATE / FOR KEY SHARE,
+    // and OF <tables>.
+    Ok(())
+}).await?;`;
 
 const sqlAgentExample = `use prax_migrate::procedure::{SqlAgentJob, JobSchedule, Weekday};
 
@@ -307,9 +317,53 @@ let lag_sql = lag_queries::check_lag_sql(DatabaseType::MSSQL);
       <section>
         <h2 class="text-2xl font-semibold mb-4">Table Hints & Locking</h2>
         <p class="text-muted mb-4">
-          Control locking behavior with MSSQL table hints.
+          Lock rows with <code>.lock(RowLock::...)</code>, <code>.for_update()</code> or
+          <code>.for_share()</code> on <code>find_many</code>, <code>find_first</code> and
+          <code>find_unique</code>. Prax renders the matching MSSQL table hint and holds the lock
+          until the surrounding transaction ends. Combinations SQL Server cannot express return an
+          error before the query runs.
         </p>
         <CodeBlock code={lockingExample} lang="rust" filename="src/main.rs" />
+        <div class="overflow-x-auto mt-6">
+          <table class="w-full text-sm border border-border rounded-lg">
+            <thead class="bg-muted/50">
+              <tr>
+                <th class="px-4 py-3 text-left font-medium">Database</th>
+                <th class="px-4 py-3 text-left font-medium">Strengths</th>
+                <th class="px-4 py-3 text-left font-medium">NOWAIT / SKIP LOCKED</th>
+                <th class="px-4 py-3 text-left font-medium">OF tables</th>
+                <th class="px-4 py-3 text-left font-medium">Rendered as</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">PostgreSQL</td>
+                <td class="px-4 py-3 text-muted">UPDATE, NO KEY UPDATE, SHARE, KEY SHARE</td>
+                <td class="px-4 py-3 text-muted">Both</td>
+                <td class="px-4 py-3 text-muted">Yes (plain identifiers; must match the FROM table name)</td>
+                <td class="px-4 py-3 text-muted">Trailing <code>FOR ...</code> clause</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">MySQL 8+</td>
+                <td class="px-4 py-3 text-muted">UPDATE, SHARE</td>
+                <td class="px-4 py-3 text-muted">Both</td>
+                <td class="px-4 py-3 text-muted">No</td>
+                <td class="px-4 py-3 text-muted">Trailing <code>FOR ...</code> clause</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">SQL Server</td>
+                <td class="px-4 py-3 text-muted">UPDATE, SHARE</td>
+                <td class="px-4 py-3 text-muted">NOWAIT; SKIP LOCKED (READPAST) with UPDATE only</td>
+                <td class="px-4 py-3 text-muted">No</td>
+                <td class="px-4 py-3 text-muted">Table hint after the table name</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">SQLite, DuckDB, MongoDB, CQL</td>
+                <td class="px-4 py-3 text-muted" colspan="4">Not supported (<code>.lock(..)</code> does not compile)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <!-- SQL Agent -->

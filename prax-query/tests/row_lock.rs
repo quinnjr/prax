@@ -13,6 +13,9 @@ use prax_query::types::OrderByField;
 
 macro_rules! mock_engine {
     ($name:ident, $dialect:expr) => {
+        mock_engine!($name, $dialect, false);
+    };
+    ($name:ident, $dialect:expr, $must_not_query:literal) => {
         #[derive(Clone)]
         struct $name;
 
@@ -25,6 +28,7 @@ macro_rules! mock_engine {
                 _: &str,
                 _: Vec<FilterValue>,
             ) -> BoxFuture<'_, QueryResult<Vec<T>>> {
+                assert!(!$must_not_query, "query must not run");
                 Box::pin(async { Ok(Vec::new()) })
             }
             fn query_one<T: Model + prax_query::row::FromRow + Send + 'static>(
@@ -32,6 +36,7 @@ macro_rules! mock_engine {
                 _: &str,
                 _: Vec<FilterValue>,
             ) -> BoxFuture<'_, QueryResult<T>> {
+                assert!(!$must_not_query, "query must not run");
                 Box::pin(async { Err(QueryError::not_found("t")) })
             }
             fn query_optional<T: Model + prax_query::row::FromRow + Send + 'static>(
@@ -39,6 +44,7 @@ macro_rules! mock_engine {
                 _: &str,
                 _: Vec<FilterValue>,
             ) -> BoxFuture<'_, QueryResult<Option<T>>> {
+                assert!(!$must_not_query, "query must not run");
                 Box::pin(async { Ok(None) })
             }
             fn execute_insert<T: Model + prax_query::row::FromRow + Send + 'static>(
@@ -76,6 +82,7 @@ macro_rules! mock_engine {
 
 mock_engine!(MockEngine, Postgres);
 mock_engine!(SqliteEngine, Sqlite);
+mock_engine!(MssqlMock, Mssql, true);
 
 #[derive(Debug)]
 struct Job;
@@ -119,11 +126,11 @@ fn postgres_skip_locked_after_limit_offset() {
 }
 
 #[test]
-fn postgres_of_tables_are_quoted() {
+fn postgres_of_tables_are_unquoted_like_from() {
     let (sql, _) = find_many()
         .lock(RowLock::for_share().of(["jobs"]).nowait())
         .build_sql(&Postgres);
-    assert!(sql.ends_with("FOR SHARE OF \"jobs\" NOWAIT"), "{sql}");
+    assert!(sql.ends_with("FOR SHARE OF jobs NOWAIT"), "{sql}");
 }
 
 #[test]
@@ -229,4 +236,163 @@ fn find_first_and_unique_render_lock() {
 fn no_lock_leaves_sql_unchanged() {
     let (sql, _) = find_many().build_sql(&Postgres);
     assert_eq!(sql, "SELECT * FROM jobs");
+}
+
+// ---- unsupported locks are rejected before the engine is queried ----
+
+fn shared_skip_locked() -> RowLock {
+    RowLock::for_share().skip_locked().build()
+}
+
+fn assert_skip_locked_error<T>(result: QueryResult<T>) {
+    match result {
+        Ok(_) => panic!("lock should have been rejected"),
+        Err(err) => assert!(err.to_string().contains("SKIP LOCKED"), "{err}"),
+    }
+}
+
+#[test]
+fn find_first_exec_rejects_unsupported_lock() {
+    let op = FindFirstOperation::<MssqlMock, Job>::new(MssqlMock).lock(shared_skip_locked());
+    assert_skip_locked_error(futures::executor::block_on(op.exec()));
+}
+
+#[test]
+fn find_first_exec_required_rejects_unsupported_lock() {
+    let op = FindFirstOperation::<MssqlMock, Job>::new(MssqlMock).lock(shared_skip_locked());
+    assert_skip_locked_error(futures::executor::block_on(op.exec_required()));
+}
+
+#[test]
+fn find_unique_exec_rejects_unsupported_lock() {
+    let op = FindUniqueOperation::<MssqlMock, Job>::new(MssqlMock).lock(shared_skip_locked());
+    assert_skip_locked_error(futures::executor::block_on(op.exec()));
+}
+
+#[test]
+fn find_unique_exec_optional_rejects_unsupported_lock() {
+    let op = FindUniqueOperation::<MssqlMock, Job>::new(MssqlMock).lock(shared_skip_locked());
+    assert_skip_locked_error(futures::executor::block_on(op.exec_optional()));
+}
+
+#[test]
+fn find_many_exec_rejects_unsupported_lock() {
+    let op = FindManyOperation::<MssqlMock, Job>::new(MssqlMock).lock(shared_skip_locked());
+    assert_skip_locked_error(futures::executor::block_on(op.exec()));
+}
+
+#[test]
+fn build_sql_omits_rejected_lock() {
+    let locked = find_many()
+        .lock(RowLock::for_no_key_update())
+        .build_sql(&Mysql)
+        .0;
+    assert_eq!(locked, find_many().build_sql(&Mysql).0);
+}
+
+#[test]
+fn try_build_sql_reports_rejected_lock() {
+    let op = find_many().lock(RowLock::for_no_key_update());
+    assert!(op.try_build_sql(&Mysql).is_err());
+    let op = FindFirstOperation::<MockEngine, Job>::new(MockEngine).lock(shared_skip_locked());
+    assert!(op.try_build_sql(&Mssql).is_err());
+    let op = FindUniqueOperation::<MockEngine, Job>::new(MockEngine).lock(shared_skip_locked());
+    assert!(op.try_build_sql(&Mssql).is_err());
+    let (sql, _) = find_many()
+        .for_update()
+        .try_build_sql(&Postgres)
+        .expect("supported lock");
+    assert!(sql.ends_with("FOR UPDATE"), "{sql}");
+}
+
+#[test]
+fn try_build_sql_rejects_lock_with_distinct() {
+    let err = find_many()
+        .distinct(["id"])
+        .for_update()
+        .try_build_sql(&Postgres)
+        .unwrap_err();
+    assert!(err.to_string().contains("distinct"), "{err}");
+}
+
+#[test]
+fn of_tables_must_be_plain_identifiers() {
+    for bad in ["", "jobs; DROP TABLE x", "a\"b", "1jobs", "public.jobs"] {
+        let lock = RowLock::for_update().of([bad]).build();
+        assert!(Postgres.row_lock_sql(&lock).is_err(), "{bad:?}");
+    }
+}
+
+// ---- table-driven dialect matrix ----
+
+#[derive(Clone, Copy)]
+enum D {
+    Pg,
+    My,
+    Ms,
+}
+
+#[test]
+fn row_lock_sql_matrix() {
+    use prax_query::advanced::RowLockBuilder;
+    // (dialect, lock, expected) where Ok((table_hint, suffix)) or Err(()).
+    type Expected = Result<(Option<&'static str>, Option<&'static str>), ()>;
+    let cases: Vec<(D, RowLockBuilder, Expected)> = vec![
+        (D::Pg, RowLock::for_update(), Ok((None, Some("FOR UPDATE")))),
+        (
+            D::Pg,
+            RowLock::for_key_share().skip_locked(),
+            Ok((None, Some("FOR KEY SHARE SKIP LOCKED"))),
+        ),
+        (
+            D::Pg,
+            RowLock::for_update().of(["jobs", "users"]).nowait(),
+            Ok((None, Some("FOR UPDATE OF jobs, users NOWAIT"))),
+        ),
+        (
+            D::My,
+            RowLock::for_share().skip_locked(),
+            Ok((None, Some("FOR SHARE SKIP LOCKED"))),
+        ),
+        (
+            D::My,
+            RowLock::for_update().nowait(),
+            Ok((None, Some("FOR UPDATE NOWAIT"))),
+        ),
+        (D::My, RowLock::for_key_share(), Err(())),
+        (D::My, RowLock::for_update().of(["jobs"]), Err(())),
+        (
+            D::Ms,
+            RowLock::for_update(),
+            Ok((Some("WITH (UPDLOCK, ROWLOCK)"), None)),
+        ),
+        (
+            D::Ms,
+            RowLock::for_update().nowait(),
+            Ok((Some("WITH (UPDLOCK, ROWLOCK, NOWAIT)"), None)),
+        ),
+        (
+            D::Ms,
+            RowLock::for_share(),
+            Ok((Some("WITH (HOLDLOCK, ROWLOCK)"), None)),
+        ),
+        (D::Ms, RowLock::for_share().skip_locked(), Err(())),
+        (D::Ms, RowLock::for_update().of(["jobs"]), Err(())),
+    ];
+    for (d, lock, expected) in cases {
+        let lock = lock.build();
+        let got = match d {
+            D::Pg => Postgres.row_lock_sql(&lock),
+            D::My => Mysql.row_lock_sql(&lock),
+            D::Ms => Mssql.row_lock_sql(&lock),
+        };
+        match (got, expected) {
+            (Ok(sql), Ok((hint, suffix))) => {
+                assert_eq!(sql.table_hint.as_deref(), hint, "{lock:?}");
+                assert_eq!(sql.suffix.as_deref(), suffix, "{lock:?}");
+            }
+            (Err(_), Err(())) => {}
+            (got, _) => panic!("unexpected result {got:?} for {lock:?}"),
+        }
+    }
 }

@@ -194,38 +194,15 @@ where
     E: QueryEngine + SupportsRowLocks,
     M: Model + crate::row::FromRow,
 {
-    /// Lock the selected rows (`SELECT ... FOR UPDATE` and friends).
-    ///
-    /// Locks are held until the surrounding transaction ends. Outside a
-    /// transaction they are released as soon as the statement finishes, so
-    /// they protect nothing; run locking queries inside
-    /// `PraxClient::transaction`. With `include`, only the root query is
-    /// locked; eagerly loaded relations are read without locks.
-    ///
-    /// Unsupported combinations (for example `SKIP LOCKED` with a shared
-    /// lock on MSSQL) and use together with `distinct` fail at `exec`.
-    pub fn lock(mut self, lock: impl Into<RowLock>) -> Self {
-        self.lock = Some(lock.into());
-        self
-    }
-
-    /// Shorthand for `.lock(RowLock::for_update())`.
-    pub fn for_update(self) -> Self {
-        self.lock(RowLock::for_update())
-    }
-
-    /// Shorthand for `.lock(RowLock::for_share())`.
-    pub fn for_share(self) -> Self {
-        self.lock(RowLock::for_share())
-    }
+    super::lock::row_lock_methods!();
 }
 
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     /// Build the SQL query.
     ///
-    /// A row lock the dialect cannot express (see [`lock`](Self::lock)) is
-    /// left out of the SQL built here; only `exec` validates the lock and
-    /// reports the error.
+    /// A row lock the dialect cannot express (see `lock`) is left out of
+    /// the SQL built here. Use [`try_build_sql`](Self::try_build_sql) to
+    /// get an error instead.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
@@ -277,10 +254,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
         let lock_sql = super::lock::render(self.lock.as_ref(), dialect);
-        if let Some(hint) = &lock_sql.table_hint {
-            sql.push(' ');
-            sql.push_str(hint);
-        }
+        lock_sql.push_table_hint(&mut sql);
 
         // WHERE clause — a stored cursor AND-composes a keyset predicate
         // (`"col" > $n` / `"col" < $n`) after the filter; its value binds
@@ -335,12 +309,28 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             self.pagination.write_sql(&mut sql);
         }
 
-        if let Some(suffix) = &lock_sql.suffix {
-            sql.push(' ');
-            sql.push_str(suffix);
-        }
+        lock_sql.push_suffix(&mut sql);
 
         (sql, params)
+    }
+
+    /// Build the SQL query, failing if the dialect cannot express the row
+    /// lock or combines it with `distinct`.
+    ///
+    /// Unlike [`build_sql`](Self::build_sql), which leaves a rejected lock
+    /// out of the SQL, this reports the error. `exec` uses this method.
+    pub fn try_build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> QueryResult<(String, Vec<crate::filter::FilterValue>)> {
+        if self.lock.is_some() && self.distinct.is_some() {
+            return Err(crate::error::QueryError::invalid_input(
+                "lock",
+                "row locks cannot be combined with distinct",
+            ));
+        }
+        super::lock::validate(self.lock.as_ref(), dialect)?;
+        Ok(self.build_sql(dialect))
     }
 
     /// Execute the query.
@@ -355,8 +345,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        super::lock::validate(self.lock.as_ref(), dialect, self.distinct.is_some())?;
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         let mut parents = self.engine.query_many::<M>(&sql, params).await?;
         for spec in &self.includes {
             <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;
