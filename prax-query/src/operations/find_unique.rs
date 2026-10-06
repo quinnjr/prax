@@ -154,6 +154,10 @@ where
 
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
     /// Build the SQL query.
+    ///
+    /// A row lock the dialect cannot express (see [`lock`](Self::lock)) is
+    /// left out of the SQL built here; only `exec` validates the lock and
+    /// reports the error.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,

@@ -24,8 +24,9 @@ pub(crate) fn validate(
 }
 
 /// Render `lock` for `dialect`. Yields the empty rendering when there is no
-/// lock or the dialect rejects it (callers validate first, so `build_sql`
-/// stays infallible).
+/// lock or the dialect rejects it, so `build_sql` stays infallible: a lock
+/// the dialect rejects is silently left out of `build_sql`'s output, and
+/// only `exec` (through [`validate`]) reports it.
 pub(crate) fn render(lock: Option<&RowLock>, dialect: &dyn SqlDialect) -> RowLockSql {
     lock.and_then(|l| dialect.row_lock_sql(l).ok())
         .unwrap_or_default()

@@ -145,6 +145,28 @@ pub type FieldName = Cow<'static, str>;
 /// let val: FilterValue = Option::<i32>::None.into();
 /// assert!(val.is_null());
 /// ```
+///
+/// # Serialization
+///
+/// `FilterValue` is `#[serde(untagged)]`, so deserialising is **not**
+/// type-preserving: a value comes back as the first variant whose JSON shape
+/// matches. `Bytes` serialises as a base64 string and deserialises as
+/// `String`; `List` and `Array` serialise as JSON arrays and deserialise as
+/// `Json`. Do not rely on a serde round trip to restore the variant (and use
+/// [`FilterValue::to_json_value`] for a JSON encoding).
+///
+/// ```rust
+/// use prax_query::FilterValue;
+///
+/// let json = serde_json::to_string(&FilterValue::Bytes(vec![1, 2])).unwrap();
+/// assert_eq!(json, r#""AQI=""#);
+/// let back: FilterValue = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, FilterValue::String("AQI=".into()));
+///
+/// let json = serde_json::to_string(&FilterValue::Array(vec![1.into()])).unwrap();
+/// let back: FilterValue = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, FilterValue::Json(serde_json::json!([1])));
+/// ```
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

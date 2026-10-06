@@ -7,13 +7,13 @@
 //! bound `QueryEngine` via `engine.dialect()`, so a single `build_sql`
 //! emission path serves every backend.
 
+use crate::advanced::{LockStrength, LockWait, RowLock};
+use crate::error::{QueryError, QueryResult};
+
 /// Sealed supertrait so only this crate can implement `SqlDialect`.
 /// Prevents downstream crates from adding their own `SqlDialect`
 /// impls; we reserve the right to add new required methods to the
 /// trait without a SemVer break.
-use crate::advanced::{LockStrength, LockWait, RowLock};
-use crate::error::{QueryError, QueryResult};
-
 mod sealed {
     pub trait Sealed {}
     impl Sealed for super::Postgres {}
