@@ -1,5 +1,6 @@
 //! Retry middleware for automatic query retry on transient failures.
 
+use super::backoff;
 use super::context::QueryContext;
 use super::types::{BoxFuture, Middleware, MiddlewareResult, Next, QueryResponse};
 use crate::QueryError;
@@ -77,22 +78,23 @@ impl RetryConfig {
         self
     }
 
-    /// Calculate delay for a given attempt.
+    /// Calculate delay for a given attempt (0-based):
+    /// `min(initial_delay * backoff_multiplier^attempt, max_delay)`, plus up
+    /// to 25% on top when [`jitter`](Self::jitter) is enabled. Never panics,
+    /// whatever the attempt or the configured values.
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let base_delay =
-            self.initial_delay.as_millis() as f64 * self.backoff_multiplier.powi(attempt as i32);
-
-        let delay_ms = base_delay.min(self.max_delay.as_millis() as f64);
-
-        let final_delay = if self.jitter {
-            // Add up to 25% jitter
-            let jitter = delay_ms * 0.25 * rand_jitter();
-            delay_ms + jitter
+        let delay = backoff::capped_exponential(
+            self.initial_delay,
+            self.backoff_multiplier,
+            attempt,
+            self.max_delay,
+        );
+        if self.jitter {
+            // Add up to 25% jitter.
+            delay.saturating_add(backoff::scale(delay, 0.25 * backoff::unit_jitter()))
         } else {
-            delay_ms
-        };
-
-        Duration::from_millis(final_delay as u64)
+            delay
+        }
     }
 }
 
@@ -161,16 +163,6 @@ impl RetryableError {
             ),
         }
     }
-}
-
-/// Simple pseudo-random jitter generator (no external dependencies).
-fn rand_jitter() -> f64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    let hasher = RandomState::new().build_hasher();
-    let hash = hasher.finish();
-    (hash % 1000) as f64 / 1000.0
 }
 
 /// Middleware that automatically retries failed queries.
@@ -286,6 +278,41 @@ mod tests {
 
         // Should be capped at 5 seconds
         assert_eq!(config.delay_for_attempt(2), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_delay_never_panics() {
+        let config = RetryConfig::new()
+            .initial_delay(Duration::from_secs(1))
+            .max_delay(Duration::MAX)
+            .backoff_multiplier(2.0);
+        // `attempt as i32` used to wrap here, and `initial * 2^70` overflows.
+        assert_eq!(config.delay_for_attempt(u32::MAX), Duration::MAX);
+        assert_eq!(config.delay_for_attempt(70), Duration::MAX);
+        let config = config.jitter(false).backoff_multiplier(f64::NAN);
+        assert_eq!(config.delay_for_attempt(3), Duration::MAX);
+    }
+
+    #[test]
+    fn test_delay_jitter_adds_at_most_a_quarter() {
+        let config = RetryConfig::new()
+            .initial_delay(Duration::from_millis(100))
+            .max_delay(Duration::from_secs(1))
+            .backoff_multiplier(2.0)
+            .jitter(true);
+        for _ in 0..64 {
+            let delay = config.delay_for_attempt(1);
+            assert!(
+                (Duration::from_millis(200)..=Duration::from_millis(250)).contains(&delay),
+                "{delay:?}"
+            );
+            // Jitter goes on top of the cap.
+            let capped = config.delay_for_attempt(10);
+            assert!(
+                (Duration::from_secs(1)..=Duration::from_millis(1250)).contains(&capped),
+                "{capped:?}"
+            );
+        }
     }
 
     #[test]

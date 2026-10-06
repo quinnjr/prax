@@ -21,6 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod common;
+
+use common::e2e_url;
 use futures::StreamExt;
 use prax_postgres::{
     PgConfig, PgConnection, PgError, PgListener, PgListenerEvent, PgNotification, PgPool,
@@ -39,15 +42,6 @@ fn unique_channel(prefix: &str) -> String {
     let n = CHANNEL_COUNTER.fetch_add(1, Ordering::SeqCst);
     let pid = std::process::id();
     format!("{prefix}_{pid}_{n}")
-}
-
-fn e2e_url() -> Option<String> {
-    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
-        return None;
-    }
-    Some(std::env::var("POSTGRES_URL").unwrap_or_else(|_| {
-        "postgres://prax:prax_test_password@localhost:5432/prax_test".to_owned()
-    }))
 }
 
 async fn pool(url: &str) -> PgPool {
@@ -117,7 +111,7 @@ struct TestProxy {
     refusing: Arc<AtomicBool>,
     silent: Arc<AtomicBool>,
     freezers: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
-    /// Frozen connections the client has since closed.
+    /// Frozen or silenced connections the client has since closed.
     hung_up: Arc<AtomicUsize>,
 }
 
@@ -146,9 +140,11 @@ impl TestProxy {
                 if silent.load(Ordering::SeqCst) {
                     // Swallow the handshake and never answer, until the
                     // client hangs up.
+                    let hung_up = Arc::clone(&hung_up);
                     tokio::spawn(async move {
                         let mut sink = [0u8; 1024];
                         while matches!(client.read(&mut sink).await, Ok(n) if n > 0) {}
+                        hung_up.fetch_add(1, Ordering::SeqCst);
                     });
                     continue;
                 }
@@ -211,7 +207,7 @@ impl TestProxy {
         self.accepted.load(Ordering::SeqCst)
     }
 
-    /// Frozen connections the client has closed.
+    /// Frozen or silenced connections the client has closed.
     fn hung_up(&self) -> usize {
         self.hung_up.load(Ordering::SeqCst)
     }
@@ -261,6 +257,32 @@ async fn next_notification(listener: &mut PgListener) -> PgNotification {
     n
 }
 
+/// Require that notifications on `channels` are not delivered: send one on
+/// each, then one on `sentinel` (which the listener is subscribed to), all
+/// from `conn`. Notifications are delivered in commit order, so if the next
+/// event is the sentinel's, none of the others is coming.
+async fn assert_not_delivered(
+    listener: &mut PgListener,
+    conn: &PgConnection,
+    channels: &[&str],
+    sentinel: &str,
+) {
+    for channel in channels {
+        conn.notify(channel, "must-not-arrive")
+            .await
+            .expect("notify");
+    }
+    conn.notify(sentinel, "sentinel")
+        .await
+        .expect("notify sentinel");
+    let n = next_notification(listener).await;
+    assert_eq!(
+        (n.channel.as_str(), n.payload.as_str()),
+        (sentinel, "sentinel"),
+        "nothing on {channels:?} may arrive before the sentinel"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn notifications_arrive_in_order() {
@@ -295,13 +317,19 @@ async fn notify_in_transaction_delivers_only_on_commit() {
     listener.listen(&channel).await.expect("listen");
 
     let mut conn = pool.get().await.expect("pool conn");
+    // Notifications are delivered in commit order: one committed by another
+    // session while the transaction is open must come first.
+    let other = pool.get().await.expect("second pool conn");
 
     let tx = conn.transaction().await.expect("begin");
     tx.notify(&channel, "a").await.expect("notify in tx");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(300), listener.recv())
-            .await
-            .is_err(),
+    other
+        .notify(&channel, "before-commit")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(
+        n.payload, "before-commit",
         "notification must not be delivered before commit"
     );
     tx.commit().await.expect("commit");
@@ -312,10 +340,13 @@ async fn notify_in_transaction_delivers_only_on_commit() {
     let tx = conn.transaction().await.expect("begin");
     tx.notify(&channel, "b").await.expect("notify in tx");
     tx.rollback().await.expect("rollback");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), listener.recv())
-            .await
-            .is_err(),
+    other
+        .notify(&channel, "after-rollback")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(
+        n.payload, "after-rollback",
         "a rolled-back notification must never be delivered"
     );
 }
@@ -344,18 +375,13 @@ async fn unlisten_stops_delivery() {
     let pool = pool(&url).await;
     let mut listener = listener(&url).await;
     let channel = unique_channel("u");
+    let sentinel = unique_channel("u_sentinel");
     listener.listen(&channel).await.expect("listen");
+    listener.listen(&sentinel).await.expect("listen sentinel");
     listener.unlisten(&channel).await.expect("unlisten");
 
     let conn = pool.get().await.expect("pool conn");
-    conn.notify(&channel, "ignored").await.expect("notify");
-
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), listener.recv())
-            .await
-            .is_err(),
-        "no notification after UNLISTEN"
-    );
+    assert_not_delivered(&mut listener, &conn, &[&channel], &sentinel).await;
 }
 
 #[tokio::test]
@@ -377,14 +403,9 @@ async fn listen_all_then_unlisten_all() {
     assert_eq!((second.channel, second.payload), (b.clone(), "to-b".into()));
 
     listener.unlisten_all().await.expect("unlisten_all");
-    conn.notify(&a, "ignored").await.expect("notify a");
-    conn.notify(&b, "ignored").await.expect("notify b");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), listener.recv())
-            .await
-            .is_err(),
-        "no notification after UNLISTEN *"
-    );
+    let sentinel = unique_channel("all_sentinel");
+    listener.listen(&sentinel).await.expect("listen sentinel");
+    assert_not_delivered(&mut listener, &conn, &[&a, &b], &sentinel).await;
 }
 
 #[tokio::test]
@@ -514,17 +535,34 @@ async fn overflow_reports_lagged() {
     while let Ok(event) = tokio::time::timeout(Duration::from_millis(500), listener.recv()).await {
         events.push(event.expect("recv ok"));
     }
-    let Some((PgListenerEvent::Lagged { dropped }, rest)) = events.split_first() else {
-        panic!("expected Lagged first, got {events:?}");
-    };
+    // Nobody read while they arrived: the first four filled the queue and
+    // the rest were dropped. `Lagged` keeps its place in the stream, after
+    // the four that were queued ahead of it.
+    let queued: Vec<&str> = events
+        .iter()
+        .take(4)
+        .map(|event| match event {
+            PgListenerEvent::Notification(n) => n.payload.as_str(),
+            other => panic!("expected the queued notifications first, got {other:?} in {events:?}"),
+        })
+        .collect();
+    assert_eq!(queued, ["0", "1", "2", "3"], "{events:?}");
     assert!(
-        rest.iter()
-            .all(|event| matches!(event, PgListenerEvent::Notification(_))),
-        "only notifications follow the Lagged report: {events:?}"
+        matches!(events.get(4), Some(PgListenerEvent::Lagged { dropped, .. }) if *dropped > 0),
+        "expected Lagged right after the queued notifications: {events:?}"
     );
-    let notifications = rest.len();
-    assert!(*dropped > 0, "{events:?}");
-    assert_eq!(*dropped as usize + notifications, 20, "{events:?}");
+    let notifications = events
+        .iter()
+        .filter(|event| matches!(event, PgListenerEvent::Notification(_)))
+        .count();
+    let dropped: u64 = events
+        .iter()
+        .filter_map(|event| match event {
+            PgListenerEvent::Lagged { dropped, .. } => Some(*dropped),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(dropped as usize + notifications, 20, "{events:?}");
 }
 
 #[tokio::test]
@@ -557,19 +595,27 @@ async fn reconnect_disabled_surfaces_error() {
     let err = result
         .expect("error within timeout")
         .expect_err("connection loss is terminal");
-    let PgError::Connection(message) = &err else {
-        panic!("expected a connection error, got {err:?}");
+    // The server's own error (57P01 admin_shutdown) is surfaced, not just
+    // "db error": structured when the driver reported it, described in the
+    // message otherwise.
+    let cause = match &err {
+        PgError::Postgres(e) => {
+            let db = e.as_db_error().unwrap_or_else(|| panic!("{err:?}"));
+            format!("{} {}", db.code().code(), db.message())
+        }
+        PgError::Connection(message) => message.clone(),
+        other => panic!("expected the connection's cause, got {other:?}"),
     };
-    let cause = message
-        .strip_prefix("listener connection closed: ")
-        .unwrap_or_else(|| panic!("unexpected message {message:?}"));
     assert!(
-        !cause.is_empty(),
-        "the error carries its cause: {message:?}"
+        cause.contains("57P01") || cause.contains("terminating connection"),
+        "the error carries its cause: {err:?}"
     );
 
     // Afterwards the listener reports itself closed.
-    let err = listener.recv().await.expect_err("listener closed");
+    let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("recv returns at once")
+        .expect_err("listener closed");
     assert!(
         matches!(&err, PgError::Connection(m) if m == "listener closed"),
         "got {err:?}"
@@ -602,10 +648,12 @@ async fn dropping_listener_during_backoff_does_not_hang() {
         assert!(proxy.accepted() > 1, "the listener was retrying");
 
         drop(listener);
-        // Let an attempt already in flight finish, then require silence: a
-        // supervisor that missed the drop would retry every 25-50 ms forever.
+        // Let an attempt already in flight finish, then let the server
+        // answer again and require silence: a supervisor that missed the
+        // drop would retry every 25-50 ms, and now succeed.
         tokio::time::sleep(Duration::from_millis(100)).await;
         let attempts = proxy.accepted();
+        proxy.heal();
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(
             proxy.accepted(),
@@ -624,25 +672,34 @@ async fn listen_while_reconnecting_takes_effect_after_reconnect() {
     let Some(url) = e2e_url() else { return };
     let pool = pool(&url).await;
     let (config, app) = tagged_config(&url);
-    let mut listener = PgListener::builder(&config)
-        .backoff(Duration::from_secs(1), Duration::from_secs(1))
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .backoff(Duration::from_millis(50), Duration::from_millis(200))
         .connect()
         .await
-        .expect("connect listener");
+        .expect("connect listener through proxy");
     let first = unique_channel("first");
     listener.listen(&first).await.expect("listen");
 
+    // The server now looks down, so the listener stays disconnected until
+    // the proxy heals; one refused attempt proves it noticed the loss.
+    proxy.refuse_new();
+    let before = proxy.accepted();
     assert_eq!(terminate_backend(&pool, &app).await, 1);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        wait_for_accepted(&proxy, before + 1, DELIVERY_TIMEOUT).await,
+        "the listener tried to reconnect"
+    );
 
-    // Mid-backoff: the subscription is recorded without waiting for the
+    // Disconnected: the subscription is recorded without waiting for the
     // connection to come back.
     let late = unique_channel("late");
-    tokio::time::timeout(Duration::from_millis(300), listener.listen(&late))
+    tokio::time::timeout(Duration::from_secs(1), listener.listen(&late))
         .await
         .expect("listen does not wait for the reconnect")
         .expect("listen while reconnecting");
 
+    proxy.heal();
     let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
         .await
         .expect("Reconnected within timeout")
@@ -808,25 +865,41 @@ async fn reconnect_drops_channels_the_server_rejects() {
     let app = unique_channel("prax_listener");
     let mut config = latin1;
     config.application_name = Some(app.clone());
-    let mut listener = PgListener::builder(&config)
-        .backoff(Duration::from_secs(1), Duration::from_secs(1))
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .backoff(Duration::from_millis(50), Duration::from_millis(200))
         .connect()
         .await
-        .expect("connect listener");
+        .expect("connect listener through proxy");
     let good = unique_channel("good");
     listener.listen(&good).await.expect("listen");
 
-    // Recorded mid-backoff, so the server only sees it on reconnect, where
-    // LATIN1 cannot encode it.
+    // Recorded while disconnected, so the server only sees it on
+    // reconnect, where LATIN1 cannot encode it.
+    proxy.refuse_new();
+    let before = proxy.accepted();
     assert_eq!(terminate_backend(&pool, &app).await, 1);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        wait_for_accepted(&proxy, before + 1, DELIVERY_TIMEOUT).await,
+        "the listener tried to reconnect"
+    );
     let bad = format!("{}_日本", unique_channel("bad"));
     listener
         .listen(&bad)
         .await
         .expect("recorded while reconnecting");
 
-    // Without the per-channel fallback every attempt fails on `bad`.
+    // Without the per-channel fallback every attempt fails on `bad`. The
+    // dropped channel is reported first, then the reconnect.
+    proxy.heal();
+    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("ChannelsDropped within timeout")
+        .expect("recv ok");
+    let PgListenerEvent::ChannelsDropped { channels, .. } = &event else {
+        panic!("expected ChannelsDropped, got {event:?}");
+    };
+    assert_eq!(channels, &[bad]);
     let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
         .await
         .expect("Reconnected within timeout")
@@ -882,10 +955,11 @@ async fn connect_fails_when_the_server_never_answers_the_handshake() {
         matches!(&err, PgError::Connection(m) if m.contains("handshake")),
         "got {err:?}"
     );
+    // Bounded by connect_timeout (1 s), not the shorter ping_interval.
+    let elapsed = started.elapsed();
     assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "failed after {:?}",
-        started.elapsed()
+        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(3),
+        "failed after {elapsed:?}"
     );
     assert_eq!(proxy.accepted(), 1, "the attempt reached the server");
 }
@@ -941,4 +1015,340 @@ async fn reconnect_keeps_retrying_while_the_server_never_answers() {
     let b = next_notification(&mut listener).await;
     assert_eq!((a.channel, a.payload), (first, "f".to_owned()));
     assert_eq!((b.channel, b.payload), (late, "l".to_owned()));
+}
+
+/// The SQLSTATE of a server error.
+fn sqlstate(err: &PgError) -> Option<&str> {
+    match err {
+        PgError::Postgres(e) => e.as_db_error().map(|db| db.code().code()),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn listen_rejected_by_server_fails_only_the_call() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let latin1 = latin1_config(&url, &pool).await;
+    let latin1_pool = PgPoolBuilder::new()
+        .config(latin1.clone())
+        .max_connections(1)
+        .connection_timeout(Duration::from_secs(10))
+        .build()
+        .await
+        .expect("connect to the LATIN1 database");
+    let app = unique_channel("prax_listener");
+    let mut config = latin1;
+    config.application_name = Some(app.clone());
+    let mut listener = PgListener::connect(&config)
+        .await
+        .expect("connect listener");
+    let good = unique_channel("good");
+    listener.listen(&good).await.expect("listen");
+
+    // LATIN1 cannot encode the name: the server refuses this LISTEN only.
+    let bad = format!("{}_日本", unique_channel("bad"));
+    let err = listener
+        .listen(&bad)
+        .await
+        .expect_err("the server rejects the name");
+    assert_eq!(sqlstate(&err), Some("22P05"), "got {err:?}");
+
+    // The connection was not treated as lost: the next event is the good
+    // channel's notification, not Reconnected, on the same backend.
+    latin1_pool
+        .get()
+        .await
+        .expect("pool conn")
+        .notify(&good, "still-subscribed")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(
+        (n.channel, n.payload),
+        (good, "still-subscribed".to_owned())
+    );
+    assert_eq!(backend_count(&pool, &app).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn invalid_channel_names_fail_before_reaching_the_server() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (config, app) = tagged_config(&url);
+    let mut listener = PgListener::connect(&config)
+        .await
+        .expect("connect listener");
+    let sentinel = unique_channel("sentinel");
+    listener.listen(&sentinel).await.expect("listen sentinel");
+    let mut conn = pool.get().await.expect("pool conn");
+
+    // The server would truncate the long name (with a notice) and reject
+    // the others with its own errors: a `Query` error means the call never
+    // got that far.
+    let too_long = "a".repeat(64);
+    for bad in ["", too_long.as_str(), "a\0b"] {
+        let result = listener.listen(bad).await;
+        assert!(
+            matches!(result, Err(PgError::Query(_))),
+            "listen {bad:?}: {result:?}"
+        );
+        let result = listener.unlisten(bad).await;
+        assert!(
+            matches!(result, Err(PgError::Query(_))),
+            "unlisten {bad:?}: {result:?}"
+        );
+        let result = conn.notify(bad, "x").await;
+        assert!(
+            matches!(result, Err(PgError::Query(_))),
+            "notify {bad:?}: {result:?}"
+        );
+
+        // A server error would abort the transaction; this one stays usable.
+        let tx = conn.transaction().await.expect("begin");
+        let result = tx.notify(bad, "x").await;
+        assert!(
+            matches!(result, Err(PgError::Query(_))),
+            "tx.notify {bad:?}: {result:?}"
+        );
+        tx.notify(&sentinel, "tx-ok")
+            .await
+            .expect("the transaction is still usable");
+        tx.commit().await.expect("commit");
+        let n = next_notification(&mut listener).await;
+        assert_eq!(
+            (n.channel.as_str(), n.payload.as_str()),
+            (sentinel.as_str(), "tx-ok")
+        );
+    }
+
+    // Every name is validated before any is subscribed.
+    let good = unique_channel("good");
+    let result = listener.listen_all([good.as_str(), "a\0b"]).await;
+    assert!(matches!(result, Err(PgError::Query(_))), "{result:?}");
+    assert_not_delivered(&mut listener, &conn, &[&good], &sentinel).await;
+
+    // None of it touched the listener's connection.
+    assert_eq!(backend_count(&pool, &app).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn reconnect_backoff_keeps_growing_while_sessions_keep_dying() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (config, app) = tagged_config(&url);
+    // No session lives for a whole ping interval here, so the backoff never
+    // starts over: reconnect `k` waits 200 ms * 2^k, scaled by 0.5-1.
+    let initial = Duration::from_millis(200);
+    let mut listener = PgListener::builder(&config)
+        .backoff(initial, Duration::from_secs(10))
+        .connect()
+        .await
+        .expect("connect listener");
+
+    let mut delays = Vec::new();
+    for _ in 0..4 {
+        let started = tokio::time::Instant::now();
+        assert!(terminate_backend(&pool, &app).await >= 1);
+        let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+            .await
+            .expect("Reconnected within timeout")
+            .expect("recv ok");
+        assert_eq!(event, PgListenerEvent::Reconnected);
+        delays.push(started.elapsed());
+    }
+    // Restarting from `initial` each time would keep every delay under
+    // 200 ms (plus connect time).
+    assert!(delays[2] >= 2 * initial, "{delays:?}");
+    assert!(delays[3] >= 4 * initial, "{delays:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn reconnect_gives_up_after_max_reconnect_attempts() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (config, app) = tagged_config(&url);
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .backoff(Duration::from_millis(20), Duration::from_millis(50))
+        .max_reconnect_attempts(3)
+        .connect()
+        .await
+        .expect("connect listener through proxy");
+    listener
+        .listen(&unique_channel("max"))
+        .await
+        .expect("listen");
+
+    proxy.refuse_new();
+    let before = proxy.accepted();
+    assert_eq!(terminate_backend(&pool, &app).await, 1);
+
+    // After three refused attempts the listener stops with the last error.
+    let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("recv returns once the listener gives up")
+        .expect_err("giving up is terminal");
+    assert!(
+        !matches!(&err, PgError::Connection(m) if m == "listener closed"),
+        "the error says why: {err:?}"
+    );
+    proxy.heal();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(proxy.accepted(), before + 3, "exactly three attempts");
+    assert_eq!(backend_count(&pool, &app).await, 0);
+
+    let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("recv returns at once")
+        .expect_err("listener closed");
+    assert!(
+        matches!(&err, PgError::Connection(m) if m == "listener closed"),
+        "got {err:?}"
+    );
+    let result = listener.listen(&unique_channel("after")).await;
+    assert!(result.is_err(), "commands fail once stopped: {result:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn reconnect_gives_up_when_the_database_is_gone() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let database = unique_channel("prax_listener_gone");
+    let conn = pool.get().await.expect("pool conn");
+    conn.batch_execute(&format!("CREATE DATABASE {database}"))
+        .await
+        .expect("create database");
+
+    let (mut config, _app) = tagged_config(&url);
+    config.database = database.clone();
+    // Retrying forever is the default; a missing database still ends it.
+    let mut listener = PgListener::builder(&config)
+        .backoff(Duration::from_millis(20), Duration::from_millis(50))
+        .connect()
+        .await
+        .expect("connect listener");
+    listener
+        .listen(&unique_channel("gone"))
+        .await
+        .expect("listen");
+
+    // Terminates the listener's backend, then drops the database.
+    conn.batch_execute(&format!("DROP DATABASE {database} WITH (FORCE)"))
+        .await
+        .expect("drop database");
+
+    let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("recv returns once the listener gives up")
+        .expect_err("a missing database is terminal");
+    assert_eq!(sqlstate(&err), Some("3D000"), "got {err:?}");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn idle_session_timeout_does_not_close_the_listener() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (mut config, app) = tagged_config(&url);
+    // A default that would end the listener's session after 300 ms idle.
+    config
+        .options
+        .push(("idle_session_timeout".to_owned(), "300".to_owned()));
+    let mut listener = PgListener::connect(&config)
+        .await
+        .expect("connect listener");
+    let channel = unique_channel("idle");
+    listener.listen(&channel).await.expect("listen");
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    pool.get()
+        .await
+        .expect("pool conn")
+        .notify(&channel, "still-here")
+        .await
+        .expect("notify");
+    // A Reconnected here would mean the server closed the idle session.
+    let n = next_notification(&mut listener).await;
+    assert_eq!(n.payload, "still-here");
+    assert_eq!(backend_count(&pool, &app).await, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn dropping_idle_listener_closes_its_backend() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (config, app) = tagged_config(&url);
+    let mut listener = PgListener::connect(&config)
+        .await
+        .expect("connect listener");
+    listener
+        .listen(&unique_channel("idle_drop"))
+        .await
+        .expect("listen");
+    assert_eq!(backend_count(&pool, &app).await, 1);
+
+    drop(listener);
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while backend_count(&pool, &app).await != 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(closed.is_ok(), "the backend is gone within 5 s of the drop");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn dropping_listener_mid_reconnect_attempt_stops_at_once() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (mut config, app) = tagged_config(&url);
+    // The handshake bound (30 s) cannot end the stuck attempt in this test.
+    config.connect_timeout = Duration::from_secs(30);
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .backoff(Duration::from_millis(20), Duration::from_millis(50))
+        .connect()
+        .await
+        .expect("connect listener through proxy");
+    listener
+        .listen(&unique_channel("mid_attempt"))
+        .await
+        .expect("listen");
+
+    // The next attempt hangs in its handshake.
+    proxy.silence_new();
+    let before = proxy.accepted();
+    assert_eq!(terminate_backend(&pool, &app).await, 1);
+    assert!(
+        wait_for_accepted(&proxy, before + 1, DELIVERY_TIMEOUT).await,
+        "the listener tried to reconnect"
+    );
+
+    let hung_up = proxy.hung_up();
+    drop(listener);
+    let abandoned = tokio::time::timeout(Duration::from_secs(2), async {
+        while proxy.hung_up() == hung_up {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        abandoned.is_ok(),
+        "the stuck attempt's socket is closed at once, not after the handshake bound"
+    );
+
+    // Nothing follows, even once the server answers again.
+    let attempts = proxy.accepted();
+    proxy.heal();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(proxy.accepted(), attempts, "no attempt after the drop");
+    assert_eq!(backend_count(&pool, &app).await, 0);
 }

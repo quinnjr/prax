@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 use prax_query::sql::is_valid_sql_identifier;
 
 use crate::error::{PgError, PgResult};
-use crate::listener::{validate_channel, validate_payload};
+use crate::notify::{validate_channel, validate_payload};
 use crate::statement::PreparedStatementCache;
 
 /// A wrapper around a PostgreSQL connection with statement caching.
