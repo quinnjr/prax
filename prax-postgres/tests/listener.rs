@@ -105,14 +105,17 @@ async fn backend_count(pool: &PgPool, app: &str) -> i64 {
         .get(0)
 }
 
-/// A TCP proxy in front of Postgres that can fake two failures: a frozen
+/// A TCP proxy in front of Postgres that can fake three failures: a frozen
 /// connection stays open and accepts the client's bytes but never answers
-/// (a peer that ACKs but is stuck), and while refusing, new connections are
-/// closed at once (a server that is down).
+/// (a peer that ACKs but is stuck); while refusing, new connections are
+/// closed at once (a server that is down); and while silent, new connections
+/// are accepted but never answered, not even the startup handshake (a wedged
+/// server or proxy).
 struct TestProxy {
     port: u16,
     accepted: Arc<AtomicUsize>,
     refusing: Arc<AtomicBool>,
+    silent: Arc<AtomicBool>,
     freezers: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
     /// Frozen connections the client has since closed.
     hung_up: Arc<AtomicUsize>,
@@ -125,17 +128,28 @@ impl TestProxy {
             port: listener.local_addr().expect("proxy addr").port(),
             accepted: Arc::default(),
             refusing: Arc::default(),
+            silent: Arc::default(),
             freezers: Arc::default(),
             hung_up: Arc::default(),
         };
         let accepted = Arc::clone(&proxy.accepted);
         let refusing = Arc::clone(&proxy.refusing);
+        let silent = Arc::clone(&proxy.silent);
         let freezers = Arc::clone(&proxy.freezers);
         let hung_up = Arc::clone(&proxy.hung_up);
         tokio::spawn(async move {
             while let Ok((mut client, _)) = listener.accept().await {
                 accepted.fetch_add(1, Ordering::SeqCst);
                 if refusing.load(Ordering::SeqCst) {
+                    continue;
+                }
+                if silent.load(Ordering::SeqCst) {
+                    // Swallow the handshake and never answer, until the
+                    // client hangs up.
+                    tokio::spawn(async move {
+                        let mut sink = [0u8; 1024];
+                        while matches!(client.read(&mut sink).await, Ok(n) if n > 0) {}
+                    });
                     continue;
                 }
                 let Ok(mut server) = TcpStream::connect((host.as_str(), port)).await else {
@@ -178,6 +192,18 @@ impl TestProxy {
     /// Close new connections at once; open ones keep forwarding.
     fn refuse_new(&self) {
         self.refusing.store(true, Ordering::SeqCst);
+    }
+
+    /// Accept new connections but never answer them; open ones keep
+    /// forwarding.
+    fn silence_new(&self) {
+        self.silent.store(true, Ordering::SeqCst);
+    }
+
+    /// Forward new connections to the server again.
+    fn heal(&self) {
+        self.refusing.store(false, Ordering::SeqCst);
+        self.silent.store(false, Ordering::SeqCst);
     }
 
     /// Connections accepted so far (refused ones included).
@@ -815,4 +841,103 @@ async fn reconnect_drops_channels_the_server_rejects() {
         .expect("notify");
     let n = next_notification(&mut listener).await;
     assert_eq!((n.channel, n.payload), (good, "kept".to_owned()));
+}
+
+/// Wait (up to `limit`) until `proxy` has accepted at least `count`
+/// connections; returns whether it did.
+async fn wait_for_accepted(proxy: &TestProxy, count: usize, limit: Duration) -> bool {
+    tokio::time::timeout(limit, async {
+        while proxy.accepted() < count {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .is_ok()
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn connect_fails_when_the_server_never_answers_the_handshake() {
+    let Some(url) = e2e_url() else { return };
+    let mut config = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
+    config.connect_timeout = Duration::from_secs(1);
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    proxy.silence_new();
+
+    // The TCP connect succeeds at once, so `connect_timeout` alone never
+    // fires; the handshake is bounded by max(connect_timeout, ping_interval)
+    // = 1 s here.
+    let started = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        PgListener::builder(&proxy.route(config))
+            .ping_interval(Duration::from_millis(500))
+            .connect(),
+    )
+    .await
+    .expect("connect returns instead of hanging");
+    let err = result.expect_err("a handshake that is never answered fails");
+    assert!(
+        matches!(&err, PgError::Connection(m) if m.contains("handshake")),
+        "got {err:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "failed after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(proxy.accepted(), 1, "the attempt reached the server");
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn reconnect_keeps_retrying_while_the_server_never_answers() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (mut config, app) = tagged_config(&url);
+    config.connect_timeout = Duration::from_secs(1);
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .ping_interval(Duration::from_secs(1))
+        .backoff(Duration::from_millis(50), Duration::from_millis(200))
+        .connect()
+        .await
+        .expect("connect listener through proxy");
+    let first = unique_channel("silent");
+    listener.listen(&first).await.expect("listen");
+
+    // New connections now hang in the handshake, and the live one dies.
+    proxy.silence_new();
+    let before = proxy.accepted();
+    assert_eq!(terminate_backend(&pool, &app).await, 1);
+
+    // Each attempt gives up after the handshake bound (1 s) and the next
+    // one follows: attempts keep coming instead of stalling on the first.
+    assert!(
+        wait_for_accepted(&proxy, before + 3, Duration::from_secs(10)).await,
+        "only {} reconnect attempts",
+        proxy.accepted() - before
+    );
+
+    // A command waits for at most the attempt in flight, then is recorded.
+    let late = unique_channel("silent_late");
+    tokio::time::timeout(Duration::from_secs(3), listener.listen(&late))
+        .await
+        .expect("listen returns while the server is silent")
+        .expect("listen while reconnecting");
+
+    proxy.heal();
+    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("Reconnected within timeout")
+        .expect("recv ok");
+    assert_eq!(event, PgListenerEvent::Reconnected);
+
+    let conn = pool.get().await.expect("pool conn");
+    conn.notify(&first, "f").await.expect("notify first");
+    conn.notify(&late, "l").await.expect("notify late");
+    let a = next_notification(&mut listener).await;
+    let b = next_notification(&mut listener).await;
+    assert_eq!((a.channel, a.payload), (first, "f".to_owned()));
+    assert_eq!((b.channel, b.payload), (late, "l".to_owned()));
 }

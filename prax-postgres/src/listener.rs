@@ -47,7 +47,9 @@
 //!   then either reconnects with exponential backoff,
 //!   re-`LISTEN`s every tracked channel and reports
 //!   [`PgListenerEvent::Reconnected`], or (with [`reconnect`] disabled)
-//!   records the error and stops.
+//!   records the error and stops. Every connection attempt, handshake
+//!   included, is bounded by the larger of `PgConfig::connect_timeout` and
+//!   [`ping_interval`]; one that runs out counts as a failed attempt.
 //!
 //! Dropping the [`PgListener`] closes the command channel; the supervisor then
 //! exits (also while waiting to reconnect) and drops the client, which ends
@@ -117,7 +119,10 @@ pub struct PgListenerOptions {
     /// half-open connections long before TCP keepalive does. The same bound
     /// applies to `LISTEN` / `UNLISTEN` commands: one not answered in time
     /// fails with a timeout error and the connection is treated as lost.
-    /// Must be non-zero and at most one day. Default: 30 s.
+    /// Each connection attempt (TCP connect, TLS and the startup handshake)
+    /// is bounded by the larger of this and
+    /// [`PgConfig::connect_timeout`]. Must be non-zero and at most one day.
+    /// Default: 30 s.
     pub ping_interval: Duration,
     /// Capacity of the notification queue. When it is full, further
     /// notifications are dropped and reported as
@@ -257,7 +262,10 @@ impl PgListenerBuilder {
     ///
     /// Fails if the options are invalid, the TLS configuration is unusable
     /// (see the pool's `ssl_mode` rules), or the connection cannot be
-    /// established.
+    /// established. The attempt, including the TLS and startup handshake,
+    /// is bounded by the larger of [`PgConfig::connect_timeout`] and
+    /// [`PgListenerOptions::ping_interval`]; past that it fails with a
+    /// connection error.
     pub async fn connect(self) -> PgResult<PgListener> {
         let Self { config, options } = self;
         options.validate()?;
@@ -273,6 +281,7 @@ impl PgListenerBuilder {
         let supervisor = Supervisor {
             pg_config,
             connector,
+            handshake_timeout: config.connect_timeout.max(options.ping_interval),
             options,
             events: events_tx,
             shared: Arc::clone(&shared),
@@ -692,6 +701,8 @@ fn rejects_channel(error: &PgError) -> bool {
 struct Supervisor {
     pg_config: tokio_postgres::Config,
     connector: Connector,
+    /// Bound on a whole connection attempt; see [`Supervisor::connect`].
+    handshake_timeout: Duration,
     options: PgListenerOptions,
     events: mpsc::Sender<PgNotification>,
     shared: Arc<Shared>,
@@ -700,8 +711,26 @@ struct Supervisor {
 }
 
 impl Supervisor {
-    /// Open a connection and spawn its driver task.
+    /// Open a connection and spawn its driver task, bounded by
+    /// `handshake_timeout` (the larger of `PgConfig::connect_timeout` and
+    /// `ping_interval`).
+    ///
+    /// `tokio_postgres`'s own `connect_timeout` only covers opening the
+    /// socket. The TLS and startup handshake (including authentication)
+    /// would otherwise wait forever on a server or proxy that accepts the
+    /// connection and never answers.
     async fn connect(&self) -> PgResult<Session> {
+        let limit = self.handshake_timeout;
+        match time::timeout(limit, self.open_connection()).await {
+            Ok(result) => result,
+            Err(_) => Err(PgError::connection(format!(
+                "connection handshake not completed within {limit:?}"
+            ))),
+        }
+    }
+
+    /// [`connect`](Self::connect) without the overall bound.
+    async fn open_connection(&self) -> PgResult<Session> {
         let (client, (closed, driver)) = match &self.connector {
             Connector::NoTls => {
                 let (client, connection) = self.pg_config.connect(NoTls).await?;
