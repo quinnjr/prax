@@ -32,6 +32,15 @@
 //!     .await?;
 //! ```
 //!
+//! ## PostgreSQL parameter types
+//!
+//! sqlx declares every parameter's type from the bound Rust value. A
+//! `FilterValue::Array` of strings (and an empty or all-`Null` array) binds
+//! as `text[]`, so comparing it with a column of another type needs an
+//! explicit cast in the SQL, for example `uuid_col = ANY($1::uuid[])`.
+//! `prax-postgres` binds against the parameter type the server infers, so
+//! `uuid_col = ANY($1)` works there without the cast.
+//!
 //! ## Compile-Time Checking
 //!
 //! Use the `sqlx::query!` macro for compile-time SQL verification:

@@ -537,6 +537,8 @@ enum PgArrayKind {
 ///
 /// Empty and all-`Null` arrays fall back to `Text` (they bind as `text[]`,
 /// a documented limitation: the server cannot infer a better element type).
+/// String arrays bind as `text[]` too, so a comparison with a non-text
+/// column needs a cast in the SQL (`uuid_col = ANY($1::uuid[])`).
 /// Mixed kinds and nested `List`/`Array` elements are rejected.
 #[cfg(feature = "postgres")]
 fn pg_array_kind(items: &[FilterValue]) -> SqlxResult<PgArrayKind> {
