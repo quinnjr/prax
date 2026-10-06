@@ -14,9 +14,12 @@
 
 #![cfg(test)]
 
+mod common;
+
 use std::collections::HashSet;
 use std::time::Duration;
 
+use common::e2e_url;
 use prax_orm::{Model, PraxClient, client};
 use prax_postgres::{PgEngine, PgPool, PgPoolBuilder};
 use prax_query::advanced::RowLock;
@@ -35,17 +38,6 @@ struct Job {
 
 client!(Job);
 
-fn postgres_url() -> Option<String> {
-    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
-        return None;
-    }
-    Some(
-        std::env::var("POSTGRES_URL").unwrap_or_else(|_| {
-            "postgres://prax:prax_test_password@localhost:5432/prax_test".into()
-        }),
-    )
-}
-
 async fn build_pool(url: String) -> PgPool {
     PgPoolBuilder::new()
         .url(url)
@@ -59,7 +51,7 @@ async fn build_pool(url: String) -> PgPool {
 /// Build a client and ensure `lock_pg_jobs` exists (advisory-lock guarded
 /// so concurrent test binaries don't race on catalog inserts).
 async fn setup() -> Option<PraxClient<PgEngine>> {
-    let url = postgres_url()?;
+    let url = e2e_url()?;
     let pool = build_pool(url).await;
 
     let conn = pool.get().await.expect("acquire conn for setup");
@@ -112,8 +104,8 @@ async fn skip_locked_claims_are_disjoint() {
         eprintln!("skipping: PRAX_E2E not set");
         return;
     };
-    let tag = "lock_skip_locked";
-    seed(&client, tag, 10).await;
+    let tag = format!("lock_skip_locked_{}", std::process::id());
+    seed(&client, &tag, 10).await;
 
     let (locked_tx, locked_rx) = oneshot::channel::<()>();
     let (done_tx, done_rx) = oneshot::channel::<()>();
@@ -121,6 +113,7 @@ async fn skip_locked_claims_are_disjoint() {
     // Tx B waits until A holds its locks, claims its own batch, then
     // tells A it may commit.
     let client_b = client.clone();
+    let tag_b = tag.clone();
     let b = tokio::spawn(async move {
         locked_rx.await.expect("A signalled");
         client_b
@@ -128,7 +121,7 @@ async fn skip_locked_claims_are_disjoint() {
                 let rows = tx
                     .job()
                     .find_many()
-                    .r#where(job::tag::equals(tag.to_string()))
+                    .r#where(job::tag::equals(tag_b))
                     .order_by(OrderByField::asc("id"))
                     .take(5)
                     .lock(RowLock::for_update().skip_locked())
@@ -141,12 +134,13 @@ async fn skip_locked_claims_are_disjoint() {
             .await
     });
 
+    let tag_a = tag.clone();
     let ids_a: Vec<i32> = client
         .transaction(move |tx| async move {
             let rows = tx
                 .job()
                 .find_many()
-                .r#where(job::tag::equals(tag.to_string()))
+                .r#where(job::tag::equals(tag_a))
                 .order_by(OrderByField::asc("id"))
                 .take(5)
                 .lock(RowLock::for_update().skip_locked())
@@ -174,7 +168,7 @@ async fn skip_locked_claims_are_disjoint() {
         "claims overlap: a={ids_a:?} b={ids_b:?}"
     );
 
-    cleanup(&client, tag).await;
+    cleanup(&client, &tag).await;
 }
 
 #[tokio::test]
@@ -184,8 +178,8 @@ async fn nowait_on_locked_row_errors_immediately() {
         eprintln!("skipping: PRAX_E2E not set");
         return;
     };
-    let tag = "lock_nowait";
-    let ids = seed(&client, tag, 1).await;
+    let tag = format!("lock_nowait_{}", std::process::id());
+    let ids = seed(&client, &tag, 1).await;
     let target = ids[0];
 
     let (locked_tx, locked_rx) = oneshot::channel::<()>();
@@ -249,5 +243,5 @@ async fn nowait_on_locked_row_errors_immediately() {
         "expected SQLSTATE 55P03, got: {err} / {source_dbg}"
     );
 
-    cleanup(&client, tag).await;
+    cleanup(&client, &tag).await;
 }

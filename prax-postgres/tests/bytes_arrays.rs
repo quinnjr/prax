@@ -3,6 +3,9 @@
 
 #![cfg(test)]
 
+mod common;
+
+use common::e2e_url;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -19,15 +22,8 @@ fn unique_table(prefix: &str) -> String {
     format!("ba_{prefix}_{pid}_{n}")
 }
 
-fn skip_unless_e2e() -> Option<String> {
-    if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
-        return None;
-    }
-    std::env::var("POSTGRES_URL").ok()
-}
-
 async fn pool() -> PgPool {
-    let url = skip_unless_e2e().expect("PRAX_E2E=1 and POSTGRES_URL required");
+    let url = e2e_url().expect("PRAX_E2E=1 and POSTGRES_URL required");
     PgPoolBuilder::new()
         .url(url)
         .max_connections(2)
@@ -35,6 +31,49 @@ async fn pool() -> PgPool {
         .build()
         .await
         .expect("connect to postgres")
+}
+
+/// Drops its table when the test ends, including when an assertion panics.
+/// `Drop` is sync, so the cleanup runs on its own thread and runtime.
+struct TableGuard {
+    url: String,
+    table: String,
+}
+
+impl TableGuard {
+    fn new(table: String) -> Self {
+        let url = e2e_url().expect("PRAX_E2E=1 required");
+        Self { url, table }
+    }
+}
+
+impl Drop for TableGuard {
+    fn drop(&mut self) {
+        let (url, table) = (self.url.clone(), self.table.clone());
+        let _ = std::thread::spawn(move || {
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            else {
+                return;
+            };
+            rt.block_on(async move {
+                if let Ok(pool) = PgPoolBuilder::new()
+                    .url(url)
+                    .max_connections(1)
+                    .connection_timeout(Duration::from_secs(10))
+                    .build()
+                    .await
+                {
+                    PgEngine::new(pool)
+                        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
+                        .await
+                        .ok();
+                }
+            });
+        })
+        .join();
+    }
 }
 
 async fn count(pool: &PgPool, sql: &str, param: FilterValue) -> i64 {
@@ -51,12 +90,13 @@ async fn count(pool: &PgPool, sql: &str, param: FilterValue) -> i64 {
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn bytea_round_trips_non_utf8() {
-    if skip_unless_e2e().is_none() {
+    if e2e_url().is_none() {
         return;
     }
     let pool = pool().await;
     let engine = PgEngine::new(pool.clone());
     let table = unique_table("bytea");
+    let _guard = TableGuard::new(table.clone());
     engine
         .execute_raw(&format!("CREATE TABLE {table} (b BYTEA NOT NULL)"), vec![])
         .await
@@ -76,21 +116,18 @@ async fn bytea_round_trips_non_utf8() {
         .await
         .expect("select");
     assert_eq!(row.get::<_, Vec<u8>>(0), vec![0x00, 0x9F, 0xFF]);
-    engine
-        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
-        .await
-        .ok();
 }
 
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn array_param_binds_for_any() {
-    if skip_unless_e2e().is_none() {
+    if e2e_url().is_none() {
         return;
     }
     let pool = pool().await;
     let engine = PgEngine::new(pool.clone());
     let table = unique_table("any");
+    let _guard = TableGuard::new(table.clone());
     engine
         .execute_raw(
             &format!("CREATE TABLE {table} (id INT4, u UUID, s TEXT)"),
@@ -127,22 +164,18 @@ async fn array_param_binds_for_any() {
 
     let sql = format!("SELECT count(*) FROM {table} WHERE id = ANY($1)");
     assert_eq!(count(&pool, &sql, FilterValue::Array(vec![])).await, 0);
-
-    engine
-        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
-        .await
-        .ok();
 }
 
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn array_column_round_trips_and_mixed_kinds_error() {
-    if skip_unless_e2e().is_none() {
+    if e2e_url().is_none() {
         return;
     }
     let pool = pool().await;
     let engine = PgEngine::new(pool.clone());
     let table = unique_table("col");
+    let _guard = TableGuard::new(table.clone());
     engine
         .execute_raw(
             &format!("CREATE TABLE {table} (tags TEXT[] NOT NULL, ns INT8[] NOT NULL)"),
@@ -183,22 +216,18 @@ async fn array_column_round_trips_and_mixed_kinds_error() {
         )
         .await;
     assert!(res.is_err(), "Int element into TEXT[] must error");
-
-    engine
-        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
-        .await
-        .ok();
 }
 
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn bytea_array_round_trips() {
-    if skip_unless_e2e().is_none() {
+    if e2e_url().is_none() {
         return;
     }
     let pool = pool().await;
     let engine = PgEngine::new(pool.clone());
     let table = unique_table("byteaarr");
+    let _guard = TableGuard::new(table.clone());
     engine
         .execute_raw(
             &format!("CREATE TABLE {table} (bs BYTEA[] NOT NULL)"),
@@ -227,8 +256,4 @@ async fn bytea_array_round_trips() {
         row.get::<_, Vec<Vec<u8>>>(0),
         vec![vec![0x00, 0xFF], vec![0x9F]]
     );
-    engine
-        .execute_raw(&format!("DROP TABLE IF EXISTS {table}"), vec![])
-        .await
-        .ok();
 }
