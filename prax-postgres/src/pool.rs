@@ -292,6 +292,7 @@ impl PgPool {
 }
 
 /// Pool status information.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PoolStatus {
     /// Number of available (idle) connections.
