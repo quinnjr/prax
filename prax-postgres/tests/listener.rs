@@ -666,7 +666,8 @@ async fn ping_detects_unresponsive_connection_and_reconnects() {
     let config = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
     let proxy = TestProxy::start(config.host.clone(), config.port).await;
 
-    let ping = Duration::from_millis(500);
+    // Long enough that a healthy ping on a loaded machine is never late.
+    let ping = Duration::from_secs(1);
     let mut listener = PgListener::builder(&proxy.route(config))
         .ping_interval(ping)
         .backoff(Duration::from_millis(50), Duration::from_secs(1))

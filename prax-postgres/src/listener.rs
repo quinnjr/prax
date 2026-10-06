@@ -105,13 +105,17 @@ pub struct PgListenerOptions {
     /// the error. Default: `true`.
     pub reconnect: bool,
     /// Delay before the first reconnect attempt; it doubles after every
-    /// failed attempt, up to [`backoff_max`](Self::backoff_max). Each delay
-    /// is scaled by a random factor between 0.5 and 1 (jitter). Must be
-    /// non-zero and at most `backoff_max`. Default: 100 ms.
+    /// attempt, up to [`backoff_max`](Self::backoff_max), and only starts
+    /// over once a re-established connection has stayed up for a
+    /// [`ping_interval`](Self::ping_interval) (so a server that keeps
+    /// dropping new connections is not hammered). Each delay is scaled by a
+    /// random factor between 0.5 and 1 (jitter). Must be non-zero and at
+    /// most `backoff_max`. Default: 100 ms.
     pub backoff_initial: Duration,
     /// Upper bound on the reconnect delay. Default: 30 s.
     pub backoff_max: Duration,
-    /// TCP keepalive idle time on the listener connection. Default: 60 s.
+    /// TCP keepalive idle time on the listener connection. Counted in whole
+    /// seconds; must be at least 1 s. Default: 60 s.
     pub keepalive_idle: Duration,
     /// Liveness check period. When no notification arrived during an
     /// interval, `SELECT 1` is sent; if it fails or is not answered within
@@ -146,6 +150,13 @@ impl PgListenerOptions {
         if self.ping_interval.is_zero() {
             return Err(PgError::config(
                 "PgListener ping_interval must be greater than zero",
+            ));
+        }
+        // TCP keepalive counts whole seconds; less than one becomes zero,
+        // which the OS rejects (EINVAL) when the socket is opened.
+        if self.keepalive_idle < Duration::from_secs(1) {
+            return Err(PgError::config(
+                "PgListener keepalive_idle must be at least one second",
             ));
         }
         if self.ping_interval > MAX_PING_INTERVAL {
@@ -232,7 +243,7 @@ impl PgListenerBuilder {
         self
     }
 
-    /// TCP keepalive idle time on the listener connection.
+    /// TCP keepalive idle time on the listener connection (at least 1 s).
     pub fn keepalive_idle(mut self, idle: Duration) -> Self {
         self.options.keepalive_idle = idle;
         self
@@ -283,6 +294,7 @@ impl PgListenerBuilder {
             connector,
             handshake_timeout: config.connect_timeout.max(options.ping_interval),
             options,
+            backoff: ReconnectBackoff::default(),
             events: events_tx,
             shared: Arc::clone(&shared),
             channels: BTreeSet::new(),
@@ -311,6 +323,18 @@ impl PgListenerBuilder {
 ///
 /// The connection is not taken from a pool. Dropping the listener closes it
 /// and stops its background tasks.
+///
+/// # Connect directly to PostgreSQL
+///
+/// A `LISTEN` subscription belongs to one server session, so the listener
+/// must connect to PostgreSQL itself, not through a transaction-mode pooler
+/// (such as PgBouncer with `pool_mode = transaction`) or a multiplexing
+/// proxy such as Amazon RDS Proxy, which do not keep the client connection
+/// tied to one server session: notifications would be lost or never
+/// arrive. When the application's pool goes through such a proxy, build the
+/// listener from a [`PgConfig`] that points at the database server directly
+/// rather than with [`from_pool`](Self::from_pool), which copies the pool's
+/// host.
 pub struct PgListener {
     cmd_tx: mpsc::Sender<Command>,
     events: mpsc::Receiver<PgNotification>,
@@ -330,7 +354,12 @@ impl PgListener {
     }
 
     /// Connect a dedicated listener using `pool`'s configuration (including
-    /// its TLS settings). The connection is not taken from the pool.
+    /// its TLS settings and host). The connection is not taken from the pool.
+    ///
+    /// If the pool connects through a transaction-mode pooler or a proxy
+    /// such as Amazon RDS Proxy, use [`connect`](Self::connect) with a
+    /// config that points at PostgreSQL directly instead; see
+    /// [Connect directly to PostgreSQL](Self#connect-directly-to-postgresql).
     pub async fn from_pool(pool: &PgPool) -> PgResult<Self> {
         Self::connect(pool.config()).await
     }
@@ -540,6 +569,41 @@ fn backoff_delay(attempt: u32, initial: Duration, max: Duration, jitter: f64) ->
         .map_or(capped, |delay| delay.min(capped))
 }
 
+/// Reconnect backoff state kept across sessions, so that a server which
+/// accepts connections and drops them again at once is retried with growing
+/// delays rather than every `backoff_initial`.
+#[derive(Debug, Default)]
+struct ReconnectBackoff {
+    /// Attempts made since the last session that stayed up for a whole
+    /// `ping_interval`.
+    attempt: u32,
+}
+
+impl ReconnectBackoff {
+    /// The delay before the next attempt ([`backoff_delay`] for the current
+    /// attempt count); counts the attempt.
+    fn next_delay(&mut self, options: &PgListenerOptions, jitter: f64) -> Duration {
+        let delay = backoff_delay(
+            self.attempt,
+            options.backoff_initial,
+            options.backoff_max,
+            jitter,
+        );
+        self.attempt = self.attempt.saturating_add(1);
+        delay
+    }
+
+    /// Record the loss of a session that had been up for `uptime`. Only a
+    /// session that survived one `ping_interval` resets the delay to
+    /// `backoff_initial`; a shorter one keeps the count, so the next delay
+    /// continues to grow.
+    fn session_lost(&mut self, uptime: Duration, ping_interval: Duration) {
+        if uptime >= ping_interval {
+            self.attempt = 0;
+        }
+    }
+}
+
 /// A jitter factor in `[0.5, 1.0)` for [`backoff_delay`], taken from std's
 /// randomly keyed hasher (every `RandomState` gets fresh keys), so no `rand`
 /// dependency is needed.
@@ -682,19 +746,25 @@ fn timeout_error(limit: Duration) -> PgError {
     PgError::Timeout(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX))
 }
 
-/// Whether the server refused `LISTEN` because of the channel name itself:
-/// SQLSTATE class 22 (data exception, e.g. a name the server encoding cannot
-/// represent) or 42 (syntax error or access rule violation). Anything else,
-/// such as a hot standby refusing `LISTEN` altogether, is a server-wide
-/// condition that a later reconnect attempt may not hit.
+/// Whether the server refused `LISTEN` because of the channel name itself;
+/// see [`rejects_channel_code`].
 fn rejects_channel(error: &PgError) -> bool {
     let PgError::Postgres(error) = error else {
         return false;
     };
-    error.as_db_error().is_some_and(|db| {
-        let code = db.code().code();
-        code.starts_with("22") || code.starts_with("42")
-    })
+    error
+        .as_db_error()
+        .is_some_and(|db| rejects_channel_code(db.code().code()))
+}
+
+/// Whether SQLSTATE `code` means the channel name itself was refused: class
+/// 22 (data exception, e.g. 22P05 for a name the server encoding cannot
+/// represent), 42602 (`invalid_name`) or 42622 (`name_too_long`). Anything
+/// else, such as a hot standby refusing `LISTEN` altogether (25006) or a
+/// permission error (42501), is a condition a later attempt may not hit:
+/// it fails the attempt, which is retried, rather than dropping channels.
+fn rejects_channel_code(code: &str) -> bool {
+    code.starts_with("22") || code == "42602" || code == "42622"
 }
 
 /// Background task owning the client and the tracked channel set.
@@ -704,6 +774,7 @@ struct Supervisor {
     /// Bound on a whole connection attempt; see [`Supervisor::connect`].
     handshake_timeout: Duration,
     options: PgListenerOptions,
+    backoff: ReconnectBackoff,
     events: mpsc::Sender<PgNotification>,
     shared: Arc<Shared>,
     /// Channels currently subscribed, to re-`LISTEN` after a reconnect.
@@ -810,6 +881,7 @@ impl Supervisor {
     /// or until the connection is lost while reconnecting is disabled.
     async fn run(mut self, mut session: Session, mut commands: mpsc::Receiver<Command>) {
         let mut ticks = ping_ticks(self.options.ping_interval);
+        let mut connected_at = time::Instant::now();
         loop {
             let cause = tokio::select! {
                 biased;
@@ -852,11 +924,14 @@ impl Supervisor {
                 )));
                 return;
             }
+            self.backoff
+                .session_lost(connected_at.elapsed(), self.options.ping_interval);
             let Some(new_session) = self.reconnect(&mut commands).await else {
                 // The handle was dropped while reconnecting.
                 return;
             };
             session = new_session;
+            connected_at = time::Instant::now();
             // Every tracked channel is subscribed again: report it.
             self.shared.reconnected.store(true, Ordering::Release);
             self.shared.wake.notify_one();
@@ -930,21 +1005,19 @@ impl Supervisor {
     }
 
     /// Re-establish the connection: before each attempt wait out its
-    /// [`backoff_delay`] (meanwhile recording commands against the tracked
+    /// backoff delay (meanwhile recording commands against the tracked
     /// channel set), then connect and re-`LISTEN` every tracked channel.
     /// Returns `None` as soon as the handle is dropped.
+    ///
+    /// The delay keeps growing across sessions until one stays up for a
+    /// `ping_interval` (see [`ReconnectBackoff`]).
     ///
     /// The whole retry loop lives here, so the lost session's (possibly
     /// completed) `closed` receiver is never polled again.
     async fn reconnect(&mut self, commands: &mut mpsc::Receiver<Command>) -> Option<Session> {
         let mut attempt: u32 = 0;
         loop {
-            let delay = backoff_delay(
-                attempt,
-                self.options.backoff_initial,
-                self.options.backoff_max,
-                jitter(),
-            );
+            let delay = self.backoff.next_delay(&self.options, jitter());
             let backoff = time::sleep(delay);
             tokio::pin!(backoff);
             loop {
@@ -1161,6 +1234,49 @@ mod tests {
     }
 
     #[test]
+    fn backoff_resets_only_after_a_session_survives_a_ping_interval() {
+        let options = PgListenerOptions::default();
+        let ping = options.ping_interval;
+        let mut backoff = ReconnectBackoff::default();
+        assert_eq!(
+            backoff.next_delay(&options, 1.0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            backoff.next_delay(&options, 1.0),
+            Duration::from_millis(200)
+        );
+        // The reconnected session died before its first ping: a flapping
+        // server keeps getting longer delays.
+        backoff.session_lost(ping - Duration::from_millis(1), ping);
+        assert_eq!(
+            backoff.next_delay(&options, 1.0),
+            Duration::from_millis(400)
+        );
+        // A session that stayed up for a whole ping interval starts over.
+        backoff.session_lost(ping, ping);
+        assert_eq!(
+            backoff.next_delay(&options, 1.0),
+            Duration::from_millis(100)
+        );
+    }
+
+    #[test]
+    fn channel_rejection_is_limited_to_name_errors() {
+        // Class 22 (e.g. 22P05: the server encoding cannot represent the
+        // name), invalid_name and name_too_long: the name itself is bad.
+        for code in ["22P05", "22021", "22023", "42602", "42622"] {
+            assert!(rejects_channel_code(code), "{code}");
+        }
+        // Everything else fails the attempt, which is retried.
+        for code in [
+            "42501", "42601", "42P01", "25006", "57P01", "53300", "08006", "XX000",
+        ] {
+            assert!(!rejects_channel_code(code), "{code}");
+        }
+    }
+
+    #[test]
     fn jitter_is_in_range_and_varies() {
         let samples: Vec<f64> = (0..256).map(|_| jitter()).collect();
         assert!(
@@ -1203,6 +1319,20 @@ mod tests {
                 },
             ),
             (
+                "zero keepalive_idle",
+                PgListenerOptions {
+                    keepalive_idle: Duration::ZERO,
+                    ..base.clone()
+                },
+            ),
+            (
+                "sub-second keepalive_idle (TCP keepalive counts whole seconds)",
+                PgListenerOptions {
+                    keepalive_idle: Duration::from_millis(999),
+                    ..base.clone()
+                },
+            ),
+            (
                 "zero backoff_initial",
                 PgListenerOptions {
                     backoff_initial: Duration::ZERO,
@@ -1231,6 +1361,11 @@ mod tests {
             ..PgListenerOptions::default()
         };
         assert!(boundaries.validate().is_ok());
+        let shortest_keepalive = PgListenerOptions {
+            keepalive_idle: Duration::from_secs(1),
+            ..PgListenerOptions::default()
+        };
+        assert!(shortest_keepalive.validate().is_ok());
         let longest_ping = PgListenerOptions {
             ping_interval: Duration::from_secs(24 * 60 * 60),
             ..PgListenerOptions::default()
