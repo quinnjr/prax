@@ -295,10 +295,13 @@ Safety:
 ### Security
 
 - **postgres**: `Debug` output of `PgConfig`, `PgConfigBuilder` and
-  `PgPoolBuilder` printed the database password, both the `password` field
-  and inside the URL. It is now shown as `REDACTED` (other fields are
-  unchanged). `PgPool` now implements `Debug` too, showing the redacted
-  config and the pool status.
+  `PgPoolBuilder` printed the database password: the `password` field, the
+  password inside the URL, and a libpq-style `?password=` parameter (in
+  the URL and in `options`). It is now shown as `REDACTED`; the rest of the
+  URL and the other fields are unchanged. A URL whose unencoded password
+  makes it parse oddly (for example `u:8/x@host`, read as port 8) has its
+  whole user info redacted. `PgPool` now implements `Debug` too, showing
+  the redacted config and the pool status.
 
 ## [0.12.5] - 2026-09-17
 

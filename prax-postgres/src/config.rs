@@ -70,7 +70,21 @@ impl fmt::Debug for PgConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("statement_timeout", &self.statement_timeout)
             .field("application_name", &self.application_name)
-            .field("options", &self.options)
+            .field(
+                "options",
+                &self
+                    .options
+                    .iter()
+                    .map(|(key, value)| {
+                        let value = if is_password_key(key) {
+                            REDACTED
+                        } else {
+                            value
+                        };
+                        (key.as_str(), value)
+                    })
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -85,13 +99,22 @@ const REDACTED: &str = "REDACTED";
 /// `password` is the config's password, when known. It is matched right
 /// after `user:` first, because the config builder writes it into the URL
 /// without percent-encoding, where an `@` or `/` in it would not parse as
-/// one URL password. Otherwise the parser locates the password; if the URL
-/// does not parse, everything between the scheme and its last `@` is
-/// redacted.
+/// one URL password. Otherwise the parser locates the password. When it
+/// finds none although an `@` follows the scheme and no user name parsed
+/// (an unencoded password starting with digits and then `/`, `?` or `#`
+/// parses as a port), or the URL does not parse at all, everything between
+/// the scheme and its last `@` is redacted. libpq-style `password` query
+/// parameters are redacted too.
 pub(crate) fn redact_url(url: &str, password: Option<&str>) -> String {
     let Some(start) = url.find("://").map(|i| i + 3) else {
         return url.to_owned();
     };
+    let redacted = redact_userinfo(url, start, password);
+    redact_query_passwords(&redacted, start)
+}
+
+/// The user-info part of [`redact_url`].
+fn redact_userinfo(url: &str, start: usize, password: Option<&str>) -> String {
     if let Some(password) = password.filter(|p| !p.is_empty())
         && let Some(redacted) = splice_password(url, start, password)
     {
@@ -101,10 +124,45 @@ pub(crate) fn redact_url(url: &str, password: Option<&str>) -> String {
         Ok(parsed) => match parsed.password() {
             Some(password) => splice_password(url, start, password)
                 .unwrap_or_else(|| redact_to_last_at(url, start)),
+            None if parsed.username().is_empty() && url[start..].contains('@') => {
+                redact_to_last_at(url, start)
+            }
             None => url.to_owned(),
         },
         Err(_) => redact_to_last_at(url, start),
     }
+}
+
+/// `url` with the value of every `password` query parameter (any case,
+/// percent-decoded key) replaced. The query is searched from `start`.
+fn redact_query_passwords(url: &str, start: usize) -> String {
+    let Some(query_start) = url[start..].find('?').map(|i| start + i + 1) else {
+        return url.to_owned();
+    };
+    let query_end = url[query_start..]
+        .find('#')
+        .map_or(url.len(), |i| query_start + i);
+    let query = url[query_start..query_end]
+        .split('&')
+        .map(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            if is_password_key(key) {
+                format!("{key}={REDACTED}")
+            } else {
+                pair.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{}{query}{}", &url[..query_start], &url[query_end..])
+}
+
+/// Whether a (possibly percent-encoded) query or option key names a
+/// password.
+fn is_password_key(key: &str) -> bool {
+    url::form_urlencoded::parse(key.as_bytes())
+        .next()
+        .is_some_and(|(key, _)| key.eq_ignore_ascii_case("password"))
 }
 
 /// `url` with `password` replaced, when it follows the first `:` of the
@@ -780,6 +838,63 @@ mod tests {
             "{debug}"
         );
         assert!(debug.contains("database: \"postgres\""), "{debug}");
+    }
+
+    #[test]
+    fn url_redaction_without_a_password_hint() {
+        // An unencoded password starting with digits and then `/`, `?` or
+        // `#` parses as a port, so the parser reports no password.
+        for url in [
+            format!("postgres://u:8/{SENTINEL}@host/db"),
+            format!("postgres://u:123#{SENTINEL}@host/db"),
+            format!("postgres://u:123?{SENTINEL}@host/db"),
+        ] {
+            let redacted = redact_url(&url, None);
+            assert!(!redacted.contains(SENTINEL), "{url} -> {redacted}");
+            assert_eq!(redacted, "postgres://REDACTED@host/db", "{url}");
+        }
+        // libpq-style `?password=` (key case and encoding ignored).
+        for url in [
+            format!("postgres://u@host/db?password={SENTINEL}&sslmode=disable"),
+            format!("postgres://u@host/db?sslmode=disable&PASSWORD={SENTINEL}#frag"),
+            format!("postgres://u@host/db?pass%77ord={SENTINEL}"),
+        ] {
+            let redacted = redact_url(&url, None);
+            assert!(!redacted.contains(SENTINEL), "{url} -> {redacted}");
+            assert!(redacted.starts_with("postgres://u@host/db?"), "{redacted}");
+        }
+        assert_eq!(
+            redact_url(
+                &format!("postgres://u@host/db?password={SENTINEL}&sslmode=disable"),
+                None
+            ),
+            "postgres://u@host/db?password=REDACTED&sslmode=disable"
+        );
+        // A user name without a password stays.
+        assert_eq!(
+            redact_url("postgres://u@host/db", None),
+            "postgres://u@host/db"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_password_options_and_query() {
+        let url = format!("postgres://u@db.internal/prax?password={SENTINEL}&search_path=app");
+        let config = PgConfig::from_url(&url).unwrap();
+        // `from_url` keeps the parameter in `options`.
+        assert!(config.options.iter().any(|(k, _)| k == "password"));
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("search_path"), "{debug}");
+
+        let builder = crate::pool::PgPoolBuilder::new().url(&url);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+
+        let builder = crate::pool::PgPoolBuilder::new()
+            .url(format!("postgres://u:8/{SENTINEL}@db.internal/prax"));
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
     }
 
     #[test]
