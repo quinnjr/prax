@@ -122,6 +122,35 @@ async fn unexpired_max_lifetime_keeps_connection() {
 
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn idle_timeout_replaces_idle_connections() {
+    let Some(url) = url() else { return };
+    let pool = PgPoolBuilder::new()
+        .url(&url)
+        .max_connections(1)
+        .min_connections(0)
+        .connection_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(1))
+        .build()
+        .await
+        .expect("connect to postgres");
+
+    let pid1 = backend_pid(&pool).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let pid2 = backend_pid(&pool).await;
+    assert_eq!(
+        pid1, pid2,
+        "a connection idle within idle_timeout is reused"
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let pid3 = backend_pid(&pool).await;
+    assert_ne!(
+        pid2, pid3,
+        "a connection idle past idle_timeout is replaced"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn clean_recycling_keeps_prepared_statements() {
     let Some(url) = url() else { return };
     let pool = pool(&url, PgRecycling::Clean, None).await;

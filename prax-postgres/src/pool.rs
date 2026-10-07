@@ -60,22 +60,35 @@ impl PgPool {
             builder = builder.recycle_timeout(Some(timeout));
         }
 
-        // Enforce `max_lifetime`: deadpool runs `pre_recycle` hooks at
-        // checkout, and a hook error discards the object and creates a new
-        // one. Connections are therefore retired lazily, when an aged one
-        // is next checked out. Each connection's deadline is shortened by a
-        // stable per-connection jitter (up to ~10%) so a batch of
-        // connections created together does not expire together.
-        if let Some(max_lifetime) = pool_config.max_lifetime {
+        // Enforce `max_lifetime` and `idle_timeout`: deadpool runs
+        // `pre_recycle` hooks at checkout, and a hook error discards the
+        // object and creates a new one. Connections are therefore retired
+        // lazily, when an aged or idle one is next checked out. Each
+        // connection's lifetime deadline is shortened by a stable
+        // per-connection jitter (up to ~10%) so a batch of connections
+        // created together does not expire together.
+        if let Some(policy) =
+            RetirementPolicy::new(pool_config.max_lifetime, pool_config.idle_timeout)
+        {
             builder = builder.pre_recycle(Hook::sync_fn(move |_, metrics| {
-                let age = metrics.created.elapsed();
-                let deadline =
-                    max_lifetime.saturating_sub(lifetime_jitter(max_lifetime, &metrics.created));
-                if age > deadline {
-                    debug!(age = ?age, "retiring pooled connection: max_lifetime");
-                    Err(HookError::message("max_lifetime exceeded"))
-                } else {
-                    Ok(())
+                let age = metrics.age();
+                // deadpool records when a connection was last handed out
+                // (`recycled`, else `created`), not when it was returned.
+                let idle = metrics.last_used();
+                let jitter = policy.max_lifetime.map_or(Duration::ZERO, |max_lifetime| {
+                    lifetime_jitter(max_lifetime, &metrics.created)
+                });
+                match policy.check(age, idle, jitter) {
+                    None => Ok(()),
+                    Some(reason) => {
+                        debug!(
+                            age = ?age,
+                            idle = ?idle,
+                            reason = reason.as_str(),
+                            "retiring pooled connection"
+                        );
+                        Err(HookError::message(reason.as_str()))
+                    }
                 }
             }));
         }
@@ -300,6 +313,57 @@ impl PgPool {
     }
 }
 
+/// Why the pool replaces a connection at checkout instead of handing it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retirement {
+    /// Older than `max_lifetime` (less its jitter).
+    MaxLifetime,
+    /// Not handed out for longer than `idle_timeout`.
+    IdleTimeout,
+}
+
+impl Retirement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxLifetime => "max_lifetime exceeded",
+            Self::IdleTimeout => "idle_timeout exceeded",
+        }
+    }
+}
+
+/// The limits the pool's `pre_recycle` hook enforces at checkout.
+#[derive(Debug, Clone, Copy)]
+struct RetirementPolicy {
+    max_lifetime: Option<Duration>,
+    idle_timeout: Option<Duration>,
+}
+
+impl RetirementPolicy {
+    /// `None` when neither limit is set (no hook is needed).
+    fn new(max_lifetime: Option<Duration>, idle_timeout: Option<Duration>) -> Option<Self> {
+        (max_lifetime.is_some() || idle_timeout.is_some()).then_some(Self {
+            max_lifetime,
+            idle_timeout,
+        })
+    }
+
+    /// Whether a connection `age` old, last handed out `idle` ago and with
+    /// lifetime `jitter`, must be replaced. The lifetime is checked first.
+    fn check(&self, age: Duration, idle: Duration, jitter: Duration) -> Option<Retirement> {
+        if let Some(max_lifetime) = self.max_lifetime
+            && age > max_lifetime.saturating_sub(jitter)
+        {
+            return Some(Retirement::MaxLifetime);
+        }
+        if let Some(idle_timeout) = self.idle_timeout
+            && idle > idle_timeout
+        {
+            return Some(Retirement::IdleTimeout);
+        }
+        None
+    }
+}
+
 /// Stable per-connection offset in `[0, max_lifetime / 10)`, derived from the
 /// connection's creation instant so it is identical on every checkout.
 fn lifetime_jitter(max_lifetime: Duration, created: &std::time::Instant) -> Duration {
@@ -389,12 +453,19 @@ pub struct PoolConfig {
     pub min_connections: usize,
     /// Maximum time to wait for a connection.
     pub connection_timeout: Option<Duration>,
-    /// Idle timeout (currently informational).
+    /// Idle timeout: a connection that was not handed out for longer than
+    /// this is discarded and replaced at its next checkout instead of being
+    /// reused (so a connection a server, proxy or NAT may have dropped while
+    /// idle is not handed out).
     ///
-    /// deadpool-postgres 0.14 exposes no true idle timeout, so this value is
-    /// **not** enforced: connections are not closed after an idle period. It
-    /// does not bound the recycle check; use
-    /// [`PoolConfig::recycle_timeout`] for that.
+    /// Enforced at checkout, like [`max_lifetime`](Self::max_lifetime):
+    /// idle connections are not reaped in the background. The idle time is
+    /// measured from when the connection was last **handed out** (deadpool
+    /// does not record when it is returned), so a connection held for
+    /// longer than this is also replaced at its next checkout.
+    /// `Duration::ZERO` replaces every reused connection; `None` disables
+    /// the limit. It does not bound the recycle check; use
+    /// [`PoolConfig::recycle_timeout`] for that. Default: 10 minutes.
     pub idle_timeout: Option<Duration>,
     /// Upper bound on the recycle check run when a connection is checked out
     /// again (the `Verified` / `Clean` round trip).
@@ -489,9 +560,10 @@ impl PgPoolBuilder {
         self
     }
 
-    /// Set the idle timeout (informational; see [`PoolConfig::idle_timeout`]).
-    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
-        self.pool_config.idle_timeout = Some(timeout);
+    /// Set the idle timeout enforced at checkout (see
+    /// [`PoolConfig::idle_timeout`]). Pass `None` to disable.
+    pub fn idle_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.idle_timeout = timeout.into();
         self
     }
 
@@ -602,6 +674,68 @@ mod tests {
             Duration::ZERO,
             "ZERO guarded"
         );
+    }
+
+    #[test]
+    fn retirement_checks_lifetime_then_idle_time() {
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        let policy = RetirementPolicy::new(Some(minutes(30)), Some(minutes(10))).unwrap();
+        let none = Duration::ZERO;
+        assert_eq!(policy.check(minutes(5), minutes(1), none), None);
+        assert_eq!(
+            policy.check(minutes(31), minutes(1), none),
+            Some(Retirement::MaxLifetime)
+        );
+        // The jitter brings the lifetime deadline forward.
+        assert_eq!(
+            policy.check(minutes(29), minutes(1), minutes(2)),
+            Some(Retirement::MaxLifetime)
+        );
+        assert_eq!(
+            policy.check(minutes(20), minutes(11), none),
+            Some(Retirement::IdleTimeout)
+        );
+        // Only idle *longer* than the timeout retires.
+        assert_eq!(policy.check(minutes(20), minutes(10), none), None);
+        // Both exceeded: the lifetime is reported.
+        assert_eq!(
+            policy.check(minutes(31), minutes(11), none),
+            Some(Retirement::MaxLifetime)
+        );
+    }
+
+    #[test]
+    fn retirement_limits_apply_independently() {
+        let secs = Duration::from_secs;
+        assert!(
+            RetirementPolicy::new(None, None).is_none(),
+            "no hook needed"
+        );
+        let idle_only = RetirementPolicy::new(None, Some(secs(60))).unwrap();
+        assert_eq!(idle_only.check(secs(86_400), secs(1), Duration::ZERO), None);
+        assert_eq!(
+            idle_only.check(secs(5), secs(61), Duration::ZERO),
+            Some(Retirement::IdleTimeout)
+        );
+        let lifetime_only = RetirementPolicy::new(Some(secs(60)), None).unwrap();
+        assert_eq!(
+            lifetime_only.check(secs(5), secs(86_400), Duration::ZERO),
+            None
+        );
+        // `Duration::ZERO` idle timeout replaces every reused connection.
+        let zero = RetirementPolicy::new(None, Some(Duration::ZERO)).unwrap();
+        assert_eq!(
+            zero.check(secs(1), Duration::from_nanos(1), Duration::ZERO),
+            Some(Retirement::IdleTimeout)
+        );
+    }
+
+    #[test]
+    fn test_idle_timeout_accepts_duration_and_none() {
+        let b = PgPoolBuilder::new().idle_timeout(Duration::from_secs(60));
+        assert_eq!(b.pool_config.idle_timeout, Some(Duration::from_secs(60)));
+        let b = PgPoolBuilder::new().idle_timeout(None);
+        assert_eq!(b.pool_config.idle_timeout, None);
     }
 
     #[test]

@@ -56,8 +56,10 @@ let pool = PgPool::with_pool_config(config, pool_config).await?;
 
 `PgRecycling::Fast` (the default) does not reset session state, so `SET`,
 `SET ROLE`, `search_path` or tenant settings leak to the next checkout; use
-`Clean` (or `SET LOCAL`) with row-level security. `idle_timeout` is
-informational and not enforced.
+`Clean` (or `SET LOCAL`) with row-level security. `max_lifetime` and
+`idle_timeout` (default 10 minutes, measured from the connection's last
+checkout) are enforced when a connection is checked out: an expired one is
+replaced instead of handed out.
 
 ## LISTEN / NOTIFY
 

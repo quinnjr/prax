@@ -65,11 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PoolConfig::default()` and pass it to `PgPool::with_pool_config`.
   Retirement is jittered (see Added).
 - **postgres**: `PoolConfig::idle_timeout` no longer feeds deadpool's recycle
-  timeout (it was mis-wired to it) and is now informational: nothing
-  enforces it (deadpool-postgres 0.14 has no idle timeout). The Verified and
-  Clean recycle checks used to be bounded by `idle_timeout` (10 minutes by
-  default); they are now bounded by the new `PoolConfig::recycle_timeout`
-  (default 5 s).
+  timeout (it was mis-wired to it). The Verified and Clean recycle checks
+  used to be bounded by `idle_timeout` (10 minutes by default); they are now
+  bounded by the new `PoolConfig::recycle_timeout` (default 5 s).
+- **postgres**: `PoolConfig::idle_timeout` (default 10 minutes) is now
+  enforced at checkout: a connection not handed out for longer than that is
+  replaced instead of reused. deadpool records when a connection was last
+  handed out, not when it was returned, so a connection *held* longer than
+  `idle_timeout` is also replaced at its next checkout. Set it to `None` to
+  keep the 0.12.x behaviour. `PgPoolBuilder::idle_timeout` takes
+  `impl Into<Option<Duration>>` (`Duration` callers still compile).
 - **postgres**: `From<PgRecycling>` for deadpool's `RecyclingMethod` is no
   longer public. `PgRecycling::Fast` stays the default; it leaks session
   state (`SET`, `SET ROLE`, `search_path`, tenant GUCs) to the next
