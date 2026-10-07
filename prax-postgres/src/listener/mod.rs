@@ -252,13 +252,19 @@ pub enum PgListenerEvent {
     /// A notification on a channel this listener is subscribed to.
     Notification(PgNotification),
     /// The connection was lost and the listener is reconnecting (only with
-    /// [`PgListenerOptions::reconnect`] enabled). Notifications sent from
-    /// now until the [`Reconnected`](Self::Reconnected) that follows are
-    /// missed. Reported once per outage, as soon as the loss is detected,
-    /// so an application can react while reconnecting is still failing;
-    /// if reconnecting gives up, [`PgListener::recv`] returns the error
-    /// instead of a `Reconnected`. Not reported when the listener is
-    /// dropped.
+    /// [`PgListenerOptions::reconnect`] enabled). Notifications sent while
+    /// it is disconnected are missed until the
+    /// [`Reconnected`](Self::Reconnected) that follows. Reported once per
+    /// outage, as soon as the loss is detected, so an application can react
+    /// while reconnecting is still failing; if reconnecting gives up,
+    /// [`PgListener::recv`] returns the error instead of a `Reconnected`.
+    /// Not reported when the listener is dropped.
+    ///
+    /// Notifications the lost connection had already received can still
+    /// be returned after this event (when the loss was detected by an
+    /// unanswered ping or command, the old connection's buffered messages
+    /// may be decoded and queued while its driver task is being stopped).
+    /// They always come before the `Reconnected`.
     #[non_exhaustive]
     Disconnected {
         /// Why the connection was lost, for logs.
