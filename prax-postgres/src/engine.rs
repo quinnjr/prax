@@ -8,6 +8,7 @@ use prax_query::filter::FilterValue;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use tracing::{error, trace};
 
+use crate::error::checkout_error;
 use crate::notify::{validate_channel, validate_payload};
 use crate::pool::PgPool;
 use crate::types::filter_value_to_sql;
@@ -85,10 +86,7 @@ impl PgEngine {
                 .await
                 .map_err(map_driver_err)?;
         } else {
-            let conn =
-                self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+            let conn = self.pool.get().await.map_err(checkout_error)?;
             conn.execute(NOTIFY_SQL, &params)
                 .await
                 .map_err(map_driver_err)?;
@@ -219,9 +217,7 @@ impl QueryEngine for PgEngine {
                 // every sibling call.
                 tx.query(&sql, &param_refs).await.map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -254,9 +250,7 @@ impl QueryEngine for PgEngine {
                     .await
                     .map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query_opt(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -285,9 +279,7 @@ impl QueryEngine for PgEngine {
                     .await
                     .map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query_opt(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -315,9 +307,7 @@ impl QueryEngine for PgEngine {
                     .await
                     .map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query_one(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -343,9 +333,7 @@ impl QueryEngine for PgEngine {
             let rows = if let Some(tx) = &self.tx_conn {
                 tx.query(&sql, &param_refs).await.map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -371,9 +359,7 @@ impl QueryEngine for PgEngine {
             if let Some(tx) = &self.tx_conn {
                 tx.execute(&sql, &param_refs).await.map_err(map_driver_err)
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.execute(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)
@@ -393,9 +379,7 @@ impl QueryEngine for PgEngine {
             if let Some(tx) = &self.tx_conn {
                 tx.execute(&sql, &param_refs).await.map_err(map_driver_err)
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.execute(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)
@@ -417,9 +401,7 @@ impl QueryEngine for PgEngine {
                     .await
                     .map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query_one(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -446,9 +428,7 @@ impl QueryEngine for PgEngine {
             let rows = if let Some(tx) = &self.tx_conn {
                 tx.query(&sql, &param_refs).await.map_err(map_driver_err)?
             } else {
-                let conn = self.pool.get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+                let conn = self.pool.get().await.map_err(checkout_error)?;
                 conn.query(&sql, &param_refs)
                     .await
                     .map_err(map_driver_err)?
@@ -492,10 +472,7 @@ impl QueryEngine for PgEngine {
             // Going through `PgPool::inner()` keeps the connection
             // pinned to this future — every query the closure emits
             // will run on the same physical connection.
-            let conn =
-                self.pool.inner().get().await.map_err(|e| {
-                    prax_query::QueryError::connection(e.to_string()).with_source(e)
-                })?;
+            let conn = self.pool.inner().get().await.map_err(checkout_error)?;
 
             // Issue `BEGIN` directly as a batch_execute on the raw
             // connection. Using `tokio_postgres::Transaction<'_>`

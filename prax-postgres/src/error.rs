@@ -137,10 +137,45 @@ pub(crate) fn classify_sqlstate(
     }
 }
 
+/// The SQLSTATE of the server error behind a failed pool checkout: the
+/// server refused the new connection (53300 too many connections, 57P03
+/// starting up, 28P01 wrong password, 3D000 no such database, ...).
+fn pool_error_sqlstate(error: &deadpool_postgres::PoolError) -> Option<String> {
+    use deadpool_postgres::{HookError, PoolError};
+    let backend = match error {
+        PoolError::Backend(e) | PoolError::PostCreateHook(HookError::Backend(e)) => e,
+        _ => return None,
+    };
+    backend.code().map(|code| code.code().to_owned())
+}
+
+/// A failed pool checkout as a connection [`QueryError`] carrying the
+/// server's SQLSTATE (when the server refused the connection) and the
+/// error as its source.
+pub(crate) fn checkout_error(error: impl Into<PgError>) -> QueryError {
+    let error = error.into();
+    let sqlstate = match &error {
+        PgError::Pool(e) => pool_error_sqlstate(e),
+        _ => None,
+    };
+    let mapped = QueryError::connection(error.to_string()).with_source(error);
+    match sqlstate {
+        Some(sqlstate) => mapped.with_sqlstate(sqlstate),
+        None => mapped,
+    }
+}
+
 impl From<PgError> for QueryError {
     fn from(err: PgError) -> Self {
         match err {
-            PgError::Pool(e) => QueryError::connection(e.to_string()),
+            PgError::Pool(e) => {
+                let sqlstate = pool_error_sqlstate(&e);
+                let mapped = QueryError::connection(e.to_string()).with_source(e);
+                match sqlstate {
+                    Some(sqlstate) => mapped.with_sqlstate(sqlstate),
+                    None => mapped,
+                }
+            }
             PgError::Postgres(e) => {
                 // Categorize by SQLSTATE while preserving the driver error
                 // as the source. The cached-plan gate needs the server's
@@ -245,6 +280,19 @@ mod tests {
         assert_eq!(classify_sqlstate(None, "no code", None).sqlstate(), None);
         // Errors without a server error carry none.
         assert_eq!(QueryError::from(PgError::Timeout(5)).sqlstate(), None);
+    }
+
+    #[test]
+    fn pool_errors_without_a_server_error_carry_no_sqlstate() {
+        use deadpool_postgres::{PoolError, TimeoutType};
+        for error in [PoolError::Timeout(TimeoutType::Wait), PoolError::Closed] {
+            let mapped = checkout_error(error);
+            assert!(mapped.is_connection_error(), "{mapped:?}");
+            assert_eq!(mapped.sqlstate(), None);
+        }
+        let mapped = QueryError::from(PgError::Pool(PoolError::Closed));
+        assert!(mapped.is_connection_error());
+        assert_eq!(mapped.sqlstate(), None);
     }
 
     #[test]

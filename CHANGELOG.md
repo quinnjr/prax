@@ -235,6 +235,9 @@ Safety:
 - **query**: `QueryError::sqlstate()` returns the server's SQLSTATE (for
   example `"55P03"` for a `NOWAIT` lock conflict) for errors from
   `prax-postgres` and from `prax-sqlx` on PostgreSQL; `None` otherwise.
+  On `prax-postgres` this includes a connection the server refuses at pool
+  checkout (for example `53300` too many connections, `28P01` wrong
+  password, `3D000` missing database), which stays a connection error.
   `QueryError::with_sqlstate` sets it.
 
 ### Fixed

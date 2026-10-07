@@ -681,3 +681,44 @@ async fn e2e_recovers_from_stale_cached_plan_after_ddl() {
     drop(conn);
     drop_table(&pool, &table).await;
 }
+
+/// A pool whose connections the server refuses carries the server's
+/// SQLSTATE through the engine.
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn refused_checkout_carries_the_sqlstate() {
+    use prax_postgres::{PgConfig, PgEngine};
+    use prax_query::traits::QueryEngine;
+
+    let Some(url) = skip_unless_e2e() else { return };
+    let base = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
+    // The test server may trust local connections, so use a role that
+    // does not exist (28000) rather than a wrong password (28P01).
+    let mut missing_role = base.clone();
+    missing_role.user = unique_table("missing_role");
+    let mut missing_database = base;
+    missing_database.database = unique_table("missing_db");
+
+    for (config, sqlstate) in [(missing_role, "28000"), (missing_database, "3D000")] {
+        let pool = PgPoolBuilder::new()
+            .config(config)
+            .max_connections(1)
+            .min_connections(0)
+            .connection_timeout(Duration::from_secs(10))
+            .build()
+            .await
+            .expect("deadpool connects lazily");
+        let engine = PgEngine::new(pool);
+        let err = engine
+            .execute_raw("SELECT 1", Vec::new())
+            .await
+            .expect_err("the server refuses the connection");
+        assert!(err.is_connection_error(), "{err:?}");
+        assert_eq!(err.sqlstate(), Some(sqlstate), "{err:?}");
+        let err = engine
+            .transaction(|_tx| async { Ok(()) })
+            .await
+            .expect_err("the server refuses the connection");
+        assert_eq!(err.sqlstate(), Some(sqlstate), "{err:?}");
+    }
+}
