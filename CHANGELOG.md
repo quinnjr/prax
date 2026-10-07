@@ -103,8 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **query**: `RetryConfig::delay_for_attempt` no longer truncates to whole
   milliseconds and no longer wraps or panics for huge attempt numbers.
 - **query**: `QueryError` gained a private field (its SQLSTATE), so it can no
-  longer be built with a struct literal; use `QueryError::new` or one of the
-  named constructors. Its public fields are unchanged.
+  longer be built with a struct literal, and exhaustive struct patterns
+  (`let QueryError { code, message, context, source } = err`) no longer
+  compile: add `..`. Use `QueryError::new` or one of the named
+  constructors to build one. Its public fields are unchanged.
 
 ### Repairing `Bytes` data written by 0.12.x
 
@@ -162,23 +164,23 @@ Safety:
   `PgListenerEvent` (`Notification`, `Disconnected { error }`,
   `Reconnected`, `Lagged { dropped }`, `ChannelsDropped { channels }`) /
   `PgNotification` (constructible with `PgNotification::new`, and the
-  `#[non_exhaustive]` events with `PgListenerEvent::disconnected`,
-  `lagged` and `channels_dropped`, for tests of code that consumes them). With
+  `#[non_exhaustive]` events with `PgListenerEvent::disconnected`, `lagged`
+  and `channels_dropped`, for tests of code that consumes them). With
   `reconnect` enabled, a lost connection is reported at once as
   `Disconnected` (once per outage, also while reconnect attempts keep
   failing; not on drop), followed by `Reconnected` when it is
-  re-established; both keep their place after already-queued
-  notifications and wake a blocked `recv()`. Reconnects with exponential
-  backoff and jitter. The backoff only starts over once a re-established
-  connection has stayed up for a `ping_interval`. Each connection attempt, TLS and startup handshake
+  re-established. Reconnects with exponential backoff and jitter. The
+  backoff only starts over once a re-established connection has stayed up
+  for a `ping_interval`. Each connection attempt, TLS and startup handshake
   included, is bounded by `PgConfig::connect_timeout` plus `ping_interval`
   (the driver applies `connect_timeout` to each resolved address, so one
   that times out leaves time for the next). Liveness uses TCP keepalive
   (`keepalive_idle` at least 1 s) plus a `SELECT 1` ping (bounded by
-  `ping_interval`, max one day).
-  Emits `Lagged` on buffer overflow and wakes a blocked `recv()` on
-  `Reconnected`/`Lagged`. `listen`/`unlisten` during backoff are recorded
-  and applied on reconnect; `LISTEN`/`UNLISTEN` are bounded by
+  `ping_interval`, max one day). Emits `Lagged` on buffer overflow.
+  `Disconnected`, `Reconnected` and `Lagged` keep their place after the
+  notifications already queued, and each wakes a blocked `recv()`
+  (returned at once on an empty queue). `listen`/`unlisten` during backoff
+  are recorded and applied on reconnect; `LISTEN`/`UNLISTEN` are bounded by
   `ping_interval`. Channels the server rejects by name on re-`LISTEN`
   (SQLSTATE class 22, 42602 or 42622) are dropped, logged at `error!` with
   the SQLSTATE, and reported as `ChannelsDropped` just before that
@@ -267,10 +269,11 @@ Safety:
   default Postgres `$N` placeholders to every engine, which MySQL rejects.
   They (and `RawQueryOperation` / `RawExecuteOperation`, the CLI-generated
   client and `MysqlRawEngine::raw_sql`) now render placeholders for the
-  engine's dialect (`?` on MySQL, `?N` on SQLite, `@PN` on MSSQL) unless
-  the query set `Sql::with_db_type`, which wins. `Sql::build()` output is
-  unchanged, except that `with_db_type` now also applies to values bound
-  before it.
+  engine's dialect (`?` on MySQL, `?N` on SQLite, `@PN` on MSSQL, and `?`
+  instead of `$N` on Cassandra and ScyllaDB, whose CQL dialect only takes
+  `?`) unless the query set `Sql::with_db_type`, which wins. DuckDB keeps
+  `$N`. `Sql::build()` output is unchanged, except that `with_db_type` now
+  also applies to values bound before it.
 - **derive**: `#[derive(Model)]` handles `u8` fields written as
   `core::primitive::u8`, `std::primitive::u8` or inside
   `Option<..>`/`std::option::Option<..>` in every filter operator.
