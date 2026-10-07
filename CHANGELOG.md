@@ -268,6 +268,14 @@ Safety:
 - **duckdb**: `prax_duckdb::types::filter_value_to_json`; use
   `FilterValue::to_json_value()`.
 
+### Security
+
+- **postgres**: `Debug` output of `PgConfig`, `PgConfigBuilder` and
+  `PgPoolBuilder` printed the database password, both the `password` field
+  and inside the URL. It is now shown as `REDACTED` (other fields are
+  unchanged). `PgPool` now implements `Debug` too, showing the redacted
+  config and the pool status.
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed

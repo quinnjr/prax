@@ -1,13 +1,17 @@
 //! PostgreSQL connection configuration.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{PgError, PgResult};
 
 /// PostgreSQL connection configuration.
+///
+/// `Debug` output redacts [`password`](Self::password) and any password in
+/// [`url`](Self::url).
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PgConfig {
     /// Database URL.
     pub url: String,
@@ -50,6 +54,60 @@ pub struct PgConfig {
     pub application_name: Option<String>,
     /// Additional options.
     pub options: Vec<(String, String)>,
+}
+
+impl fmt::Debug for PgConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConfig")
+            .field("url", &redact_url(&self.url, self.password.as_deref()))
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("application_name", &self.application_name)
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+/// Shown in place of a password in `Debug` output.
+const REDACTED: &str = "REDACTED";
+
+/// `url` with its password replaced by [`REDACTED`], for `Debug` output.
+///
+/// The literal `password` is replaced first: the config builder writes it
+/// into the URL without percent-encoding, where an `@` or `/` in it would
+/// not parse as one URL password. Then any URL password is replaced through
+/// the parser; a URL that does not parse loses everything between the
+/// scheme and its last `@`.
+pub(crate) fn redact_url(url: &str, password: Option<&str>) -> String {
+    let url = match password {
+        Some(password) if !password.is_empty() => url.replace(password, REDACTED),
+        _ => url.to_owned(),
+    };
+    match url::Url::parse(&url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() && parsed.set_password(Some(REDACTED)).is_ok() {
+                parsed.to_string()
+            } else {
+                url
+            }
+        }
+        Err(_) => {
+            let Some(start) = url.find("://").map(|i| i + 3) else {
+                return url;
+            };
+            match url[start..].rfind('@') {
+                Some(at) => format!("{}{REDACTED}{}", &url[..start], &url[start + at..]),
+                None => url,
+            }
+        }
+    }
 }
 
 /// SSL mode for connections.
@@ -278,7 +336,9 @@ impl PgConfig {
 }
 
 /// Builder for PostgreSQL configuration.
-#[derive(Debug, Default)]
+///
+/// `Debug` output redacts the password, also inside the URL.
+#[derive(Default)]
 pub struct PgConfigBuilder {
     url: Option<String>,
     host: Option<String>,
@@ -291,6 +351,30 @@ pub struct PgConfigBuilder {
     connect_timeout: Option<Duration>,
     statement_timeout: Option<Duration>,
     application_name: Option<String>,
+}
+
+impl fmt::Debug for PgConfigBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConfigBuilder")
+            .field(
+                "url",
+                &self
+                    .url
+                    .as_deref()
+                    .map(|url| redact_url(url, self.password.as_deref())),
+            )
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("application_name", &self.application_name)
+            .finish()
+    }
 }
 
 impl PgConfigBuilder {
@@ -601,6 +685,73 @@ mod tests {
 
         assert_eq!(config.host, "localhost");
         assert_eq!(config.database, "mydb");
+    }
+
+    const SENTINEL: &str = "hunter2-sentinel";
+
+    #[test]
+    fn debug_redacts_the_password_and_the_url_password() {
+        let config = PgConfig::from_url(format!(
+            "postgres://prax:{SENTINEL}@db.internal:5432/prax?application_name=app"
+        ))
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        // Everything else stays visible.
+        for visible in [
+            "db.internal",
+            "5432",
+            "prax",
+            "application_name=app",
+            "REDACTED",
+        ] {
+            assert!(debug.contains(visible), "{visible}: {debug}");
+        }
+        let alternate = format!("{config:#?}");
+        assert!(!alternate.contains(SENTINEL), "{alternate}");
+    }
+
+    #[test]
+    fn debug_redacts_unencoded_builder_passwords() {
+        // The builder writes the password into `url` verbatim, so `@` and
+        // `/` in it do not parse as one URL password.
+        let config = PgConfig::builder()
+            .host("db.internal")
+            .database("prax")
+            .user("prax")
+            .password(format!("{SENTINEL}@x/y"))
+            .build()
+            .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("x/y"), "{debug}");
+
+        // A URL that does not parse is redacted up to its last `@`.
+        let mut config = config;
+        config.url = format!("postgres://prax:{SENTINEL}@bad host/prax");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[test]
+    fn debug_keeps_urls_without_a_password() {
+        let config = PgConfig::from_url("postgres://prax@db.internal/prax").unwrap();
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains("postgres://prax@db.internal/prax"),
+            "{debug}"
+        );
+        assert!(debug.contains("password: None"), "{debug}");
+    }
+
+    #[test]
+    fn config_builder_debug_redacts_secrets() {
+        let builder = PgConfig::builder()
+            .url(format!("postgres://prax:{SENTINEL}@db.internal/prax"))
+            .password(SENTINEL);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("db.internal"), "{debug}");
     }
 
     #[test]

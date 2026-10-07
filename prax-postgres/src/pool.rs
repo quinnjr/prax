@@ -7,7 +7,7 @@ use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Pool, Recycling
 use tokio_postgres::NoTls;
 use tracing::{debug, info, warn};
 
-use crate::config::PgConfig;
+use crate::config::{PgConfig, redact_url};
 use crate::connection::PgConnection;
 use crate::connector::{Connector, select_connector};
 use crate::error::{PgError, PgResult};
@@ -19,6 +19,16 @@ pub struct PgPool {
     inner: Pool,
     config: Arc<PgConfig>,
     statement_cache: Arc<PreparedStatementCache>,
+}
+
+/// Shows the configuration (password redacted) and the pool status.
+impl std::fmt::Debug for PgPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgPool")
+            .field("config", &self.config)
+            .field("status", &self.status())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PgPool {
@@ -513,11 +523,23 @@ impl Default for PoolConfig {
 }
 
 /// Builder for creating a connection pool.
-#[derive(Debug, Default)]
+///
+/// `Debug` output redacts passwords (in the config and in the URL).
+#[derive(Default)]
 pub struct PgPoolBuilder {
     config: Option<PgConfig>,
     url: Option<String>,
     pool_config: PoolConfig,
+}
+
+impl std::fmt::Debug for PgPoolBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgPoolBuilder")
+            .field("config", &self.config)
+            .field("url", &self.url.as_deref().map(|url| redact_url(url, None)))
+            .field("pool_config", &self.pool_config)
+            .finish()
+    }
 }
 
 impl PgPoolBuilder {
@@ -736,6 +758,35 @@ mod tests {
         assert_eq!(b.pool_config.idle_timeout, Some(Duration::from_secs(60)));
         let b = PgPoolBuilder::new().idle_timeout(None);
         assert_eq!(b.pool_config.idle_timeout, None);
+    }
+
+    const SENTINEL: &str = "hunter2-sentinel";
+
+    #[test]
+    fn pool_builder_debug_redacts_passwords() {
+        let url = format!("postgres://prax:{SENTINEL}@db.internal/prax");
+        let builder = PgPoolBuilder::new().url(&url);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("db.internal"), "{debug}");
+
+        let builder = PgPoolBuilder::new().config(PgConfig::from_url(&url).unwrap());
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn pool_debug_redacts_passwords() {
+        // deadpool connects lazily: nothing listens on port 1.
+        let pool = PgPoolBuilder::new()
+            .url(format!("postgres://prax:{SENTINEL}@127.0.0.1:1/prax"))
+            .min_connections(0)
+            .build()
+            .await
+            .unwrap();
+        let debug = format!("{pool:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("127.0.0.1"), "{debug}");
     }
 
     #[test]
