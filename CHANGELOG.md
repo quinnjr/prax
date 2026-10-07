@@ -277,6 +277,15 @@ Safety:
 - **derive**: `#[derive(Model)]` handles `u8` fields written as
   `core::primitive::u8`, `std::primitive::u8` or inside
   `Option<..>`/`std::option::Option<..>` in every filter operator.
+- **postgres**: `PgConfig::from_url` used the user name, password and
+  database name still percent-encoded (`p%40ss` was sent as the password);
+  it now decodes them, as libpq does. A URL whose password contains an
+  unencoded `/`, `?` or `#` was silently misparsed (`postgres://u:8/x@host/db`
+  became host `u`, port 8, database `x@host/db`); such a URL, recognised by
+  an `@` after the host (in the path, the fragment or a query key), is now
+  rejected with a configuration error asking to percent-encode reserved
+  characters in the password. Behaviour change: these malformed URLs, and a
+  database name with a literal `@` (write `%40`), no longer parse.
 - **derive**: `#[derive(Model)]` fields typed `std::option::Option<T>` or
   `core::option::Option<T>` are nullable like `Option<T>`: they get
   `is_null()` / `is_not_null()` and nullable where/create/update inputs

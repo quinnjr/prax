@@ -230,12 +230,73 @@ fn is_safe_guc_value(value: &str) -> bool {
         .any(|c| c.is_whitespace() || c == '\\' || c == '\'')
 }
 
+/// How to fix a URL whose password breaks its structure.
+const PERCENT_ENCODE_HINT: &str = "percent-encode reserved characters in the password \
+     (`@` as %40, `/` as %2F, `?` as %3F, `#` as %23, `:` as %3A)";
+
+/// Reject a URL in which an unencoded `/`, `?` or `#` in the password ended
+/// the authority early, so the rest of the password and the real host
+/// landed in the path, query or fragment (`postgres://u:8/x@host/db` parses
+/// as host `u`, port 8 and database `x@host/db`). The telltale is an `@`
+/// after the authority: in the path, the fragment, or a query key (a query
+/// *value* such as `application_name=me@work` is fine). An `@` in a
+/// database name must be written `%40`. The error never repeats the URL.
+fn reject_unencoded_userinfo(parsed: &url::Url) -> PgResult<()> {
+    let in_query_key = parsed.query().is_some_and(|query| {
+        query.split('&').any(|pair| {
+            pair.split_once('=')
+                .map_or(pair, |(key, _)| key)
+                .contains('@')
+        })
+    });
+    if parsed.path().contains('@')
+        || parsed
+            .fragment()
+            .is_some_and(|fragment| fragment.contains('@'))
+        || in_query_key
+    {
+        return Err(PgError::config(format!(
+            "invalid database URL: an `@` follows the host, so the password \
+             seems to contain unencoded reserved characters; {PERCENT_ENCODE_HINT}"
+        )));
+    }
+    Ok(())
+}
+
+/// Percent-decode a URL component (`what` names it in the error), as libpq
+/// does for the user, password and database name.
+fn percent_decode(component: &str, what: &str) -> PgResult<String> {
+    percent_encoding::percent_decode_str(component)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .map_err(|_| {
+            PgError::config(format!(
+                "invalid database URL: the {what} is not valid UTF-8 once percent-decoded"
+            ))
+        })
+}
+
 impl PgConfig {
     /// Create a new configuration from a database URL.
+    ///
+    /// The user name, password and database name are percent-decoded, as
+    /// libpq does: write reserved characters in them (`@`, `/`, `?`, `#`,
+    /// `:`) percent-encoded. A URL whose password evidently contains them
+    /// unencoded (an `@` after the host) is rejected with a configuration
+    /// error rather than parsed into the wrong host, port or database.
     pub fn from_url(url: impl Into<String>) -> PgResult<Self> {
         let url = url.into();
-        let parsed = url::Url::parse(&url)
-            .map_err(|e| PgError::config(format!("invalid database URL: {}", e)))?;
+        let parsed = url::Url::parse(&url).map_err(|e| {
+            // An unencoded `/`, `?` or `#` in the password ends the authority
+            // early, which often leaves an invalid port behind.
+            let hint = if url.contains('@') {
+                format!("; {PERCENT_ENCODE_HINT}")
+            } else {
+                String::new()
+            };
+            PgError::config(format!("invalid database URL: {e}{hint}"))
+        })?;
+        reject_unencoded_userinfo(&parsed)?;
 
         if parsed.scheme() != "postgresql" && parsed.scheme() != "postgres" {
             return Err(PgError::config(format!(
@@ -251,7 +312,7 @@ impl PgConfig {
 
         let port = parsed.port().unwrap_or(5432);
 
-        let database = parsed.path().trim_start_matches('/').to_string();
+        let database = percent_decode(parsed.path().trim_start_matches('/'), "database name")?;
 
         if database.is_empty() {
             return Err(PgError::config("missing database name in URL"));
@@ -260,10 +321,13 @@ impl PgConfig {
         let user = if parsed.username().is_empty() {
             "postgres".to_string()
         } else {
-            parsed.username().to_string()
+            percent_decode(parsed.username(), "user name")?
         };
 
-        let password = parsed.password().map(String::from);
+        let password = parsed
+            .password()
+            .map(|password| percent_decode(password, "password"))
+            .transpose()?;
 
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
@@ -916,6 +980,62 @@ mod tests {
         let debug = format!("{builder:?}");
         assert!(!debug.contains(SENTINEL), "{debug}");
         assert!(debug.contains("db.internal"), "{debug}");
+    }
+
+    #[test]
+    fn from_url_rejects_passwords_with_unencoded_reserved_characters() {
+        for url in [
+            "postgres://u:8/Hx@host/db",
+            "postgres://u:123#456@host/db",
+            "postgres://u:123?x@host/db",
+            "postgres://u:a@b/c@host/db",
+            "postgres://u:8/x:y@host:5432/db?sslmode=disable",
+        ] {
+            match PgConfig::from_url(url) {
+                Err(PgError::Config(message)) => {
+                    assert!(message.contains("percent-encode"), "{url}: {message}");
+                    // The error never repeats the URL (or the password).
+                    assert!(
+                        !message.contains("Hx") && !message.contains("456"),
+                        "{message}"
+                    );
+                }
+                other => panic!("{url}: expected a config error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn from_url_decodes_percent_encoded_credentials_and_database() {
+        let config = PgConfig::from_url("postgres://u:8%2FHx@host/db").unwrap();
+        assert_eq!(
+            (
+                config.user.as_str(),
+                config.password.as_deref(),
+                config.host.as_str()
+            ),
+            ("u", Some("8/Hx"), "host")
+        );
+        assert_eq!((config.port, config.database.as_str()), (5432, "db"));
+
+        let config = PgConfig::from_url("postgres://u:123%23456@host:6543/db").unwrap();
+        assert_eq!(config.password.as_deref(), Some("123#456"));
+        assert_eq!(config.port, 6543);
+
+        let config =
+            PgConfig::from_url("postgres://app%40corp:p%40ss%3Aw%2B@host/my%40db").unwrap();
+        assert_eq!(config.user, "app@corp");
+        assert_eq!(config.password.as_deref(), Some("p@ss:w+"));
+        assert_eq!(config.database, "my@db");
+        let pg_config = config.to_pg_config();
+        assert_eq!(pg_config.get_password(), Some(&b"p@ss:w+"[..]));
+        assert_eq!(pg_config.get_user(), Some("app@corp"));
+
+        // An `@` inside a query value is not mistaken for user info.
+        let config =
+            PgConfig::from_url("postgres://u:pw@host/db?application_name=me@work").unwrap();
+        assert_eq!(config.application_name.as_deref(), Some("me@work"));
+        assert_eq!(config.password.as_deref(), Some("pw"));
     }
 
     #[test]

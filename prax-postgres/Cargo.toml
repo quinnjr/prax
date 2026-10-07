@@ -50,6 +50,8 @@ tracing = "0.1"
 
 # URL parsing
 url = "2.5"
+# Percent-decoding the user, password and database name of a URL (as libpq does).
+percent-encoding = "2.3"
 
 # LRU cache for prepared statements
 lru = { workspace = true }
