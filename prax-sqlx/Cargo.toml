@@ -46,7 +46,7 @@ rust_decimal = { version = "1.36", features = ["serde"] }
 tracing = { workspace = true }
 
 # Async traits
-async-trait = "0.1"
+async-trait = "0.1.92"
 
 # URL parsing
 url = { workspace = true }
