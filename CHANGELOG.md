@@ -251,6 +251,13 @@ Safety:
   replaces the connection on every checkout (effectively disables pooling).
 - **sqlx**: `PgHelpers::notify` built SQL by string escaping; it now uses
   `pg_notify($1, $2)`.
+- **sqlx**: `SqlxEngine`'s `QueryEngine` methods and its transaction
+  `BEGIN` / `COMMIT` turned every driver error into a generic database
+  error. They now use the same classification as `From<SqlxError>`
+  (constraint violations by SQLSTATE, connection and pool errors), so
+  errors through `PraxClient<SqlxEngine>` carry `sqlstate()` on PostgreSQL;
+  their messages no longer start with `Database error:`. `query_one` still
+  reports a missing row as `not_found` for the model.
 - **query**: `PraxClient::query_raw` / `execute_raw` sent a raw `Sql`'s
   default Postgres `$N` placeholders to every engine, which MySQL rejects.
   They (and `RawQueryOperation` / `RawExecuteOperation`, the CLI-generated

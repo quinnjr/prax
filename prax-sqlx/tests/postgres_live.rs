@@ -233,3 +233,69 @@ async fn database_errors_carry_the_sqlstate() {
     let err = prax_query::QueryError::from(err);
     assert_eq!(err.sqlstate(), Some("22012"), "{err:?}");
 }
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn engine_errors_carry_the_sqlstate() {
+    use prax_query::ErrorCode;
+    use prax_query::traits::QueryEngine;
+
+    let Some(url) = url() else { return };
+    // One connection: the TEMP table is visible to the transaction too.
+    let engine = engine(&url).await;
+    QueryEngine::execute_raw(
+        &engine,
+        "CREATE TEMP TABLE sqlx_sqlstate_probe (
+             email TEXT UNIQUE,
+             code TEXT UNIQUE DEFERRABLE INITIALLY DEFERRED
+         )",
+        Vec::new(),
+    )
+    .await
+    .expect("create probe table");
+    let insert = "INSERT INTO sqlx_sqlstate_probe (email, code) VALUES ($1, $2)";
+    let row = |email: &str, code: &str| {
+        vec![
+            FilterValue::String(email.into()),
+            FilterValue::String(code.into()),
+        ]
+    };
+
+    // What `PraxClient::execute_raw` runs: a unique violation.
+    QueryEngine::execute_raw(&engine, insert, row("a@x", "a"))
+        .await
+        .expect("first insert");
+    let err = QueryEngine::execute_raw(&engine, insert, row("a@x", "b"))
+        .await
+        .expect_err("duplicate email");
+    assert_eq!(err.sqlstate(), Some("23505"), "{err:?}");
+    assert_eq!(err.code, ErrorCode::UniqueConstraint, "{err:?}");
+
+    // `count` goes through `raw_query_one`.
+    let err = QueryEngine::count(
+        &engine,
+        "SELECT count(*) FROM sqlx_no_such_table",
+        Vec::new(),
+    )
+    .await
+    .expect_err("missing table");
+    assert_eq!(err.sqlstate(), Some("42P01"), "{err:?}");
+
+    // Inside a transaction, and at COMMIT (the deferred constraint).
+    let err = engine
+        .transaction(move |tx| async move {
+            QueryEngine::execute_raw(&tx, insert, row("b@x", "a")).await?;
+            Ok(())
+        })
+        .await
+        .expect_err("deferred duplicate fails at COMMIT");
+    assert_eq!(err.sqlstate(), Some("23505"), "{err:?}");
+    let err = engine
+        .transaction(move |tx| async move {
+            QueryEngine::execute_raw(&tx, insert, row("a@x", "c")).await?;
+            Ok(())
+        })
+        .await
+        .expect_err("duplicate email in a transaction");
+    assert_eq!(err.sqlstate(), Some("23505"), "{err:?}");
+}

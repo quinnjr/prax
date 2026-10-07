@@ -634,6 +634,14 @@ fn bind_sqlite_param<'q>(
     })
 }
 
+/// Convert a driver error into the [`prax_query::QueryError`] taxonomy via
+/// `From<SqlxError>`: classified by SQLSTATE, with
+/// [`sqlstate`](prax_query::QueryError::sqlstate) set for PostgreSQL
+/// errors.
+fn query_error(e: impl Into<SqlxError>) -> prax_query::QueryError {
+    prax_query::QueryError::from(e.into())
+}
+
 // ==================== Transaction Finalization ====================
 
 /// Commit or roll back a transaction after the closure has resolved.
@@ -650,9 +658,7 @@ where
     let tx = slot.lock().await.take();
     match (result, tx) {
         (Ok(value), Some(tx)) => {
-            tx.commit()
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            tx.commit().await.map_err(query_error)?;
             Ok(value)
         }
         (Err(err), Some(tx)) => {
@@ -811,7 +817,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             rows.iter()
                 .map(|r| {
@@ -838,11 +844,10 @@ impl QueryEngine for SqlxEngine {
             debug!(sql = %sql, "Executing query_one via QueryEngine");
 
             let row = self.raw_query_one(&sql, &params).await.map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("no rows") {
+                if e.to_string().contains("no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
-                    prax_query::QueryError::database(msg)
+                    query_error(e)
                 }
             })?;
 
@@ -869,7 +874,7 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_optional(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             match row {
                 Some(r) => {
@@ -899,7 +904,7 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_one(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             let rr = crate::row_ref::SqlxRowRef::from_sqlx(&row).map_err(|e| {
                 let msg = e.to_string();
@@ -924,7 +929,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             rows.iter()
                 .map(|r| {
@@ -950,10 +955,7 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_delete via QueryEngine");
 
-            let affected = self
-                .raw_execute(&sql, &params)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let affected = self.raw_execute(&sql, &params).await.map_err(query_error)?;
 
             Ok(affected)
         })
@@ -964,10 +966,7 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_raw via QueryEngine");
 
-            let affected = self
-                .raw_execute(&sql, &params)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let affected = self.raw_execute(&sql, &params).await.map_err(query_error)?;
 
             Ok(affected)
         })
@@ -981,24 +980,15 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_one(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             let count = match row {
                 #[cfg(feature = "postgres")]
-                SqlxRow::Postgres(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::Postgres(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
                 #[cfg(feature = "mysql")]
-                SqlxRow::MySql(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::MySql(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
                 #[cfg(feature = "sqlite")]
-                SqlxRow::Sqlite(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::Sqlite(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
             };
 
             Ok(count)
@@ -1017,7 +1007,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             Ok(rows.iter().map(decode_aggregate_row).collect())
         })
@@ -1052,26 +1042,17 @@ impl QueryEngine for SqlxEngine {
             let tx_handle = match &*self.pool {
                 #[cfg(feature = "postgres")]
                 SqlxPool::Postgres(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::Postgres(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
                 #[cfg(feature = "mysql")]
                 SqlxPool::MySql(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::MySql(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
                 #[cfg(feature = "sqlite")]
                 SqlxPool::Sqlite(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::Sqlite(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
             };
