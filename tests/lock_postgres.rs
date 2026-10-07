@@ -231,16 +231,11 @@ async fn nowait_on_locked_row_errors_immediately() {
         Ok(Ok(v)) => panic!("NOWAIT on a locked row must error, got {v:?}"),
         Err(_) => panic!("NOWAIT blocked past 2s instead of failing immediately"),
     };
-    // SQLSTATE 55P03 (lock_not_available). The driver error is kept as the
-    // source; `tokio_postgres` is not a root dev-dependency, so match on
-    // its Debug rendering (which includes the SqlState) rather than
-    // downcasting.
-    let source_dbg = std::error::Error::source(&err)
-        .map(|s| format!("{s:?}"))
-        .unwrap_or_default();
-    assert!(
-        source_dbg.contains("55P03") || format!("{err:?}").contains("55P03"),
-        "expected SQLSTATE 55P03, got: {err} / {source_dbg}"
+    // SQLSTATE 55P03 (lock_not_available).
+    assert_eq!(
+        err.sqlstate(),
+        Some("55P03"),
+        "expected SQLSTATE 55P03, got: {err:?}"
     );
 
     cleanup(&client, &tag).await;

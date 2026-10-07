@@ -101,6 +101,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot close it; SQLSTATE 42704 (servers before 14) is ignored.
 - **query**: `RetryConfig::delay_for_attempt` no longer truncates to whole
   milliseconds and no longer wraps or panics for huge attempt numbers.
+- **query**: `QueryError` gained a private field (its SQLSTATE), so it can no
+  longer be built with a struct literal; use `QueryError::new` or one of the
+  named constructors. Its public fields are unchanged.
 
 ### Repairing `Bytes` data written by 0.12.x
 
@@ -219,6 +222,10 @@ Safety:
   Postgres; `SMALLINT` unsupported).
 - **query**: `Sql::build_for_dialect(&dyn SqlDialect)` renders a raw query's
   placeholders for a dialect (unless `with_db_type` chose one).
+- **query**: `QueryError::sqlstate()` returns the server's SQLSTATE (for
+  example `"55P03"` for a `NOWAIT` lock conflict) for errors from
+  `prax-postgres` and from `prax-sqlx` on PostgreSQL; `None` otherwise.
+  `QueryError::with_sqlstate` sets it.
 
 ### Fixed
 

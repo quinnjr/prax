@@ -102,6 +102,8 @@ impl PgError {
 ///     terminal and stay generic.
 ///   * anything else → a generic database error.
 ///
+/// The code is kept on the result as [`QueryError::sqlstate`].
+///
 /// `display` is the driver error's `Display` text (used as the error message);
 /// `detail` is the server's message string (`DbError::message`), used only for
 /// the `0A000` gate — a `tokio_postgres::Error` renders a DB error as just
@@ -114,7 +116,7 @@ pub(crate) fn classify_sqlstate(
     detail: Option<&str>,
 ) -> QueryError {
     let gate_text = detail.unwrap_or(display);
-    match code {
+    let error = match code {
         // Unique / foreign key / check violations.
         Some("23505") | Some("23503") | Some("23514") => {
             QueryError::constraint_violation("", display)
@@ -128,6 +130,10 @@ pub(crate) fn classify_sqlstate(
             QueryError::stale_plan(display)
         }
         _ => QueryError::database(display),
+    };
+    match code {
+        Some(code) => error.with_sqlstate(code),
+        None => error,
     }
 }
 
@@ -228,6 +234,17 @@ mod tests {
         let e = classify_sqlstate(Some("0A000"), "db error", Some("cannot insert into a view"));
         assert_eq!(e.code, ErrorCode::DatabaseError);
         assert!(!e.is_retryable());
+    }
+
+    #[test]
+    fn classified_errors_keep_their_sqlstate() {
+        for code in ["23505", "23502", "0A000", "55P03", "40P01"] {
+            let e = classify_sqlstate(Some(code), "db error", Some("boom"));
+            assert_eq!(e.sqlstate(), Some(code), "code {code}");
+        }
+        assert_eq!(classify_sqlstate(None, "no code", None).sqlstate(), None);
+        // Errors without a server error carry none.
+        assert_eq!(QueryError::from(PgError::Timeout(5)).sqlstate(), None);
     }
 
     #[test]

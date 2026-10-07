@@ -221,3 +221,15 @@ async fn notify_validates_client_side() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn database_errors_carry_the_sqlstate() {
+    let Some(url) = url() else { return };
+    let engine = engine(&url).await;
+    let Err(err) = engine.raw_query_one("SELECT 1 / 0", &[]).await else {
+        panic!("division by zero must fail");
+    };
+    let err = prax_query::QueryError::from(err);
+    assert_eq!(err.sqlstate(), Some("22012"), "{err:?}");
+}
