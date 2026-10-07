@@ -86,7 +86,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **postgres**: `PgListenerOptions::ping_interval` must be at least 100 ms
   (a Config error below that), `PgListenerEvent::Lagged` is
   `#[non_exhaustive]` (see the destructuring note above), and
-  `PgListenerEvent` gains `ChannelsDropped`.
+  `PgListenerEvent` gains `ChannelsDropped` and `Disconnected { error }`
+  (a `#[non_exhaustive]` variant).
 - **postgres**: with `reconnect = false` the listener's terminal error is now
   `PgError::Postgres(e)` when the driver reported the cause (read
   `.code()`); it used to be a generic
@@ -158,11 +159,16 @@ Safety:
 ### Added
 
 - **postgres**: `PgListener` / `PgListenerBuilder` / `PgListenerOptions` /
-  `PgListenerEvent` (`Notification`, `Reconnected`, `Lagged { dropped }`,
-  `ChannelsDropped { channels }`) / `PgNotification` (constructible with
-  `PgNotification::new`). Reconnects with exponential backoff and jitter. The
-  backoff only starts over once a re-established connection has stayed up
-  for a `ping_interval`. Each connection attempt, TLS and startup handshake
+  `PgListenerEvent` (`Notification`, `Disconnected { error }`,
+  `Reconnected`, `Lagged { dropped }`, `ChannelsDropped { channels }`) /
+  `PgNotification` (constructible with `PgNotification::new`). With
+  `reconnect` enabled, a lost connection is reported at once as
+  `Disconnected` (once per outage, also while reconnect attempts keep
+  failing; not on drop), followed by `Reconnected` when it is
+  re-established; both keep their place after already-queued
+  notifications and wake a blocked `recv()`. Reconnects with exponential
+  backoff and jitter. The backoff only starts over once a re-established
+  connection has stayed up for a `ping_interval`. Each connection attempt, TLS and startup handshake
   included, is bounded by `PgConfig::connect_timeout` plus `ping_interval`
   (the driver applies `connect_timeout` to each resolved address, so one
   that times out leaves time for the next). Liveness uses TCP keepalive

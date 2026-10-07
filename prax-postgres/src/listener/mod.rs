@@ -19,6 +19,9 @@
 //! loop {
 //!     match listener.recv().await? {
 //!         PgListenerEvent::Notification(n) => println!("{}: {}", n.channel, n.payload),
+//!         PgListenerEvent::Disconnected { error, .. } => {
+//!             eprintln!("listener disconnected ({error}), reconnecting");
+//!         }
 //!         PgListenerEvent::Reconnected | PgListenerEvent::Lagged { .. } => {
 //!             // Notifications may have been missed: resynchronise.
 //!         }
@@ -48,17 +51,18 @@
 //!   and when the queue is full the notification is dropped and counted. The
 //!   driver tells the supervisor when the connection ends.
 //! - State that must never be lost to a full queue (the drop count, the
-//!   reconnect flag and the channels a reconnect dropped, the terminal error)
-//!   lives in atomics / mutexes shared with the handle and is collected at the
-//!   top of [`PgListener::recv`], which then returns it after the
-//!   notifications queued ahead of it. Raising a flag also wakes a `recv`
-//!   that is parked on an empty queue.
+//!   connection losses and reconnects not yet reported with the channels a
+//!   reconnect dropped, the terminal error) lives in atomics / mutexes
+//!   shared with the handle and is collected at the top of
+//!   [`PgListener::recv`], which then returns it after the notifications
+//!   queued ahead of it. Raising one also wakes a `recv` that is parked on
+//!   an empty queue.
 //! - The supervisor watches the connection: when the driver reports its end,
 //!   or when a `SELECT 1` ping (sent after a [`ping_interval`] without any
 //!   notification) or a `LISTEN` / `UNLISTEN` command fails on the connection
 //!   or goes unanswered for a [`ping_interval`], the connection is lost. It
-//!   then either reconnects with exponential backoff,
-//!   re-`LISTEN`s every tracked channel and reports
+//!   then either reports [`PgListenerEvent::Disconnected`], reconnects with
+//!   exponential backoff, re-`LISTEN`s every tracked channel and reports
 //!   [`PgListenerEvent::Reconnected`], or (with [`reconnect`] disabled)
 //!   records the error and stops. It also stops once reconnecting gives up
 //!   (see [`max_reconnect_attempts`]). Every connection attempt, handshake
@@ -79,6 +83,7 @@
 mod backoff;
 mod supervisor;
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -123,9 +128,11 @@ fn handshake_bound(connect_timeout: Duration, ping_interval: Duration) -> Durati
 #[derive(Debug, Clone)]
 pub struct PgListenerOptions {
     /// Reconnect after the connection is lost, re-issuing `LISTEN` for every
-    /// tracked channel and reporting [`PgListenerEvent::Reconnected`]. When
-    /// `false`, connection loss is terminal and [`PgListener::recv`] returns
-    /// the error. Default: `true`.
+    /// tracked channel: the loss is reported as
+    /// [`PgListenerEvent::Disconnected`] and the re-established connection
+    /// as [`PgListenerEvent::Reconnected`]. When `false`, connection loss is
+    /// terminal and [`PgListener::recv`] returns the error (no
+    /// `Disconnected`). Default: `true`.
     pub reconnect: bool,
     /// Delay before the first reconnect attempt; it doubles after every
     /// attempt, up to [`backoff_max`](Self::backoff_max), and only starts
@@ -242,6 +249,19 @@ impl Default for PgListenerOptions {
 pub enum PgListenerEvent {
     /// A notification on a channel this listener is subscribed to.
     Notification(PgNotification),
+    /// The connection was lost and the listener is reconnecting (only with
+    /// [`PgListenerOptions::reconnect`] enabled). Notifications sent from
+    /// now until the [`Reconnected`](Self::Reconnected) that follows are
+    /// missed. Reported once per outage, as soon as the loss is detected,
+    /// so an application can react while reconnecting is still failing;
+    /// if reconnecting gives up, [`PgListener::recv`] returns the error
+    /// instead of a `Reconnected`. Not reported when the listener is
+    /// dropped.
+    #[non_exhaustive]
+    Disconnected {
+        /// Why the connection was lost, for logs.
+        error: String,
+    },
     /// The connection was lost and re-established; notifications sent in
     /// between were missed. Resynchronise any state derived from them.
     Reconnected,
@@ -543,15 +563,17 @@ impl PgListener {
     /// Wait for the next event.
     ///
     /// Events keep their order relative to the notifications: a
-    /// [`PgListenerEvent::Reconnected`] or [`PgListenerEvent::Lagged`] is
-    /// returned after the notifications that were already queued when this
-    /// first saw it, and before any queued later. On an empty queue it is
-    /// returned at once, also while this is waiting. A
-    /// [`PgListenerEvent::ChannelsDropped`] comes right before the
-    /// `Reconnected` of the reconnect that dropped the channels; when both
-    /// are due at once, `Reconnected` comes before `Lagged`. Several
-    /// reconnects that happen before this sees the first are reported as a
-    /// single `Reconnected`.
+    /// [`PgListenerEvent::Disconnected`], [`PgListenerEvent::Reconnected`] or
+    /// [`PgListenerEvent::Lagged`] is returned after the notifications that
+    /// were already queued when this first saw it, and before any queued
+    /// later. On an empty queue it is returned at once, also while this is
+    /// waiting. Each `Disconnected` comes before the `Reconnected` that ends
+    /// its outage, and a [`PgListenerEvent::ChannelsDropped`] right before
+    /// the `Reconnected` of the reconnect that dropped the channels; when
+    /// they are due together with a `Lagged`, they come first. Several
+    /// outages that happen before this sees the first reconnect are
+    /// reported as a single `Disconnected` and `Reconnected` (with every
+    /// channel dropped meanwhile), so the two always alternate.
     ///
     /// Once the listener has stopped (the connection was lost with
     /// [`PgListenerOptions::reconnect`] disabled, or reconnecting gave up)
@@ -648,23 +670,25 @@ fn listener_closed() -> PgError {
 /// was taken; kept in the handle, so a cancelled `recv` loses none.
 #[derive(Debug, Default)]
 struct Pending {
-    /// A reconnect: notifications still ahead of it, and the channels it
-    /// dropped (reported first, as `ChannelsDropped`).
-    reconnected: Option<(usize, Vec<String>)>,
+    /// Connection events (`Disconnected`, `ChannelsDropped`, `Reconnected`)
+    /// taken together, in order, and the notifications still ahead of them.
+    outage: Option<(usize, VecDeque<PgListenerEvent>)>,
     /// Notifications still ahead of a `Lagged`, and its count.
     lagged: Option<(usize, u64)>,
 }
 
 impl Pending {
     /// Take events newly raised in `shared`, behind the `queued`
-    /// notifications now in the queue. One of a kind is taken at a time:
-    /// another one raised meanwhile stays in `shared` (where repeats
-    /// coalesce) until this one has been returned.
+    /// notifications now in the queue. One batch of a kind is taken at a
+    /// time: events raised meanwhile stay in `shared` (where repeats
+    /// coalesce) until this batch has been returned, so batches never
+    /// overtake each other.
     fn collect(&mut self, shared: &Shared, queued: usize) {
-        if self.reconnected.is_none()
-            && let Some(channels) = shared.take_reconnect()
-        {
-            self.reconnected = Some((queued, channels));
+        if self.outage.is_none() {
+            let events = shared.take_outage();
+            if !events.is_empty() {
+                self.outage = Some((queued, events.into()));
+            }
         }
         if self.lagged.is_none() {
             let dropped = shared.take_dropped();
@@ -676,14 +700,14 @@ impl Pending {
 
     /// The next event with no notification left ahead of it.
     fn due(&mut self) -> Option<PgListenerEvent> {
-        if let Some((0, channels)) = &mut self.reconnected {
-            if !channels.is_empty() {
-                return Some(PgListenerEvent::ChannelsDropped {
-                    channels: std::mem::take(channels),
-                });
+        if let Some((0, events)) = &mut self.outage {
+            let event = events.pop_front();
+            if events.is_empty() {
+                self.outage = None;
             }
-            self.reconnected = None;
-            return Some(PgListenerEvent::Reconnected);
+            if event.is_some() {
+                return event;
+            }
         }
         if let Some((0, dropped)) = self.lagged {
             self.lagged = None;
@@ -694,7 +718,7 @@ impl Pending {
 
     /// A notification was returned: one fewer ahead of each pending event.
     fn delivered(&mut self) {
-        if let Some((ahead, _)) = &mut self.reconnected {
+        if let Some((ahead, _)) = &mut self.outage {
             *ahead = ahead.saturating_sub(1);
         }
         if let Some((ahead, _)) = &mut self.lagged {
@@ -874,6 +898,113 @@ mod tests {
             PgListenerEvent::Reconnected
         );
         assert_eq!(next_event(&mut listener).await, delivered("2"));
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Reconnected
+        );
+        assert_no_event(&mut listener).await;
+    }
+
+    fn disconnected(error: &str) -> PgListenerEvent {
+        PgListenerEvent::Disconnected {
+            error: error.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnected_follows_queued_notifications_and_precedes_reconnected() {
+        let (mut listener, tx, shared) = detached_listener(8);
+        tx.try_send(notification("1")).unwrap();
+        shared.report_disconnect("boom".to_owned());
+        assert_eq!(next_event(&mut listener).await, delivered("1"));
+        tx.try_send(notification("2")).unwrap();
+        assert_eq!(next_event(&mut listener).await, disconnected("boom"));
+        assert_eq!(next_event(&mut listener).await, delivered("2"));
+        shared.report_reconnect(Vec::new());
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Reconnected
+        );
+        assert_no_event(&mut listener).await;
+    }
+
+    #[tokio::test]
+    async fn disconnected_wakes_a_blocked_recv() {
+        let (mut listener, _tx, shared) = detached_listener(8);
+        let raise = tokio::spawn(async move {
+            time::sleep(Duration::from_millis(50)).await;
+            shared.report_disconnect("gone".to_owned());
+        });
+        assert_eq!(next_event(&mut listener).await, disconnected("gone"));
+        raise.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_outage_seen_late_is_reported_in_order() {
+        let (mut listener, _tx, shared) = detached_listener(8);
+        shared.notification_dropped();
+        shared.report_disconnect("boom".to_owned());
+        shared.report_reconnect(vec!["bad".to_owned()]);
+        assert_eq!(next_event(&mut listener).await, disconnected("boom"));
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::ChannelsDropped {
+                channels: vec!["bad".to_owned()]
+            }
+        );
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Reconnected
+        );
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Lagged { dropped: 1 }
+        );
+        assert_no_event(&mut listener).await;
+    }
+
+    #[tokio::test]
+    async fn an_unseen_reconnect_and_the_next_loss_fold_into_one_outage() {
+        let (mut listener, _tx, shared) = detached_listener(8);
+        shared.report_disconnect("first".to_owned());
+        shared.report_reconnect(vec!["a".to_owned()]);
+        shared.report_disconnect("second".to_owned());
+        // Still disconnected: one Disconnected (the first cause) ...
+        assert_eq!(next_event(&mut listener).await, disconnected("first"));
+        assert_no_event(&mut listener).await;
+        // ... and one Reconnected, with every dropped channel.
+        shared.report_reconnect(vec!["b".to_owned()]);
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::ChannelsDropped {
+                channels: vec!["a".to_owned(), "b".to_owned()]
+            }
+        );
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Reconnected
+        );
+        assert_no_event(&mut listener).await;
+    }
+
+    #[tokio::test]
+    async fn a_loss_after_an_unseen_reconnect_follows_it() {
+        let (mut listener, _tx, shared) = detached_listener(8);
+        shared.report_disconnect("first".to_owned());
+        assert_eq!(next_event(&mut listener).await, disconnected("first"));
+        // The reconnect is not seen before the next loss: both are reported,
+        // in order.
+        shared.report_reconnect(Vec::new());
+        shared.report_disconnect("second".to_owned());
+        assert_eq!(
+            next_event(&mut listener).await,
+            PgListenerEvent::Reconnected
+        );
+        assert_eq!(next_event(&mut listener).await, disconnected("second"));
+        // A reconnect and loss after that fold into the pending reconnect.
+        shared.report_reconnect(Vec::new());
+        shared.report_disconnect("third".to_owned());
+        shared.report_reconnect(Vec::new());
         assert_eq!(
             next_event(&mut listener).await,
             PgListenerEvent::Reconnected

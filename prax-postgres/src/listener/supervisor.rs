@@ -16,7 +16,7 @@ use tokio_postgres::{AsyncMessage, NoTls};
 use tracing::{debug, error, info, warn};
 
 use super::backoff::{ReconnectBackoff, jitter};
-use super::{PgListenerOptions, PgNotification};
+use super::{PgListenerEvent, PgListenerOptions, PgNotification};
 use crate::connector::Connector;
 use crate::error::{PgError, PgResult};
 
@@ -59,22 +59,51 @@ impl Command {
     }
 }
 
+/// Connection losses and reconnects the handle has not taken yet, in the
+/// order they happened.
+///
+/// The supervisor reports them strictly alternating (a loss, the reconnect
+/// that ends it, the next loss, ...). Untaken events are folded so that the
+/// handle sees them alternate too: an unseen reconnect, loss and reconnect
+/// become one reconnect, and an unseen loss, reconnect and loss become one
+/// ongoing loss (keeping the first cause).
+#[derive(Debug, Default)]
+enum OutageEvents {
+    #[default]
+    None,
+    /// The connection was lost, for the given reason.
+    Lost(String),
+    /// The connection was re-established.
+    Reconnected,
+    /// Lost, then re-established.
+    LostThenReconnected(String),
+    /// Re-established, then lost again.
+    ReconnectedThenLost(String),
+}
+
+/// [`OutageEvents`] plus the channels the reconnects among them dropped.
+#[derive(Debug, Default)]
+struct Outage {
+    events: OutageEvents,
+    /// Channels the server rejected while re-subscribing after a reconnect
+    /// not taken yet; reported with that reconnect.
+    channels_dropped: Vec<String>,
+}
+
 /// State shared between the handle, the supervisor and the driver that must
 /// never be lost to a full notification queue.
 #[derive(Debug, Default)]
 pub(super) struct Shared {
     /// Notifications discarded because the queue was full, not yet reported.
     dropped: AtomicU64,
-    /// Set after a reconnect; reported once as `Reconnected`.
-    reconnected: AtomicBool,
-    /// Channels the server rejected while re-subscribing after a reconnect,
-    /// not yet reported. Filled before `reconnected` is raised.
-    channels_dropped: Mutex<Vec<String>>,
+    /// Connection losses and reconnects not yet taken by the handle. A
+    /// short critical section, never held across an await.
+    outage: Mutex<Outage>,
     /// Set by the driver whenever a notification (or another asynchronous
     /// message) arrives, cleared by the supervisor's ping tick: a tick that
     /// finds it unset sends a ping.
     traffic: AtomicBool,
-    /// Wakes a `recv` parked on the empty queue when `reconnected` or
+    /// Wakes a `recv` parked on the empty queue when a loss, a reconnect or
     /// `dropped` is raised.
     pub(super) wake: Notify,
     /// Why the listener stopped, returned once the queue is drained.
@@ -95,22 +124,64 @@ impl Shared {
         self.dropped.swap(0, Ordering::Relaxed)
     }
 
-    /// Report a reconnect, after which the server refused to re-subscribe
-    /// `channels_dropped`.
-    pub(super) fn report_reconnect(&self, channels_dropped: Vec<String>) {
-        if !channels_dropped.is_empty() {
-            lock(&self.channels_dropped).extend(channels_dropped);
+    /// Report that the connection was lost (for `error`) and reconnecting
+    /// begins.
+    pub(super) fn report_disconnect(&self, error: String) {
+        {
+            let mut outage = lock(&self.outage);
+            outage.events = match std::mem::take(&mut outage.events) {
+                OutageEvents::None => OutageEvents::Lost(error),
+                OutageEvents::Reconnected => OutageEvents::ReconnectedThenLost(error),
+                // The reconnect was never seen: still the same outage.
+                OutageEvents::LostThenReconnected(first) => OutageEvents::Lost(first),
+                // Not reported twice in a row; keep the first cause.
+                lost @ (OutageEvents::Lost(_) | OutageEvents::ReconnectedThenLost(_)) => lost,
+            };
         }
-        self.reconnected.store(true, Ordering::Release);
         self.wake.notify_one();
     }
 
-    /// Take a reported reconnect, with the channels it dropped.
-    pub(super) fn take_reconnect(&self) -> Option<Vec<String>> {
-        if !self.reconnected.swap(false, Ordering::AcqRel) {
-            return None;
+    /// Report a reconnect, after which the server refused to re-subscribe
+    /// `channels_dropped`.
+    pub(super) fn report_reconnect(&self, channels_dropped: Vec<String>) {
+        {
+            let mut outage = lock(&self.outage);
+            outage.channels_dropped.extend(channels_dropped);
+            outage.events = match std::mem::take(&mut outage.events) {
+                OutageEvents::None => OutageEvents::Reconnected,
+                OutageEvents::Lost(error) => OutageEvents::LostThenReconnected(error),
+                // The loss after the unseen reconnect, and its end, were
+                // never seen either: one reconnect.
+                OutageEvents::ReconnectedThenLost(_) => OutageEvents::Reconnected,
+                // Repeats coalesce.
+                reconnected
+                @ (OutageEvents::Reconnected | OutageEvents::LostThenReconnected(_)) => reconnected,
+            };
         }
-        Some(std::mem::take(&mut *lock(&self.channels_dropped)))
+        self.wake.notify_one();
+    }
+
+    /// Take the reported losses and reconnects, in order, as the events
+    /// `recv` returns (`ChannelsDropped` right before its `Reconnected`).
+    pub(super) fn take_outage(&self) -> Vec<PgListenerEvent> {
+        let mut outage = lock(&self.outage);
+        let disconnected = |error| PgListenerEvent::Disconnected { error };
+        match std::mem::take(&mut outage.events) {
+            OutageEvents::None => Vec::new(),
+            // The channels wait for the reconnect that ends this loss.
+            OutageEvents::Lost(error) => vec![disconnected(error)],
+            OutageEvents::Reconnected => reconnected(&mut outage.channels_dropped),
+            OutageEvents::LostThenReconnected(error) => {
+                let mut events = vec![disconnected(error)];
+                events.extend(reconnected(&mut outage.channels_dropped));
+                events
+            }
+            OutageEvents::ReconnectedThenLost(error) => {
+                let mut events = reconnected(&mut outage.channels_dropped);
+                events.push(disconnected(error));
+                events
+            }
+        }
     }
 
     fn set_terminal(&self, error: PgError) {
@@ -122,9 +193,22 @@ impl Shared {
     }
 }
 
+/// A reconnect's events: `ChannelsDropped` (when it dropped any, taken from
+/// `channels_dropped`), then `Reconnected`.
+fn reconnected(channels_dropped: &mut Vec<String>) -> Vec<PgListenerEvent> {
+    let mut events = Vec::with_capacity(2);
+    if !channels_dropped.is_empty() {
+        events.push(PgListenerEvent::ChannelsDropped {
+            channels: std::mem::take(channels_dropped),
+        });
+    }
+    events.push(PgListenerEvent::Reconnected);
+    events
+}
+
 /// Lock `mutex`, ignoring poisoning (every critical section here is a
-/// single assignment, `extend` or `take`, which cannot leave the value
-/// inconsistent).
+/// single assignment, `extend`, `take` or a state transition that cannot
+/// panic part-way, so the value is never left inconsistent).
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -503,6 +587,9 @@ impl Supervisor {
                 self.shared.set_terminal(cause.into_terminal());
                 return;
             }
+            // Reported now, so the application learns of the outage while
+            // the reconnect is still under way.
+            self.shared.report_disconnect(cause.message);
             self.backoff
                 .session_lost(connected_at.elapsed(), self.options.ping_interval);
             let (new_session, channels_dropped) = match self.reconnect(&mut commands).await {

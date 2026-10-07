@@ -244,6 +244,28 @@ async fn database_exists(conn: &PgConnection, name: &str) -> bool {
     .get(0)
 }
 
+/// Receive the next event, bounded by [`DELIVERY_TIMEOUT`].
+async fn next_event(listener: &mut PgListener) -> PgListenerEvent {
+    tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
+        .await
+        .expect("event within timeout")
+        .expect("recv ok")
+}
+
+/// Require the next event to be `Disconnected`; returns its error text.
+async fn expect_disconnected(listener: &mut PgListener) -> String {
+    match next_event(listener).await {
+        PgListenerEvent::Disconnected { error, .. } => error,
+        other => panic!("expected Disconnected, got {other:?}"),
+    }
+}
+
+/// Require the events of one outage: `Disconnected`, then `Reconnected`.
+async fn expect_outage(listener: &mut PgListener) {
+    expect_disconnected(listener).await;
+    assert_eq!(next_event(listener).await, PgListenerEvent::Reconnected);
+}
+
 /// Receive the next event (bounded by [`DELIVERY_TIMEOUT`]) and require it to
 /// be a notification.
 async fn next_notification(listener: &mut PgListener) -> PgNotification {
@@ -483,7 +505,7 @@ async fn reconnects_and_resubscribes_after_backend_termination() {
     listener.listen(&channel).await.expect("listen");
 
     // `recv` is polled first, so it is already parked on the idle queue when
-    // the backend dies: `Reconnected` must wake a blocked caller.
+    // the backend dies: `Disconnected` must wake a blocked caller.
     let (event, terminated) = tokio::join!(
         tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv()),
         async {
@@ -495,8 +517,18 @@ async fn reconnects_and_resubscribes_after_backend_termination() {
         terminated, 1,
         "exactly the listener's backend is terminated"
     );
+    let event = event
+        .expect("Disconnected within timeout")
+        .expect("recv ok");
+    let PgListenerEvent::Disconnected { error, .. } = &event else {
+        panic!("expected Disconnected, got {event:?}");
+    };
+    assert!(
+        error.contains("57P01") || error.contains("terminating connection"),
+        "the error says why: {error}"
+    );
     assert_eq!(
-        event.expect("Reconnected within timeout").expect("recv ok"),
+        next_event(&mut listener).await,
         PgListenerEvent::Reconnected
     );
 
@@ -700,11 +732,7 @@ async fn listen_while_reconnecting_takes_effect_after_reconnect() {
         .expect("listen while reconnecting");
 
     proxy.heal();
-    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
-        .await
-        .expect("Reconnected within timeout")
-        .expect("recv ok");
-    assert_eq!(event, PgListenerEvent::Reconnected);
+    expect_outage(&mut listener).await;
 
     let conn = pool.get().await.expect("pool conn");
     conn.notify(&first, "f").await.expect("notify first");
@@ -744,11 +772,12 @@ async fn ping_detects_unresponsive_connection_and_reconnects() {
 
     // No FIN, no RST: only the unanswered ping reveals the dead connection.
     proxy.freeze();
-    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
-        .await
-        .expect("Reconnected within timeout")
-        .expect("recv ok");
-    assert_eq!(event, PgListenerEvent::Reconnected);
+    let error = expect_disconnected(&mut listener).await;
+    assert!(error.contains("ping not answered"), "{error}");
+    assert_eq!(
+        next_event(&mut listener).await,
+        PgListenerEvent::Reconnected
+    );
 
     pool.get()
         .await
@@ -789,11 +818,7 @@ async fn command_on_unresponsive_connection_times_out_and_reconnects() {
     assert!(err.is_timeout(), "got {err:?}");
 
     // The timeout counted as connection loss.
-    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
-        .await
-        .expect("Reconnected within timeout")
-        .expect("recv ok");
-    assert_eq!(event, PgListenerEvent::Reconnected);
+    expect_outage(&mut listener).await;
 
     // The tracked channel was re-subscribed and commands work again.
     listener
@@ -892,6 +917,7 @@ async fn reconnect_drops_channels_the_server_rejects() {
     // Without the per-channel fallback every attempt fails on `bad`. The
     // dropped channel is reported first, then the reconnect.
     proxy.heal();
+    expect_disconnected(&mut listener).await;
     let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
         .await
         .expect("ChannelsDropped within timeout")
@@ -915,6 +941,59 @@ async fn reconnect_drops_channels_the_server_rejects() {
         .expect("notify");
     let n = next_notification(&mut listener).await;
     assert_eq!((n.channel, n.payload), (good, "kept".to_owned()));
+}
+
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn disconnected_is_reported_while_reconnect_keeps_failing() {
+    let Some(url) = e2e_url() else { return };
+    let pool = pool(&url).await;
+    let (config, app) = tagged_config(&url);
+    let proxy = TestProxy::start(config.host.clone(), config.port).await;
+    let mut listener = PgListener::builder(&proxy.route(config))
+        .backoff(Duration::from_millis(50), Duration::from_millis(100))
+        .connect()
+        .await
+        .expect("connect listener through proxy");
+    let channel = unique_channel("outage");
+    listener.listen(&channel).await.expect("listen");
+
+    // The server now looks down: the backend dies and every reconnect
+    // attempt is refused.
+    proxy.refuse_new();
+    let before = proxy.accepted();
+    assert_eq!(terminate_backend(&pool, &app).await, 1);
+
+    // The outage is reported promptly, while reconnecting still fails.
+    let error = expect_disconnected(&mut listener).await;
+    assert!(
+        error.contains("57P01") || error.contains("terminating connection"),
+        "the error says why: {error}"
+    );
+    assert!(
+        wait_for_accepted(&proxy, before + 2, DELIVERY_TIMEOUT).await,
+        "the listener keeps trying to reconnect"
+    );
+    // Once per outage: nothing else while the attempts keep failing.
+    let result = tokio::time::timeout(Duration::from_millis(300), listener.recv()).await;
+    assert!(
+        result.is_err(),
+        "no further event while disconnected: {result:?}"
+    );
+
+    proxy.heal();
+    assert_eq!(
+        next_event(&mut listener).await,
+        PgListenerEvent::Reconnected
+    );
+    pool.get()
+        .await
+        .expect("pool conn")
+        .notify(&channel, "back")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!((n.channel, n.payload), (channel, "back".to_owned()));
 }
 
 /// Wait (up to `limit`) until `proxy` has accepted at least `count`
@@ -1004,11 +1083,7 @@ async fn reconnect_keeps_retrying_while_the_server_never_answers() {
         .expect("listen while reconnecting");
 
     proxy.heal();
-    let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
-        .await
-        .expect("Reconnected within timeout")
-        .expect("recv ok");
-    assert_eq!(event, PgListenerEvent::Reconnected);
+    expect_outage(&mut listener).await;
 
     let conn = pool.get().await.expect("pool conn");
     conn.notify(&first, "f").await.expect("notify first");
@@ -1155,11 +1230,7 @@ async fn reconnect_backoff_keeps_growing_while_sessions_keep_dying() {
     for _ in 0..4 {
         let started = tokio::time::Instant::now();
         assert!(terminate_backend(&pool, &app).await >= 1);
-        let event = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
-            .await
-            .expect("Reconnected within timeout")
-            .expect("recv ok");
-        assert_eq!(event, PgListenerEvent::Reconnected);
+        expect_outage(&mut listener).await;
         delays.push(started.elapsed());
     }
     // Restarting from `initial` each time would keep every delay under
@@ -1190,7 +1261,9 @@ async fn reconnect_gives_up_after_max_reconnect_attempts() {
     let before = proxy.accepted();
     assert_eq!(terminate_backend(&pool, &app).await, 1);
 
-    // After three refused attempts the listener stops with the last error.
+    // After three refused attempts the listener stops with the last error
+    // (the loss itself was reported first).
+    expect_disconnected(&mut listener).await;
     let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
         .await
         .expect("recv returns once the listener gives up")
@@ -1245,6 +1318,7 @@ async fn reconnect_gives_up_when_the_database_is_gone() {
         .await
         .expect("drop database");
 
+    expect_disconnected(&mut listener).await;
     let err = tokio::time::timeout(DELIVERY_TIMEOUT, listener.recv())
         .await
         .expect("recv returns once the listener gives up")

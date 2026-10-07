@@ -71,6 +71,7 @@ listener.listen("events").await?;
 loop {
     match listener.recv().await? {
         PgListenerEvent::Notification(n) => println!("{}: {}", n.channel, n.payload),
+        PgListenerEvent::Disconnected { error, .. } => eprintln!("reconnecting: {error}"),
         PgListenerEvent::Reconnected | PgListenerEvent::Lagged { .. } => { /* resync */ }
         PgListenerEvent::ChannelsDropped { channels, .. } => eprintln!("dropped {channels:?}"),
         _ => {}
