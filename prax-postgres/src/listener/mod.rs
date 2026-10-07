@@ -7,8 +7,10 @@
 //!
 //! Sending is done from any ordinary connection or transaction with
 //! [`PgConnection::notify`](crate::connection::PgConnection::notify) /
-//! [`PgTransaction::notify`](crate::connection::PgTransaction::notify), which
-//! run `SELECT pg_notify($1, $2)`. Inside a transaction the notification is
+//! [`PgTransaction::notify`](crate::connection::PgTransaction::notify), or
+//! through the query engine with [`PgEngine::notify`](crate::engine::PgEngine::notify)
+//! (also inside `PraxClient::transaction`), which run
+//! `SELECT pg_notify($1, $2)`. Inside a transaction the notification is
 //! delivered on commit and discarded on rollback.
 //!
 //! ```rust,ignore

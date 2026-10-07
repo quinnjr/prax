@@ -191,6 +191,10 @@ Safety:
 - **postgres**: `PgConnection::notify` / `PgTransaction::notify` using
   `pg_notify($1, $2)`, with client-side validation (channel at most 63 bytes
   and no NUL; payload under 8000 bytes).
+- **postgres**: `PgEngine::notify(channel, payload)`, with the same
+  validation (an invalid-input `QueryError`). On the transaction-bound
+  engine inside `PraxClient::<PgEngine>::transaction` (`tx.engine()`) the
+  notification is delivered on commit and discarded on rollback.
 - **core**: `FilterValue::Array`, `FilterValue::Bytes`, `FilterValue::list(..)`
   and `FilterValue::to_json_value()`. Postgres binds `Array` as a typed array
   parameter with per-element type checks (works with `= ANY($1)`). `prax-sqlx`

@@ -8,8 +8,12 @@ use prax_query::filter::FilterValue;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use tracing::{error, trace};
 
+use crate::notify::{validate_channel, validate_payload};
 use crate::pool::PgPool;
 use crate::types::filter_value_to_sql;
+
+/// Statement behind [`PgEngine::notify`].
+const NOTIFY_SQL: &str = "SELECT pg_notify($1, $2)";
 
 /// PostgreSQL query engine that implements the Prax `QueryEngine`
 /// trait.
@@ -56,6 +60,40 @@ impl PgEngine {
     /// Get a reference to the connection pool.
     pub fn pool(&self) -> &PgPool {
         &self.pool
+    }
+
+    /// Send a notification on `channel` (`SELECT pg_notify($1, $2)`).
+    ///
+    /// On the transaction-bound engine that
+    /// `PraxClient::<PgEngine>::transaction` hands its closure (reach it with
+    /// `tx.engine()`), the notification is part of that transaction:
+    /// delivered when it commits, discarded if it rolls back. Otherwise it
+    /// runs on a pooled connection and is delivered at once.
+    ///
+    /// The channel name is matched verbatim (case preserved) by a
+    /// [`PgListener`](crate::listener::PgListener) subscribed to the same
+    /// string. It must be non-empty, at most 63 bytes and free of NUL, and
+    /// the payload shorter than 8000 bytes; both are checked before
+    /// anything is sent (an invalid-input error otherwise).
+    pub async fn notify(&self, channel: &str, payload: &str) -> QueryResult<()> {
+        validate_channel(channel)
+            .and_then(|()| validate_payload(payload))
+            .map_err(|e| prax_query::QueryError::invalid_input("notify", e.to_string()))?;
+        let params: [&(dyn tokio_postgres::types::ToSql + Sync); 2] = [&channel, &payload];
+        if let Some(tx) = &self.tx_conn {
+            tx.execute(NOTIFY_SQL, &params)
+                .await
+                .map_err(map_driver_err)?;
+        } else {
+            let conn =
+                self.pool.get().await.map_err(|e| {
+                    prax_query::QueryError::connection(e.to_string()).with_source(e)
+                })?;
+            conn.execute(NOTIFY_SQL, &params)
+                .await
+                .map_err(map_driver_err)?;
+        }
+        Ok(())
     }
 
     /// Convert filter values to PostgreSQL parameters.
@@ -655,4 +693,34 @@ mod tests {
     // (`deadpool_postgres::Object` cannot be fabricated without a live
     // connection), so it is covered only by live integration testing,
     // not unit tests.
+
+    use super::*;
+
+    #[tokio::test]
+    async fn notify_validates_before_connecting() {
+        // deadpool connects lazily, and nothing listens on port 1: only
+        // validation can answer these.
+        let pool = crate::pool::PgPoolBuilder::new()
+            .url("postgres://prax@127.0.0.1:1/prax")
+            .min_connections(0)
+            .build()
+            .await
+            .unwrap();
+        let engine = PgEngine::new(pool);
+        let too_long = "a".repeat(64);
+        let oversized = "x".repeat(8000);
+        for (channel, payload) in [
+            ("", "x"),
+            (too_long.as_str(), "x"),
+            ("a\0b", "x"),
+            ("ok", oversized.as_str()),
+        ] {
+            let err = engine.notify(channel, payload).await.unwrap_err();
+            assert_eq!(
+                err.code,
+                prax_query::ErrorCode::InvalidParameter,
+                "{channel:?}: {err}"
+            );
+        }
+    }
 }

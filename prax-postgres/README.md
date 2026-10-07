@@ -79,8 +79,10 @@ loop {
 }
 ```
 
-Connect the listener directly to PostgreSQL, not through a
-transaction-mode pooler. Any role can `NOTIFY` any channel: treat payloads as
+Send notifications with `PgConnection::notify`, `PgTransaction::notify` or
+`PgEngine::notify` (inside `PraxClient::transaction`, `tx.engine().notify(..)`
+is delivered only on commit). Connect the listener directly to PostgreSQL,
+not through a transaction-mode pooler. Any role can `NOTIFY` any channel: treat payloads as
 untrusted.
 
 ## License
