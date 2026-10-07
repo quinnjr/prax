@@ -79,34 +79,49 @@ impl fmt::Debug for PgConfig {
 const REDACTED: &str = "REDACTED";
 
 /// `url` with its password replaced by [`REDACTED`], for `Debug` output.
+/// Only the password inside the user info (`user:password@`) is touched;
+/// the rest of the URL is kept exactly as written.
 ///
-/// The literal `password` is replaced first: the config builder writes it
-/// into the URL without percent-encoding, where an `@` or `/` in it would
-/// not parse as one URL password. Then any URL password is replaced through
-/// the parser; a URL that does not parse loses everything between the
-/// scheme and its last `@`.
+/// `password` is the config's password, when known. It is matched right
+/// after `user:` first, because the config builder writes it into the URL
+/// without percent-encoding, where an `@` or `/` in it would not parse as
+/// one URL password. Otherwise the parser locates the password; if the URL
+/// does not parse, everything between the scheme and its last `@` is
+/// redacted.
 pub(crate) fn redact_url(url: &str, password: Option<&str>) -> String {
-    let url = match password {
-        Some(password) if !password.is_empty() => url.replace(password, REDACTED),
-        _ => url.to_owned(),
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return url.to_owned();
     };
-    match url::Url::parse(&url) {
-        Ok(mut parsed) => {
-            if parsed.password().is_some() && parsed.set_password(Some(REDACTED)).is_ok() {
-                parsed.to_string()
-            } else {
-                url
-            }
-        }
-        Err(_) => {
-            let Some(start) = url.find("://").map(|i| i + 3) else {
-                return url;
-            };
-            match url[start..].rfind('@') {
-                Some(at) => format!("{}{REDACTED}{}", &url[..start], &url[start + at..]),
-                None => url,
-            }
-        }
+    if let Some(password) = password.filter(|p| !p.is_empty())
+        && let Some(redacted) = splice_password(url, start, password)
+    {
+        return redacted;
+    }
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.password() {
+            Some(password) => splice_password(url, start, password)
+                .unwrap_or_else(|| redact_to_last_at(url, start)),
+            None => url.to_owned(),
+        },
+        Err(_) => redact_to_last_at(url, start),
+    }
+}
+
+/// `url` with `password` replaced, when it follows the first `:` of the
+/// user info (which starts at `start`) and is followed by `@`.
+fn splice_password(url: &str, start: usize, password: &str) -> Option<String> {
+    let from = start + url[start..].find(':')? + 1;
+    let after = url[from..].strip_prefix(password)?;
+    after
+        .starts_with('@')
+        .then(|| format!("{}{REDACTED}{after}", &url[..from]))
+}
+
+/// `url` with everything from `start` to its last `@` replaced.
+fn redact_to_last_at(url: &str, start: usize) -> String {
+    match url[start..].rfind('@') {
+        Some(at) => format!("{}{REDACTED}{}", &url[..start], &url[start + at..]),
+        None => url.to_owned(),
     }
 }
 
@@ -731,6 +746,40 @@ mod tests {
         config.url = format!("postgres://prax:{SENTINEL}@bad host/prax");
         let debug = format!("{config:?}");
         assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[test]
+    fn url_redaction_touches_only_the_password() {
+        // A password equal to the user, host or database name (or a single
+        // letter of them) must not be replaced anywhere else.
+        assert_eq!(
+            redact_url(
+                "postgres://postgres:postgres@localhost:5432/postgres",
+                Some("postgres")
+            ),
+            "postgres://postgres:REDACTED@localhost:5432/postgres"
+        );
+        assert_eq!(
+            redact_url(
+                "postgres://app:a@db.internal:5432/app_db?sslmode=disable",
+                Some("a")
+            ),
+            "postgres://app:REDACTED@db.internal:5432/app_db?sslmode=disable"
+        );
+        // Without a hint the parser finds the password; the rest of the URL
+        // is kept as written.
+        assert_eq!(
+            redact_url("postgres://app:a@db.internal/app_db", None),
+            "postgres://app:REDACTED@db.internal/app_db"
+        );
+        let config =
+            PgConfig::from_url("postgres://postgres:postgres@localhost:5432/postgres").unwrap();
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains("\"postgres://postgres:REDACTED@localhost:5432/postgres\""),
+            "{debug}"
+        );
+        assert!(debug.contains("database: \"postgres\""), "{debug}");
     }
 
     #[test]
