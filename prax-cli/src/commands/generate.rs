@@ -315,7 +315,7 @@ fn generate_client_module(
         "        T: prax_query::traits::Model + prax_query::row::FromRow + Send + 'static,\n",
     );
     code.push_str("    {\n");
-    code.push_str("        let (s, p) = sql.build();\n");
+    code.push_str("        let (s, p) = sql.build_for_dialect(self.engine.dialect());\n");
     code.push_str("        self.engine.query_many::<T>(&s, p).await\n");
     code.push_str("    }\n\n");
 
@@ -326,7 +326,7 @@ fn generate_client_module(
     code.push_str("    pub async fn execute_raw(&self, sql: prax_query::raw::Sql)\n");
     code.push_str("        -> prax_query::error::QueryResult<u64>\n");
     code.push_str("    {\n");
-    code.push_str("        let (s, p) = sql.build();\n");
+    code.push_str("        let (s, p) = sql.build_for_dialect(self.engine.dialect());\n");
     code.push_str("        self.engine.execute_raw(&s, p).await\n");
     code.push_str("    }\n\n");
 

@@ -459,7 +459,8 @@ impl MysqlRawEngine {
         &self,
         sql: prax_query::raw::Sql,
     ) -> Result<Vec<MysqlJsonRow>, MysqlError> {
-        let (query_string, params) = sql.build();
+        // `?` placeholders unless the query chose a database type itself.
+        let (query_string, params) = sql.build_for_dialect(&prax_query::dialect::Mysql);
         debug!(sql = %query_string, "Executing raw SQL from builder");
         self.raw_sql_query(&query_string, &params).await
     }

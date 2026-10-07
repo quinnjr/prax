@@ -64,6 +64,10 @@ impl<E: QueryEngine> PraxClient<E> {
     /// the query with a table) and [`FromRow`] (so each row can be
     /// decoded). Both are provided automatically by `#[derive(Model)]`.
     ///
+    /// Placeholders are rendered for the engine's dialect (`$1` on
+    /// Postgres, `?` on MySQL, `@P1` on MSSQL, ...) unless the query set
+    /// one explicitly with [`Sql::with_db_type`].
+    ///
     /// ```rust,ignore
     /// use prax_query::raw::Sql;
     ///
@@ -81,7 +85,7 @@ impl<E: QueryEngine> PraxClient<E> {
     where
         T: Model + FromRow + Send + 'static,
     {
-        let (s, p) = sql.build();
+        let (s, p) = sql.build_for_dialect(self.engine.dialect());
         self.engine.query_many::<T>(&s, p).await
     }
 
@@ -89,7 +93,8 @@ impl<E: QueryEngine> PraxClient<E> {
     ///
     /// Use this for `INSERT` / `UPDATE` / `DELETE` / DDL when the typed
     /// Client API doesn't model what you need. Returns the
-    /// driver-reported affected-row count.
+    /// driver-reported affected-row count. Placeholders are rendered as in
+    /// [`query_raw`](Self::query_raw).
     ///
     /// ```rust,ignore
     /// use prax_query::raw::Sql;
@@ -104,7 +109,7 @@ impl<E: QueryEngine> PraxClient<E> {
     /// ```
     #[allow(clippy::result_large_err)]
     pub async fn execute_raw(&self, sql: Sql) -> QueryResult<u64> {
-        let (s, p) = sql.build();
+        let (s, p) = sql.build_for_dialect(self.engine.dialect());
         self.engine.execute_raw(&s, p).await
     }
 

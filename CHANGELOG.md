@@ -212,6 +212,8 @@ Safety:
   server.
 - **core**: `impl FromColumn for u8` (decodes via the `i32` getter: `INT4` on
   Postgres; `SMALLINT` unsupported).
+- **query**: `Sql::build_for_dialect(&dyn SqlDialect)` renders a raw query's
+  placeholders for a dialect (unless `with_db_type` chose one).
 
 ### Fixed
 
@@ -227,6 +229,14 @@ Safety:
   replaces the connection on every checkout (effectively disables pooling).
 - **sqlx**: `PgHelpers::notify` built SQL by string escaping; it now uses
   `pg_notify($1, $2)`.
+- **query**: `PraxClient::query_raw` / `execute_raw` sent a raw `Sql`'s
+  default Postgres `$N` placeholders to every engine, which MySQL rejects.
+  They (and `RawQueryOperation` / `RawExecuteOperation`, the CLI-generated
+  client and `MysqlRawEngine::raw_sql`) now render placeholders for the
+  engine's dialect (`?` on MySQL, `?N` on SQLite, `@PN` on MSSQL) unless
+  the query set `Sql::with_db_type`, which wins. `Sql::build()` output is
+  unchanged, except that `with_db_type` now also applies to values bound
+  before it.
 - **derive**: `#[derive(Model)]` handles `u8` fields written as
   `core::primitive::u8`, `std::primitive::u8` or inside
   `Option<..>`/`std::option::Option<..>` in every filter operator.
