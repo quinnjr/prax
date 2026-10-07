@@ -284,6 +284,10 @@ impl PgConfig {
     /// `:`) percent-encoded. A URL whose password evidently contains them
     /// unencoded (an `@` after the host) is rejected with a configuration
     /// error rather than parsed into the wrong host, port or database.
+    ///
+    /// As with libpq, `user` and `password` query parameters set the
+    /// credentials (overriding the user info). Other unrecognised
+    /// parameters become [`options`](Self::options).
     pub fn from_url(url: impl Into<String>) -> PgResult<Self> {
         let url = url.into();
         let parsed = url::Url::parse(&url).map_err(|e| {
@@ -318,16 +322,29 @@ impl PgConfig {
             return Err(PgError::config("missing database name in URL"));
         }
 
-        let user = if parsed.username().is_empty() {
+        let mut user = if parsed.username().is_empty() {
             "postgres".to_string()
         } else {
             percent_decode(parsed.username(), "user name")?
         };
 
-        let password = parsed
+        let mut password = parsed
             .password()
             .map(|password| percent_decode(password, "password"))
             .transpose()?;
+
+        // libpq-style `user=` / `password=` query parameters set the
+        // credentials (overriding the user info; the last one wins). Their
+        // values are percent-decoded like libpq's, so a `+` stays a plus
+        // sign (unlike form decoding, which `query_pairs` uses).
+        for pair in parsed.query().unwrap_or_default().split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match percent_decode(key, "query parameter name")?.as_str() {
+                "user" => user = percent_decode(value, "user name")?,
+                "password" => password = Some(percent_decode(value, "password")?),
+                _ => {}
+            }
+        }
 
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
@@ -371,6 +388,8 @@ impl PgConfig {
                 "sslrootcert" => {
                     ssl_root_cert = Some(PathBuf::from(value_str));
                 }
+                // Credentials, taken above; never a server startup option.
+                "user" | "password" => {}
                 _ => {
                     options.push((key_str.to_string(), value_str.to_string()));
                 }
@@ -945,11 +964,18 @@ mod tests {
     fn debug_redacts_password_options_and_query() {
         let url = format!("postgres://u@db.internal/prax?password={SENTINEL}&search_path=app");
         let config = PgConfig::from_url(&url).unwrap();
-        // `from_url` keeps the parameter in `options`.
-        assert!(config.options.iter().any(|(k, _)| k == "password"));
         let debug = format!("{config:?}");
         assert!(!debug.contains(SENTINEL), "{debug}");
         assert!(debug.contains("search_path"), "{debug}");
+
+        // Not the libpq keyword (case differs), so it stays an option, which
+        // Debug redacts all the same.
+        let config =
+            PgConfig::from_url(format!("postgres://u@db.internal/prax?PASSWORD={SENTINEL}"))
+                .unwrap();
+        assert!(config.options.iter().any(|(k, _)| k == "PASSWORD"));
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
 
         let builder = crate::pool::PgPoolBuilder::new().url(&url);
         let debug = format!("{builder:?}");
@@ -1036,6 +1062,35 @@ mod tests {
             PgConfig::from_url("postgres://u:pw@host/db?application_name=me@work").unwrap();
         assert_eq!(config.application_name.as_deref(), Some("me@work"));
         assert_eq!(config.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn from_url_takes_credentials_from_query_parameters() {
+        let config = PgConfig::from_url(format!(
+            "postgres://db.internal/prax?user=alice&password={SENTINEL}&sslmode=disable"
+        ))
+        .unwrap();
+        assert_eq!(config.user, "alice");
+        assert_eq!(config.password.as_deref(), Some(SENTINEL));
+        assert_eq!(config.ssl_mode, SslMode::Disable);
+        // Credentials, not server startup options.
+        assert!(config.options.is_empty(), "{:?}", config.options);
+        let pg_config = config.to_pg_config();
+        assert_eq!(pg_config.get_user(), Some("alice"));
+        assert_eq!(pg_config.get_password(), Some(SENTINEL.as_bytes()));
+        assert_eq!(pg_config.get_options(), None);
+        // Debug still redacts the password (field and URL).
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("alice"), "{debug}");
+
+        // They override the user info; values are percent-decoded like
+        // libpq, so `+` stays a plus sign.
+        let config =
+            PgConfig::from_url("postgres://bob:old@host/db?password=n%26w+1&user=carol").unwrap();
+        assert_eq!(config.user, "carol");
+        assert_eq!(config.password.as_deref(), Some("n&w+1"));
+        assert!(config.options.is_empty(), "{:?}", config.options);
     }
 
     #[test]

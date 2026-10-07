@@ -286,6 +286,11 @@ Safety:
   rejected with a configuration error asking to percent-encode reserved
   characters in the password. Behaviour change: these malformed URLs, and a
   database name with a literal `@` (write `%40`), no longer parse.
+- **postgres**: libpq-style `user=` / `password=` query parameters in a
+  `PgConfig::from_url` URL were sent to the server as `-c user=…` /
+  `-c password=…` startup options (and printed by `Debug`); they now set
+  the user name and password, overriding the URL's user info, with libpq's
+  percent-decoding (`+` stays a plus sign). `Debug` keeps redacting them.
 - **derive**: `#[derive(Model)]` fields typed `std::option::Option<T>` or
   `core::option::Option<T>` are nullable like `Option<T>`: they get
   `is_null()` / `is_not_null()` and nullable where/create/update inputs
