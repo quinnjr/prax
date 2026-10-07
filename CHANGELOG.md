@@ -161,7 +161,9 @@ Safety:
 - **postgres**: `PgListener` / `PgListenerBuilder` / `PgListenerOptions` /
   `PgListenerEvent` (`Notification`, `Disconnected { error }`,
   `Reconnected`, `Lagged { dropped }`, `ChannelsDropped { channels }`) /
-  `PgNotification` (constructible with `PgNotification::new`). With
+  `PgNotification` (constructible with `PgNotification::new`, and the
+  `#[non_exhaustive]` events with `PgListenerEvent::disconnected`,
+  `lagged` and `channels_dropped`, for tests of code that consumes them). With
   `reconnect` enabled, a lost connection is reported at once as
   `Disconnected` (once per outage, also while reconnect attempts keep
   failing; not on drop), followed by `Reconnected` when it is

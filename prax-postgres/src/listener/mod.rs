@@ -286,6 +286,33 @@ pub enum PgListenerEvent {
     },
 }
 
+/// Constructors for the `#[non_exhaustive]` variants, for tests and fakes of
+/// code that consumes [`PgListenerEvent`]s (like [`PgNotification::new`]).
+impl PgListenerEvent {
+    /// A [`Disconnected`](Self::Disconnected) event with this cause.
+    pub fn disconnected(error: impl Into<String>) -> Self {
+        Self::Disconnected {
+            error: error.into(),
+        }
+    }
+
+    /// A [`Lagged`](Self::Lagged) event reporting `dropped` notifications.
+    pub fn lagged(dropped: u64) -> Self {
+        Self::Lagged { dropped }
+    }
+
+    /// A [`ChannelsDropped`](Self::ChannelsDropped) event for `channels`.
+    pub fn channels_dropped<I, S>(channels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::ChannelsDropped {
+            channels: channels.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// A notification received from PostgreSQL.
 ///
 /// # Security
@@ -713,7 +740,7 @@ impl Pending {
         }
         if let Some((0, dropped)) = self.lagged {
             self.lagged = None;
-            return Some(PgListenerEvent::Lagged { dropped });
+            return Some(PgListenerEvent::lagged(dropped));
         }
         None
     }

@@ -165,7 +165,7 @@ impl Shared {
     /// `recv` returns (`ChannelsDropped` right before its `Reconnected`).
     pub(super) fn take_outage(&self) -> Vec<PgListenerEvent> {
         let mut outage = lock(&self.outage);
-        let disconnected = |error| PgListenerEvent::Disconnected { error };
+        let disconnected = |error: String| PgListenerEvent::disconnected(error);
         match std::mem::take(&mut outage.events) {
             OutageEvents::None => Vec::new(),
             // The channels wait for the reconnect that ends this loss.
@@ -198,9 +198,9 @@ impl Shared {
 fn reconnected(channels_dropped: &mut Vec<String>) -> Vec<PgListenerEvent> {
     let mut events = Vec::with_capacity(2);
     if !channels_dropped.is_empty() {
-        events.push(PgListenerEvent::ChannelsDropped {
-            channels: std::mem::take(channels_dropped),
-        });
+        events.push(PgListenerEvent::channels_dropped(std::mem::take(
+            channels_dropped,
+        )));
     }
     events.push(PgListenerEvent::Reconnected);
     events

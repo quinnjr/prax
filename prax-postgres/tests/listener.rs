@@ -305,6 +305,29 @@ async fn assert_not_delivered(
     );
 }
 
+/// Code that consumes listener events can build every kind in its own
+/// tests, although the variants are `#[non_exhaustive]`.
+#[test]
+fn events_are_constructible_outside_the_crate() {
+    let events = [
+        PgListenerEvent::Notification(PgNotification::new("events", "x", 7)),
+        PgListenerEvent::disconnected("connection reset"),
+        PgListenerEvent::Reconnected,
+        PgListenerEvent::lagged(3),
+        PgListenerEvent::channels_dropped(["a", "b"]),
+    ];
+    assert!(
+        matches!(&events[1], PgListenerEvent::Disconnected { error, .. } if error == "connection reset")
+    );
+    assert!(matches!(
+        events[3],
+        PgListenerEvent::Lagged { dropped: 3, .. }
+    ));
+    assert!(
+        matches!(&events[4], PgListenerEvent::ChannelsDropped { channels, .. } if channels == &["a", "b"])
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
 async fn notifications_arrive_in_order() {
