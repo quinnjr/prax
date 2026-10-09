@@ -348,19 +348,39 @@ pub struct TimescaleCatalog {
     pub aggregate_columns: BTreeMap<String, Vec<CatalogColumn>>,
     /// Non-aggregate views; the value is whether the view is materialized.
     pub other_views: BTreeMap<String, bool>,
+    /// Valid Timescale relations Prax cannot represent (relation to reason);
+    /// omitted from `hypertables`.
+    pub unsupported: BTreeMap<String, String>,
 }
 
 fn interval(parts: IntervalParts) -> PgInterval {
     PgInterval::new(parts.0, parts.1, parts.2)
 }
 
-/// Strip one level of identifier quoting (`""` becomes `"`).
+/// Reduce regclass text to the relation name: the last identifier of an
+/// optionally schema-qualified name, split on unquoted dots (`""` becomes `"`).
 fn unquote_relation(s: &str) -> String {
-    let s = s.trim();
-    match s.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-        Some(inner) => inner.replace("\"\"", "\""),
-        None => s.to_string(),
+    let mut parts: Vec<String> = vec![String::new()];
+    let mut chars = s.trim().chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                chars.next();
+                if let Some(p) = parts.last_mut() {
+                    p.push('"');
+                }
+            }
+            '"' => quoted = !quoted,
+            '.' if !quoted => parts.push(String::new()),
+            _ => {
+                if let Some(p) = parts.last_mut() {
+                    p.push(c);
+                }
+            }
+        }
     }
+    parts.pop().unwrap_or_default()
 }
 
 /// Parse a Timescale `segmentby`/`orderby` list into `(column, descending)`.
@@ -437,16 +457,20 @@ impl TimescaleCatalog {
         let version = ext.version.clone();
 
         let mut hypertables = BTreeMap::new();
+        let mut unsupported = BTreeMap::new();
         for h in &rows.hypertables {
             let time = rows
                 .dimensions
                 .iter()
                 .find(|d| d.table == h.table && d.is_time)
                 .ok_or_else(|| malformed(&h.table, "hypertable has no time dimension"))?;
-            let chunk_interval = time
-                .interval
-                .map(interval)
-                .ok_or_else(|| malformed(&h.table, "time dimension has no chunk interval"))?;
+            let Some(chunk_interval) = time.interval.map(interval) else {
+                unsupported.insert(
+                    h.table.clone(),
+                    "integer time dimensions are not supported".to_string(),
+                );
+                continue;
+            };
             let space = rows
                 .dimensions
                 .iter()
@@ -520,16 +544,34 @@ impl TimescaleCatalog {
                         .get_mut(&j.relation)
                         .and_then(|h| h.columnstore.as_mut())
                     {
-                        cs.after = Some(interval(j.after.ok_or_else(|| {
-                            malformed(&j.relation, "compression policy has no interval")
-                        })?));
+                        match j.after {
+                            Some(after) => cs.after = Some(interval(after)),
+                            None => {
+                                hypertables.remove(&j.relation);
+                                unsupported.insert(
+                                    j.relation.clone(),
+                                    "policy_compression without a compress_after interval \
+                                     (compress_created_before) is not supported"
+                                        .to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 "policy_retention" => {
                     if let Some(h) = hypertables.get_mut(&j.relation) {
-                        h.retention = Some(interval(j.drop_after.ok_or_else(|| {
-                            malformed(&j.relation, "retention policy has no drop_after")
-                        })?));
+                        match j.drop_after {
+                            Some(drop_after) => h.retention = Some(interval(drop_after)),
+                            None => {
+                                hypertables.remove(&j.relation);
+                                unsupported.insert(
+                                    j.relation.clone(),
+                                    "policy_retention without a drop_after interval \
+                                     (drop_created_before) is not supported"
+                                        .to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 "policy_refresh_continuous_aggregate" => {
@@ -580,6 +622,7 @@ impl TimescaleCatalog {
             aggregate_definitions,
             aggregate_columns,
             other_views,
+            unsupported,
         }))
     }
 }
@@ -715,11 +758,50 @@ mod tests {
     }
 
     #[test]
-    fn test_compression_job_without_interval_is_error() {
+    fn test_compression_job_without_interval_is_unsupported() {
         let mut rows = metric_rows();
         rows.jobs = vec![job("policy_compression", "Metric")];
-        let err = TimescaleCatalog::from_rows(rows).unwrap_err().to_string();
-        assert!(err.contains("Metric"), "{err}");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(!cat.hypertables.contains_key("Metric"));
+        assert!(cat.unsupported["Metric"].contains("policy_compression"));
+    }
+
+    #[test]
+    fn test_retention_job_without_drop_after_is_unsupported() {
+        let mut rows = metric_rows();
+        rows.jobs = vec![job("policy_retention", "Metric")];
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(!cat.hypertables.contains_key("Metric"));
+        assert!(cat.unsupported["Metric"].contains("policy_retention"));
+    }
+
+    #[test]
+    fn test_integer_time_hypertable_is_unsupported() {
+        let mut rows = metric_rows();
+        rows.dimensions[0].interval = None;
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(cat.hypertables.is_empty());
+        assert!(cat.unsupported["Metric"].contains("integer time"));
+    }
+
+    #[test]
+    fn test_columnstore_settings_match_schema_qualified_relation() {
+        for rel in [
+            "myschema.\"Metric\"",
+            "\"my.schema\".\"Metric\"",
+            "\"Metric\"",
+        ] {
+            let mut rows = metric_rows();
+            rows.columnstore_settings[0].relation = rel.into();
+            let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+            let cs = cat.hypertables["Metric"].columnstore.as_ref().unwrap();
+            assert_eq!(
+                cs.settings.segment_by,
+                vec!["deviceId".to_string()],
+                "{rel}"
+            );
+        }
+        assert_eq!(unquote_relation("myschema.metric"), "metric");
     }
 
     #[test]
