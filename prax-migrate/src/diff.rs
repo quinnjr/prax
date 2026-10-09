@@ -519,6 +519,8 @@ pub struct SchemaDiffer {
     source: Option<Schema>,
     /// Target schema (desired state).
     target: Schema,
+    /// Extensions known to be installed in the database, if introspected.
+    installed_extensions: Option<Vec<String>>,
 }
 
 impl SchemaDiffer {
@@ -527,6 +529,7 @@ impl SchemaDiffer {
         Self {
             source: None,
             target,
+            installed_extensions: None,
         }
     }
 
@@ -536,9 +539,49 @@ impl SchemaDiffer {
         self
     }
 
+    /// Set the extensions installed in the database (names or aliases).
+    ///
+    /// When set, this takes precedence over the source schema's datasource
+    /// extensions when deciding which extensions to create.
+    #[must_use]
+    pub fn with_installed_extensions(mut self, names: Vec<String>) -> Self {
+        self.installed_extensions = Some(names);
+        self
+    }
+
     /// Compute the diff between schemas.
     pub fn diff(&self) -> MigrateResult<SchemaDiff> {
         let mut result = SchemaDiff::default();
+
+        // Extensions are create-only: databases carry undeclared extensions,
+        // so `drop_extensions` is never populated. Names are normalized so
+        // aliases (`pgvector`) match installed names (`vector`); versions are
+        // ignored to avoid churn.
+        let installed: HashSet<String> = match (&self.installed_extensions, &self.source) {
+            (Some(names), _) => names
+                .iter()
+                .map(|n| prax_schema::ast::canonical_extension_name(n))
+                .collect(),
+            (None, Some(source)) => source
+                .datasource
+                .iter()
+                .flat_map(|d| d.extensions.iter())
+                .map(|e| prax_schema::ast::canonical_extension_name(&e.name))
+                .collect(),
+            (None, None) => HashSet::new(),
+        };
+        if let Some(ds) = &self.target.datasource {
+            for ext in &ds.extensions {
+                let name = prax_schema::ast::canonical_extension_name(&ext.name);
+                if !installed.contains(&name) {
+                    result.create_extensions.push(ExtensionDiff {
+                        name,
+                        schema: ext.schema.as_ref().map(|s| s.to_string()),
+                        version: ext.version.as_ref().map(|v| v.to_string()),
+                    });
+                }
+            }
+        }
 
         // Models are keyed by their database table name (`@@map` or model
         // name), not the Prax model name: the table is the stable database
@@ -1760,6 +1803,66 @@ fn ast_procedure_to_definition(p: &prax_schema::ast::Procedure) -> ProcedureDefi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ext_schema(exts: &str) -> Schema {
+        prax_schema::parse_schema(&format!(
+            "datasource db {{\n  provider = \"postgresql\"\n  url = \"postgres://x\"\n  extensions = [{exts}]\n}}\n"
+        ))
+        .unwrap()
+    }
+
+    fn create_names(diff: &SchemaDiff) -> Vec<&str> {
+        diff.create_extensions
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn test_extension_diff_creates_missing() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb, pgvector"))
+            .with_installed_extensions(vec!["vector".to_string()])
+            .diff()
+            .unwrap();
+        assert_eq!(create_names(&diff), vec!["timescaledb"]);
+    }
+
+    #[test]
+    fn test_extension_diff_never_drops() {
+        let target = prax_schema::parse_schema("model A { id Int @id }").unwrap();
+        let diff = SchemaDiffer::new(target)
+            .with_installed_extensions(vec!["vector".into(), "uuid-ossp".into(), "pgcrypto".into()])
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+        assert!(diff.drop_extensions.is_empty());
+    }
+
+    #[test]
+    fn test_extension_diff_normalizes_alias() {
+        let diff = SchemaDiffer::new(ext_schema("pgvector, uuid_ossp"))
+            .diff()
+            .unwrap();
+        assert_eq!(create_names(&diff), vec!["vector", "uuid-ossp"]);
+    }
+
+    #[test]
+    fn test_extension_diff_falls_back_to_source_datasource() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb"))
+            .with_source(ext_schema("timescaledb"))
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+    }
+
+    #[test]
+    fn test_extension_version_does_not_churn() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb(version: \"2.18.0\")"))
+            .with_installed_extensions(vec!["timescaledb".to_string()])
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+    }
 
     #[test]
     fn test_schema_diff_empty() {
