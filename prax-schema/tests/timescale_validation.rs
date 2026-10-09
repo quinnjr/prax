@@ -86,7 +86,7 @@ fn rule1_typo_rejected() {
 #[test]
 fn rule1_bare_timescale_rejected() {
     let s = ts(r#"model M { time DateTime @@id([time]) @@timescale }"#);
-    assert_err(&s, "timescale");
+    assert_err(&s, "unknown attribute `@@timescale`");
 }
 
 #[test]
@@ -106,19 +106,19 @@ model M { time DateTime @@id([time]) @@timescale.hypertable(time) }"#;
 #[test]
 fn rule3_time_field_missing() {
     let s = ts(r#"model M { id Int @id @@timescale.hypertable(when) }"#);
-    assert_err(&s, "when");
+    assert_err(&s, "time field `when` does not exist");
 }
 
 #[test]
 fn rule3_time_field_wrong_type() {
     let s = ts(r#"model M { time String @@id([time]) @@timescale.hypertable(time) }"#);
-    assert_err(&s, "DateTime");
+    assert_err(&s, "must be DateTime");
 }
 
 #[test]
 fn rule3_time_field_optional() {
     let s = ts(r#"model M { id Int @id time DateTime? @@timescale.hypertable(time) }"#);
-    assert_err(&s, "required");
+    assert_err(&s, "must be required, not optional");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn rule4_space_is_time_field() {
     let s = ts(
         r#"model M { time DateTime @@id([time]) @@timescale.hypertable(time, space: hash(time, 4)) }"#,
     );
-    assert_err(&s, "time field");
+    assert_err(&s, "must differ from the time field");
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn rule4_space_field_missing() {
     let s = ts(
         r#"model M { time DateTime @@id([time]) @@timescale.hypertable(time, space: hash(nope, 4)) }"#,
     );
-    assert_err(&s, "nope");
+    assert_err(&s, "space field `nope` does not exist");
 }
 
 #[test]
@@ -148,21 +148,30 @@ fn rule5_id_without_time() {
     let s = ts(
         r#"model M { time DateTime deviceId String @@id([deviceId]) @@timescale.hypertable(time) }"#,
     );
-    assert_err(&s, "time");
+    assert_err(
+        &s,
+        "`@@id` (deviceId) must include hypertable dimension field `time`",
+    );
 }
 
 #[test]
 fn rule5_field_level_id_without_time() {
     let s = ts(r#"model M { id Int @id time DateTime @@timescale.hypertable(time) }"#);
-    assert_err(&s, "time");
+    assert_err(
+        &s,
+        "`@id` (id) must include hypertable dimension field `time`",
+    );
 }
 
 #[test]
 fn rule5_unique_without_space() {
     let s = ts(
-        r#"model M { id Int @id time DateTime deviceId String @@unique([time]) @@timescale.hypertable(time, space: hash(deviceId, 4)) }"#,
+        r#"model M { time DateTime deviceId String @@id([time, deviceId]) @@unique([time]) @@timescale.hypertable(time, space: hash(deviceId, 4)) }"#,
     );
-    assert_err(&s, "deviceId");
+    assert_err(
+        &s,
+        "`@@unique` (time) must include hypertable dimension field `deviceId`",
+    );
 }
 
 #[test]
@@ -176,7 +185,7 @@ model Alert {{
   metric       Metric   @relation(fields: [metricTime, metricDevice], references: [time, deviceId])
 }}"#
     ));
-    assert_err(&s, "Metric");
+    assert_err(&s, "declares a foreign key to hypertable `Metric`");
 }
 
 #[test]
@@ -184,7 +193,7 @@ fn rule8_unknown_segment_field() {
     let s = ts(
         r#"model M { time DateTime @@id([time]) @@timescale.hypertable(time) @@timescale.columnstore(segmentBy: [ghost]) }"#,
     );
-    assert_err(&s, "ghost");
+    assert_err(&s, "segmentBy field `ghost` does not exist");
 }
 
 #[test]
@@ -192,7 +201,7 @@ fn rule8_field_in_both_lists() {
     let s = ts(
         r#"model M { time DateTime d String @@id([time]) @@timescale.hypertable(time) @@timescale.columnstore(segmentBy: [d], orderBy: [d]) }"#,
     );
-    assert_err(&s, "both");
+    assert_err(&s, "appears in both segmentBy and orderBy");
 }
 
 #[test]
@@ -201,7 +210,7 @@ fn rule10_continuous_without_sql() {
         r#"{METRIC}
 view V {{ bucket DateTime @@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days") }}"#
     ));
-    assert_err(&s, "SQL");
+    assert_err(&s, "continuous aggregate requires SQL");
 }
 
 #[test]
@@ -213,7 +222,10 @@ view V { bucket DateTime @@timescale.continuous(source: Plain, scheduleInterval:
 SELECT 1
 """)
 "#);
-    assert_err(&s, "Plain");
+    assert_err(
+        &s,
+        "source `Plain` must be a hypertable model or a continuous aggregate view",
+    );
 }
 
 #[test]
@@ -228,12 +240,15 @@ SELECT 1
 SELECT 1
 """)
 "#);
-    assert_err(&s, "cycle");
+    assert_err(&s, "source graph has a cycle");
 }
 
 #[test]
 fn rule12_missing_start_offset_with_retention() {
-    assert_err(&ts(&format!("{METRIC}{}", hourly(""))), "startOffset");
+    assert_err(
+        &ts(&format!("{METRIC}{}", hourly(""))),
+        "`startOffset` is required",
+    );
 }
 
 #[test]
@@ -243,7 +258,7 @@ fn rule12_start_offset_too_long() {
             "{METRIC}{}",
             hourly(r#", startOffset: "100 days""#)
         )),
-        "dropAfter",
+        "`startOffset` must be shorter than `dropAfter`",
     );
 }
 
@@ -255,7 +270,7 @@ fn rule12_month_vs_days_conservative() {
             "{metric}{}",
             hourly(r#", startOffset: "1 month""#)
         )),
-        "dropAfter",
+        "`startOffset` must be shorter than `dropAfter`",
     );
 }
 
