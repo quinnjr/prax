@@ -4,7 +4,10 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use super::{Attribute, Documentation, Field, Ident, Span};
+use super::{
+    Attribute, ContinuousAggregateConfig, Documentation, Field, Ident, Schema, Span,
+    TimescaleModelConfig,
+};
 
 /// A model definition (maps to a database table).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +28,13 @@ pub struct Model {
 }
 
 impl Model {
+    /// Typed `@@timescale.*` configuration, or `None` when absent or invalid.
+    ///
+    /// Use [`TimescaleModelConfig::from_model`] to get the validation error.
+    pub fn timescale(&self) -> Option<TimescaleModelConfig> {
+        TimescaleModelConfig::from_model(self).ok().flatten()
+    }
+
     /// Create a new model.
     pub fn new(name: Ident, span: Span) -> Self {
         Self {
@@ -277,6 +287,27 @@ pub struct View {
 }
 
 impl View {
+    /// Typed `@@timescale.continuous` configuration, or `None` when absent or invalid.
+    ///
+    /// Use [`ContinuousAggregateConfig::from_view`] to get the validation error.
+    pub fn continuous_aggregate(&self) -> Option<ContinuousAggregateConfig> {
+        ContinuousAggregateConfig::from_view(self).ok().flatten()
+    }
+
+    /// Resolve the SQL defining this view: the inline `@@sql` attribute if
+    /// present, otherwise a top-level `@@sql` definition (`schema.raw_sql`)
+    /// whose name matches the view's database name (`@@map`) or model name.
+    pub fn resolved_sql<'a>(&'a self, schema: &'a Schema) -> Option<&'a str> {
+        if let Some(sql) = self.sql_query() {
+            return Some(sql);
+        }
+        schema
+            .raw_sql
+            .iter()
+            .find(|r| r.name.as_str() == self.view_name() || r.name.as_str() == self.name())
+            .map(|r| r.sql.as_str())
+    }
+
     /// Create a new view.
     pub fn new(name: Ident, span: Span) -> Self {
         Self {

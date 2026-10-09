@@ -1551,14 +1551,7 @@ fn diff_models(
 /// otherwise a top-level `@@sql` definition (`schema.raw_sql`) whose name
 /// matches the view's database name (`@@map`) or model name.
 fn resolve_view_sql<'a>(view: &'a View, schema: &'a Schema) -> Option<&'a str> {
-    if let Some(sql) = view.sql_query() {
-        return Some(sql);
-    }
-    schema
-        .raw_sql
-        .iter()
-        .find(|r| r.name.as_str() == view.view_name() || r.name.as_str() == view.name())
-        .map(|r| r.sql.as_str())
+    view.resolved_sql(schema)
 }
 
 /// Convert a view to a diff for creation.

@@ -5,6 +5,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+
+use super::{Attribute, AttributeValue, Model, View};
+use crate::error::SchemaError;
 
 const MICROS_PER_MS: i64 = 1_000;
 const MICROS_PER_SEC: i64 = 1_000_000;
@@ -189,6 +193,470 @@ impl FromStr for PgInterval {
     }
 }
 
+/// Default chunk interval for a hypertable (`7 days`).
+pub const DEFAULT_CHUNK_INTERVAL: PgInterval = PgInterval::new(0, 7, 0);
+
+/// Typed `@@timescale.*` configuration of a model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimescaleModelConfig {
+    /// Hypertable settings (`@@timescale.hypertable`).
+    pub hypertable: HypertableConfig,
+    /// Columnstore settings (`@@timescale.columnstore`).
+    pub columnstore: Option<ColumnstoreConfig>,
+    /// Retention policy (`@@timescale.retention`).
+    pub retention: Option<RetentionConfig>,
+}
+
+/// Hypertable settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HypertableConfig {
+    /// Time dimension field.
+    pub time_field: SmolStr,
+    /// Chunk interval (never contains months).
+    pub chunk_interval: PgInterval,
+    /// Optional hash space dimension.
+    pub space: Option<HashDimension>,
+}
+
+/// A hash-partitioned space dimension.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HashDimension {
+    /// Field to partition on.
+    pub field: SmolStr,
+    /// Number of partitions (1..=32767).
+    pub partitions: i16,
+}
+
+/// Columnstore settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnstoreConfig {
+    /// Segment-by fields (empty means none).
+    pub segment_by: Vec<SmolStr>,
+    /// Order-by columns.
+    pub order_by: Vec<OrderByColumn>,
+    /// Convert chunks older than this; `None` means no conversion policy.
+    pub after: Option<PgInterval>,
+}
+
+/// One column of a columnstore order-by list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderByColumn {
+    /// Field name.
+    pub field: SmolStr,
+    /// Whether the order is descending.
+    pub descending: bool,
+}
+
+/// Retention policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetentionConfig {
+    /// Drop chunks older than this.
+    pub drop_after: PgInterval,
+}
+
+/// Typed `@@timescale.continuous` configuration of a view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuousAggregateConfig {
+    /// Model or continuous view the aggregate reads.
+    pub source: SmolStr,
+    /// Refresh policy schedule interval.
+    pub schedule_interval: PgInterval,
+    /// Refresh window start offset; `None` means `NULL`.
+    pub start_offset: Option<PgInterval>,
+    /// Refresh window end offset; `None` means `NULL`.
+    pub end_offset: Option<PgInterval>,
+    /// Whether to serve materialized data only.
+    pub materialized_only: bool,
+}
+
+/// Which kind of block an attribute is being parsed on.
+#[derive(Clone, Copy)]
+enum Owner {
+    Model,
+    View,
+}
+
+/// Prefix used in error messages, e.g. ``model `Metric`: ``.
+struct Ctx {
+    owner: Owner,
+    name: String,
+}
+
+impl Ctx {
+    fn err(&self, attr: &str, msg: impl fmt::Display) -> SchemaError {
+        let kind = match self.owner {
+            Owner::Model => "model",
+            Owner::View => "view",
+        };
+        SchemaError::InvalidAttribute {
+            attribute: format!("@@timescale.{attr}"),
+            message: format!("{kind} `{}`: {msg}", self.name),
+        }
+    }
+}
+
+/// Collected named arguments of one attribute.
+struct Args<'a> {
+    attr: &'a str,
+    ctx: &'a Ctx,
+    named: Vec<(&'a str, &'a AttributeValue)>,
+}
+
+impl<'a> Args<'a> {
+    /// Validate names (known, not repeated) and reject unexpected positionals.
+    fn collect(
+        ctx: &'a Ctx,
+        attr_name: &'a str,
+        attribute: &'a Attribute,
+        known: &[&str],
+    ) -> Result<Self, SchemaError> {
+        let mut named: Vec<(&str, &AttributeValue)> = Vec::new();
+        for (i, arg) in attribute.args.iter().enumerate() {
+            match &arg.name {
+                None => {
+                    let allowed = attr_name == "hypertable" && i == 0;
+                    if !allowed {
+                        return Err(ctx.err(attr_name, "unexpected positional argument"));
+                    }
+                }
+                Some(n) => {
+                    let n = n.as_str();
+                    if !known.contains(&n) {
+                        return Err(ctx.err(
+                            attr_name,
+                            format!(
+                                "unknown argument `{n}` (expected one of: {})",
+                                known.join(", ")
+                            ),
+                        ));
+                    }
+                    if named.iter().any(|(k, _)| *k == n) {
+                        return Err(ctx.err(attr_name, format!("argument `{n}` is repeated")));
+                    }
+                    named.push((n, &arg.value));
+                }
+            }
+        }
+        Ok(Self {
+            attr: attr_name,
+            ctx,
+            named,
+        })
+    }
+
+    fn get(&self, name: &str) -> Option<&'a AttributeValue> {
+        self.named.iter().find(|(k, _)| *k == name).map(|(_, v)| *v)
+    }
+
+    fn err(&self, msg: impl fmt::Display) -> SchemaError {
+        self.ctx.err(self.attr, msg)
+    }
+
+    fn interval(&self, name: &str) -> Result<Option<PgInterval>, SchemaError> {
+        let Some(v) = self.get(name) else {
+            return Ok(None);
+        };
+        let s = v
+            .as_string()
+            .ok_or_else(|| self.err(format!("`{name}` must be a string interval")))?;
+        PgInterval::parse(s)
+            .map(Some)
+            .map_err(|e| self.err(format!("`{name}`: {e}")))
+    }
+
+    fn required_interval(&self, name: &str) -> Result<PgInterval, SchemaError> {
+        self.interval(name)?
+            .ok_or_else(|| self.err(format!("missing required argument `{name}`")))
+    }
+}
+
+/// Reject a name that is not a `timescale.*` attribute of this owner kind.
+fn check_name(ctx: &Ctx, name: &str, allowed: &[&str]) -> Result<(), SchemaError> {
+    if allowed.contains(&name) {
+        return Ok(());
+    }
+    const ALL: [&str; 4] = ["hypertable", "columnstore", "retention", "continuous"];
+    if ALL.contains(&name) {
+        let other = match ctx.owner {
+            Owner::Model => "views",
+            Owner::View => "models",
+        };
+        return Err(ctx.err(
+            name,
+            format!("`@@timescale.{name}` can only be used on {other}"),
+        ));
+    }
+    Err(ctx.err(
+        name,
+        format!(
+            "unknown attribute `@@timescale.{name}` (expected one of: {})",
+            allowed.join(", ")
+        ),
+    ))
+}
+
+fn field_list(
+    args: &Args<'_>,
+    name: &str,
+    v: &AttributeValue,
+) -> Result<Vec<SmolStr>, SchemaError> {
+    match v {
+        AttributeValue::FieldRefList(l) => Ok(l.clone()),
+        AttributeValue::Array(items) => items
+            .iter()
+            .map(|i| match i {
+                AttributeValue::Ident(s) | AttributeValue::FieldRef(s) => Ok(s.clone()),
+                _ => Err(args.err(format!("`{name}` must be a list of field names"))),
+            })
+            .collect(),
+        _ => Err(args.err(format!("`{name}` must be a list of field names"))),
+    }
+}
+
+fn order_by_list(args: &Args<'_>, v: &AttributeValue) -> Result<Vec<OrderByColumn>, SchemaError> {
+    let bad = || args.err("`orderBy` must be a list of `field`, `asc(field)` or `desc(field)`");
+    let items: Vec<OrderByColumn> = match v {
+        AttributeValue::FieldRefList(l) => l
+            .iter()
+            .map(|f| OrderByColumn {
+                field: f.clone(),
+                descending: false,
+            })
+            .collect(),
+        AttributeValue::Array(items) => items
+            .iter()
+            .map(|i| match i {
+                AttributeValue::Ident(f) | AttributeValue::FieldRef(f) => Ok(OrderByColumn {
+                    field: f.clone(),
+                    descending: false,
+                }),
+                AttributeValue::Function(func, a) if func == "asc" || func == "desc" => {
+                    match a.as_slice() {
+                        [AttributeValue::Ident(f)] => Ok(OrderByColumn {
+                            field: f.clone(),
+                            descending: func == "desc",
+                        }),
+                        _ => Err(bad()),
+                    }
+                }
+                _ => Err(bad()),
+            })
+            .collect::<Result<_, _>>()?,
+        _ => return Err(bad()),
+    };
+    if items.is_empty() {
+        return Err(args.err("`orderBy` must not be empty"));
+    }
+    Ok(items)
+}
+
+impl TimescaleModelConfig {
+    /// Parse the `@@timescale.*` attributes of a model.
+    ///
+    /// Returns `Ok(None)` when the model has no `@@timescale.*` attribute.
+    /// Only structural rules are enforced here; field-existence and
+    /// cross-model rules are validated separately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::InvalidAttribute`] for unknown attributes or
+    /// arguments, wrong value shapes, bad intervals, or `columnstore` /
+    /// `retention` without `hypertable`.
+    pub fn from_model(model: &Model) -> Result<Option<Self>, SchemaError> {
+        let ctx = Ctx {
+            owner: Owner::Model,
+            name: model.name().to_string(),
+        };
+        let mut hypertable = None;
+        let mut columnstore = None;
+        let mut retention = None;
+        let mut any = false;
+        for attribute in &model.attributes {
+            let Some(name) = attribute.name.as_str().strip_prefix("timescale.") else {
+                continue;
+            };
+            any = true;
+            check_name(&ctx, name, &["hypertable", "columnstore", "retention"])?;
+            let repeated = match name {
+                "hypertable" => hypertable.is_some(),
+                "columnstore" => columnstore.is_some(),
+                _ => retention.is_some(),
+            };
+            if repeated {
+                return Err(ctx.err(name, format!("`@@timescale.{name}` is repeated")));
+            }
+            match name {
+                "hypertable" => hypertable = Some(parse_hypertable(&ctx, attribute)?),
+                "columnstore" => columnstore = Some(attribute),
+                _ => retention = Some(parse_retention(&ctx, attribute)?),
+            }
+        }
+        if !any {
+            return Ok(None);
+        }
+        let Some(hypertable) = hypertable else {
+            let which = if columnstore.is_some() {
+                "columnstore"
+            } else {
+                "retention"
+            };
+            return Err(ctx.err(
+                which,
+                format!("`@@timescale.{which}` requires `@@timescale.hypertable`"),
+            ));
+        };
+        let columnstore = columnstore
+            .map(|a| parse_columnstore(&ctx, a, &hypertable.time_field))
+            .transpose()?;
+        Ok(Some(Self {
+            hypertable,
+            columnstore,
+            retention,
+        }))
+    }
+}
+
+fn parse_hypertable(ctx: &Ctx, attribute: &Attribute) -> Result<HypertableConfig, SchemaError> {
+    let args = Args::collect(ctx, "hypertable", attribute, &["chunkInterval", "space"])?;
+    let time_field = match attribute.args.first() {
+        Some(a) if a.name.is_none() => match &a.value {
+            AttributeValue::Ident(s) | AttributeValue::FieldRef(s) => s.clone(),
+            _ => return Err(args.err("the time field must be a field name")),
+        },
+        _ => return Err(args.err("missing required time field (first positional argument)")),
+    };
+    let chunk_interval = match args.interval("chunkInterval")? {
+        Some(i) if i.months != 0 => {
+            return Err(
+                args.err("`chunkInterval` must not contain months or years; use days or weeks")
+            );
+        }
+        Some(i) => i,
+        None => DEFAULT_CHUNK_INTERVAL,
+    };
+    let space = match args.get("space") {
+        None => None,
+        Some(AttributeValue::Function(f, a)) if f == "hash" => match a.as_slice() {
+            [AttributeValue::Ident(field), AttributeValue::Int(n)] => {
+                let partitions = i16::try_from(*n).ok().filter(|p| *p >= 1).ok_or_else(|| {
+                    args.err(format!(
+                        "hash partitions must be between 1 and 32767, got {n}"
+                    ))
+                })?;
+                Some(HashDimension {
+                    field: field.clone(),
+                    partitions,
+                })
+            }
+            _ => return Err(args.err("`space` must be `hash(<field>, <partitions>)`")),
+        },
+        Some(_) => return Err(args.err("`space` must be `hash(<field>, <partitions>)`")),
+    };
+    Ok(HypertableConfig {
+        time_field,
+        chunk_interval,
+        space,
+    })
+}
+
+fn parse_columnstore(
+    ctx: &Ctx,
+    attribute: &Attribute,
+    time_field: &SmolStr,
+) -> Result<ColumnstoreConfig, SchemaError> {
+    let args = Args::collect(
+        ctx,
+        "columnstore",
+        attribute,
+        &["segmentBy", "orderBy", "after"],
+    )?;
+    let segment_by = match args.get("segmentBy") {
+        Some(v) => field_list(&args, "segmentBy", v)?,
+        None => Vec::new(),
+    };
+    let order_by = match args.get("orderBy") {
+        Some(v) => order_by_list(&args, v)?,
+        None => vec![OrderByColumn {
+            field: time_field.clone(),
+            descending: true,
+        }],
+    };
+    let after = args.interval("after")?;
+    Ok(ColumnstoreConfig {
+        segment_by,
+        order_by,
+        after,
+    })
+}
+
+fn parse_retention(ctx: &Ctx, attribute: &Attribute) -> Result<RetentionConfig, SchemaError> {
+    let args = Args::collect(ctx, "retention", attribute, &["dropAfter"])?;
+    Ok(RetentionConfig {
+        drop_after: args.required_interval("dropAfter")?,
+    })
+}
+
+impl ContinuousAggregateConfig {
+    /// Parse the `@@timescale.continuous` attribute of a view.
+    ///
+    /// Returns `Ok(None)` when the view has no `@@timescale.*` attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::InvalidAttribute`] for unknown attributes or
+    /// arguments, wrong value shapes, missing required arguments, or bad
+    /// intervals.
+    pub fn from_view(view: &View) -> Result<Option<Self>, SchemaError> {
+        let ctx = Ctx {
+            owner: Owner::View,
+            name: view.name().to_string(),
+        };
+        let mut found: Option<&Attribute> = None;
+        for attribute in &view.attributes {
+            let Some(name) = attribute.name.as_str().strip_prefix("timescale.") else {
+                continue;
+            };
+            check_name(&ctx, name, &["continuous"])?;
+            if found.is_some() {
+                return Err(ctx.err(name, "`@@timescale.continuous` is repeated"));
+            }
+            found = Some(attribute);
+        }
+        let Some(attribute) = found else {
+            return Ok(None);
+        };
+        let args = Args::collect(
+            &ctx,
+            "continuous",
+            attribute,
+            &[
+                "source",
+                "scheduleInterval",
+                "startOffset",
+                "endOffset",
+                "materializedOnly",
+            ],
+        )?;
+        let source = match args.get("source") {
+            Some(AttributeValue::Ident(s)) => s.clone(),
+            Some(_) => return Err(args.err("`source` must be a model or view name")),
+            None => return Err(args.err("missing required argument `source`")),
+        };
+        let materialized_only = match args.get("materializedOnly") {
+            None => true,
+            Some(AttributeValue::Boolean(b)) => *b,
+            Some(_) => return Err(args.err("`materializedOnly` must be true or false")),
+        };
+        Ok(Some(Self {
+            source,
+            schedule_interval: args.required_interval("scheduleInterval")?,
+            start_offset: args.interval("startOffset")?,
+            end_offset: args.interval("endOffset")?,
+            materialized_only,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,5 +798,266 @@ mod tests {
             let i = PgInterval::new(months, days, micros);
             proptest::prop_assert_eq!(PgInterval::parse(&i.to_string()).unwrap(), i);
         }
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use crate::parser::parse_schema;
+
+    const METRIC: &str = r#"
+model Metric {
+  time     DateTime
+  deviceId String
+  value    Float
+  @@id([deviceId, time])
+  @@timescale.hypertable(time, chunkInterval: "1 day", space: hash(deviceId, 4))
+  @@timescale.columnstore(segmentBy: [deviceId], orderBy: [desc(time)], after: "7 days")
+  @@timescale.retention(dropAfter: "90 days")
+}
+"#;
+
+    fn model_with(attrs: &str) -> Model {
+        let src = format!(
+            "model Metric {{\n  time DateTime\n  deviceId String\n  value Float\n  @@id([deviceId, time])\n  {attrs}\n}}\n"
+        );
+        parse_schema(&src)
+            .unwrap()
+            .models
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    }
+
+    fn view(attrs: &str) -> View {
+        let src =
+            format!("view HourlyMetric {{\n  bucket DateTime\n  deviceId String\n  {attrs}\n}}\n");
+        parse_schema(&src)
+            .unwrap()
+            .views
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    }
+
+    fn err_msg<T: std::fmt::Debug>(r: Result<T, SchemaError>) -> String {
+        match r.unwrap_err() {
+            SchemaError::InvalidAttribute { message, .. } => message,
+            e => panic!("unexpected error {e:?}"),
+        }
+    }
+
+    #[test]
+    fn test_hypertable_defaults() {
+        let c = TimescaleModelConfig::from_model(&model_with("@@timescale.hypertable(time)"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.hypertable.time_field, "time");
+        assert_eq!(c.hypertable.chunk_interval, DEFAULT_CHUNK_INTERVAL);
+        assert_eq!(c.hypertable.space, None);
+        assert_eq!(c.columnstore, None);
+        assert_eq!(c.retention, None);
+    }
+
+    #[test]
+    fn test_hypertable_full() {
+        let schema = parse_schema(METRIC).unwrap();
+        let m = schema.models.get("Metric").unwrap();
+        let c = m.timescale().unwrap();
+        assert_eq!(c.hypertable.chunk_interval, PgInterval::new(0, 1, 0));
+        assert_eq!(
+            c.hypertable.space,
+            Some(HashDimension {
+                field: "deviceId".into(),
+                partitions: 4
+            })
+        );
+        let cs = c.columnstore.unwrap();
+        assert_eq!(cs.segment_by, vec![SmolStr::from("deviceId")]);
+        assert_eq!(
+            cs.order_by,
+            vec![OrderByColumn {
+                field: "time".into(),
+                descending: true
+            }]
+        );
+        assert_eq!(cs.after, Some(PgInterval::new(0, 7, 0)));
+        assert_eq!(c.retention.unwrap().drop_after, PgInterval::new(0, 90, 0));
+    }
+
+    #[test]
+    fn test_columnstore_defaults() {
+        let m = model_with("@@timescale.hypertable(time)\n@@timescale.columnstore()");
+        let cs = TimescaleModelConfig::from_model(&m)
+            .unwrap()
+            .unwrap()
+            .columnstore
+            .unwrap();
+        assert!(cs.segment_by.is_empty());
+        assert_eq!(
+            cs.order_by,
+            vec![OrderByColumn {
+                field: "time".into(),
+                descending: true
+            }]
+        );
+        assert_eq!(cs.after, None);
+    }
+
+    #[test]
+    fn test_columnstore_order_by_forms() {
+        let ob = |form: &str| {
+            let m = model_with(&format!(
+                "@@timescale.hypertable(time)\n@@timescale.columnstore(orderBy: {form})"
+            ));
+            TimescaleModelConfig::from_model(&m)
+                .unwrap()
+                .unwrap()
+                .columnstore
+                .unwrap()
+                .order_by
+        };
+        let c = |f: &str, d: bool| OrderByColumn {
+            field: f.into(),
+            descending: d,
+        };
+        assert_eq!(ob("[time]"), vec![c("time", false)]);
+        assert_eq!(
+            ob("[desc(time), asc(deviceId)]"),
+            vec![c("time", true), c("deviceId", false)]
+        );
+        assert_eq!(
+            ob("[time, desc(value)]"),
+            vec![c("time", false), c("value", true)]
+        );
+    }
+
+    #[test]
+    fn test_continuous_defaults_and_full() {
+        let v = view(r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour")"#);
+        let c = v.continuous_aggregate().unwrap();
+        assert_eq!(c.source, "Metric");
+        assert_eq!(c.schedule_interval, PgInterval::new(0, 0, 3_600_000_000));
+        assert!(c.materialized_only);
+        assert_eq!((c.start_offset, c.end_offset), (None, None));
+
+        let v = view(
+            r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour")"#,
+        );
+        let c = v.continuous_aggregate().unwrap();
+        assert_eq!(c.start_offset, Some(PgInterval::new(0, 3, 0)));
+        assert_eq!(c.end_offset, Some(PgInterval::new(0, 0, 3_600_000_000)));
+
+        let v = view(
+            r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour", materializedOnly: false)"#,
+        );
+        assert!(!v.continuous_aggregate().unwrap().materialized_only);
+    }
+
+    #[test]
+    fn test_unknown_timescale_attribute_rejected() {
+        let m = model_with("@@timescale.hypertabel(time)");
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("hypertabel"));
+    }
+
+    #[test]
+    fn test_unknown_argument_rejected() {
+        let m = model_with(r#"@@timescale.hypertable(time, chunkIntervl: "1 day")"#);
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("chunkIntervl"));
+    }
+
+    #[test]
+    fn test_repeated_argument_rejected() {
+        let m = model_with(
+            r#"@@timescale.hypertable(time, chunkInterval: "1 day", chunkInterval: "2 days")"#,
+        );
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("chunkInterval"));
+    }
+
+    #[test]
+    fn test_columnstore_without_hypertable_rejected() {
+        let m = model_with("@@timescale.columnstore()");
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("hypertable"));
+    }
+
+    #[test]
+    fn test_retention_without_hypertable_rejected() {
+        let m = model_with(r#"@@timescale.retention(dropAfter: "1 day")"#);
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("hypertable"));
+    }
+
+    #[test]
+    fn test_chunk_interval_months_rejected() {
+        let m = model_with(r#"@@timescale.hypertable(time, chunkInterval: "1 month")"#);
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("month"));
+    }
+
+    #[test]
+    fn test_partitions_out_of_range_rejected() {
+        for n in [0, 40000] {
+            let m = model_with(&format!(
+                "@@timescale.hypertable(time, space: hash(deviceId, {n}))"
+            ));
+            assert!(TimescaleModelConfig::from_model(&m).is_err(), "{n}");
+        }
+    }
+
+    #[test]
+    fn test_wrong_block_kind_rejected() {
+        let m = model_with(r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour")"#);
+        assert!(TimescaleModelConfig::from_model(&m).is_err());
+        let v = view("@@timescale.hypertable(bucket)");
+        assert!(ContinuousAggregateConfig::from_view(&v).is_err());
+    }
+
+    #[test]
+    fn test_bad_interval_names_token() {
+        let m = model_with(
+            "@@timescale.hypertable(time)\n@@timescale.retention(dropAfter: \"90 dayz\")",
+        );
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).contains("dayz"));
+    }
+
+    #[test]
+    fn test_error_messages_name_block() {
+        let m = model_with("@@timescale.hypertabel(time)");
+        assert!(err_msg(TimescaleModelConfig::from_model(&m)).starts_with("model `Metric`: "));
+        let v = view("@@timescale.hypertable(bucket)");
+        assert!(
+            err_msg(ContinuousAggregateConfig::from_view(&v)).starts_with("view `HourlyMetric`: ")
+        );
+    }
+
+    #[test]
+    fn test_view_resolved_sql_inline_and_top_level() {
+        let schema = parse_schema(
+            r#"
+view A {
+  id Int
+  @@sql("SELECT 1")
+}
+view HourlyMetric {
+  id Int
+}
+@@sql("HourlyMetric", """SELECT 2""")
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            schema.views.get("A").unwrap().resolved_sql(&schema),
+            Some("SELECT 1")
+        );
+        assert!(
+            schema
+                .views
+                .get("HourlyMetric")
+                .unwrap()
+                .resolved_sql(&schema)
+                .unwrap()
+                .contains("SELECT 2")
+        );
     }
 }
