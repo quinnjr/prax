@@ -692,14 +692,19 @@ async fn refused_checkout_carries_the_sqlstate() {
 
     let Some(url) = skip_unless_e2e() else { return };
     let base = PgConfig::from_url(&url).expect("parse POSTGRES_URL");
-    // The test server may trust local connections, so use a role that
-    // does not exist (28000) rather than a wrong password (28P01).
+    // A role that does not exist is refused with 28000 when the server
+    // trusts the connection, and with 28P01 under password authentication,
+    // which hides whether the role exists (the docker and CI servers).
+    // Both are class 28.
     let mut missing_role = base.clone();
     missing_role.user = unique_table("missing_role");
     let mut missing_database = base;
     missing_database.database = unique_table("missing_db");
 
-    for (config, sqlstate) in [(missing_role, "28000"), (missing_database, "3D000")] {
+    for (config, sqlstates) in [
+        (missing_role, &["28000", "28P01"][..]),
+        (missing_database, &["3D000"][..]),
+    ] {
         let pool = PgPoolBuilder::new()
             .config(config)
             .max_connections(1)
@@ -714,11 +719,17 @@ async fn refused_checkout_carries_the_sqlstate() {
             .await
             .expect_err("the server refuses the connection");
         assert!(err.is_connection_error(), "{err:?}");
-        assert_eq!(err.sqlstate(), Some(sqlstate), "{err:?}");
+        assert!(
+            err.sqlstate().is_some_and(|s| sqlstates.contains(&s)),
+            "{err:?}"
+        );
         let err = engine
             .transaction(|_tx| async { Ok(()) })
             .await
             .expect_err("the server refuses the connection");
-        assert_eq!(err.sqlstate(), Some(sqlstate), "{err:?}");
+        assert!(
+            err.sqlstate().is_some_and(|s| sqlstates.contains(&s)),
+            "{err:?}"
+        );
     }
 }
