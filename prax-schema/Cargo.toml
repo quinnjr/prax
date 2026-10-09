@@ -42,6 +42,7 @@ pretty_assertions = { workspace = true }
 criterion = { workspace = true }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+proptest = "1.6"
 
 [[bench]]
 name = "schema_parsing"
