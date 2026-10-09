@@ -166,6 +166,7 @@ pub mod resolution;
 pub mod shadow;
 pub mod sql;
 pub mod state;
+pub mod timescale;
 
 // Re-exports
 pub use bootstrap::Bootstrap;
@@ -252,5 +253,6 @@ pub use sql::{
     SqliteGenerator,
 };
 pub use state::MigrationState;
+pub use timescale::{CatalogRows, TimescaleCatalog};
 // Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
 // Access via prax_migrate::state::MigrationStatus if needed for event sourcing state projection
