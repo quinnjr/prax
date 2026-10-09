@@ -55,14 +55,16 @@ async fn bytes_update_input_writes_raw_bytes() {
         .expect("connect to postgres");
 
     let conn = pool.get().await.expect("acquire conn");
+    // Not `bytes_pg_blobs`: the create test makes that one concurrently, and
+    // two `CREATE TABLE IF NOT EXISTS` of the same table can collide.
     conn.batch_execute(
-        "CREATE TABLE IF NOT EXISTS bytes_pg_blobs (id SERIAL PRIMARY KEY, b BYTEA NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS bytes_pg_raw_blobs (id SERIAL PRIMARY KEY, b BYTEA NOT NULL)",
     )
     .await
     .expect("create table");
     let id: i32 = conn
         .query_one(
-            "INSERT INTO bytes_pg_blobs (b) VALUES ($1) RETURNING id",
+            "INSERT INTO bytes_pg_raw_blobs (b) VALUES ($1) RETURNING id",
             &[&vec![1u8]],
         )
         .await
@@ -86,19 +88,19 @@ async fn bytes_update_input_writes_raw_bytes() {
     let engine = PgEngine::new(pool.clone());
     engine
         .execute_raw(
-            "UPDATE bytes_pg_blobs SET b = $1 WHERE id = $2",
+            "UPDATE bytes_pg_raw_blobs SET b = $1 WHERE id = $2",
             vec![v, FilterValue::Int(id as i64)],
         )
         .await
         .expect("update");
 
     let row = conn
-        .query_one("SELECT b FROM bytes_pg_blobs WHERE id = $1", &[&id])
+        .query_one("SELECT b FROM bytes_pg_raw_blobs WHERE id = $1", &[&id])
         .await
         .expect("select");
     assert_eq!(row.get::<_, Vec<u8>>(0), vec![0x00, 0x9F, 0xFF]);
 
-    conn.execute("DELETE FROM bytes_pg_blobs WHERE id = $1", &[&id])
+    conn.execute("DELETE FROM bytes_pg_raw_blobs WHERE id = $1", &[&id])
         .await
         .expect("cleanup");
 }
