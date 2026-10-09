@@ -7,6 +7,324 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> The 0.13.0 release itself is cut on `release/0.13.0` after the scalar-lists
+> work lands; no version bump is made here.
+
+### Breaking
+
+- **core**: `FilterValue` is `#[non_exhaustive]`; downstream matches need a
+  `_` arm.
+- **core**: `From<u8> for FilterValue` removed; use `i64::from(x)`.
+  `#[derive(Model)]` `u8` fields keep working (converted via `i64::from`).
+- **core**: `From<Vec<T>>` now yields `FilterValue::Array` (was `List`);
+  `Vec<u8>`/`&[u8]` yield `FilterValue::Bytes`. `FilterValue::List` is not
+  expanded into placeholders when bound as one parameter (Postgres rejects
+  it): use `Filter::In` / `SqlBuilder::bind_in_slice` for `IN (...)`, or
+  `FilterValue::Array` with `= ANY($1)` on Postgres.
+- **core**: `ToFilterValue for Vec<u8>` now yields `FilterValue::Bytes` and
+  `Vec<f32>` yields `FilterValue::Array` (both used to be a `List`), so
+  their serialized form is now base64 and a JSON array respectively.
+  `FilterValue::Bytes` serializes as base64 but no longer deserializes
+  (`skip_deserializing`).
+- **core**: `FilterValue::Array` binds as JSON text on MySQL, SQLite, DuckDB
+  and MSSQL, including through `prax-sqlx` (BSON array on MongoDB, list on
+  CQL). A `Vec` bound into `IN (?)` on MSSQL, `prax-sqlx` MySQL or
+  `prax-sqlx` SQLite used to fail with an error; it now binds one JSON-text
+  parameter and **silently matches nothing**. Use `Filter::In` /
+  `SqlBuilder::bind_in_slice` for `IN` lists.
+- **core**: the `#[non_exhaustive]` additions below also break exhaustive
+  struct and variant destructuring: add `..` (for example
+  `PgListenerEvent::Lagged { dropped, .. }`).
+- **core**: `Bytes` inputs now bind real bytes (`BytesFilter`,
+  `BytesFieldUpdate` and `Vec<u8>` in create inputs). **Data
+  that 0.12.x wrote through these inputs is stored as base64 text or as a
+  JSON integer array and needs a one-off repair**; see
+  [Repairing `Bytes` data written by 0.12.x](#repairing-bytes-data-written-by-012x).
+- **core**: `BytesFieldUpdate.set` / `BytesNullableFieldUpdate.set` are now
+  `Option<Vec<u8>>`. Their JSON is still base64 but is now strictly
+  validated as standard, padded base64 (0.12.x accepted any string).
+  `BytesFilter` JSON is unchanged (array of numbers).
+- **query**: `RowLock`, `LockStrength` and `LockWait` are `#[non_exhaustive]`:
+  build locks with `RowLock::for_update()` and friends, and add a `_` arm
+  when matching the enums.
+- **query**: Postgres `FOR UPDATE OF` table names must be plain identifiers.
+  They are validated and emitted unquoted, like `FROM`; schema-qualified
+  names such as `public.jobs` are rejected with an invalid-input error.
+- **query**: `RowLock::to_postgres_sql`, `to_mysql_sql`, `to_mssql_hint` and
+  `to_sql` are removed (see Removed); use `SqlDialect::row_lock_sql`.
+- **postgres**: `PoolConfig`, `PgConfig` and `PoolStatus` are
+  `#[non_exhaustive]`, so they cannot be built with struct literals outside
+  the crate. `PgConfig` has no `Default`: create it with
+  `PgConfig::from_url` or `PgConfig::builder()` and assign fields
+  afterwards. For `PoolConfig`, start from `PoolConfig::default()` and
+  assign fields.
+- **postgres**: the default `PoolConfig::max_lifetime` of 30 minutes is now
+  enforced on every pool, including `PgPool::new` and `PgPoolBuilder` pools:
+  connections older than that are replaced at checkout. To keep connections
+  indefinitely, as 0.12.x did, set `max_lifetime = None` on a
+  `PoolConfig::default()` and pass it to `PgPool::with_pool_config`.
+  Retirement is jittered (see Added).
+- **postgres**: `PoolConfig::idle_timeout` no longer feeds deadpool's recycle
+  timeout (it was mis-wired to it). The Verified and Clean recycle checks
+  used to be bounded by `idle_timeout` (10 minutes by default); they are now
+  bounded by the new `PoolConfig::recycle_timeout` (default 5 s).
+- **postgres**: `PoolConfig::idle_timeout` (default 10 minutes) is now
+  enforced at checkout: a connection not handed out for longer than that is
+  replaced instead of reused. deadpool records when a connection was last
+  handed out, not when it was returned, so a connection *held* longer than
+  `idle_timeout` is also replaced at its next checkout. Set it to `None` to
+  keep the 0.12.x behaviour. `PgPoolBuilder::idle_timeout` takes
+  `impl Into<Option<Duration>>` (`Duration` callers still compile).
+- **postgres**: `From<PgRecycling>` for deadpool's `RecyclingMethod` is no
+  longer public. `PgRecycling::Fast` stays the default; it leaks session
+  state (`SET`, `SET ROLE`, `search_path`, tenant GUCs) to the next
+  checkout, so use `Clean` (or `SET LOCAL`) with row-level security or
+  per-tenant session settings.
+- **postgres**: `PgPoolBuilder::max_lifetime` takes
+  `impl Into<Option<Duration>>` (`Duration` callers still compile; pass
+  `None` to disable).
+- **postgres**: `PgListenerOptions::ping_interval` must be at least 100 ms
+  (a Config error below that), `PgListenerEvent::Lagged` is
+  `#[non_exhaustive]` (see the destructuring note above), and
+  `PgListenerEvent` gains `ChannelsDropped` and `Disconnected { error }`
+  (a `#[non_exhaustive]` variant).
+- **postgres**: with `reconnect = false` the listener's terminal error is now
+  `PgError::Postgres(e)` when the driver reported the cause (read
+  `.code()`); it used to be a generic
+  `PgError::Connection("listener connection closed: db error")`. Listener
+  error messages now include the severity and SQLSTATE.
+- **postgres**: `PgListener::recv` now returns `Reconnected` / `Lagged`
+  after the notifications that were already queued when it first sees the
+  event, instead of before them. A blocked `recv` still gets `Reconnected`
+  at once.
+- **postgres**: the listener runs `SET idle_session_timeout = 0` after every
+  connect (one extra round trip) so a server-side idle-session timeout
+  cannot close it; SQLSTATE 42704 (servers before 14) is ignored.
+- **query**: `RetryConfig::delay_for_attempt` no longer truncates to whole
+  milliseconds and no longer wraps or panics for huge attempt numbers.
+- **query**: `QueryError` gained a private field (its SQLSTATE), so it can no
+  longer be built with a struct literal, and exhaustive struct patterns
+  (`let QueryError { code, message, context, source } = err`) no longer
+  compile: add `..`. Use `QueryError::new` or one of the named
+  constructors to build one. Its public fields are unchanged.
+
+### Repairing `Bytes` data written by 0.12.x
+
+0.12.x (and earlier releases with the same inputs, back to 0.10) could
+store two wrong encodings in binary columns:
+
+1. **Base64 text, from `BytesFieldUpdate.set` / `BytesNullableFieldUpdate.set`.**
+   The value was bound as a string, so the column holds the ASCII text of
+   the base64 encoding instead of the bytes. This affected `prax-postgres`,
+   MySQL, SQLite and DuckDB, including MySQL and SQLite through `prax-sqlx`.
+   MSSQL, and Postgres through `prax-sqlx`, rejected the write instead.
+   `prax-cassandra` is very likely affected too (not verified live): its
+   0.12.x update path sent the string's UTF-8 bytes untyped, which a `blob`
+   column accepts. CQL has no base64 decoder, so repair from the
+   application. `prax-scylladb` rejected the write (typed `text` vs `blob`),
+   and MongoDB never executed these inputs.
+   - Postgres:
+     `UPDATE t SET col = decode(convert_from(col, 'UTF8'), 'base64') WHERE <scope>;`
+   - MySQL:
+     `UPDATE t SET col = FROM_BASE64(col) WHERE <scope> AND FROM_BASE64(col) IS NOT NULL;`
+     (`FROM_BASE64` returns `NULL` for invalid input instead of failing,
+     hence the guard).
+   - DuckDB: `UPDATE t SET col = from_base64(decode(col)) WHERE <scope>;`
+   - SQLite has no built-in base64 decoder. The affected values are stored
+     as `text` (correct writes are `blob`): select them with
+     `SELECT rowid, col FROM t WHERE typeof(col) = 'text' AND col NOT LIKE '[%' AND <scope>`
+     and write the decoded bytes back from the application.
+2. **JSON integer array, from a `Vec<u8>` field in a generated create input.**
+   The bytes were lowered to a list of integers. MySQL, SQLite and DuckDB
+   stored it as JSON text such as `[0,159,255]`. Postgres and MSSQL
+   rejected the insert, and so did `prax-sqlx` on every database. These
+   values start with `[`, which never occurs in base64. Find them with
+   `WHERE col LIKE '[%'` (MySQL), `WHERE typeof(col) = 'text' AND col LIKE '[%'`
+   (SQLite) or `WHERE try(decode(col)) LIKE '[%'` (DuckDB). Then repair
+   them from the application: parse the array and write its numbers
+   (0–255) back as bytes.
+
+Safety:
+
+- Run each repair once, in a transaction, before any 0.13 writer touches
+  the column. A second run, or a run over values 0.13 wrote correctly,
+  decodes again and corrupts them.
+- Scope `<scope>` to rows written through these 0.12.x inputs, for example
+  by primary-key or timestamp range. Raw bytes written correctly by other
+  means (raw SQL, another application) that happen to be valid ASCII base64
+  would be decoded as well (`abcd` becomes `0x69b71d`).
+- An overly wide scope mostly fails safe: on Postgres and DuckDB a value
+  that is not valid UTF-8 makes `convert_from` / `decode` raise, and text
+  that is not valid base64 makes the decode raise, aborting the
+  transaction. MySQL's guard skips text that is not valid base64.
+
+### Added
+
+- **postgres**: `PgListener` / `PgListenerBuilder` / `PgListenerOptions` /
+  `PgListenerEvent` (`Notification`, `Disconnected { error }`,
+  `Reconnected`, `Lagged { dropped }`, `ChannelsDropped { channels }`) /
+  `PgNotification` (constructible with `PgNotification::new`, and the
+  `#[non_exhaustive]` events with `PgListenerEvent::disconnected`, `lagged`
+  and `channels_dropped`, for tests of code that consumes them). With
+  `reconnect` enabled, a lost connection is reported at once as
+  `Disconnected` (once per outage, also while reconnect attempts keep
+  failing; not on drop), followed by `Reconnected` when it is
+  re-established. Reconnects with exponential backoff and jitter. The
+  backoff only starts over once a re-established connection has stayed up
+  for a `ping_interval`. Each connection attempt, TLS and startup handshake
+  included, is bounded by `PgConfig::connect_timeout` plus `ping_interval`
+  (the driver applies `connect_timeout` to each resolved address, so one
+  that times out leaves time for the next). Liveness uses TCP keepalive
+  (`keepalive_idle` at least 1 s) plus a `SELECT 1` ping (bounded by
+  `ping_interval`, max one day). Emits `Lagged` on buffer overflow.
+  `Disconnected`, `Reconnected` and `Lagged` keep their place after the
+  notifications already queued, and each wakes a blocked `recv()`
+  (returned at once on an empty queue). `listen`/`unlisten` during backoff
+  are recorded and applied on reconnect; `LISTEN`/`UNLISTEN` are bounded by
+  `ping_interval`. Channels the server rejects by name on re-`LISTEN`
+  (SQLSTATE class 22, 42602 or 42622) are dropped, logged at `error!` with
+  the SQLSTATE, and reported as `ChannelsDropped` just before that
+  reconnect's `Reconnected`; other errors fail the attempt, which is
+  retried. `PgListenerOptions::max_reconnect_attempts` (default `None`,
+  unlimited; `Some(0)` is rejected) makes the listener give up with the last
+  attempt's error, and 3 consecutive attempts failing with SQLSTATE class 28
+  (authentication) or `3D000` (missing database) are terminal regardless.
+  The listener must connect to PostgreSQL directly, not through a
+  transaction-mode pooler or RDS Proxy. Any role can `NOTIFY` any channel,
+  so payloads are untrusted; see the Security section of the rustdoc.
+- **postgres**: `PgConnection::notify` / `PgTransaction::notify` using
+  `pg_notify($1, $2)`, with client-side validation (channel at most 63 bytes
+  and no NUL; payload under 8000 bytes).
+- **postgres**: `PgEngine::notify(channel, payload)`, with the same
+  validation (an invalid-input `QueryError`). On the transaction-bound
+  engine inside `PraxClient::<PgEngine>::transaction` (`tx.engine()`) the
+  notification is delivered on commit and discarded on rollback.
+- **core**: `FilterValue::Array`, `FilterValue::Bytes`, `FilterValue::list(..)`
+  and `FilterValue::to_json_value()`. Postgres binds `Array` as a typed array
+  parameter with per-element type checks (works with `= ANY($1)`). `prax-sqlx`
+  binds `Array` on Postgres too, but string, empty and all-NULL arrays bind
+  as `text[]`, so comparing with a non-text column needs a cast
+  (`uuid_col = ANY($1::uuid[])`). `FilterValue`'s serde form is not
+  type-preserving: `Bytes` serializes as base64 and does not deserialize,
+  and arrays come back as `Json`.
+- **query**: row locking via `.lock(RowLock)`, `.for_update()` and
+  `.for_share()` on `find_many`/`find_first`/`find_unique`, plus
+  `SqlDialect::row_lock_sql`. `.lock()` requires `E: SupportsRowLocks`
+  (implemented for Postgres, MySQL, MSSQL and sqlx engines). Unsupported
+  combinations error at exec time (MySQL: no `NoKeyUpdate`/`KeyShare`/`OF`;
+  MSSQL: no `Share`+`SkipLocked`/`NoKeyUpdate`/`KeyShare`/`OF`); `build_sql`
+  silently omits such a lock. Lock plus `distinct` is rejected; with
+  `include` only the root query is locked; outside a transaction the lock
+  is released at statement end.
+- **postgres**: `PgRecycling { Fast (default), Verified, Clean }` via
+  `PoolConfig::recycling` / `PgPoolBuilder::recycling`; `Clean` preserves
+  prepared statements. `Fast` keeps session state across checkouts (see
+  Breaking).
+- **postgres**: `PoolConfig::recycle_timeout` / `PgPoolBuilder::recycle_timeout`
+  (default 5 s; `None` disables) bounds the Verified and Clean checks.
+  `max_lifetime` retirement is jittered by up to 10% per connection (stable
+  for a connection's life) so a pool does not expire all at once.
+- **query**: `try_build_sql(dialect)` on `find_many` / `find_first` /
+  `find_unique`, returning `QueryResult<(String, Vec<FilterValue>)>`: it
+  reports a rejected lock (or lock plus `distinct`) as an error where
+  `build_sql` omits the lock. The `exec*` methods use it.
+- **sqlx**: `PgHelpers::notify` validates its arguments client-side (channel
+  non-empty, at most 63 bytes, no NUL; payload under 8000 bytes), so an
+  overlong channel name is an error instead of being truncated by the
+  server.
+- **core**: `impl FromColumn for u8` (decodes via the `i32` getter: `INT4` on
+  Postgres; `SMALLINT` unsupported).
+- **query**: `Sql::build_for_dialect(&dyn SqlDialect)` renders a raw query's
+  placeholders for a dialect (unless `with_db_type` chose one).
+- **query**: `QueryError::sqlstate()` returns the server's SQLSTATE (for
+  example `"55P03"` for a `NOWAIT` lock conflict) for errors from
+  `prax-postgres` and from `prax-sqlx` on PostgreSQL; `None` otherwise.
+  On `prax-postgres` this includes a connection the server refuses at pool
+  checkout (for example `53300` too many connections, `28P01` wrong
+  password, `3D000` missing database), which stays a connection error.
+  `QueryError::with_sqlstate` sets it.
+
+### Fixed
+
+- **core**: `Bytes` update inputs stored base64 text, and `Vec<u8>` create
+  inputs a JSON integer array, in binary columns (data corruption; see
+  [Repairing `Bytes` data written by 0.12.x](#repairing-bytes-data-written-by-012x)).
+- **query**: `Bytes` `@unique` lookups (`WhereUniqueInput`) compared against
+  base64 text and never matched.
+- **core**: `FieldValue::to_filter_value` maps `Bytes` and `Array` (it
+  returned `None`).
+- **postgres**: `PoolConfig::max_lifetime` was ignored; it is now enforced at
+  checkout via a `pre_recycle` hook (see Breaking). `Duration::ZERO`
+  replaces the connection on every checkout (effectively disables pooling).
+- **sqlx**: `PgHelpers::notify` built SQL by string escaping; it now uses
+  `pg_notify($1, $2)`.
+- **sqlx**: `SqlxEngine`'s `QueryEngine` methods and its transaction
+  `BEGIN` / `COMMIT` turned every driver error into a generic database
+  error. They now use the same classification as `From<SqlxError>`
+  (constraint violations by SQLSTATE, connection and pool errors), so
+  errors through `PraxClient<SqlxEngine>` carry `sqlstate()` on PostgreSQL;
+  their messages no longer start with `Database error:`. `query_one` still
+  reports a missing row as `not_found` for the model.
+- **query**: `PraxClient::query_raw` / `execute_raw` sent a raw `Sql`'s
+  default Postgres `$N` placeholders to every engine, which MySQL rejects.
+  They (and `RawQueryOperation` / `RawExecuteOperation`, the CLI-generated
+  client and `MysqlRawEngine::raw_sql`) now render placeholders for the
+  engine's dialect (`?` on MySQL, `?N` on SQLite, `@PN` on MSSQL, and `?`
+  instead of `$N` on Cassandra and ScyllaDB, whose CQL dialect only takes
+  `?`) unless the query set `Sql::with_db_type`, which wins. DuckDB keeps
+  `$N`. `Sql::build()` output is unchanged, except that `with_db_type` now
+  also applies to values bound before it.
+- **derive**: `#[derive(Model)]` handles `u8` fields written as
+  `core::primitive::u8`, `std::primitive::u8` or inside
+  `Option<..>`/`std::option::Option<..>` in every filter operator.
+- **postgres**: `PgConfig::from_url` used the user name, password and
+  database name still percent-encoded (`p%40ss` was sent as the password);
+  it now decodes them, as libpq does. A URL whose password contains an
+  unencoded `/`, `?` or `#` was silently misparsed (`postgres://u:8/x@host/db`
+  became host `u`, port 8, database `x@host/db`); such a URL, recognised by
+  an `@` after the host (in the path, the fragment or a query key), is now
+  rejected with a configuration error asking to percent-encode reserved
+  characters in the password. Behaviour change: these malformed URLs, and a
+  database name with a literal `@` (write `%40`), no longer parse.
+- **postgres**: libpq-style `user=` / `password=` query parameters in a
+  `PgConfig::from_url` URL were sent to the server as `-c user=…` /
+  `-c password=…` startup options (and printed by `Debug`); they now set
+  the user name and password, overriding the URL's user info, with libpq's
+  percent-decoding (`+` stays a plus sign). `Debug` keeps redacting them.
+- **derive**: `#[derive(Model)]` fields typed `std::option::Option<T>` or
+  `core::option::Option<T>` are nullable like `Option<T>`: they get
+  `is_null()` / `is_not_null()` and nullable where/create/update inputs
+  (they were treated as required columns).
+- **postgres**: listener `Reconnected` / `Lagged` events are ordered after
+  the notifications queued before them; a stale liveness flag from the old
+  connection no longer carries over a reconnect; a panic in the listener's
+  supervisor task is reported as `PgError::Internal`.
+- **postgres**: the `FilterValue::List` bind error now points to
+  `Filter::In` or `FilterValue::Array` with `= ANY($1)`; `Array` string
+  elements adapt to uuid, timestamp, date, time and enum element types.
+
+### Removed
+
+- **sqlx**: `PgHelpers::listen` (`LISTEN` on a pooled connection never
+  receives notifications). Use `sqlx::postgres::PgListener`, or
+  `prax_postgres::PgListener` if you use `prax-postgres`.
+- **query**: `RowLock::to_postgres_sql`, `to_mysql_sql`, `to_mssql_hint` and
+  `to_sql`; use `SqlDialect::row_lock_sql`, which quotes identifiers and
+  rejects unsupported combinations instead of silently degrading them.
+- **duckdb**: `prax_duckdb::types::filter_value_to_json`; use
+  `FilterValue::to_json_value()`.
+
+### Security
+
+- **postgres**: `Debug` output of `PgConfig`, `PgConfigBuilder` and
+  `PgPoolBuilder` printed the database password: the `password` field, the
+  password inside the URL, and a libpq-style `?password=` parameter (in
+  the URL and in `options`). It is now shown as `REDACTED`; the rest of the
+  URL and the other fields are unchanged. A URL whose unencoded password
+  makes it parse oddly (for example `u:8/x@host`, read as port 8) has its
+  whole user info redacted. `PgPool` now implements `Debug` too, showing
+  the redacted config and the pool status.
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed

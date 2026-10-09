@@ -575,7 +575,14 @@ fn filter_value_to_value(
         FilterValue::Float(f) => Ok(Value::new(*f)),
         FilterValue::String(s) => Ok(Value::new(s.clone())),
         FilterValue::Json(j) => Ok(Value::new(j.to_string())),
-        FilterValue::List(items) => Ok(Value::Some(encode_cql_list(items)?)),
+        FilterValue::List(items) | FilterValue::Array(items) => {
+            Ok(Value::Some(encode_cql_list(items)?))
+        }
+        // CQL blob: raw bytes.
+        FilterValue::Bytes(b) => Ok(Value::Some(b.clone())),
+        _ => Err(CassandraError::Query(
+            "unsupported FilterValue variant".into(),
+        )),
     }
 }
 
@@ -593,7 +600,11 @@ fn filter_value_wire_bytes(value: &prax_query::filter::FilterValue) -> Cassandra
         FilterValue::Float(f) => Ok(Bytes::from(*f).into_inner()),
         FilterValue::String(s) => Ok(Bytes::from(s.clone()).into_inner()),
         FilterValue::Json(j) => Ok(Bytes::from(j.to_string()).into_inner()),
-        FilterValue::List(items) => encode_cql_list(items),
+        FilterValue::List(items) | FilterValue::Array(items) => encode_cql_list(items),
+        FilterValue::Bytes(b) => Ok(b.clone()),
+        _ => Err(CassandraError::Query(
+            "unsupported FilterValue variant".into(),
+        )),
     }
 }
 
@@ -836,6 +847,20 @@ mod tests {
         expected.extend_from_slice(&8i32.to_be_bytes()); // len of element 2
         expected.extend_from_slice(&2i64.to_be_bytes());
         assert_eq!(value, cdrs_tokio::types::value::Value::Some(expected));
+    }
+
+    #[test]
+    fn filter_value_bytes_is_raw_blob_and_array_matches_list() {
+        use cdrs_tokio::types::value::Value;
+        assert_eq!(
+            filter_value_to_value(&FilterValue::Bytes(vec![0, 255])).unwrap(),
+            Value::Some(vec![0, 255])
+        );
+        let items = vec![FilterValue::Int(1), FilterValue::Int(2)];
+        assert_eq!(
+            filter_value_to_value(&FilterValue::Array(items.clone())).unwrap(),
+            filter_value_to_value(&FilterValue::List(items)).unwrap()
+        );
     }
 
     #[test]

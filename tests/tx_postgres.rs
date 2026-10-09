@@ -18,7 +18,9 @@
 use std::time::Duration;
 
 use prax_orm::{Model, PraxClient, client};
-use prax_postgres::{PgEngine, PgPool, PgPoolBuilder};
+use prax_postgres::{
+    PgConfig, PgEngine, PgListener, PgListenerEvent, PgNotification, PgPool, PgPoolBuilder,
+};
 use prax_query::error::{QueryError, QueryResult};
 use prax_query::raw::Sql;
 
@@ -191,4 +193,79 @@ async fn transaction_commits_on_ok() {
         .execute_raw(Sql::new("DELETE FROM tx_pg_users WHERE email = ").bind(email))
         .await
         .expect("post-test cleanup");
+}
+
+/// The next listener event, which must be a notification.
+async fn next_notification(listener: &mut PgListener) -> PgNotification {
+    let event = tokio::time::timeout(Duration::from_secs(10), listener.recv())
+        .await
+        .expect("notification within timeout")
+        .expect("recv ok");
+    let PgListenerEvent::Notification(n) = event else {
+        panic!("expected a notification, got {event:?}");
+    };
+    n
+}
+
+#[tokio::test]
+#[ignore = "requires docker-compose postgres (PRAX_E2E=1)"]
+async fn engine_notify_in_transaction_is_delivered_only_on_commit() {
+    let Some((client, _pool)) = setup().await else {
+        eprintln!("skipping: PRAX_E2E not set");
+        return;
+    };
+    let url = postgres_url().expect("PRAX_E2E is set");
+    let mut listener = PgListener::connect(&PgConfig::from_url(&url).expect("config"))
+        .await
+        .expect("connect listener");
+    let channel = format!("tx_notify_{}", std::process::id());
+    listener.listen(&channel).await.expect("listen");
+
+    // Committed: delivered after the commit, so after a notification sent
+    // (and committed) by another session while the transaction was open.
+    let outside = client.engine().clone();
+    let ch = channel.clone();
+    client
+        .transaction(move |tx| async move {
+            tx.engine().notify(&ch, "committed").await?;
+            outside.notify(&ch, "outside").await?;
+            QueryResult::Ok(())
+        })
+        .await
+        .expect("commit");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(n.payload, "outside", "nothing before the commit");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(
+        (n.channel.as_str(), n.payload.as_str()),
+        (channel.as_str(), "committed")
+    );
+
+    // Rolled back: never delivered; the next notification is the sentinel.
+    let ch = channel.clone();
+    let result: QueryResult<()> = client
+        .transaction(move |tx| async move {
+            tx.engine().notify(&ch, "rolled-back").await?;
+            Err(QueryError::internal("roll back"))
+        })
+        .await;
+    assert!(result.is_err(), "the closure's error rolls back");
+    client
+        .engine()
+        .notify(&channel, "sentinel")
+        .await
+        .expect("notify");
+    let n = next_notification(&mut listener).await;
+    assert_eq!(
+        n.payload, "sentinel",
+        "a rolled-back notification never arrives"
+    );
+
+    // Arguments are validated before anything is sent.
+    let err = client
+        .engine()
+        .notify("", "x")
+        .await
+        .expect_err("an empty channel is rejected");
+    assert!(err.to_string().contains("channel"), "{err}");
 }

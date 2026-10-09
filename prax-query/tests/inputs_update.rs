@@ -1,5 +1,5 @@
 use prax_query::inputs::{
-    BoolFieldUpdate, IntFieldUpdate, IntNullableFieldUpdate, StringFieldUpdate,
+    BoolFieldUpdate, BytesFieldUpdate, IntFieldUpdate, IntNullableFieldUpdate, StringFieldUpdate,
     StringNullableFieldUpdate,
 };
 
@@ -49,4 +49,21 @@ fn int_nullable_field_update_unset_marker() {
         ..Default::default()
     };
     assert_eq!(u.unset, Some(true));
+}
+
+#[test]
+fn bytes_field_update_json_stays_base64() {
+    let u: BytesFieldUpdate = serde_json::from_str(r#"{"set":"AP8="}"#).unwrap();
+    assert_eq!(u.set, Some(vec![0x00, 0xFF]));
+    assert_eq!(serde_json::to_string(&u).unwrap(), r#"{"set":"AP8="}"#);
+}
+
+#[test]
+fn bytes_nullable_update_absent_and_null_are_none() {
+    use prax_query::inputs::BytesNullableFieldUpdate;
+    let absent: BytesNullableFieldUpdate = serde_json::from_str(r#"{"unset":true}"#).unwrap();
+    assert_eq!(absent.set, None);
+    let null: BytesNullableFieldUpdate = serde_json::from_str(r#"{"set":null}"#).unwrap();
+    assert_eq!(null.set, None);
+    assert!(serde_json::from_str::<BytesNullableFieldUpdate>(r#"{"set":"!!"}"#).is_err());
 }

@@ -4,7 +4,8 @@ use std::marker::PhantomData;
 
 use smallvec::SmallVec;
 
-use crate::capabilities::SupportsScalarSubqueryInSelect;
+use crate::advanced::RowLock;
+use crate::capabilities::{SupportsRowLocks, SupportsScalarSubqueryInSelect};
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::pagination::Pagination;
@@ -44,6 +45,8 @@ pub struct FindManyOperation<E: QueryEngine, M: Model> {
     /// Extra scalar-subquery columns appended to the SELECT clause.
     /// Used by relation-aggregate virtual fields (`@count`, `@sum`, …).
     pub extra_projections: Vec<ScalarProjection>,
+    /// Row lock appended to the statement (`FOR UPDATE`, MSSQL hints, ...).
+    lock: Option<RowLock>,
     _model: PhantomData<M>,
 }
 
@@ -59,6 +62,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             distinct: None,
             includes: SmallVec::new(),
             extra_projections: Vec::new(),
+            lock: None,
             _model: PhantomData,
         }
     }
@@ -185,8 +189,20 @@ where
     }
 }
 
+impl<E, M> FindManyOperation<E, M>
+where
+    E: QueryEngine + SupportsRowLocks,
+    M: Model + crate::row::FromRow,
+{
+    super::lock::row_lock_methods!();
+}
+
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
     /// Build the SQL query.
+    ///
+    /// A row lock the dialect cannot express (see `lock`) is left out of
+    /// the SQL built here. Use [`try_build_sql`](Self::try_build_sql) to
+    /// get an error instead.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
@@ -237,6 +253,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         // FROM clause
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
+        let lock_sql = super::lock::render(self.lock.as_ref(), dialect);
+        lock_sql.push_table_hint(&mut sql);
 
         // WHERE clause — a stored cursor AND-composes a keyset predicate
         // (`"col" > $n` / `"col" < $n`) after the filter; its value binds
@@ -291,7 +309,28 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             self.pagination.write_sql(&mut sql);
         }
 
+        lock_sql.push_suffix(&mut sql);
+
         (sql, params)
+    }
+
+    /// Build the SQL query, failing if the dialect cannot express the row
+    /// lock or combines it with `distinct`.
+    ///
+    /// Unlike [`build_sql`](Self::build_sql), which leaves a rejected lock
+    /// out of the SQL, this reports the error. `exec` uses this method.
+    pub fn try_build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> QueryResult<(String, Vec<crate::filter::FilterValue>)> {
+        if self.lock.is_some() && self.distinct.is_some() {
+            return Err(crate::error::QueryError::invalid_input(
+                "lock",
+                "row locks cannot be combined with distinct",
+            ));
+        }
+        super::lock::validate(self.lock.as_ref(), dialect)?;
+        Ok(self.build_sql(dialect))
     }
 
     /// Execute the query.
@@ -306,7 +345,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         let mut parents = self.engine.query_many::<M>(&sql, params).await?;
         for spec in &self.includes {
             <M as ModelRelationLoader<E>>::load_relation(&self.engine, &mut parents, spec).await?;

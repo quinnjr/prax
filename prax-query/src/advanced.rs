@@ -356,6 +356,10 @@ impl Returning {
 // ============================================================================
 
 /// Row locking mode.
+///
+/// Build one with [`RowLock::for_update`] and friends; render it with
+/// [`SqlDialect::row_lock_sql`](crate::dialect::SqlDialect::row_lock_sql).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RowLock {
     /// Lock strength.
@@ -367,6 +371,7 @@ pub struct RowLock {
 }
 
 /// Lock strength.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockStrength {
     /// FOR UPDATE - exclusive lock.
@@ -380,6 +385,7 @@ pub enum LockStrength {
 }
 
 /// Lock wait behavior.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LockWait {
     /// Wait for lock (default).
@@ -410,80 +416,6 @@ impl RowLock {
     pub fn for_key_share() -> RowLockBuilder {
         RowLockBuilder::new(LockStrength::KeyShare)
     }
-
-    /// Generate PostgreSQL FOR clause.
-    pub fn to_postgres_sql(&self) -> String {
-        let strength = match self.strength {
-            LockStrength::Update => "FOR UPDATE",
-            LockStrength::NoKeyUpdate => "FOR NO KEY UPDATE",
-            LockStrength::Share => "FOR SHARE",
-            LockStrength::KeyShare => "FOR KEY SHARE",
-        };
-
-        let mut sql = strength.to_string();
-
-        if !self.of_tables.is_empty() {
-            sql.push_str(&format!(" OF {}", self.of_tables.join(", ")));
-        }
-
-        match self.wait {
-            LockWait::Wait => {}
-            LockWait::NoWait => sql.push_str(" NOWAIT"),
-            LockWait::SkipLocked => sql.push_str(" SKIP LOCKED"),
-        }
-
-        sql
-    }
-
-    /// Generate MySQL FOR clause.
-    pub fn to_mysql_sql(&self) -> String {
-        let strength = match self.strength {
-            LockStrength::Update | LockStrength::NoKeyUpdate => "FOR UPDATE",
-            LockStrength::Share | LockStrength::KeyShare => "FOR SHARE",
-        };
-
-        let mut sql = strength.to_string();
-
-        if !self.of_tables.is_empty() {
-            sql.push_str(&format!(" OF {}", self.of_tables.join(", ")));
-        }
-
-        match self.wait {
-            LockWait::Wait => {}
-            LockWait::NoWait => sql.push_str(" NOWAIT"),
-            LockWait::SkipLocked => sql.push_str(" SKIP LOCKED"),
-        }
-
-        sql
-    }
-
-    /// Generate MSSQL table hint.
-    pub fn to_mssql_hint(&self) -> String {
-        let hint = match self.strength {
-            LockStrength::Update | LockStrength::NoKeyUpdate => "UPDLOCK, ROWLOCK",
-            LockStrength::Share | LockStrength::KeyShare => "HOLDLOCK, ROWLOCK",
-        };
-
-        let wait_hint = match self.wait {
-            LockWait::Wait => "",
-            LockWait::NoWait => ", NOWAIT",
-            LockWait::SkipLocked => ", READPAST",
-        };
-
-        format!("WITH ({}{})", hint, wait_hint)
-    }
-
-    /// Generate SQL for database type.
-    pub fn to_sql(&self, db_type: DatabaseType) -> QueryResult<String> {
-        match db_type {
-            DatabaseType::PostgreSQL => Ok(self.to_postgres_sql()),
-            DatabaseType::MySQL => Ok(self.to_mysql_sql()),
-            DatabaseType::MSSQL => Ok(self.to_mssql_hint()),
-            DatabaseType::SQLite => Err(QueryError::unsupported(
-                "Row locking is not supported in SQLite",
-            )),
-        }
-    }
 }
 
 /// Builder for row locks.
@@ -505,6 +437,11 @@ impl RowLockBuilder {
     }
 
     /// Lock specific tables.
+    ///
+    /// Names must match how the query's `FROM` clause spells the table
+    /// (the find operations interpolate `Model::TABLE_NAME` unquoted), and
+    /// must be plain SQL identifiers (`[A-Za-z_][A-Za-z0-9_]*`). Dialects
+    /// that support `OF` emit them unquoted and reject anything else.
     pub fn of<I, S>(mut self, tables: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -533,6 +470,12 @@ impl RowLockBuilder {
             of_tables: self.of_tables,
             wait: self.wait,
         }
+    }
+}
+
+impl From<RowLockBuilder> for RowLock {
+    fn from(builder: RowLockBuilder) -> Self {
+        builder.build()
     }
 }
 
@@ -1031,29 +974,32 @@ mod tests {
 
     #[test]
     fn test_for_update() {
+        use crate::dialect::{Postgres, SqlDialect};
         let lock = RowLock::for_update().nowait().build();
-        let sql = lock.to_postgres_sql();
+        let sql = Postgres.row_lock_sql(&lock).unwrap();
 
-        assert!(sql.contains("FOR UPDATE"));
-        assert!(sql.contains("NOWAIT"));
+        assert_eq!(sql.suffix.as_deref(), Some("FOR UPDATE NOWAIT"));
     }
 
     #[test]
     fn test_for_share_skip_locked() {
+        use crate::dialect::{Postgres, SqlDialect};
         let lock = RowLock::for_share().skip_locked().build();
-        let sql = lock.to_postgres_sql();
+        let sql = Postgres.row_lock_sql(&lock).unwrap();
 
-        assert!(sql.contains("FOR SHARE"));
-        assert!(sql.contains("SKIP LOCKED"));
+        assert_eq!(sql.suffix.as_deref(), Some("FOR SHARE SKIP LOCKED"));
     }
 
     #[test]
     fn test_row_lock_mssql() {
+        use crate::dialect::{Mssql, SqlDialect};
         let lock = RowLock::for_update().nowait().build();
-        let sql = lock.to_mssql_hint();
+        let sql = Mssql.row_lock_sql(&lock).unwrap();
 
-        assert!(sql.contains("UPDLOCK"));
-        assert!(sql.contains("NOWAIT"));
+        assert_eq!(
+            sql.table_hint.as_deref(),
+            Some("WITH (UPDLOCK, ROWLOCK, NOWAIT)")
+        );
     }
 
     #[test]

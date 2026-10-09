@@ -7,7 +7,7 @@
 
 use prax_query::capabilities::{
     SupportsCorrelatedSubquery, SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath,
-    SupportsNestedWrites, SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsNestedWrites, SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 
 use crate::engine::MysqlEngine;
@@ -19,3 +19,4 @@ impl SupportsFullTextSearch for MysqlEngine {}
 impl SupportsGeneratedColumns for MysqlEngine {}
 impl SupportsScalarSubqueryInSelect for MysqlEngine {}
 impl SupportsNestedWrites for MysqlEngine {}
+impl SupportsRowLocks for MysqlEngine {}

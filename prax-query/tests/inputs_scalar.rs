@@ -198,11 +198,11 @@ fn bytes_filter_equals_lowers() {
     let f = BytesFilter::equals(vec![1u8, 2, 3]);
     let filter = f.into_filter("blob");
     match filter {
-        Filter::Equals(col, FilterValue::String(s)) => {
+        Filter::Equals(col, FilterValue::Bytes(b)) => {
             assert_eq!(col, "blob");
-            assert!(!s.is_empty());
+            assert_eq!(b, vec![1u8, 2, 3]);
         }
-        other => panic!("expected Bytes Equals (base64-encoded), got {:?}", other),
+        other => panic!("expected Bytes Equals, got {:?}", other),
     }
 }
 
@@ -259,5 +259,14 @@ fn enum_filter_equals_lowers() {
     assert_eq!(
         filter,
         Filter::Equals("role".into(), FilterValue::String("Admin".into()))
+    );
+}
+
+#[test]
+fn bytes_filter_lowers_to_bytes() {
+    let f = BytesFilter::equals(vec![0u8, 255]).into_filter("payload");
+    assert_eq!(
+        f,
+        Filter::Equals("payload".into(), FilterValue::Bytes(vec![0, 255]))
     );
 }

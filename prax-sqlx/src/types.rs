@@ -20,10 +20,15 @@ pub fn filter_value_to_string(value: &FilterValue) -> String {
         FilterValue::Bool(b) => b.to_string(),
         FilterValue::Null => "NULL".to_string(),
         FilterValue::Json(j) => j.to_string(),
-        FilterValue::List(arr) => {
+        FilterValue::List(arr) | FilterValue::Array(arr) => {
             let items: Vec<String> = arr.iter().map(filter_value_to_string).collect();
             format!("[{}]", items.join(", "))
         }
+        FilterValue::Bytes(b) => {
+            let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("\\x{hex}")
+        }
+        _ => value.to_json_value().to_string(),
     }
 }
 
@@ -99,6 +104,21 @@ pub fn rust_to_sql_type(backend: DatabaseBackend, rust_type: &str) -> &'static s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_format_for_debugging() {
+        assert_eq!(
+            filter_value_to_string(&FilterValue::Bytes(vec![0, 255])),
+            "\\x00ff"
+        );
+        assert_eq!(
+            filter_value_to_string(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ])),
+            "[1, a]"
+        );
+    }
 
     #[test]
     fn test_placeholder() {

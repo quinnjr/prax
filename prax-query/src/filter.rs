@@ -136,14 +136,38 @@ pub type FieldName = Cow<'static, str>;
 /// // Null value
 /// let val = FilterValue::Null;
 ///
-/// // From vectors
+/// // From vectors (a single array-valued parameter; `Vec<u8>` becomes `Bytes`)
 /// let val: FilterValue = vec![1, 2, 3].into();
+/// assert!(matches!(val, FilterValue::Array(_)));
 ///
 /// // From Option (Some becomes value, None becomes Null)
 /// let val: FilterValue = Some(42).into();
 /// let val: FilterValue = Option::<i32>::None.into();
 /// assert!(val.is_null());
 /// ```
+///
+/// # Serialization
+///
+/// `FilterValue` is `#[serde(untagged)]`, so deserialising is **not**
+/// type-preserving: a value comes back as the first variant whose JSON shape
+/// matches. `Bytes` serialises as a base64 string and deserialises as
+/// `String`; `List` and `Array` serialise as JSON arrays and deserialise as
+/// `Json`. Do not rely on a serde round trip to restore the variant (and use
+/// [`FilterValue::to_json_value`] for a JSON encoding).
+///
+/// ```rust
+/// use prax_query::FilterValue;
+///
+/// let json = serde_json::to_string(&FilterValue::Bytes(vec![1, 2])).unwrap();
+/// assert_eq!(json, r#""AQI=""#);
+/// let back: FilterValue = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, FilterValue::String("AQI=".into()));
+///
+/// let json = serde_json::to_string(&FilterValue::Array(vec![1.into()])).unwrap();
+/// let back: FilterValue = serde_json::from_str(&json).unwrap();
+/// assert_eq!(back, FilterValue::Json(serde_json::json!([1])));
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum FilterValue {
@@ -159,14 +183,59 @@ pub enum FilterValue {
     String(String),
     /// JSON value.
     Json(serde_json::Value),
-    /// List of values.
+    /// A group of values used for composite keys; not expanded when bound.
+    /// Use [`Filter::In`] / `SqlBuilder::bind_in_slice` for `IN (...)`, or
+    /// [`FilterValue::Array`] with `= ANY($1)` on Postgres.
     List(Vec<FilterValue>),
+    /// A single array-valued parameter.
+    Array(Vec<FilterValue>),
+    /// A single binary parameter. Serialises as base64 and is never
+    /// deserialised (a base64 string comes back as [`FilterValue::String`]).
+    #[serde(
+        skip_deserializing,
+        serialize_with = "crate::serde_base64::bytes::serialize"
+    )]
+    Bytes(Vec<u8>),
 }
 
 impl FilterValue {
     /// Check if this is a null value.
     pub fn is_null(&self) -> bool {
         matches!(self, Self::Null)
+    }
+
+    /// Build a [`FilterValue::List`] from an iterator. A group of values used
+    /// for composite keys; not expanded when bound. Use [`Filter::In`] /
+    /// `SqlBuilder::bind_in_slice` for `IN (...)`, or [`FilterValue::Array`]
+    /// with `= ANY($1)` on Postgres.
+    pub fn list<I, T>(items: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<FilterValue>,
+    {
+        Self::List(items.into_iter().map(Into::into).collect())
+    }
+
+    /// JSON encoding (not type-preserving): `Bytes` becomes a base64 string,
+    /// `List`/`Array` become JSON arrays, and non-finite floats become `null`.
+    pub fn to_json_value(&self) -> serde_json::Value {
+        use base64::Engine as _;
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Bool(b) => serde_json::Value::Bool(*b),
+            Self::Int(i) => serde_json::Value::from(*i),
+            Self::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            Self::String(s) => serde_json::Value::String(s.clone()),
+            Self::Json(v) => v.clone(),
+            Self::List(items) | Self::Array(items) => {
+                serde_json::Value::Array(items.iter().map(Self::to_json_value).collect())
+            }
+            Self::Bytes(b) => {
+                serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b))
+            }
+        }
     }
 }
 
@@ -208,7 +277,19 @@ impl From<&str> for FilterValue {
 
 impl<T: Into<FilterValue>> From<Vec<T>> for FilterValue {
     fn from(v: Vec<T>) -> Self {
-        Self::List(v.into_iter().map(Into::into).collect())
+        Self::Array(v.into_iter().map(Into::into).collect())
+    }
+}
+
+impl From<Vec<u8>> for FilterValue {
+    fn from(v: Vec<u8>) -> Self {
+        Self::Bytes(v)
+    }
+}
+
+impl From<&[u8]> for FilterValue {
+    fn from(v: &[u8]) -> Self {
+        Self::Bytes(v.to_vec())
     }
 }
 
@@ -233,11 +314,6 @@ impl From<i8> for FilterValue {
 }
 impl From<i16> for FilterValue {
     fn from(v: i16) -> Self {
-        Self::Int(v as i64)
-    }
-}
-impl From<u8> for FilterValue {
-    fn from(v: u8) -> Self {
         Self::Int(v as i64)
     }
 }
@@ -323,12 +399,6 @@ impl From<serde_json::Value> for FilterValue {
         Self::Json(v)
     }
 }
-
-// `Vec<u8>` is already reachable via the `Vec<T: Into<FilterValue>>`
-// blanket impl — it lands as `FilterValue::List` of `FilterValue::Int`
-// bytes. Drivers that want native BYTEA binding should intercept the
-// List variant and re-interpret. We intentionally don't shadow the
-// blanket with a dedicated impl (which would be a conflict anyway).
 
 /// Reverse of [`crate::row::FromColumn`]: convert an in-memory value to
 /// a [`FilterValue`] suitable for parameter binding.
@@ -446,20 +516,19 @@ impl ToFilterValue for serde_json::Value {
         FilterValue::Json(self.clone())
     }
 }
+/// Binary data: since 0.13 a `Vec<u8>` lowers to a single
+/// [`FilterValue::Bytes`] parameter (not a list of integers).
 impl ToFilterValue for Vec<u8> {
     fn to_filter_value(&self) -> FilterValue {
-        // Bytes round-trip as a list of ints to match the existing
-        // `From<Vec<T>>` blanket behavior. Drivers that want native
-        // BYTEA binding intercept the List variant.
-        FilterValue::List(self.iter().map(|b| FilterValue::Int(*b as i64)).collect())
+        FilterValue::Bytes(self.clone())
     }
 }
+/// Vectors (e.g. pgvector): since 0.13 a `Vec<f32>` lowers to a single
+/// [`FilterValue::Array`] of [`FilterValue::Float`] parameters.
 impl ToFilterValue for Vec<f32> {
     fn to_filter_value(&self) -> FilterValue {
-        // Pgvector columns encode as a list of floats. Drivers that want
-        // to bind the native `vector` type cast the List variant
-        // explicitly on the way out.
-        FilterValue::List(self.iter().map(|f| FilterValue::Float(*f as f64)).collect())
+        // Pgvector columns encode as an array of floats.
+        FilterValue::Array(self.iter().map(|f| FilterValue::Float(*f as f64)).collect())
     }
 }
 impl<T: ToFilterValue> ToFilterValue for Option<T> {
@@ -1899,17 +1968,78 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_value_from_vec() {
+    fn test_filter_value_from_vec_is_array() {
         let values: Vec<i32> = vec![1, 2, 3];
         let filter_val: FilterValue = values.into();
-        if let FilterValue::List(list) = filter_val {
-            assert_eq!(list.len(), 3);
-            assert_eq!(list[0], FilterValue::Int(1));
-            assert_eq!(list[1], FilterValue::Int(2));
-            assert_eq!(list[2], FilterValue::Int(3));
+        if let FilterValue::Array(items) = filter_val {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], FilterValue::Int(1));
+            assert_eq!(items[1], FilterValue::Int(2));
+            assert_eq!(items[2], FilterValue::Int(3));
         } else {
-            panic!("Expected List");
+            panic!("Expected Array");
         }
+    }
+
+    #[test]
+    fn vec_into_filter_value_is_array() {
+        let v: FilterValue = vec![1i32, 2, 3].into();
+        assert_eq!(
+            v,
+            FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::Int(2),
+                FilterValue::Int(3)
+            ])
+        );
+    }
+
+    #[test]
+    fn bytes_conversions_yield_bytes() {
+        assert_eq!(
+            FilterValue::from(vec![0u8, 159, 255]),
+            FilterValue::Bytes(vec![0, 159, 255])
+        );
+        assert_eq!(
+            FilterValue::from(&[1u8, 2][..]),
+            FilterValue::Bytes(vec![1, 2])
+        );
+        assert_eq!(vec![7u8].to_filter_value(), FilterValue::Bytes(vec![7]));
+    }
+
+    #[test]
+    fn vec_f32_to_filter_value_is_array_of_float() {
+        assert_eq!(
+            vec![0.5f32].to_filter_value(),
+            FilterValue::Array(vec![FilterValue::Float(0.5)])
+        );
+    }
+
+    #[test]
+    fn explicit_list_constructor() {
+        assert_eq!(
+            FilterValue::list([1i64, 2]),
+            FilterValue::List(vec![FilterValue::Int(1), FilterValue::Int(2)])
+        );
+    }
+
+    #[test]
+    fn bytes_serde_is_base64_and_json_encoding_is_not_type_preserving() {
+        let b = FilterValue::Bytes(vec![0x00, 0xFF, 0x10]);
+        assert_eq!(serde_json::to_string(&b).unwrap(), "\"AP8Q\"");
+        assert_eq!(b.to_json_value(), serde_json::json!("AP8Q"));
+        let a = FilterValue::Array(vec![
+            FilterValue::Bytes(vec![0xFF]),
+            FilterValue::Float(f64::NAN),
+        ]);
+        assert_eq!(a.to_json_value(), serde_json::json!(["/w==", null]));
+    }
+
+    #[test]
+    fn json_array_deserializes_as_json() {
+        // Untagged order puts Json before List/Array, unchanged from 0.12.x.
+        let v: FilterValue = serde_json::from_str("[1,2]").unwrap();
+        assert!(matches!(v, FilterValue::Json(_)));
     }
 
     #[test]
@@ -3017,7 +3147,7 @@ mod tests {
     fn filter_value_from_unsigned_integer_extremes() {
         // u8/u16/u32 all fit in i64 so these never panic. u64::MAX has its
         // own dedicated `#[should_panic]` test at filter_value_from_u64_overflow_panics.
-        assert_eq!(FilterValue::from(u8::MAX), FilterValue::Int(u8::MAX as i64));
+        assert_eq!(u8::MAX.to_filter_value(), FilterValue::Int(u8::MAX as i64));
         assert_eq!(
             FilterValue::from(u16::MAX),
             FilterValue::Int(u16::MAX as i64)

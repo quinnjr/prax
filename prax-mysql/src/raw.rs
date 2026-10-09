@@ -365,7 +365,7 @@ impl MysqlRawEngine {
 
         let json = result
             .into_iter()
-            .map(|(k, v)| (k, filter_value_to_json(&v)))
+            .map(|(k, v)| (k, v.to_json_value()))
             .collect::<serde_json::Map<_, _>>();
 
         Ok(MysqlJsonRow::new(JsonValue::Object(json)))
@@ -459,7 +459,8 @@ impl MysqlRawEngine {
         &self,
         sql: prax_query::raw::Sql,
     ) -> Result<Vec<MysqlJsonRow>, MysqlError> {
-        let (query_string, params) = sql.build();
+        // `?` placeholders unless the query chose a database type itself.
+        let (query_string, params) = sql.build_for_dialect(&prax_query::dialect::Mysql);
         debug!(sql = %query_string, "Executing raw SQL from builder");
         self.raw_sql_query(&query_string, &params).await
     }
@@ -705,23 +706,6 @@ impl MysqlRawEngine {
     }
 }
 
-/// Convert a FilterValue to JSON.
-fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,23 +715,6 @@ mod tests {
         let sql = "SELECT * FROM `users`";
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("users"));
-    }
-
-    #[test]
-    fn test_filter_value_to_json() {
-        assert_eq!(filter_value_to_json(&FilterValue::Null), JsonValue::Null);
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bool(true)),
-            JsonValue::Bool(true)
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Int(42)),
-            JsonValue::Number(42.into())
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::String("test".to_string())),
-            JsonValue::String("test".to_string())
-        );
     }
 
     #[test]

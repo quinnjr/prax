@@ -1,0 +1,12 @@
+error[E0277]: the engine `MongoEngine` does not support row locks (FOR UPDATE / FOR SHARE)
+ --> tests/ui/row_locks/mongo_no_row_locks_fail.rs:8:16
+  |
+8 |     requires::<prax_mongodb::MongoEngine>();
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `SupportsRowLocks` is not implemented for `MongoEngine`
+  |
+  = note: SQLite, DuckDB, MongoDB and CQL engines cannot lock rows.
+note: required by a bound in `requires`
+ --> tests/ui/row_locks/mongo_no_row_locks_fail.rs:5:16
+  |
+5 | fn requires<E: prax_query::capabilities::SupportsRowLocks>() {}
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires`

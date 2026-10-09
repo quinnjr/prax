@@ -50,6 +50,20 @@ pub enum SqlxError {
     Internal(String),
 }
 
+/// The SQLSTATE of a PostgreSQL database error. Other backends' codes are
+/// not reported as one: SQLite's, for instance, are its own result codes.
+fn postgres_sqlstate(db_err: &dyn sqlx::error::DatabaseError) -> Option<String> {
+    #[cfg(feature = "postgres")]
+    if db_err
+        .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+        .is_some()
+    {
+        return db_err.code().map(|code| code.into_owned());
+    }
+    let _ = db_err;
+    None
+}
+
 impl From<SqlxError> for QueryError {
     fn from(err: SqlxError) -> Self {
         match err {
@@ -63,27 +77,34 @@ impl From<SqlxError> for QueryError {
                 sqlx::Error::RowNotFound => QueryError::not_found("row"),
                 // Classify database errors by SQLSTATE code rather than by
                 // substring-matching the message (mirrors prax-postgres).
-                sqlx::Error::Database(db_err) => match db_err.code().as_deref() {
-                    // unique / foreign key / check violation
-                    Some("23505") | Some("23503") | Some("23514") => {
-                        QueryError::constraint_violation("", e.to_string())
+                sqlx::Error::Database(db_err) => {
+                    let sqlstate = postgres_sqlstate(db_err.as_ref());
+                    let error = match db_err.code().as_deref() {
+                        // unique / foreign key / check violation
+                        Some("23505") | Some("23503") | Some("23514") => {
+                            QueryError::constraint_violation("", e.to_string())
+                        }
+                        // not-null violation
+                        Some("23502") => QueryError::invalid_input("", e.to_string()),
+                        // Stale server-side prepared plan after DDL — transient,
+                        // retryable. 0A000 is the shared FEATURE_NOT_SUPPORTED
+                        // class, so gate on the specific cached-plan message from
+                        // the DbError (not the outer Display); other 0A000
+                        // conditions stay terminal.
+                        Some("0A000")
+                            if db_err
+                                .message()
+                                .contains("cached plan must not change result type") =>
+                        {
+                            QueryError::stale_plan(e.to_string())
+                        }
+                        _ => QueryError::database(e.to_string()),
+                    };
+                    match sqlstate {
+                        Some(sqlstate) => error.with_sqlstate(sqlstate),
+                        None => error,
                     }
-                    // not-null violation
-                    Some("23502") => QueryError::invalid_input("", e.to_string()),
-                    // Stale server-side prepared plan after DDL — transient,
-                    // retryable. 0A000 is the shared FEATURE_NOT_SUPPORTED
-                    // class, so gate on the specific cached-plan message from
-                    // the DbError (not the outer Display); other 0A000
-                    // conditions stay terminal.
-                    Some("0A000")
-                        if db_err
-                            .message()
-                            .contains("cached plan must not change result type") =>
-                    {
-                        QueryError::stale_plan(e.to_string())
-                    }
-                    _ => QueryError::database(e.to_string()),
-                },
+                }
                 _ => QueryError::database(e.to_string()),
             },
             SqlxError::Config(msg) => QueryError::connection(msg),
@@ -200,6 +221,22 @@ mod tests {
         fn kind(&self) -> sqlx::error::ErrorKind {
             sqlx::error::ErrorKind::Other
         }
+    }
+
+    #[test]
+    fn sqlstate_is_only_taken_from_postgres_errors() {
+        // A database error of another backend (here a mock; SQLite's codes,
+        // for one, are not SQLSTATEs) classifies by its code but carries no
+        // SQLSTATE. Postgres errors are covered by tests/postgres_live.rs.
+        let db_err = MockDbError {
+            message: "db says no".to_string(),
+            code: Some("23505".to_string()),
+        };
+        let query_err: QueryError = SqlxError::from(sqlx::Error::Database(Box::new(db_err))).into();
+        assert_eq!(query_err.code, prax_query::ErrorCode::UniqueConstraint);
+        assert_eq!(query_err.sqlstate(), None);
+        let query_err: QueryError = SqlxError::timeout(5).into();
+        assert_eq!(query_err.sqlstate(), None);
     }
 
     #[test]

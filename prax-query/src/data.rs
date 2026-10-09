@@ -116,6 +116,12 @@ pub enum FieldValue {
 
 impl FieldValue {
     /// Convert to FilterValue for query operations.
+    ///
+    /// `Bytes` becomes [`FilterValue::Bytes`] (bound as raw bytes) and
+    /// `Array` becomes [`FilterValue::Array`] (one array-valued parameter),
+    /// converting its elements recursively. Write operations (`Default`,
+    /// `Increment`, `Connect`, ...) have no filter value and yield `None`,
+    /// as does an `Array` containing one.
     pub fn to_filter_value(&self) -> Option<FilterValue> {
         match self {
             Self::Null => Some(FilterValue::Null),
@@ -124,8 +130,14 @@ impl FieldValue {
             Self::Float(f) => Some(FilterValue::Float(*f)),
             Self::String(s) => Some(FilterValue::String(s.clone())),
             Self::Json(j) => Some(FilterValue::Json(j.clone())),
+            Self::Bytes(b) => Some(FilterValue::Bytes(b.clone())),
             Self::DateTime(s) => Some(FilterValue::String(s.clone())),
             Self::Uuid(s) => Some(FilterValue::String(s.clone())),
+            Self::Array(items) => items
+                .iter()
+                .map(Self::to_filter_value)
+                .collect::<Option<Vec<_>>>()
+                .map(FilterValue::Array),
             _ => None,
         }
     }
@@ -566,6 +578,36 @@ pub trait TypedUpdateBuilder: Sized {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_filter_value_maps_bytes_and_arrays() {
+        assert_eq!(
+            FieldValue::Bytes(vec![0, 159, 255]).to_filter_value(),
+            Some(FilterValue::Bytes(vec![0, 159, 255]))
+        );
+        assert_eq!(
+            FieldValue::Array(vec![
+                FieldValue::Int(1),
+                FieldValue::Null,
+                FieldValue::Array(vec![FieldValue::Bytes(vec![7])]),
+            ])
+            .to_filter_value(),
+            Some(FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::Null,
+                FilterValue::Array(vec![FilterValue::Bytes(vec![7])]),
+            ]))
+        );
+        assert_eq!(
+            FieldValue::Array(Vec::new()).to_filter_value(),
+            Some(FilterValue::Array(Vec::new()))
+        );
+        // One element without a filter value makes the whole array unmappable.
+        assert_eq!(
+            FieldValue::Array(vec![FieldValue::Int(1), FieldValue::Default]).to_filter_value(),
+            None
+        );
+    }
 
     #[test]
     fn test_data_builder_basic() {

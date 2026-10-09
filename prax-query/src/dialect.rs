@@ -7,6 +7,9 @@
 //! bound `QueryEngine` via `engine.dialect()`, so a single `build_sql`
 //! emission path serves every backend.
 
+use crate::advanced::{LockStrength, LockWait, RowLock};
+use crate::error::{QueryError, QueryResult};
+
 /// Sealed supertrait so only this crate can implement `SqlDialect`.
 /// Prevents downstream crates from adding their own `SqlDialect`
 /// impls; we reserve the right to add new required methods to the
@@ -19,6 +22,47 @@ mod sealed {
     impl Sealed for super::Mssql {}
     impl Sealed for super::Cql {}
     impl Sealed for super::NotSql {}
+}
+
+/// Dialect-specific rendering of a row lock, split by where each piece
+/// lands in a `SELECT`.
+///
+/// `table_hint` follows the table name (MSSQL `WITH (UPDLOCK, ...)`);
+/// `suffix` goes at the very end of the statement (`FOR UPDATE ...`).
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RowLockSql {
+    /// Hint rendered directly after the table name (without leading space).
+    pub table_hint: Option<String>,
+    /// Clause rendered at the end of the statement (without leading space).
+    pub suffix: Option<String>,
+}
+
+impl RowLockSql {
+    /// Append the table hint (if any), preceded by a space.
+    pub(crate) fn push_table_hint(&self, sql: &mut String) {
+        if let Some(hint) = &self.table_hint {
+            sql.push(' ');
+            sql.push_str(hint);
+        }
+    }
+
+    /// Append the statement-final clause (if any), preceded by a space.
+    pub(crate) fn push_suffix(&self, sql: &mut String) {
+        if let Some(suffix) = &self.suffix {
+            sql.push(' ');
+            sql.push_str(suffix);
+        }
+    }
+}
+
+/// The ` NOWAIT` / ` SKIP LOCKED` tail shared by the `FOR ...` dialects.
+fn wait_suffix(wait: LockWait) -> &'static str {
+    match wait {
+        LockWait::Wait => "",
+        LockWait::NoWait => " NOWAIT",
+        LockWait::SkipLocked => " SKIP LOCKED",
+    }
 }
 
 /// Cross-dialect SQL emission helpers.
@@ -36,6 +80,14 @@ pub trait SqlDialect: Send + Sync + sealed::Sealed {
 
     /// Quote a table/column identifier for safe interpolation.
     fn quote_ident(&self, ident: &str) -> String;
+
+    /// Render a row lock for this dialect, or fail if the dialect cannot
+    /// express it faithfully. The default rejects every lock.
+    fn row_lock_sql(&self, _lock: &RowLock) -> QueryResult<RowLockSql> {
+        Err(QueryError::unsupported(
+            "row locks are not supported by this dialect",
+        ))
+    }
 
     /// Whether the dialect supports `SELECT DISTINCT ON (cols)` (Postgres-only
     /// among our backends today).
@@ -154,6 +206,35 @@ pub struct Cql;
 pub struct NotSql;
 
 impl SqlDialect for Postgres {
+    fn row_lock_sql(&self, lock: &RowLock) -> QueryResult<RowLockSql> {
+        let mut sql = String::from(match lock.strength {
+            LockStrength::Update => "FOR UPDATE",
+            LockStrength::NoKeyUpdate => "FOR NO KEY UPDATE",
+            LockStrength::Share => "FOR SHARE",
+            LockStrength::KeyShare => "FOR KEY SHARE",
+        });
+        if !lock.of_tables.is_empty() {
+            // `OF` names must match how the query's FROM clause spells the
+            // table, and FROM interpolates `Model::TABLE_NAME` unquoted. Emit
+            // the same way, so only validated identifiers may reach here.
+            for table in &lock.of_tables {
+                if !crate::sql::is_valid_sql_identifier(table) {
+                    return Err(QueryError::invalid_input(
+                        "lock",
+                        format!("invalid table name in OF clause: {table:?}"),
+                    ));
+                }
+            }
+            sql.push_str(" OF ");
+            sql.push_str(&lock.of_tables.join(", "));
+        }
+        sql.push_str(wait_suffix(lock.wait));
+        Ok(RowLockSql {
+            table_hint: None,
+            suffix: Some(sql),
+        })
+    }
+
     fn placeholder(&self, i: usize) -> String {
         format!("${}", i)
     }
@@ -197,6 +278,28 @@ impl SqlDialect for Sqlite {
 }
 
 impl SqlDialect for Mysql {
+    fn row_lock_sql(&self, lock: &RowLock) -> QueryResult<RowLockSql> {
+        let mut sql = String::from(match lock.strength {
+            LockStrength::Update => "FOR UPDATE",
+            LockStrength::Share => "FOR SHARE",
+            LockStrength::NoKeyUpdate | LockStrength::KeyShare => {
+                return Err(QueryError::unsupported(
+                    "MySQL row locks support only FOR UPDATE and FOR SHARE",
+                ));
+            }
+        });
+        if !lock.of_tables.is_empty() {
+            return Err(QueryError::unsupported(
+                "MySQL row locks do not support OF <tables>",
+            ));
+        }
+        sql.push_str(wait_suffix(lock.wait));
+        Ok(RowLockSql {
+            table_hint: None,
+            suffix: Some(sql),
+        })
+    }
+
     fn placeholder(&self, _i: usize) -> String {
         "?".into()
     }
@@ -241,6 +344,35 @@ impl SqlDialect for Mysql {
 }
 
 impl SqlDialect for Mssql {
+    fn row_lock_sql(&self, lock: &RowLock) -> QueryResult<RowLockSql> {
+        if !lock.of_tables.is_empty() {
+            return Err(QueryError::unsupported(
+                "MSSQL row locks do not support OF <tables>",
+            ));
+        }
+        let hint = match (lock.strength, lock.wait) {
+            (LockStrength::Update, LockWait::Wait) => "WITH (UPDLOCK, ROWLOCK)",
+            (LockStrength::Update, LockWait::SkipLocked) => "WITH (UPDLOCK, ROWLOCK, READPAST)",
+            (LockStrength::Update, LockWait::NoWait) => "WITH (UPDLOCK, ROWLOCK, NOWAIT)",
+            (LockStrength::Share, LockWait::Wait) => "WITH (HOLDLOCK, ROWLOCK)",
+            (LockStrength::Share, LockWait::NoWait) => "WITH (HOLDLOCK, ROWLOCK, NOWAIT)",
+            (LockStrength::Share, LockWait::SkipLocked) => {
+                return Err(QueryError::unsupported(
+                    "MSSQL cannot combine a shared row lock with SKIP LOCKED",
+                ));
+            }
+            (LockStrength::NoKeyUpdate | LockStrength::KeyShare, _) => {
+                return Err(QueryError::unsupported(
+                    "MSSQL row locks support only FOR UPDATE and FOR SHARE",
+                ));
+            }
+        };
+        Ok(RowLockSql {
+            table_hint: Some(hint.to_string()),
+            suffix: None,
+        })
+    }
+
     fn placeholder(&self, i: usize) -> String {
         format!("@P{}", i)
     }

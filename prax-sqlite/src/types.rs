@@ -3,9 +3,11 @@
 use rusqlite::types::{FromSql, FromSqlError, Value, ValueRef};
 use serde_json::Value as JsonValue;
 
+use prax_query::base64::{Engine as _, engine::general_purpose::STANDARD};
 use prax_query::filter::FilterValue;
 
 /// Convert a FilterValue to a SQLite Value.
+#[deny(clippy::wildcard_enum_match_arm)]
 pub fn filter_value_to_sqlite(value: &FilterValue) -> Value {
     match value {
         FilterValue::Null => Value::Null,
@@ -14,24 +16,16 @@ pub fn filter_value_to_sqlite(value: &FilterValue) -> Value {
         FilterValue::Float(f) => Value::Real(*f),
         FilterValue::String(s) => Value::Text(s.clone()),
         FilterValue::Json(j) => Value::Text(j.to_string()),
-        FilterValue::List(list) => {
-            // Serialize list as JSON
-            let json_array: Vec<JsonValue> = list
-                .iter()
-                .map(|v| match v {
-                    FilterValue::Null => JsonValue::Null,
-                    FilterValue::Bool(b) => JsonValue::Bool(*b),
-                    FilterValue::Int(i) => JsonValue::Number((*i).into()),
-                    FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-                        .map(JsonValue::Number)
-                        .unwrap_or(JsonValue::Null),
-                    FilterValue::String(s) => JsonValue::String(s.clone()),
-                    FilterValue::Json(j) => j.clone(),
-                    FilterValue::List(_) => JsonValue::Null, // Nested lists not directly supported
-                })
-                .collect();
-            Value::Text(serde_json::to_string(&json_array).unwrap_or_default())
+        FilterValue::Bytes(b) => Value::Blob(b.clone()),
+        // Lists and arrays bind as JSON text (see the scalar-lists design).
+        FilterValue::List(_) | FilterValue::Array(_) => {
+            Value::Text(value.to_json_value().to_string())
         }
+        // `FilterValue` is `#[non_exhaustive]`, so a catch-all is required.
+        // Every current variant is listed above; when a new variant is added,
+        // `#[deny(clippy::wildcard_enum_match_arm)]` makes this arm fail
+        // clippy until the variant gets its own arm.
+        _ => Value::Text(value.to_json_value().to_string()),
     }
 }
 
@@ -67,7 +61,7 @@ pub fn from_sqlite_value(value: ValueRef<'_>) -> JsonValue {
                 Ok(s) => JsonValue::String(s.to_string()),
                 Err(_) => {
                     // Binary data, encode as base64
-                    JsonValue::String(base64_encode(bytes))
+                    JsonValue::String(STANDARD.encode(bytes))
                 }
             }
         }
@@ -93,39 +87,6 @@ pub fn get_value_at_index(row: &rusqlite::Row<'_>, index: usize) -> JsonValue {
     }
 }
 
-/// Simple base64 encoding for binary data.
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut result = String::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        let b0 = data[i];
-        let b1 = data.get(i + 1).copied().unwrap_or(0);
-        let b2 = data.get(i + 2).copied().unwrap_or(0);
-
-        result.push(ALPHABET[(b0 >> 2) as usize] as char);
-        result.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
-
-        if i + 1 < data.len() {
-            result.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        if i + 2 < data.len() {
-            result.push(ALPHABET[(b2 & 0x3f) as usize] as char);
-        } else {
-            result.push('=');
-        }
-
-        i += 3;
-    }
-
-    result
-}
-
 /// A newtype wrapper for JSON values stored in SQLite.
 #[derive(Debug, Clone)]
 pub struct JsonColumn(pub JsonValue);
@@ -148,6 +109,21 @@ impl FromSql for JsonColumn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_sqlite_values() {
+        assert_eq!(
+            filter_value_to_sqlite(&FilterValue::Bytes(vec![0, 255])),
+            Value::Blob(vec![0, 255])
+        );
+        assert_eq!(
+            filter_value_to_sqlite(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ])),
+            Value::Text("[1,\"a\"]".to_string())
+        );
+    }
 
     #[test]
     fn test_filter_value_to_sqlite_null() {
@@ -229,8 +205,10 @@ mod tests {
     }
 
     #[test]
-    fn test_base64_encode() {
-        let result = base64_encode(b"Hello");
-        assert_eq!(result, "SGVsbG8=");
+    fn non_utf8_blob_renders_as_standard_base64() {
+        let result = from_sqlite_value(ValueRef::Blob(&[0, 255, 159]));
+        assert_eq!(result, serde_json::json!("AP+f"));
+        let padded = from_sqlite_value(ValueRef::Blob(&[0xff]));
+        assert_eq!(padded, serde_json::json!("/w=="));
     }
 }

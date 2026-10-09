@@ -486,6 +486,97 @@ fn bind_pg_param<'q>(
                 "list values not supported in raw binds; use typed IN filters",
             ));
         }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(items) => match pg_array_values(items)? {
+            PgArrayValues::Int(v) => query.bind(v),
+            PgArrayValues::Float(v) => query.bind(v),
+            PgArrayValues::Bool(v) => query.bind(v),
+            PgArrayValues::Text(v) => query.bind(v),
+            PgArrayValues::Json(v) => query.bind(v),
+            PgArrayValues::Bytes(v) => query.bind(v),
+        },
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
+            ));
+        }
+    })
+}
+
+/// Typed element vectors for a Postgres array bind (`Null` -> `None`).
+#[cfg(feature = "postgres")]
+#[derive(Debug, PartialEq)]
+enum PgArrayValues {
+    Int(Vec<Option<i64>>),
+    Float(Vec<Option<f64>>),
+    Bool(Vec<Option<bool>>),
+    Text(Vec<Option<String>>),
+    Json(Vec<Option<serde_json::Value>>),
+    Bytes(Vec<Option<Vec<u8>>>),
+}
+
+/// Convert `FilterValue::Array` items into typed element vectors.
+///
+/// The element kind is chosen from the first non-`Null` element; every other
+/// non-`Null` element must have the same kind, otherwise this errors (mixed
+/// kinds and nested `List`/`Array` elements are rejected).
+///
+/// Empty and all-`Null` arrays fall back to `Text` (they bind as `text[]`,
+/// a documented limitation: the server cannot infer a better element type).
+/// String arrays bind as `text[]` too, so a comparison with a non-text
+/// column needs a cast in the SQL (`uuid_col = ANY($1::uuid[])`).
+#[cfg(feature = "postgres")]
+fn pg_array_values(items: &[FilterValue]) -> SqlxResult<PgArrayValues> {
+    fn collect<T>(
+        items: &[FilterValue],
+        pick: impl Fn(&FilterValue) -> Option<T>,
+    ) -> SqlxResult<Vec<Option<T>>> {
+        items
+            .iter()
+            .map(|item| match item {
+                FilterValue::Null => Ok(None),
+                other => pick(other).map(Some).ok_or_else(|| {
+                    SqlxError::type_conversion(
+                        "FilterValue::Array elements must share one scalar kind",
+                    )
+                }),
+            })
+            .collect()
+    }
+
+    let first = items.iter().find(|v| !matches!(v, FilterValue::Null));
+    Ok(match first {
+        None => PgArrayValues::Text(vec![None; items.len()]),
+        Some(FilterValue::Int(_)) => PgArrayValues::Int(collect(items, |v| match v {
+            FilterValue::Int(i) => Some(*i),
+            _ => None,
+        })?),
+        Some(FilterValue::Float(_)) => PgArrayValues::Float(collect(items, |v| match v {
+            FilterValue::Float(f) => Some(*f),
+            _ => None,
+        })?),
+        Some(FilterValue::Bool(_)) => PgArrayValues::Bool(collect(items, |v| match v {
+            FilterValue::Bool(b) => Some(*b),
+            _ => None,
+        })?),
+        Some(FilterValue::String(_)) => PgArrayValues::Text(collect(items, |v| match v {
+            FilterValue::String(s) => Some(s.clone()),
+            _ => None,
+        })?),
+        Some(FilterValue::Json(_)) => PgArrayValues::Json(collect(items, |v| match v {
+            FilterValue::Json(j) => Some(j.clone()),
+            _ => None,
+        })?),
+        Some(FilterValue::Bytes(_)) => PgArrayValues::Bytes(collect(items, |v| match v {
+            FilterValue::Bytes(b) => Some(b.clone()),
+            _ => None,
+        })?),
+        // Nested `List`/`Array` (and any future variant) is not an element kind.
+        Some(_) => {
+            return Err(SqlxError::type_conversion(
+                "FilterValue::Array elements must share one scalar kind",
+            ));
+        }
     })
 }
 
@@ -504,6 +595,13 @@ fn bind_mysql_param<'q>(
         FilterValue::List(_) => {
             return Err(SqlxError::type_conversion(
                 "list values not supported in raw binds; use typed IN filters",
+            ));
+        }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(_) => query.bind(value.to_json_value().to_string()),
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
             ));
         }
     })
@@ -526,7 +624,22 @@ fn bind_sqlite_param<'q>(
                 "list values not supported in raw binds; use typed IN filters",
             ));
         }
+        FilterValue::Bytes(b) => query.bind(b.as_slice()),
+        FilterValue::Array(_) => query.bind(value.to_json_value().to_string()),
+        _ => {
+            return Err(SqlxError::type_conversion(
+                "unsupported FilterValue variant",
+            ));
+        }
     })
+}
+
+/// Convert a driver error into the [`prax_query::QueryError`] taxonomy via
+/// `From<SqlxError>`: classified by SQLSTATE, with
+/// [`sqlstate`](prax_query::QueryError::sqlstate) set for PostgreSQL
+/// errors.
+fn query_error(e: impl Into<SqlxError>) -> prax_query::QueryError {
+    prax_query::QueryError::from(e.into())
 }
 
 // ==================== Transaction Finalization ====================
@@ -545,9 +658,7 @@ where
     let tx = slot.lock().await.take();
     match (result, tx) {
         (Ok(value), Some(tx)) => {
-            tx.commit()
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            tx.commit().await.map_err(query_error)?;
             Ok(value)
         }
         (Err(err), Some(tx)) => {
@@ -706,7 +817,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             rows.iter()
                 .map(|r| {
@@ -733,11 +844,10 @@ impl QueryEngine for SqlxEngine {
             debug!(sql = %sql, "Executing query_one via QueryEngine");
 
             let row = self.raw_query_one(&sql, &params).await.map_err(|e| {
-                let msg = e.to_string();
-                if msg.contains("no rows") {
+                if e.to_string().contains("no rows") {
                     prax_query::QueryError::not_found(T::MODEL_NAME)
                 } else {
-                    prax_query::QueryError::database(msg)
+                    query_error(e)
                 }
             })?;
 
@@ -764,7 +874,7 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_optional(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             match row {
                 Some(r) => {
@@ -794,7 +904,7 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_one(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             let rr = crate::row_ref::SqlxRowRef::from_sqlx(&row).map_err(|e| {
                 let msg = e.to_string();
@@ -819,7 +929,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             rows.iter()
                 .map(|r| {
@@ -845,10 +955,7 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_delete via QueryEngine");
 
-            let affected = self
-                .raw_execute(&sql, &params)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let affected = self.raw_execute(&sql, &params).await.map_err(query_error)?;
 
             Ok(affected)
         })
@@ -859,10 +966,7 @@ impl QueryEngine for SqlxEngine {
         Box::pin(async move {
             debug!(sql = %sql, "Executing execute_raw via QueryEngine");
 
-            let affected = self
-                .raw_execute(&sql, &params)
-                .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+            let affected = self.raw_execute(&sql, &params).await.map_err(query_error)?;
 
             Ok(affected)
         })
@@ -876,24 +980,15 @@ impl QueryEngine for SqlxEngine {
             let row = self
                 .raw_query_one(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             let count = match row {
                 #[cfg(feature = "postgres")]
-                SqlxRow::Postgres(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::Postgres(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
                 #[cfg(feature = "mysql")]
-                SqlxRow::MySql(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::MySql(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
                 #[cfg(feature = "sqlite")]
-                SqlxRow::Sqlite(r) => r
-                    .try_get::<i64, _>(0)
-                    .map_err(|e| prax_query::QueryError::database(e.to_string()))?
-                    as u64,
+                SqlxRow::Sqlite(r) => r.try_get::<i64, _>(0).map_err(query_error)? as u64,
             };
 
             Ok(count)
@@ -912,7 +1007,7 @@ impl QueryEngine for SqlxEngine {
             let rows = self
                 .raw_query_many(&sql, &params)
                 .await
-                .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                .map_err(query_error)?;
 
             Ok(rows.iter().map(decode_aggregate_row).collect())
         })
@@ -947,26 +1042,17 @@ impl QueryEngine for SqlxEngine {
             let tx_handle = match &*self.pool {
                 #[cfg(feature = "postgres")]
                 SqlxPool::Postgres(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::Postgres(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
                 #[cfg(feature = "mysql")]
                 SqlxPool::MySql(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::MySql(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
                 #[cfg(feature = "sqlite")]
                 SqlxPool::Sqlite(pool) => {
-                    let tx = pool
-                        .begin()
-                        .await
-                        .map_err(|e| prax_query::QueryError::database(e.to_string()))?;
+                    let tx = pool.begin().await.map_err(query_error)?;
                     TxHandle::Sqlite(Arc::new(futures::lock::Mutex::new(Some(tx))))
                 }
             };
@@ -1001,6 +1087,7 @@ impl QueryEngine for SqlxEngine {
 /// lets callers use [`FindManyOperation::with_scalar_projection`] and its
 /// siblings on `SqlxEngine` just like the individual SQL engine crates.
 impl prax_query::capabilities::SupportsScalarSubqueryInSelect for SqlxEngine {}
+impl prax_query::capabilities::SupportsRowLocks for SqlxEngine {}
 
 #[cfg(test)]
 mod tests {
@@ -1206,5 +1293,109 @@ mod tests {
             matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("list values")),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn bind_sqlite_param_accepts_bytes_and_array() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(bind_sqlite_param(sqlx::query::<sqlx::Sqlite>("SELECT ?1"), &bytes).is_ok());
+        assert!(bind_sqlite_param(sqlx::query::<sqlx::Sqlite>("SELECT ?1"), &array).is_ok());
+    }
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn bind_mysql_param_accepts_bytes_and_array() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(bind_mysql_param(sqlx::query::<sqlx::MySql>("SELECT ?"), &bytes).is_ok());
+        assert!(bind_mysql_param(sqlx::query::<sqlx::MySql>("SELECT ?"), &array).is_ok());
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn bind_pg_param_bytes_and_arrays_ok() {
+        let bytes = FilterValue::Bytes(vec![0, 255]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &bytes).is_ok());
+        for array in [
+            FilterValue::Array(vec![FilterValue::Int(1), FilterValue::Null]),
+            FilterValue::Array(vec![FilterValue::Float(1.5)]),
+            FilterValue::Array(vec![FilterValue::Bool(true)]),
+            FilterValue::Array(vec![FilterValue::String("a".into())]),
+            FilterValue::Array(vec![FilterValue::Json(serde_json::json!({"a": 1}))]),
+            FilterValue::Array(vec![FilterValue::Bytes(vec![1, 2])]),
+            FilterValue::Array(vec![]),
+            FilterValue::Array(vec![FilterValue::Null]),
+        ] {
+            assert!(
+                bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &array).is_ok(),
+                "{array:?}"
+            );
+        }
+        let mixed = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &mixed)
+            .err()
+            .expect("mixed array must be rejected");
+        assert!(
+            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("share one scalar kind")),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_array_values_have_exact_contents_and_null_positions() {
+        use FilterValue::*;
+        assert_eq!(
+            pg_array_values(&[Null, Int(1), Null, Int(-2)]).unwrap(),
+            PgArrayValues::Int(vec![None, Some(1), None, Some(-2)])
+        );
+        assert_eq!(
+            pg_array_values(&[Float(1.5), Null]).unwrap(),
+            PgArrayValues::Float(vec![Some(1.5), None])
+        );
+        assert_eq!(
+            pg_array_values(&[Null, Bool(true), Bool(false)]).unwrap(),
+            PgArrayValues::Bool(vec![None, Some(true), Some(false)])
+        );
+        assert_eq!(
+            pg_array_values(&[String("a".into()), Null, String("b".into())]).unwrap(),
+            PgArrayValues::Text(vec![Some("a".into()), None, Some("b".into())])
+        );
+        assert_eq!(
+            pg_array_values(&[Null, Json(serde_json::json!({"a": 1}))]).unwrap(),
+            PgArrayValues::Json(vec![None, Some(serde_json::json!({"a": 1}))])
+        );
+        assert_eq!(
+            pg_array_values(&[Bytes(vec![0, 255]), Null]).unwrap(),
+            PgArrayValues::Bytes(vec![Some(vec![0, 255]), None])
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_array_values_empty_and_all_null_fall_back_to_text() {
+        use FilterValue::*;
+        assert_eq!(pg_array_values(&[]).unwrap(), PgArrayValues::Text(vec![]));
+        assert_eq!(
+            pg_array_values(&[Null, Null]).unwrap(),
+            PgArrayValues::Text(vec![None, None])
+        );
+    }
+
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn pg_array_values_reject_mixed_and_nested() {
+        use FilterValue::*;
+        // Mismatch is detected wherever it sits relative to the first kind.
+        assert!(pg_array_values(&[Int(1), String("a".into())]).is_err());
+        assert!(pg_array_values(&[String("a".into()), Int(1)]).is_err());
+        assert!(pg_array_values(&[Int(1), Float(1.0)]).is_err());
+        assert!(pg_array_values(&[Null, Bool(true), Int(1)]).is_err());
+        assert!(pg_array_values(&[Array(vec![])]).is_err());
+        assert!(pg_array_values(&[List(vec![])]).is_err());
+        assert!(pg_array_values(&[Null, List(vec![])]).is_err());
+        assert!(pg_array_values(&[Int(1), Array(vec![])]).is_err());
     }
 }

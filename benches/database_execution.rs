@@ -163,14 +163,13 @@ mod prax_benchmarks {
             let config = PgConfig::from_url(&url)?;
 
             // Create pool configuration (disable timeouts for benchmark)
-            let pool_config = PoolConfig {
-                max_connections: 5,
-                min_connections: 1,
-                statement_cache_size: 100,
-                connection_timeout: None, // Disable timeout for benchmark
-                idle_timeout: None,
-                max_lifetime: None,
-            };
+            let mut pool_config = PoolConfig::default();
+            pool_config.max_connections = 5;
+            pool_config.min_connections = 1;
+            pool_config.statement_cache_size = 100;
+            pool_config.connection_timeout = None; // Disable timeout for benchmark
+            pool_config.idle_timeout = None;
+            pool_config.max_lifetime = None;
 
             let pool = PgPool::with_pool_config(config, pool_config).await?;
 

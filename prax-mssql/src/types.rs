@@ -23,6 +23,12 @@ pub fn filter_value_to_sql(value: &FilterValue) -> MssqlResult<Box<dyn tiberius:
                 "list values should be handled specially",
             ))
         }
+        FilterValue::Bytes(b) => Ok(Box::new(b.clone())),
+        // Arrays are sent as JSON text (NVARCHAR).
+        FilterValue::Array(_) => Ok(Box::new(value.to_json_value().to_string())),
+        _ => Err(MssqlError::type_conversion(
+            "unsupported FilterValue variant",
+        )),
     }
 }
 
@@ -189,6 +195,25 @@ pub mod dialect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_bind() {
+        use tiberius::ColumnData;
+        let bytes = filter_value_to_sql(&FilterValue::Bytes(vec![0, 255])).unwrap();
+        assert_eq!(
+            bytes.to_sql(),
+            ColumnData::Binary(Some(std::borrow::Cow::Borrowed(&[0u8, 255][..])))
+        );
+        let array = filter_value_to_sql(&FilterValue::Array(vec![
+            FilterValue::Int(1),
+            FilterValue::String("a".into()),
+        ]))
+        .unwrap();
+        assert_eq!(
+            array.to_sql(),
+            ColumnData::String(Some(std::borrow::Cow::Borrowed("[1,\"a\"]")))
+        );
+    }
 
     #[test]
     fn test_filter_value_to_sql() {

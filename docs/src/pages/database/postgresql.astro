@@ -45,6 +45,31 @@ postgres://user:password@host:5432/mydb?sslmode=verify-full
 # Plaintext only
 postgres://user:password@host:5432/mydb?sslmode=disable`;
 
+const rowLockCode = `use prax_query::advanced::RowLock;
+
+// Locks are held until the surrounding transaction ends, so use them inside one.
+client.transaction(|tx| async move {
+    // SELECT ... FOR UPDATE
+    let jobs = tx.job().find_many().for_update().exec().await?;
+
+    // Work-queue claim: SELECT ... LIMIT 1 FOR UPDATE SKIP LOCKED
+    let next = tx
+        .job()
+        .find_first()
+        .lock(RowLock::for_update().skip_locked())
+        .exec()
+        .await?;
+
+    // FOR NO KEY UPDATE / FOR KEY SHARE, restricted to one table (OF jobs)
+    let rows = tx
+        .job()
+        .find_many()
+        .lock(RowLock::for_no_key_update().of(["jobs"]).nowait())
+        .exec()
+        .await?;
+    Ok(())
+}).await?;`;
+
 const tlsFeatureCode = `# TLS support is enabled by default via the "tls" cargo feature.
 # To build without it (minimal dependency tree), disable default features.
 # TLS-requiring sslmodes then fail at pool build time with a clear
@@ -435,6 +460,59 @@ SET hnsw.ef_search = 100;  -- Higher = better recall, slower`;
 
         <h3 class="text-xl font-medium mb-3 mt-8">Disabling the TLS Feature</h3>
         <CodeBlock code={tlsFeatureCode} lang="toml" filename="Cargo.toml" />
+      </section>
+
+      <section>
+        <h2 class="text-2xl font-semibold mb-4">Row Locking</h2>
+        <p class="text-muted mb-4">
+          Lock rows with <code>.lock(RowLock::...)</code>, <code>.for_update()</code> or
+          <code>.for_share()</code> on <code>find_many</code>, <code>find_first</code> and
+          <code>find_unique</code>. Locks are held until the surrounding transaction ends; outside a
+          transaction they are released when the statement finishes. Combinations the database
+          cannot express return an error before the query runs, and
+          <code>try_build_sql</code> reports the same error without executing anything.
+        </p>
+        <CodeBlock code={rowLockCode} lang="rust" filename="src/main.rs" />
+        <div class="overflow-x-auto mt-6">
+          <table class="w-full text-sm border border-border rounded-lg">
+            <thead class="bg-muted/50">
+              <tr>
+                <th class="px-4 py-3 text-left font-medium">Database</th>
+                <th class="px-4 py-3 text-left font-medium">Strengths</th>
+                <th class="px-4 py-3 text-left font-medium">NOWAIT / SKIP LOCKED</th>
+                <th class="px-4 py-3 text-left font-medium">OF tables</th>
+                <th class="px-4 py-3 text-left font-medium">Rendered as</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">PostgreSQL</td>
+                <td class="px-4 py-3 text-muted">UPDATE, NO KEY UPDATE, SHARE, KEY SHARE</td>
+                <td class="px-4 py-3 text-muted">Both</td>
+                <td class="px-4 py-3 text-muted">Yes (plain identifiers; must match the FROM table name)</td>
+                <td class="px-4 py-3 text-muted">Trailing <code>FOR ...</code> clause</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">MySQL 8+</td>
+                <td class="px-4 py-3 text-muted">UPDATE, SHARE</td>
+                <td class="px-4 py-3 text-muted">Both</td>
+                <td class="px-4 py-3 text-muted">No</td>
+                <td class="px-4 py-3 text-muted">Trailing <code>FOR ...</code> clause</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">SQL Server</td>
+                <td class="px-4 py-3 text-muted">UPDATE, SHARE</td>
+                <td class="px-4 py-3 text-muted">NOWAIT; SKIP LOCKED (READPAST) with UPDATE only</td>
+                <td class="px-4 py-3 text-muted">No</td>
+                <td class="px-4 py-3 text-muted">Table hint after the table name</td>
+              </tr>
+              <tr class="border-t border-border">
+                <td class="px-4 py-3 font-mono text-primary">SQLite, DuckDB, MongoDB, CQL</td>
+                <td class="px-4 py-3 text-muted" colspan="4">Not supported (<code>.lock(..)</code> does not compile)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section>

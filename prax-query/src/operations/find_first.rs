@@ -2,7 +2,8 @@
 
 use std::marker::PhantomData;
 
-use crate::capabilities::SupportsScalarSubqueryInSelect;
+use crate::advanced::RowLock;
+use crate::capabilities::{SupportsRowLocks, SupportsScalarSubqueryInSelect};
 use crate::error::QueryResult;
 use crate::filter::Filter;
 use crate::projection::ScalarProjection;
@@ -37,6 +38,8 @@ pub struct FindFirstOperation<E: QueryEngine, M: Model> {
     /// Extra scalar-subquery columns appended to the SELECT clause.
     /// Used by relation-aggregate virtual fields (`@count`, `@sum`, …).
     pub extra_projections: Vec<ScalarProjection>,
+    /// Row lock appended to the statement (`FOR UPDATE`, MSSQL hints, ...).
+    lock: Option<RowLock>,
     _model: PhantomData<M>,
 }
 
@@ -50,6 +53,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
             select: Select::All,
             includes: Vec::new(),
             extra_projections: Vec::new(),
+            lock: None,
             _model: PhantomData,
         }
     }
@@ -135,8 +139,20 @@ where
     }
 }
 
+impl<E, M> FindFirstOperation<E, M>
+where
+    E: QueryEngine + SupportsRowLocks,
+    M: Model + crate::row::FromRow,
+{
+    super::lock::row_lock_methods!();
+}
+
 impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
     /// Build the SQL query.
+    ///
+    /// A row lock the dialect cannot express (see `lock`) is left out of
+    /// the SQL built here. Use [`try_build_sql`](Self::try_build_sql) to
+    /// get an error instead.
     pub fn build_sql(
         &self,
         dialect: &dyn crate::dialect::SqlDialect,
@@ -171,6 +187,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         // FROM clause
         sql.push_str(" FROM ");
         sql.push_str(M::TABLE_NAME);
+        let lock_sql = super::lock::render(self.lock.as_ref(), dialect);
+        lock_sql.push_table_hint(&mut sql);
 
         // WHERE clause
         if !self.filter.is_none() {
@@ -188,7 +206,22 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         // LIMIT 1
         sql.push_str(" LIMIT 1");
 
+        lock_sql.push_suffix(&mut sql);
+
         (sql, params)
+    }
+
+    /// Build the SQL query, failing if the dialect cannot express the row
+    /// lock.
+    ///
+    /// Unlike [`build_sql`](Self::build_sql), which leaves a rejected lock
+    /// out of the SQL, this reports the error. `exec` uses this method.
+    pub fn try_build_sql(
+        &self,
+        dialect: &dyn crate::dialect::SqlDialect,
+    ) -> QueryResult<(String, Vec<crate::filter::FilterValue>)> {
+        super::lock::validate(self.lock.as_ref(), dialect)?;
+        Ok(self.build_sql(dialect))
     }
 
     /// Execute the query and return an optional result.
@@ -197,7 +230,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         match self.engine.query_optional::<M>(&sql, params).await? {
             None => Ok(None),
             Some(row) => {
@@ -217,7 +250,7 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
         M: Send + 'static + ModelRelationLoader<E>,
     {
         let dialect = self.engine.dialect();
-        let (sql, params) = self.build_sql(dialect);
+        let (sql, params) = self.try_build_sql(dialect)?;
         let row = self.engine.query_one::<M>(&sql, params).await?;
         let mut parents = vec![row];
         for spec in &self.includes {

@@ -404,6 +404,18 @@ impl FromColumn for i32 {
     }
 }
 
+/// Decodes through the `i32` getter (INT4 columns on Postgres; SMALLINT is
+/// not supported) and range-checks the value into `u8`.
+impl FromColumn for u8 {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
+        let v = row.get_i32(column)?;
+        u8::try_from(v).map_err(|_| RowError::TypeConversion {
+            column: column.to_string(),
+            message: format!("value {v} out of range for u8"),
+        })
+    }
+}
+
 impl FromColumn for i64 {
     fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
         row.get_i64(column)
@@ -677,6 +689,24 @@ mod tests {
         let row = MockRow { data };
         assert!(matches!(
             row.get_datetime_utc("created_at"),
+            Err(RowError::TypeConversion { .. })
+        ));
+    }
+
+    #[test]
+    fn from_column_u8_range_checks() {
+        let mut data = std::collections::HashMap::new();
+        data.insert("ok".to_string(), "255".to_string());
+        data.insert("big".to_string(), "256".to_string());
+        data.insert("neg".to_string(), "-1".to_string());
+        let row = MockRow { data };
+        assert_eq!(u8::from_column(&row, "ok").unwrap(), 255);
+        assert!(matches!(
+            u8::from_column(&row, "big"),
+            Err(RowError::TypeConversion { .. })
+        ));
+        assert!(matches!(
+            u8::from_column(&row, "neg"),
             Err(RowError::TypeConversion { .. })
         ));
     }

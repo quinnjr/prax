@@ -258,15 +258,8 @@ fn value_to_f64(v: &crate::filter::FilterValue) -> Option<f64> {
 fn filter_value_to_json(v: &crate::filter::FilterValue) -> serde_json::Value {
     use crate::filter::FilterValue;
     match v {
-        FilterValue::Null => serde_json::Value::Null,
-        FilterValue::Bool(b) => serde_json::Value::Bool(*b),
-        FilterValue::Int(n) => serde_json::Value::from(*n),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-        FilterValue::String(s) => serde_json::Value::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
         FilterValue::List(_) => serde_json::Value::Null,
+        other => other.to_json_value(),
     }
 }
 
