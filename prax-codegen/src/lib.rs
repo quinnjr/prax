@@ -585,3 +585,69 @@ fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, s
 
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::generate_from_schema;
+
+    /// The TimescaleDB spec's §3.1 example.
+    const TIMESCALE_EXAMPLE: &str = r#"
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [timescaledb]
+}
+
+model Metric {
+  time     DateTime
+  deviceId String
+  value    Float
+
+  @@id([deviceId, time])
+  @@timescale.hypertable(time, chunkInterval: "1 day", space: hash(deviceId, 4))
+  @@timescale.columnstore(segmentBy: [deviceId], orderBy: [desc(time)], after: "7 days")
+  @@timescale.retention(dropAfter: "90 days")
+}
+
+view HourlyMetric {
+  bucket   DateTime
+  deviceId String
+  avgValue Float
+
+  @@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour")
+}
+
+@@sql("HourlyMetric", """
+SELECT time_bucket('1 hour', "time") AS bucket, "deviceId", avg("value") AS "avgValue"
+FROM "Metric"
+GROUP BY 1, 2
+""")
+"#;
+
+    /// Run the `prax_schema!` pipeline on `source` written to a fresh
+    /// directory (so no `prax.toml` is picked up).
+    fn generate(source: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema.prax");
+        std::fs::write(&path, source).unwrap();
+        generate_from_schema(path.to_str().unwrap())
+            .unwrap_or_else(|e| panic!("codegen failed: {e}"))
+            .to_string()
+    }
+
+    #[test]
+    fn test_timescale_attributes_do_not_affect_codegen() {
+        let with = generate(TIMESCALE_EXAMPLE);
+        assert!(!with.contains("compile_error"), "{with}");
+        assert!(with.contains("pub mod metric"), "{with}");
+        assert!(with.contains("pub mod hourly_metric"), "{with}");
+
+        // `@@timescale.*` changes no generated Rust.
+        let without: String = TIMESCALE_EXAMPLE
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("@@timescale."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(with, generate(&without));
+    }
+}
