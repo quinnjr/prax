@@ -17,6 +17,8 @@
 //! | Enums                | ✅         | ✅    | ❌     | ❌    | ❌            |
 //! | Views                | ✅         | ✅    | ✅     | ✅    | ✅            |
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::sql::{DatabaseType, escape_literal};
@@ -920,8 +922,30 @@ fn normalize_mssql_type(
 // Schema Generation
 // ============================================================================
 
+/// Caller-supplied additions to the generated Prax schema text.
+///
+/// Lets callers (e.g. `prax db pull`) inject database-specific attribute
+/// lines and blocks without the generator knowing about them.
+#[derive(Debug, Clone, Default)]
+pub struct RenderExtras {
+    /// Extra lines per table name, rendered verbatim (the caller supplies
+    /// indentation) after the model's generated attributes, before `}`.
+    pub model_attributes: HashMap<String, Vec<String>>,
+    /// Extra blocks appended after the views, each followed by `\n`.
+    pub extra_blocks: Vec<String>,
+    /// Database view names that the caller renders itself and must be skipped.
+    pub skip_views: HashSet<String>,
+}
+
 /// Generate Prax schema from introspection result.
 pub fn generate_prax_schema(db: &DatabaseSchema) -> String {
+    generate_prax_schema_with(db, &RenderExtras::default())
+}
+
+/// Generate Prax schema from introspection result, applying [`RenderExtras`].
+///
+/// With default extras the output is identical to [`generate_prax_schema`].
+pub fn generate_prax_schema_with(db: &DatabaseSchema, extras: &RenderExtras) -> String {
     let mut output = String::new();
 
     // Header comment
@@ -936,13 +960,26 @@ pub fn generate_prax_schema(db: &DatabaseSchema) -> String {
 
     // Generate models
     for table in &db.tables {
-        output.push_str(&generate_model(table, &db.tables));
+        let extra = extras
+            .model_attributes
+            .get(&table.name)
+            .map_or(&[][..], Vec::as_slice);
+        output.push_str(&generate_model_with(table, &db.tables, extra));
         output.push('\n');
     }
 
     // Generate views
     for view in &db.views {
+        if extras.skip_views.contains(&view.name) {
+            continue;
+        }
         output.push_str(&generate_view(view));
+        output.push('\n');
+    }
+
+    // Caller-rendered blocks
+    for block in &extras.extra_blocks {
+        output.push_str(block);
         output.push('\n');
     }
 
@@ -1062,6 +1099,14 @@ fn escape_map_value(raw: &str) -> String {
 }
 
 fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
+    generate_model_with(table, all_tables, &[])
+}
+
+fn generate_model_with(
+    table: &TableInfo,
+    all_tables: &[TableInfo],
+    extra_lines: &[String],
+) -> String {
     let mut output = String::new();
 
     // Comment
@@ -1086,6 +1131,16 @@ fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
     if !attrs.is_empty() {
         output.push('\n');
         output.push_str(&attrs);
+    }
+
+    if !extra_lines.is_empty() {
+        if attrs.is_empty() {
+            output.push('\n');
+        }
+        for line in extra_lines {
+            output.push_str(line);
+            output.push('\n');
+        }
     }
 
     output.push_str("}\n");
@@ -1457,7 +1512,8 @@ pub fn pascal_case(s: &str) -> String {
         .collect()
 }
 
-fn camel_case(s: &str) -> String {
+/// Convert a snake_case identifier to camelCase.
+pub fn camel_case(s: &str) -> String {
     let pascal = pascal_case(s);
     let mut chars = pascal.chars();
     match chars.next() {
@@ -1492,6 +1548,68 @@ fn simplify_default(default: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn extras_fixture() -> DatabaseSchema {
+        DatabaseSchema {
+            name: "db".into(),
+            tables: vec![TableInfo {
+                name: "metrics".into(),
+                columns: vec![ColumnInfo {
+                    name: "id".into(),
+                    db_type: "int4".into(),
+                    ..Default::default()
+                }],
+                primary_key: vec!["id".into()],
+                ..Default::default()
+            }],
+            views: vec![
+                ViewInfo {
+                    name: "v".into(),
+                    ..Default::default()
+                },
+                ViewInfo {
+                    name: "w".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_generate_with_empty_extras_is_identical() {
+        let db = extras_fixture();
+        assert_eq!(
+            generate_prax_schema_with(&db, &RenderExtras::default()),
+            generate_prax_schema(&db)
+        );
+    }
+
+    #[test]
+    fn test_generate_with_model_attributes() {
+        let db = extras_fixture();
+        let line = "    @@timescale.retention(dropAfter: \"90 days\")";
+        let mut extras = RenderExtras::default();
+        extras
+            .model_attributes
+            .insert("metrics".into(), vec![line.to_string()]);
+        let out = generate_prax_schema_with(&db, &extras);
+        let start = out.find("model Metrics {").unwrap();
+        let end = start + out[start..].find("\n}\n").unwrap();
+        assert!(out[start..end].contains(line));
+    }
+
+    #[test]
+    fn test_generate_with_skip_views_and_blocks() {
+        let db = extras_fixture();
+        let mut extras = RenderExtras::default();
+        extras.skip_views.insert("v".into());
+        extras.extra_blocks.push("view Agg {\n}\n".into());
+        let out = generate_prax_schema_with(&db, &extras);
+        assert!(!out.contains("view V {"));
+        assert!(out.contains("view W {"));
+        assert!(out.ends_with("view Agg {\n}\n\n"));
+    }
 
     #[test]
     fn test_pascal_case() {
