@@ -210,7 +210,8 @@ fn aggregate_creates(diff: &TimescaleDiff) -> (Vec<String>, Vec<String>, Vec<Str
         let body = sql.trim_end();
         let body = body.strip_suffix(';').unwrap_or(body).trim_end();
         up.push(format!(
-            "CREATE MATERIALIZED VIEW {view}\n  WITH (timescaledb.continuous, timescaledb.materialized_only = true) AS\n{body}\nWITH NO DATA;"
+            "CREATE MATERIALIZED VIEW {view}\n  WITH (timescaledb.continuous, timescaledb.materialized_only = {}) AS\n{body}\nWITH NO DATA;",
+            agg.materialized_only
         ));
         up.push(format!(
             "COMMENT ON VIEW {view} IS {};",
@@ -801,6 +802,19 @@ mod tests {
 
     const HOURLY_SQL: &str =
         "SELECT time_bucket('1 hour', time) AS bucket FROM \"Metric\" GROUP BY 1";
+
+    #[test]
+    fn test_create_aggregate_uses_declared_materialized_only() {
+        let mut real_time = agg("HourlyMetric", "Metric", HOURLY_SQL, true);
+        real_time.materialized_only = false;
+        let p = post(&diff_of(vec![set(false, vec![], vec![], vec![real_time])]));
+        assert_eq!(
+            p.up[0],
+            format!(
+                "CREATE MATERIALIZED VIEW \"HourlyMetric\"\n  WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS\n{HOURLY_SQL}\nWITH NO DATA;"
+            )
+        );
+    }
 
     #[test]
     fn test_create_aggregate_sql() {
