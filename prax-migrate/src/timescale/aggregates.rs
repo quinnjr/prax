@@ -52,8 +52,9 @@ pub(crate) fn topo_order(aggs: &[AggregateState]) -> Vec<AggregateState> {
 /// `AggregateSet`, the gated one, then policy and `materialized_only` changes
 /// in view-name order. Unmarked aggregates add warnings.
 ///
-/// `generic` supplies the column alters and drops that force the aggregates
-/// reading a table to be recreated (spec §4.8).
+/// `generic` supplies the column type changes and drops that force the
+/// aggregates reading a table to be recreated (spec §4.8); default-only and
+/// nullability-only alters do not.
 ///
 /// # Errors
 ///
@@ -74,7 +75,7 @@ pub(crate) fn diff_aggregates(
 
     // Catalog aggregates that must go (spec §5.5): changed SQL, no longer an
     // aggregate in the target (handed off when the target declares a view of
-    // that name), or reading a table whose columns are altered or dropped.
+    // that name), or reading a table whose columns are type-changed or dropped.
     let mut changed = BTreeSet::new();
     let mut removed = BTreeSet::new();
     let mut handoff_views = Vec::new();
@@ -115,10 +116,13 @@ pub(crate) fn diff_aggregates(
             .filter(|a| a.source == alter.table_name)
             .map(|a| &a.view)
             .collect();
+        // Postgres refuses only `ALTER COLUMN … TYPE` and `DROP COLUMN` on a
+        // column a view depends on; `new_type` is set only for type changes.
         // `drop_fields` holds column names.
         let columns: Vec<&String> = alter
             .alter_fields
             .iter()
+            .filter(|f| f.new_type.is_some())
             .map(|f| &f.column_name)
             .chain(&alter.drop_fields)
             .collect();
@@ -317,7 +321,8 @@ impl GatedSet {
                 .collect();
             let one = columns.len() == 1;
             sentences.push(format!(
-                "{} {} {} altered or dropped, which Postgres refuses while a view depends on {}.",
+                "{} {} {} type-changed or dropped, which Postgres refuses while a view depends \
+                 on {}.",
                 if one { "Column" } else { "Columns" },
                 columns.join(", "),
                 if one { "is" } else { "are" },
@@ -1000,6 +1005,50 @@ mod tests {
         for needle in ["\"Metric\".\"value\"", "materialized data"] {
             assert!(set.note.contains(needle), "{needle}: {}", set.note);
         }
+    }
+
+    #[test]
+    fn test_source_column_default_or_nullability_alter_is_not_coupled() {
+        // Default-only, then nullability-only: Postgres allows both on a
+        // column a view depends on.
+        for value in ["Float @default(0)", "Float?"] {
+            let diff = run(
+                &target_with(value, &[view("HourlyMetric", HOURLY, HOURLY_SQL)]),
+                Some(catalog(vec![hourly()], &[])),
+            )
+            .unwrap();
+            assert_eq!(diff.alter_models.len(), 1, "{value}");
+            let alter = &diff.alter_models[0].alter_fields;
+            assert_eq!(alter.len(), 1, "{value}: {alter:?}");
+            assert_eq!(alter[0].column_name, "value");
+            assert!(alter[0].new_type.is_none(), "{value}: {alter:?}");
+            assert!(
+                diff.timescale.is_empty(),
+                "{value}: {:#?}",
+                diff.timescale.changes
+            );
+        }
+    }
+
+    #[test]
+    fn test_only_type_changed_columns_are_coupled() {
+        let diff = run_from(
+            &target_with(
+                "Float\n  label    String @default(\"x\")",
+                &[view("HourlyMetric", HOURLY, HOURLY_SQL)],
+            ),
+            &source_with("value    Int\n  label    String"),
+            Some(catalog(vec![hourly()], &[])),
+        )
+        .unwrap();
+        assert_eq!(diff.alter_models.len(), 1);
+        assert_eq!(diff.alter_models[0].alter_fields.len(), 2);
+
+        let set = only_set(&diff.timescale);
+        assert!(set.gated);
+        assert_eq!(set.coupled_columns, [("Metric", "value")]);
+        assert_eq!(set.create_views(), ["HourlyMetric"]);
+        assert!(set.note.contains("type-changed or dropped"), "{}", set.note);
     }
 
     #[test]

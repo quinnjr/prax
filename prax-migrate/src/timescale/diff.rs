@@ -151,8 +151,8 @@ pub enum TimescaleChangeKind {
         /// views; the generic pipeline creates those views
         /// (`SchemaDiff::create_views`).
         handoff_views: Vec<String>,
-        /// `(table, column)` alters and drops in the generic diff that force
-        /// this recreation (spec §4.8).
+        /// `(table, column)` type changes and drops in the generic diff that
+        /// force this recreation (spec §4.8).
         coupled_columns: Vec<(String, String)>,
     },
     /// Add, change or remove a continuous aggregate's refresh policy.
@@ -212,8 +212,8 @@ impl TimescaleChangeKind {
 /// `generic` is the schema diff built so far: a table it creates is new and
 /// empty (adding its retention policy is not gated), while a table in `source`
 /// that it does not create already exists and is converted with
-/// `migrate_data`. Its column alters and drops force the recreation of the
-/// aggregates reading that table (spec §4.8). Without a catalog the database
+/// `migrate_data`. Its column type changes and drops force the recreation of
+/// the aggregates reading that table (spec §4.8). Without a catalog the database
 /// has no Timescale state. Hypertable changes come first, tables in name
 /// order, then aggregate changes, so `changes` is stable.
 ///
