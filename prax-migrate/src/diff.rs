@@ -80,6 +80,70 @@ impl SchemaDiff {
             && self.timescale.is_empty()
     }
 
+    /// Remove every gated TimescaleDB change and what is coupled to it.
+    ///
+    /// Drops the gated entries of `timescale.changes`, the `create_views`
+    /// entries a stripped aggregate set hands off, and the column alters and
+    /// drops that force a stripped recreation (`alter_models` entries left
+    /// empty are removed). Returns one note per stripped change, in change
+    /// order. A stripped aggregate set that creates aggregates also reports
+    /// that their refresh policy and `materializedOnly` values are deferred.
+    pub fn strip_timescale_gated(&mut self) -> Vec<String> {
+        use crate::timescale::TimescaleChangeKind;
+
+        let mut notes = Vec::new();
+        let mut handoffs: Vec<String> = Vec::new();
+        let mut coupled: Vec<(String, String)> = Vec::new();
+
+        let changes = std::mem::take(&mut self.timescale.changes);
+        for change in changes {
+            if !change.gated {
+                self.timescale.changes.push(change);
+                continue;
+            }
+            let mut note = change.description();
+            if let TimescaleChangeKind::AggregateSet {
+                create,
+                handoff_views,
+                coupled_columns,
+                ..
+            } = &change.kind
+            {
+                if !create.is_empty() {
+                    note.truncate(note.trim_end_matches('.').len());
+                    note.push_str(
+                        ". The recreated aggregates' new refresh-policy and materializedOnly \
+                         values are deferred with it",
+                    );
+                }
+                handoffs.extend(handoff_views.iter().cloned());
+                coupled.extend(coupled_columns.iter().cloned());
+            }
+            notes.push(note);
+        }
+
+        self.create_views
+            .retain(|v| !handoffs.iter().any(|h| *h == v.view_name || *h == v.name));
+
+        for alter in &mut self.alter_models {
+            for (_, column) in coupled.iter().filter(|(t, _)| *t == alter.table_name) {
+                alter.alter_fields.retain(|f| f.column_name != *column);
+                alter.drop_fields.retain(|c| c != column);
+            }
+        }
+        self.alter_models.retain(|a| {
+            !(a.add_fields.is_empty()
+                && a.drop_fields.is_empty()
+                && a.alter_fields.is_empty()
+                && a.add_indexes.is_empty()
+                && a.drop_indexes.is_empty()
+                && a.add_foreign_keys.is_empty()
+                && a.drop_foreign_keys.is_empty())
+        });
+
+        notes
+    }
+
     /// Get a human-readable summary of the diff.
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
@@ -1875,6 +1939,163 @@ fn ast_procedure_to_definition(p: &prax_schema::ast::Procedure) -> ProcedureDefi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod strip_gated {
+        use super::*;
+        use crate::timescale::catalog::AggregateState;
+        use crate::timescale::{TimescaleChange, TimescaleChangeKind};
+        use prax_schema::ast::PgInterval;
+
+        fn days(n: i32) -> PgInterval {
+            PgInterval {
+                months: 0,
+                days: n,
+                micros: 0,
+            }
+        }
+
+        fn retention(gated: bool, note: &str) -> TimescaleChange {
+            TimescaleChange {
+                kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+                    table: "Metric".into(),
+                    old: None,
+                    new: Some(days(90)),
+                },
+                gated,
+                note: Some(note.into()),
+            }
+        }
+
+        fn columnstore_policy() -> TimescaleChange {
+            TimescaleChange {
+                kind: TimescaleChangeKind::ReplaceColumnstorePolicy {
+                    table: "Metric".into(),
+                    old: Some(days(7)),
+                    new: Some(days(14)),
+                },
+                gated: false,
+                note: None,
+            }
+        }
+
+        fn aggregate(create: bool, note: Option<&str>) -> TimescaleChange {
+            let state = AggregateState {
+                view: "HourlyMetric".into(),
+                source: "Metric".into(),
+                sql: Some("SELECT 1".into()),
+                materialized_only: false,
+                policy: None,
+            };
+            TimescaleChange {
+                kind: TimescaleChangeKind::AggregateSet {
+                    drop_aggregates: vec![state.clone()],
+                    drop_views: vec![],
+                    create: if create { vec![state] } else { vec![] },
+                    handoff_views: vec!["HourlyMetric".into()],
+                    coupled_columns: vec![("Metric".into(), "value".into())],
+                },
+                gated: true,
+                note: note.map(Into::into),
+            }
+        }
+
+        fn alter(table: &str) -> ModelAlterDiff {
+            ModelAlterDiff {
+                name: table.into(),
+                table_name: table.into(),
+                add_fields: vec![],
+                drop_fields: vec![],
+                alter_fields: vec![],
+                add_indexes: vec![],
+                drop_indexes: vec![],
+                add_foreign_keys: vec![],
+                drop_foreign_keys: vec![],
+            }
+        }
+
+        fn field_alter(column: &str) -> FieldAlterDiff {
+            FieldAlterDiff {
+                name: column.into(),
+                column_name: column.into(),
+                old_type: Some("INTEGER".into()),
+                new_type: Some("BIGINT".into()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }
+        }
+
+        fn view(name: &str) -> ViewDiff {
+            ViewDiff {
+                name: name.into(),
+                view_name: name.into(),
+                sql_query: "SELECT 1".into(),
+                is_materialized: false,
+                refresh_interval: None,
+                fields: vec![],
+            }
+        }
+
+        #[test]
+        fn test_strip_removes_gated_and_keeps_ungated() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![retention(true, "adds retention"), columnstore_policy()];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["adds retention".to_string()]);
+            assert_eq!(diff.timescale.changes.len(), 1);
+            assert!(!diff.timescale.changes[0].gated);
+        }
+
+        #[test]
+        fn test_strip_removes_handoff_view() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, Some("drops aggregate"))];
+            diff.create_views = vec![view("HourlyMetric"), view("Other")];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["drops aggregate".to_string()]);
+            assert_eq!(diff.create_views.len(), 1);
+            assert_eq!(diff.create_views[0].name, "Other");
+        }
+
+        #[test]
+        fn test_strip_removes_coupled_column_alter() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, None)];
+            let mut metric = alter("Metric");
+            metric.alter_fields = vec![field_alter("value")];
+            let mut other = alter("Metric2");
+            other.alter_fields = vec![field_alter("value")];
+            let mut partial = alter("Metric");
+            partial.alter_fields = vec![field_alter("value"), field_alter("keep")];
+            partial.drop_fields = vec!["value".into(), "gone".into()];
+            diff.alter_models = vec![metric, other, partial];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["AggregateSet on \"HourlyMetric\"".to_string()]);
+            assert_eq!(diff.alter_models.len(), 2, "empty alter removed");
+            assert_eq!(diff.alter_models[0].table_name, "Metric2");
+            assert_eq!(diff.alter_models[1].alter_fields.len(), 1);
+            assert_eq!(diff.alter_models[1].alter_fields[0].column_name, "keep");
+            assert_eq!(diff.alter_models[1].drop_fields, vec!["gone".to_string()]);
+        }
+
+        #[test]
+        fn test_strip_notes_deferred_policy_when_creating_aggregates() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(true, Some("Recreates \"HourlyMetric\"."))];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes.len(), 1);
+            assert!(
+                notes[0].starts_with("Recreates \"HourlyMetric\"."),
+                "{notes:?}"
+            );
+            assert!(
+                notes[0].contains("refresh-policy and materializedOnly values are deferred"),
+                "{notes:?}"
+            );
+            assert!(!notes[0].contains(".."), "{notes:?}");
+        }
+    }
 
     fn ext_schema(exts: &str) -> Schema {
         prax_schema::parse_schema(&format!(
