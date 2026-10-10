@@ -154,9 +154,10 @@ impl TimescaleChangeKind {
 /// Diff the target's hypertables against the live catalog.
 ///
 /// `generic` is the schema diff built so far: a table it creates is new and
-/// empty, while a table in `source` that it does not create already exists and
-/// is converted with `migrate_data`. Without a catalog the database has no
-/// Timescale state. Tables are visited in name order, so `changes` is stable.
+/// empty (adding its retention policy is not gated), while a table in `source`
+/// that it does not create already exists and is converted with
+/// `migrate_data`. Without a catalog the database has no Timescale state.
+/// Tables are visited in name order, so `changes` is stable.
 ///
 /// # Errors
 ///
@@ -200,9 +201,10 @@ pub fn diff_timescale(
         match catalog.and_then(|c| c.hypertables.get(&table)) {
             Some(have) => alter_hypertable(have, &want, &mut diff.changes)?,
             None => {
-                let exists = !generic.create_models.iter().any(|m| m.table_name == table)
+                let created = generic.create_models.iter().any(|m| m.table_name == table);
+                let exists = !created
                     && source.is_some_and(|s| s.models.values().any(|m| m.table_name() == table));
-                create_hypertable(&want, exists, &mut diff.changes)?;
+                create_hypertable(&want, created, exists, &mut diff.changes)?;
             }
         }
     }
@@ -224,9 +226,12 @@ fn change(kind: TimescaleChangeKind, gated: bool, note: Option<String>) -> Times
     TimescaleChange { kind, gated, note }
 }
 
-/// A table without a hypertable in the catalog: new (empty) or existing.
+/// A table without a hypertable in the catalog. `created`: the table is created
+/// in this migration, so it is empty. `exists`: it already exists and holds
+/// rows to convert.
 fn create_hypertable(
     want: &HypertableState,
+    created: bool,
     exists: bool,
     out: &mut Vec<TimescaleChange>,
 ) -> MigrateResult<()> {
@@ -258,7 +263,19 @@ fn create_hypertable(
         note,
     ));
     columnstore_changes(table, None, want.columnstore.as_ref(), out);
-    retention_change(table, None, want.retention, out);
+    match want.retention {
+        // A table created in this migration holds no data the policy could drop.
+        Some(new) if created => out.push(change(
+            TimescaleChangeKind::ReplaceRetentionPolicy {
+                table: table.clone(),
+                old: None,
+                new: Some(new),
+            },
+            false,
+            None,
+        )),
+        _ => retention_change(table, None, want.retention, out),
+    }
     Ok(())
 }
 
@@ -430,9 +447,10 @@ fn columnstore_changes(
     }
 }
 
-/// Adding retention or shortening `dropAfter` is gated; shortening compares
-/// conservatively (`new.lower < old.upper`), so month-based intervals that
-/// might be shorter count as shorter.
+/// Adding retention to an existing table or shortening `dropAfter` is gated
+/// (tables created in this migration are handled by `create_hypertable`).
+/// Shortening compares conservatively (`new.lower < old.upper`), so
+/// month-based intervals that might be shorter count as shorter.
 fn retention_change(
     table: &str,
     old: Option<PgInterval>,
@@ -621,8 +639,11 @@ mod tests {
             TimescaleChangeKind::ReplaceRetentionPolicy { table, old: None, new: Some(n) }
                 if table == "Metric" && *n == days(90)
         ));
-        assert!(diff.changes[3].gated, "adding retention is gated");
-        assert_eq!(diff.gated_notes().len(), 1);
+        assert!(
+            !diff.changes[3].gated,
+            "retention on a table created in this migration is ungated"
+        );
+        assert!(diff.gated_notes().is_empty());
     }
 
     #[test]
@@ -638,6 +659,60 @@ mod tests {
         assert!(!change.gated);
         assert!(note(change).contains("rewrites its rows"), "{change:?}");
         assert!(note(change).contains("\"Metric\""), "{change:?}");
+    }
+
+    #[test]
+    fn test_existing_table_conversion_with_retention_is_gated() {
+        let target = metric(&[
+            "@@timescale.hypertable(time, chunkInterval: \"1 day\")",
+            RETENTION,
+        ]);
+        let diff = run(&target, Some(&plain_metric()), None).unwrap();
+        assert_eq!(diff.changes.len(), 2, "changes: {:#?}", diff.changes);
+        assert!(matches!(
+            &diff.changes[0].kind,
+            TimescaleChangeKind::CreateHypertable {
+                migrate_data: true,
+                ..
+            }
+        ));
+        let retention = &diff.changes[1];
+        assert!(matches!(
+            &retention.kind,
+            TimescaleChangeKind::ReplaceRetentionPolicy { table, old: None, new: Some(n) }
+                if table == "Metric" && *n == days(90)
+        ));
+        assert!(retention.gated);
+        assert!(
+            note(retention).contains("automatically drops chunks older than 90 days"),
+            "{retention:?}"
+        );
+        assert_eq!(diff.gated_notes(), vec![note(retention).to_string()]);
+    }
+
+    #[test]
+    fn test_retention_stays_gated_when_table_is_neither_created_nor_in_source() {
+        // An inconsistent `generic` (table not created, no source schema): the
+        // table is treated as new for `migrate_data`, but retention stays gated.
+        let diff =
+            diff_timescale(&schema(&full_metric()), None, None, &SchemaDiff::default()).unwrap();
+        assert!(matches!(
+            &diff.changes[0].kind,
+            TimescaleChangeKind::CreateHypertable {
+                migrate_data: false,
+                ..
+            }
+        ));
+        let retention = diff.changes.last().unwrap();
+        assert!(matches!(
+            &retention.kind,
+            TimescaleChangeKind::ReplaceRetentionPolicy {
+                old: None,
+                new: Some(_),
+                ..
+            }
+        ));
+        assert!(retention.gated);
     }
 
     #[test]
