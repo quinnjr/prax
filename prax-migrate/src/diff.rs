@@ -9,7 +9,9 @@ use crate::error::MigrateResult;
 use crate::procedure::{
     ProcedureDefinition, ProcedureDiff, ProcedureDiffer, ProcedureLanguage, Volatility,
 };
-use crate::timescale::{TimescaleCatalog, TimescaleDiff, diff_timescale};
+use crate::timescale::{
+    TimescaleCatalog, TimescaleChangeKind, TimescaleDiff, diff_timescale, resolve_aggregates,
+};
 
 /// A diff between two schemas.
 #[derive(Debug, Clone, Default)]
@@ -42,7 +44,8 @@ pub struct SchemaDiff {
     pub drop_indexes: Vec<IndexDiff>,
     /// Procedure changes.
     pub procedures: Option<ProcedureDiff>,
-    /// TimescaleDB changes (hypertables, columnstore, retention).
+    /// TimescaleDB changes (hypertables, columnstore, retention, continuous
+    /// aggregates).
     pub timescale: TimescaleDiff,
 }
 
@@ -739,15 +742,38 @@ impl SchemaDiffer {
             }
         }
 
-        // Diff views
+        // Diff views. A view that is a continuous aggregate on either side
+        // (target declaration or catalog) is left to `diff_timescale`,
+        // including transitions to and from plain or materialized views.
+        let aggregate_views: HashSet<String> = resolve_aggregates(&self.target)
+            .into_keys()
+            .chain(
+                self.timescale_catalog
+                    .iter()
+                    .flat_map(|c| c.aggregates.keys().cloned()),
+            )
+            .collect();
+        let generic_view = |v: &&View| !aggregate_views.contains(v.view_name());
+
         let source_views: HashMap<&str, &View> = self
             .source
             .as_ref()
-            .map(|s| s.views.values().map(|v| (v.name(), v)).collect())
+            .map(|s| {
+                s.views
+                    .values()
+                    .filter(generic_view)
+                    .map(|v| (v.name(), v))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let target_views: HashMap<&str, &View> =
-            self.target.views.values().map(|v| (v.name(), v)).collect();
+        let target_views: HashMap<&str, &View> = self
+            .target
+            .views
+            .values()
+            .filter(generic_view)
+            .map(|v| (v.name(), v))
+            .collect();
 
         // Find views to create
         for (name, view) in &target_views {
@@ -859,6 +885,21 @@ impl SchemaDiffer {
             self.timescale_catalog.as_ref(),
             &result,
         )?;
+
+        // Aggregates the target turns into plain or materialized views are
+        // dropped by the Timescale pre-phase; the generic pipeline creates the
+        // views.
+        for change in &result.timescale.changes {
+            if let TimescaleChangeKind::AggregateSet { handoff_views, .. } = &change.kind {
+                for name in handoff_views {
+                    if let Some(view) = self.target.views.values().find(|v| v.view_name() == name)
+                        && let Some(view_diff) = view_to_diff(view, &self.target)
+                    {
+                        result.create_views.push(view_diff);
+                    }
+                }
+            }
+        }
 
         Ok(result)
     }
@@ -2529,6 +2570,72 @@ mod tests {
             view.sql_query
         );
         assert_eq!(view.fields.len(), 2);
+    }
+
+    #[test]
+    fn test_generic_view_diff_ignores_aggregates() {
+        use std::collections::BTreeMap;
+
+        use crate::timescale::{AggregateState, TimescaleCatalog};
+
+        let view = |name: &str, attr: &str, sql: &str| {
+            format!(
+                "view {name} {{\n  bucket DateTime\n  {attr}\n}}\n\n@@sql(\"{name}\", \"\"\"\n{sql}\n\"\"\")\n"
+            )
+        };
+        let datasource = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
+        let metric =
+            "model Metric {\n  time DateTime\n  @@id([time])\n  @@timescale.hypertable(time)\n}\n";
+        let target = prax_schema::parse_schema(&format!(
+            "{datasource}\n{metric}\n{}\n{}",
+            view(
+                "HourlyMetric",
+                "@@timescale.continuous(source: Metric, scheduleInterval: \"1 hour\")",
+                "SELECT time_bucket('1 hour', \"time\") AS bucket FROM \"Metric\" GROUP BY 1",
+            ),
+            view("Plain", "", "SELECT 1 AS bucket"),
+        ))
+        .unwrap();
+        // A source schema whose views would otherwise alter `HourlyMetric` and
+        // drop `OldAggregate`, a catalog aggregate the target no longer has.
+        let source = prax_schema::parse_schema(&format!(
+            "{datasource}\n{metric}\n{}\n{}",
+            view("HourlyMetric", "", "SELECT 2 AS bucket"),
+            view("OldAggregate", "", "SELECT 3 AS bucket"),
+        ))
+        .unwrap();
+        let catalog = TimescaleCatalog {
+            version: "2.18.0".into(),
+            hypertables: BTreeMap::new(),
+            aggregates: BTreeMap::from([(
+                "OldAggregate".to_string(),
+                AggregateState {
+                    view: "OldAggregate".into(),
+                    source: "Metric".into(),
+                    sql: Some("SELECT 3 AS bucket".into()),
+                    materialized_only: true,
+                    policy: None,
+                },
+            )]),
+            aggregate_definitions: BTreeMap::new(),
+            aggregate_columns: BTreeMap::new(),
+            other_views: BTreeMap::new(),
+            unsupported: BTreeMap::new(),
+        };
+
+        let diff = SchemaDiffer::new(target)
+            .with_source(source)
+            .with_timescale_catalog(catalog)
+            .diff()
+            .unwrap();
+        let created: Vec<&str> = diff
+            .create_views
+            .iter()
+            .map(|v| v.view_name.as_str())
+            .collect();
+        assert_eq!(created, ["Plain"]);
+        assert!(diff.alter_views.is_empty(), "{:?}", diff.alter_views);
+        assert!(diff.drop_views.is_empty(), "{:?}", diff.drop_views);
     }
 
     #[test]

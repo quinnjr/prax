@@ -9,8 +9,10 @@ use prax_schema::ast::{Model, PgInterval};
 
 use crate::diff::SchemaDiff;
 use crate::error::{MigrateResult, MigrationError};
+use crate::timescale::aggregates::diff_aggregates;
 use crate::timescale::catalog::{
-    ColumnstoreSettings, ColumnstoreState, HypertableState, TimescaleCatalog,
+    AggregatePolicy, AggregateState, ColumnstoreSettings, ColumnstoreState, HypertableState,
+    TimescaleCatalog,
 };
 use crate::timescale::resolve::resolve_hypertables;
 
@@ -134,6 +136,43 @@ pub enum TimescaleChangeKind {
         /// New `drop_after`; `None` removes the policy.
         new: Option<PgInterval>,
     },
+    /// Drop continuous aggregates and the views they replace, then create
+    /// aggregates (spec §5.5, §5.6). A diff holds at most one ungated set
+    /// (creates and plain-view drops) and one gated set.
+    AggregateSet {
+        /// Aggregates to drop, children before parents.
+        drop_aggregates: Vec<AggregateState>,
+        /// Non-aggregate views to drop before an aggregate of the same name is
+        /// created; the flag is `true` for a materialized view.
+        drop_views: Vec<(String, bool)>,
+        /// Aggregates to create, parents before children.
+        create: Vec<AggregateState>,
+        /// Dropped aggregates the target declares as plain or materialized
+        /// views; the generic pipeline creates those views
+        /// (`SchemaDiff::create_views`).
+        handoff_views: Vec<String>,
+        /// `(table, column)` alters and drops in the generic diff that force
+        /// this recreation (spec §4.8).
+        coupled_columns: Vec<(String, String)>,
+    },
+    /// Add, change or remove a continuous aggregate's refresh policy.
+    ReplaceAggregatePolicy {
+        /// View name.
+        view: String,
+        /// Previous policy; `None` when there was none.
+        old: Option<AggregatePolicy>,
+        /// New policy; `None` removes the policy.
+        new: Option<AggregatePolicy>,
+    },
+    /// Change a continuous aggregate's `timescaledb.materialized_only`.
+    SetMaterializedOnly {
+        /// View name.
+        view: String,
+        /// Previous value.
+        old: bool,
+        /// New value.
+        new: bool,
+    },
 }
 
 impl TimescaleChangeKind {
@@ -147,25 +186,46 @@ impl TimescaleChangeKind {
             Self::DisableColumnstore { table, .. } => ("DisableColumnstore", table),
             Self::ReplaceColumnstorePolicy { table, .. } => ("ReplaceColumnstorePolicy", table),
             Self::ReplaceRetentionPolicy { table, .. } => ("ReplaceRetentionPolicy", table),
+            Self::AggregateSet {
+                drop_aggregates,
+                drop_views,
+                create,
+                ..
+            } => (
+                "AggregateSet",
+                create
+                    .first()
+                    .or_else(|| drop_aggregates.first())
+                    .map(|a| a.view.as_str())
+                    .or_else(|| drop_views.first().map(|(v, _)| v.as_str()))
+                    .unwrap_or_default(),
+            ),
+            Self::ReplaceAggregatePolicy { view, .. } => ("ReplaceAggregatePolicy", view),
+            Self::SetMaterializedOnly { view, .. } => ("SetMaterializedOnly", view),
         }
     }
 }
 
-/// Diff the target's hypertables against the live catalog.
+/// Diff the target's hypertables and continuous aggregates against the live
+/// catalog.
 ///
 /// `generic` is the schema diff built so far: a table it creates is new and
 /// empty (adding its retention policy is not gated), while a table in `source`
 /// that it does not create already exists and is converted with
-/// `migrate_data`. Without a catalog the database has no Timescale state.
-/// Tables are visited in name order, so `changes` is stable.
+/// `migrate_data`. Its column alters and drops force the recreation of the
+/// aggregates reading that table (spec §4.8). Without a catalog the database
+/// has no Timescale state. Hypertable changes come first, tables in name
+/// order, then aggregate changes, so `changes` is stable.
 ///
 /// # Errors
 ///
 /// Returns [`MigrationError::InvalidMigration`] when a change cannot be made in
 /// place (spec §4.3): changing a hypertable's time column; adding, removing or
 /// changing its space column; adding `space` to an existing table; removing
-/// `@@timescale.hypertable` from an existing hypertable; or declaring
-/// `@@timescale.*` on a relation the catalog lists as unsupported.
+/// `@@timescale.hypertable` from an existing hypertable; declaring
+/// `@@timescale.*` on a relation the catalog lists as unsupported; declaring a
+/// continuous aggregate `source` that differs from the database while its SQL
+/// is unchanged; or declaring a continuous aggregate without SQL.
 pub fn diff_timescale(
     target: &Schema,
     source: Option<&Schema>,
@@ -208,6 +268,7 @@ pub fn diff_timescale(
             }
         }
     }
+    diff_aggregates(target, catalog, generic, &mut diff)?;
     Ok(diff)
 }
 

@@ -71,6 +71,16 @@ fn owns_first_statement(kind: &TimescaleChangeKind, phase: Phase) -> bool {
         | TimescaleChangeKind::SetChunkInterval { .. }
         | TimescaleChangeKind::SetPartitions { .. }
         | TimescaleChangeKind::ConfigureColumnstore { .. } => phase == Phase::Post,
+        // Drops run in pre; a set without drops only creates (post).
+        TimescaleChangeKind::AggregateSet {
+            drop_aggregates,
+            drop_views,
+            ..
+        } => (phase == Phase::Pre) == (!drop_aggregates.is_empty() || !drop_views.is_empty()),
+        TimescaleChangeKind::ReplaceAggregatePolicy { old, .. } => {
+            (phase == Phase::Pre) == old.is_some()
+        }
+        TimescaleChangeKind::SetMaterializedOnly { .. } => phase == Phase::Post,
     }
 }
 
@@ -177,6 +187,10 @@ fn change_sql(change: &TimescaleChange, phase: Phase) -> (Vec<String>, Vec<Strin
                 }
             }
         },
+        // Continuous aggregates: rendered in Task 9; no statements yet.
+        TimescaleChangeKind::AggregateSet { .. }
+        | TimescaleChangeKind::ReplaceAggregatePolicy { .. }
+        | TimescaleChangeKind::SetMaterializedOnly { .. } => {}
     }
     (up, down, warnings)
 }
@@ -452,6 +466,45 @@ mod tests {
             vec!["SELECT add_retention_policy('\"Metric\"', drop_after => INTERVAL '90 days');"]
         );
         assert_eq!(po.down, vec![rm]);
+    }
+
+    #[test]
+    fn test_aggregate_changes_route_to_phases() {
+        let set = |drops: bool| TimescaleChangeKind::AggregateSet {
+            drop_aggregates: Vec::new(),
+            drop_views: if drops {
+                vec![("HourlyMetric".to_string(), false)]
+            } else {
+                Vec::new()
+            },
+            create: Vec::new(),
+            handoff_views: Vec::new(),
+            coupled_columns: Vec::new(),
+        };
+        assert!(owns_first_statement(&set(true), Phase::Pre));
+        assert!(!owns_first_statement(&set(true), Phase::Post));
+        assert!(owns_first_statement(&set(false), Phase::Post));
+        assert!(!owns_first_statement(&set(false), Phase::Pre));
+
+        let policy = |old: bool| TimescaleChangeKind::ReplaceAggregatePolicy {
+            view: "HourlyMetric".into(),
+            old: old.then(|| crate::timescale::catalog::AggregatePolicy {
+                start_offset: None,
+                end_offset: None,
+                schedule_interval: days(1),
+            }),
+            new: None,
+        };
+        assert!(owns_first_statement(&policy(true), Phase::Pre));
+        assert!(owns_first_statement(&policy(false), Phase::Post));
+
+        let mo = TimescaleChangeKind::SetMaterializedOnly {
+            view: "HourlyMetric".into(),
+            old: true,
+            new: false,
+        };
+        assert!(owns_first_statement(&mo, Phase::Post));
+        assert!(!owns_first_statement(&mo, Phase::Pre));
     }
 
     #[test]

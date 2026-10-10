@@ -1,5 +1,6 @@
 //! TimescaleDB support for the migration engine.
 
+mod aggregates;
 pub mod catalog;
 pub mod diff;
 pub mod quote;
@@ -14,5 +15,5 @@ pub use catalog::{
 };
 pub use diff::{TimescaleChange, TimescaleChangeKind, TimescaleDiff, diff_timescale};
 pub use quote::{ident_list_literal, name_literal, quote_ident, quote_literal, regclass_literal};
-pub use resolve::resolve_hypertables;
+pub use resolve::{resolve_aggregates, resolve_hypertables};
 pub use sql::TimescaleSql;
