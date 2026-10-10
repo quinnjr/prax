@@ -699,7 +699,7 @@ impl Validator {
 
         for (name, cfg) in &hypertables {
             if let Some(model) = schema.models.get(*name) {
-                self.validate_hypertable(model, cfg, schema);
+                self.validate_hypertable(model, cfg);
             }
         }
 
@@ -711,8 +711,8 @@ impl Validator {
         }
     }
 
-    /// Rules 3-6 and 8 for one hypertable model.
-    fn validate_hypertable(&mut self, model: &Model, cfg: &TimescaleModelConfig, schema: &Schema) {
+    /// Rules 3-5 and 8 for one hypertable model.
+    fn validate_hypertable(&mut self, model: &Model, cfg: &TimescaleModelConfig) {
         let m = model.name();
         let time = cfg.hypertable.time_field.as_str();
 
@@ -803,30 +803,9 @@ impl Validator {
             }
         }
 
-        // Rule 6: no foreign key may reference a hypertable.
-        for other in schema.models.values() {
-            for f in other.fields.values() {
-                let FieldType::Model(target) = &f.field_type else {
-                    continue;
-                };
-                if target.as_str() != m {
-                    continue;
-                }
-                let has_fk = f
-                    .get_attribute("relation")
-                    .is_some_and(|r| r.get_arg("fields").is_some());
-                if has_fk {
-                    self.timescale_error(
-                        "timescale.hypertable",
-                        format!(
-                            "model `{}`: field `{}` declares a foreign key to hypertable `{m}`, which is not supported",
-                            other.name(),
-                            f.name()
-                        ),
-                    );
-                }
-            }
-        }
+        // Rule 6 (no foreign key may reference a hypertable) was dropped:
+        // TimescaleDB 2.18 and 2.30 both accept such foreign keys (spec §8
+        // item 4, live probe `probe_fk_to_hypertable_accepted`).
 
         // Rule 8: columnstore fields.
         if let Some(cs) = &cfg.columnstore {

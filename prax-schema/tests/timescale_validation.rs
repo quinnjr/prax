@@ -174,8 +174,10 @@ fn rule5_unique_without_space() {
     );
 }
 
+/// Rule 6 was dropped (spec §8 item 4): TimescaleDB accepts foreign keys
+/// that reference a hypertable.
 #[test]
-fn rule6_fk_to_hypertable() {
+fn fk_to_hypertable_is_allowed() {
     let s = ts(&format!(
         r#"{METRIC}
 model Alert {{
@@ -185,7 +187,7 @@ model Alert {{
   metric       Metric   @relation(fields: [metricTime, metricDevice], references: [time, deviceId])
 }}"#
     ));
-    assert_err(&s, "declares a foreign key to hypertable `Metric`");
+    assert_ok(&s);
 }
 
 #[test]
