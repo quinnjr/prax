@@ -188,9 +188,21 @@ fn aggregate_creates(diff: &TimescaleDiff) -> (Vec<String>, Vec<String>, Vec<Str
     let (mut up, mut down, mut warnings) = (Vec::new(), Vec::new(), Vec::new());
     for agg in &ordered {
         let Some(sql) = &agg.sql else {
+            // Unreachable in practice (the diff rejects a target aggregate
+            // without SQL), but the generator cannot return an error and the
+            // old aggregate may already be dropped: abort the migration
+            // visibly rather than silently skipping the create.
             warnings.push(format!(
-                "Continuous aggregate {} has no authored SQL and was not created",
+                "Continuous aggregate {} has no authored SQL and cannot be created",
                 quote_ident(&agg.view)
+            ));
+            let message = format!(
+                "Prax: continuous aggregate {} has no SQL definition; cannot recreate it",
+                quote_ident(&agg.view)
+            );
+            up.push(format!(
+                "DO $prax$ BEGIN RAISE EXCEPTION {}; END $prax$;",
+                quote_literal(&message)
             ));
             continue;
         };
@@ -1011,5 +1023,19 @@ mod tests {
         let drop = pos("DROP MATERIALIZED VIEW");
         let block = pos("DO $prax$");
         assert!(policy < drop && drop < block, "{up:?}");
+    }
+
+    #[test]
+    fn test_create_aggregate_without_sql_aborts() {
+        let mut a = agg("HourlyMetric", "Metric", "SELECT 1", false);
+        a.sql = None;
+        let p = post(&diff_of(vec![set(false, vec![], vec![], vec![a])]));
+        assert_eq!(
+            p.up,
+            vec![
+                "DO $prax$ BEGIN RAISE EXCEPTION 'Prax: continuous aggregate \"HourlyMetric\" has no SQL definition; cannot recreate it'; END $prax$;"
+            ]
+        );
+        assert_eq!(p.warnings.len(), 1);
     }
 }
