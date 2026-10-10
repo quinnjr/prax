@@ -1150,8 +1150,10 @@ fn generate_model_with(
 fn generate_field(col: &ColumnInfo, primary_key: &[String]) -> String {
     let mut attrs = Vec::new();
 
-    // Check if primary key
-    if primary_key.contains(&col.name) {
+    // Single-column primary key only; a composite key is declared once with
+    // `@@id([...])` (see `generate_model_attributes`), and a per-field `@id`
+    // on each member would fail schema validation.
+    if primary_key.len() == 1 && primary_key.contains(&col.name) {
         attrs.push("@id".to_string());
     }
 

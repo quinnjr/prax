@@ -107,7 +107,16 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     // Generate output
     output::step(2, 3, "Generating schema...");
     let schema_content = match args.format {
-        OutputFormat::Prax => format_as_prax(&db_schema, &config),
+        OutputFormat::Prax => {
+            let timescale = crate::commands::introspect::introspect_postgres_catalog(
+                &config.database.provider,
+                &database_url,
+                args.schema.as_deref(),
+            )
+            .await?
+            .and_then(|c| c.timescale);
+            format_as_prax(&db_schema, &config, timescale.as_ref())
+        }
         OutputFormat::Json => format_as_json(&db_schema)?,
         OutputFormat::Sql => format_as_sql(&db_schema, db_type),
     };
