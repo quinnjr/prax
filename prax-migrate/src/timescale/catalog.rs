@@ -32,11 +32,18 @@ pub fn parse_aggregate_record(comment: &str) -> Option<&str> {
 /// Whether a TimescaleDB version string is at least 2.18.
 #[must_use]
 pub fn timescale_version_supported(version: &str) -> bool {
+    timescale_version_at_least(version, 2, 18)
+}
+
+/// Whether a TimescaleDB version string is at least `major.minor`. An
+/// unparsable version is treated as older.
+#[must_use]
+pub fn timescale_version_at_least(version: &str, major: u32, minor: u32) -> bool {
     let mut parts = version.split('.');
-    let major = parts.next().and_then(|p| p.trim().parse::<u32>().ok());
-    let minor = parts.next().and_then(|p| p.trim().parse::<u32>().ok());
-    match (major, minor) {
-        (Some(major), Some(minor)) => major > 2 || (major == 2 && minor >= 18),
+    let have_major = parts.next().and_then(|p| p.trim().parse::<u32>().ok());
+    let have_minor = parts.next().and_then(|p| p.trim().parse::<u32>().ok());
+    match (have_major, have_minor) {
+        (Some(have_major), Some(have_minor)) => (have_major, have_minor) >= (major, minor),
         _ => false,
     }
 }
@@ -891,6 +898,15 @@ mod tests {
         assert!(timescale_version_supported("2.30.2"));
         assert!(timescale_version_supported("3.0.0"));
         assert!(!timescale_version_supported("garbage"));
+    }
+
+    #[test]
+    fn test_timescale_version_at_least() {
+        assert!(timescale_version_at_least("2.30.2", 2, 30));
+        assert!(timescale_version_at_least("3.0.0", 2, 30));
+        assert!(!timescale_version_at_least("2.29.9", 2, 30));
+        assert!(!timescale_version_at_least("2.18.2", 2, 30));
+        assert!(!timescale_version_at_least("garbage", 2, 30));
     }
 
     #[test]

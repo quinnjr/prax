@@ -12,7 +12,7 @@ use crate::error::{MigrateResult, MigrationError};
 use crate::timescale::aggregates::diff_aggregates;
 use crate::timescale::catalog::{
     AggregatePolicy, AggregateState, ColumnstoreSettings, ColumnstoreState, HypertableState,
-    TimescaleCatalog,
+    TimescaleCatalog, timescale_version_at_least,
 };
 use crate::timescale::resolve::resolve_hypertables;
 
@@ -225,7 +225,10 @@ impl TimescaleChangeKind {
 /// `@@timescale.hypertable` from an existing hypertable; declaring
 /// `@@timescale.*` on a relation the catalog lists as unsupported; declaring a
 /// continuous aggregate `source` that differs from the database while its SQL
-/// is unchanged; or declaring a continuous aggregate without SQL.
+/// is unchanged; declaring a continuous aggregate without SQL; or, on a
+/// hypertable whose columnstore is enabled, changing a column's type, dropping
+/// a `segmentby`/`orderby` column, or (before TimescaleDB 2.30) making a column
+/// `NOT NULL` (spec §8 item 10).
 pub fn diff_timescale(
     target: &Schema,
     source: Option<&Schema>,
@@ -254,6 +257,7 @@ pub fn diff_timescale(
                 )));
             }
         }
+        check_columnstore_column_alters(catalog, generic)?;
     }
 
     let mut diff = TimescaleDiff::default();
@@ -274,6 +278,72 @@ pub fn diff_timescale(
 
 fn invalid(message: String) -> MigrationError {
     MigrationError::InvalidMigration(message)
+}
+
+/// The first TimescaleDB version observed to accept `SET NOT NULL` on a
+/// hypertable with columnstore chunks; 2.18 rejects it (spec §8 item 10).
+/// Versions in between were not probed and are treated as rejecting it.
+const SET_NOT_NULL_ON_COLUMNSTORE_SINCE: (u32, u32) = (2, 30);
+
+/// How to make a column change TimescaleDB rejects while the columnstore is
+/// enabled.
+const DISABLE_COLUMNSTORE_FIRST: &str = "Disable the columnstore in a separate migration first \
+     (remove @@timescale.columnstore from the model and migrate with --allow-destructive, which \
+     converts every chunk back to rowstore), then make this change, then restore \
+     @@timescale.columnstore.";
+
+/// Refuse the column changes TimescaleDB rejects on a hypertable whose
+/// columnstore is enabled (spec §4.8, §8 item 10): changing a column's type,
+/// dropping a `segmentby` or `orderby` column, and (before 2.30) `SET NOT NULL`.
+fn check_columnstore_column_alters(
+    catalog: &TimescaleCatalog,
+    generic: &SchemaDiff,
+) -> MigrateResult<()> {
+    let (major, minor) = SET_NOT_NULL_ON_COLUMNSTORE_SINCE;
+    let set_not_null_accepted = timescale_version_at_least(&catalog.version, major, minor);
+    for alter in &generic.alter_models {
+        let table = &alter.table_name;
+        let Some(columnstore) = catalog
+            .hypertables
+            .get(table)
+            .and_then(|h| h.columnstore.as_ref())
+        else {
+            continue;
+        };
+        for field in &alter.alter_fields {
+            let column = &field.column_name;
+            if field.new_type.is_some() {
+                return Err(invalid(format!(
+                    "Cannot change the type of column \"{column}\" of hypertable \"{table}\" \
+                     while its columnstore is enabled: TimescaleDB rejects ALTER COLUMN ... TYPE \
+                     on a hypertable with columnstore chunks. {DISABLE_COLUMNSTORE_FIRST}"
+                )));
+            }
+            if field.new_nullable == Some(false) && !set_not_null_accepted {
+                return Err(invalid(format!(
+                    "Cannot make column \"{column}\" of hypertable \"{table}\" required while \
+                     its columnstore is enabled: TimescaleDB {} rejects SET NOT NULL on a \
+                     hypertable with columnstore chunks (TimescaleDB {major}.{minor} and newer \
+                     accept it). {DISABLE_COLUMNSTORE_FIRST}",
+                    catalog.version
+                )));
+            }
+        }
+        let settings = &columnstore.settings;
+        for column in &alter.drop_fields {
+            if settings.segment_by.contains(column)
+                || settings.order_by.iter().any(|(c, _)| c == column)
+            {
+                return Err(invalid(format!(
+                    "Cannot drop column \"{column}\" from hypertable \"{table}\": it is a \
+                     columnstore segmentBy or orderBy column, and TimescaleDB rejects dropping \
+                     those while the columnstore is enabled (columnstore chunks keep using them \
+                     even after the settings change). {DISABLE_COLUMNSTORE_FIRST}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn declares_timescale(model: &Model) -> bool {
@@ -1229,5 +1299,137 @@ mod tests {
         assert!(!diff.timescale.is_empty());
         assert!(!diff.is_empty());
         assert_ne!(diff.summary(), "No changes");
+    }
+
+    /// `Metric` with the given extra fields and model attributes.
+    fn metric_fields(fields: &str, attrs: &[&str]) -> String {
+        format!(
+            "{DATASOURCE}\nmodel Metric {{\n  time     DateTime\n  deviceId String\n{fields}\n\n  @@id([deviceId, time])\n  {}\n}}\n",
+            attrs.join("\n  ")
+        )
+    }
+
+    /// Diff a field change on hypertable `Metric` in `state` at `version`.
+    fn columnstore_alter(
+        source_fields: &str,
+        target_fields: &str,
+        state: HypertableState,
+        version: &str,
+    ) -> MigrateResult<TimescaleDiff> {
+        let mut catalog = catalog(vec![state]);
+        catalog.version = version.into();
+        run(
+            &metric_fields(target_fields, &[HYPERTABLE, COLUMNSTORE, RETENTION]),
+            Some(&metric_fields(source_fields, &[])),
+            Some(catalog),
+        )
+    }
+
+    fn with_settings(segment_by: &[&str], order_by: &[(&str, bool)]) -> HypertableState {
+        let mut state = metric_state();
+        if let Some(cs) = state.columnstore.as_mut() {
+            cs.settings = ColumnstoreSettings {
+                segment_by: segment_by.iter().map(|c| (*c).to_string()).collect(),
+                order_by: order_by
+                    .iter()
+                    .map(|(c, d)| ((*c).to_string(), *d))
+                    .collect(),
+            };
+        }
+        state
+    }
+
+    #[test]
+    fn test_type_change_on_columnstore_hypertable_is_invalid() {
+        for version in ["2.18.2", "2.30.2"] {
+            let msg = invalid(columnstore_alter(
+                "  value    Float",
+                "  value    Int",
+                metric_state(),
+                version,
+            ));
+            assert!(
+                msg.contains("type of column \"value\" of hypertable \"Metric\""),
+                "{msg}"
+            );
+            assert!(msg.contains("--allow-destructive"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_type_change_without_columnstore_is_allowed() {
+        let mut state = metric_state();
+        state.columnstore = None;
+        assert!(columnstore_alter("  value    Float", "  value    Int", state, "2.18.2").is_ok());
+    }
+
+    #[test]
+    fn test_dropping_segmentby_or_orderby_column_is_invalid() {
+        let state = with_settings(&["region"], &[("time", true)]);
+        let msg = invalid(columnstore_alter(
+            "  value    Float\n  region   String?",
+            "  value    Float",
+            state,
+            "2.30.2",
+        ));
+        assert!(
+            msg.contains("drop column \"region\" from hypertable \"Metric\""),
+            "{msg}"
+        );
+
+        let state = with_settings(&["deviceId"], &[("seq", false), ("time", true)]);
+        let msg = invalid(columnstore_alter(
+            "  value    Float\n  seq      Int?",
+            "  value    Float",
+            state,
+            "2.30.2",
+        ));
+        assert!(msg.contains("drop column \"seq\""), "{msg}");
+    }
+
+    #[test]
+    fn test_dropping_other_column_on_columnstore_hypertable_is_allowed() {
+        assert!(
+            columnstore_alter(
+                "  value    Float\n  note     String?",
+                "  value    Float",
+                metric_state(),
+                "2.18.2",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_set_not_null_on_columnstore_hypertable_depends_on_version() {
+        let msg = invalid(columnstore_alter(
+            "  value    Float?",
+            "  value    Float",
+            metric_state(),
+            "2.18.2",
+        ));
+        assert!(
+            msg.contains("\"value\" of hypertable \"Metric\" required") && msg.contains("2.18.2"),
+            "{msg}"
+        );
+        assert!(
+            columnstore_alter(
+                "  value    Float?",
+                "  value    Float",
+                metric_state(),
+                "2.30.2"
+            )
+            .is_ok()
+        );
+        // DROP NOT NULL is accepted on every version.
+        assert!(
+            columnstore_alter(
+                "  value    Float",
+                "  value    Float?",
+                metric_state(),
+                "2.18.2"
+            )
+            .is_ok()
+        );
     }
 }
