@@ -10,8 +10,8 @@
 //! Every test is `#[ignore]` and self-skips unless `PRAX_E2E=1` and
 //! `TIMESCALE_URL` is set, following the workspace convention. Each test owns
 //! a fresh schema `t_<name>` (dropped at the end) and the tests run one at a
-//! time: the catalog's job and columnstore-settings queries are not
-//! schema-scoped. Run via docker compose:
+//! time, because each first drops the `t_*` schemas a failed run left behind.
+//! Run via docker compose:
 //!
 //! ```sh
 //! docker compose up -d timescaledb
@@ -40,9 +40,8 @@ use prax_schema::ast::PgInterval;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::{Client, NoTls};
 
-/// Serializes the tests: the jobs and columnstore-settings catalog queries are
-/// unfiltered by schema, so two tests with a `"Metric"` hypertable would see
-/// each other's policies.
+/// Serializes the tests: each one starts by dropping every leftover `t_*`
+/// schema, which would pull the schema out from under a concurrent test.
 static SERIAL: Mutex<()> = Mutex::const_new(());
 
 const PROVIDER: &str = "postgresql";
@@ -93,8 +92,7 @@ impl Ts {
             let _ = connection.await;
         });
 
-        // A test that panicked earlier leaves its schema behind; its policies
-        // would leak into this test's catalog read.
+        // A test that panicked earlier leaves its schema behind.
         let leftovers = client
             .query(
                 "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 't\\_%'",
@@ -123,6 +121,14 @@ impl Ts {
             schema,
             _serial: serial,
         })
+    }
+
+    /// Point the session (search path, introspection and diffs) at another
+    /// existing schema.
+    async fn use_schema(&mut self, schema: &str) {
+        self.exec(&format!("SET search_path TO \"{schema}\", public"))
+            .await;
+        self.schema = schema.to_string();
     }
 
     /// Drop the test schema.
@@ -465,6 +471,81 @@ async fn roundtrip_spec_example_is_empty() {
     let hourly = &catalog.aggregates["HourlyMetric"];
     assert_eq!(hourly.source, "Metric");
     assert!(hourly.sql.is_some() && hourly.policy.is_some());
+    ts.finish().await;
+}
+
+/// The same hypertable and aggregate names in two schemas, with different
+/// chunk, columnstore, retention and refresh settings: each schema's catalog
+/// sees only its own (the jobs and columnstore-settings queries are scoped to
+/// the introspected schema) and each re-diffs empty.
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn catalog_queries_are_schema_scoped() {
+    let Some(mut ts) = Ts::connect("catalog_queries_are_schema_scoped").await else {
+        return;
+    };
+    let main = ts.schema.clone();
+    let other = format!("{main}_other");
+    ts.exec(&format!("CREATE SCHEMA \"{other}\"")).await;
+
+    let main_prax = spec_example();
+    let other_model = metric(
+        "",
+        r#"  @@timescale.hypertable(time, chunkInterval: "2 days")
+  @@timescale.columnstore(orderBy: [desc(time)], after: "3 days")
+  @@timescale.retention(dropAfter: "30 days")"#,
+    );
+    let other_prax = format!(
+        "{DATASOURCE}{other_model}{}",
+        hourly_with(
+            r#"scheduleInterval: "2 hours", startOffset: "2 days", endOffset: "2 hours""#,
+            HOURLY_SQL
+        )
+    );
+
+    // Apply each schema, then re-diff both with the other one present.
+    ts.use_schema(&other).await;
+    ts.apply_clean(&other_prax, false).await;
+    ts.use_schema(&main).await;
+    ts.apply_clean(&main_prax, false).await;
+    ts.use_schema(&other).await;
+    assert_empty(&ts.diff(&other_prax).await, "(other schema re-diff)");
+    let other_catalog = ts.catalog().await;
+    ts.use_schema(&main).await;
+    assert_empty(&ts.diff(&main_prax).await, "(main schema re-diff)");
+    let main_catalog = ts.catalog().await;
+
+    let main_metric = &main_catalog.hypertables["Metric"];
+    let other_metric = &other_catalog.hypertables["Metric"];
+    assert_eq!(main_metric.retention, Some(PgInterval::new(0, 90, 0)));
+    assert_eq!(other_metric.retention, Some(PgInterval::new(0, 30, 0)));
+    assert_eq!(
+        main_metric
+            .columnstore
+            .as_ref()
+            .map(|c| (&c.settings.segment_by, c.after)),
+        Some((
+            &vec!["deviceId".to_string()],
+            Some(PgInterval::new(0, 7, 0))
+        ))
+    );
+    assert_eq!(
+        other_metric
+            .columnstore
+            .as_ref()
+            .map(|c| (&c.settings.segment_by, c.after)),
+        Some((&Vec::new(), Some(PgInterval::new(0, 3, 0))))
+    );
+    let start = |catalog: &TimescaleCatalog| {
+        catalog.aggregates["HourlyMetric"]
+            .policy
+            .as_ref()
+            .and_then(|p| p.start_offset)
+    };
+    assert_eq!(start(&main_catalog), Some(PgInterval::new(0, 3, 0)));
+    assert_eq!(start(&other_catalog), Some(PgInterval::new(0, 2, 0)));
+
+    ts.exec(&format!("DROP SCHEMA \"{other}\" CASCADE")).await;
     ts.finish().await;
 }
 

@@ -60,9 +60,10 @@ pub fn interval_parts_sql(expr: &str) -> String {
     )
 }
 
-/// SQL run by the CLI to fill [`CatalogRows`]. Schema-scoped queries take the
-/// schema name as `$1`; `COLUMNSTORE_SETTINGS` and `JOBS` are unfiltered because
-/// their relations can live in `_timescaledb_internal`.
+/// SQL run by the CLI to fill [`CatalogRows`]. Every query but `EXTENSIONS` is
+/// scoped to the introspected schema, passed as `$1`, so a database with the
+/// same relation names in several schemas (e.g. schema per tenant) never mixes
+/// their state.
 pub mod queries {
     /// `(extname, extversion)`.
     pub const EXTENSIONS: &str = "SELECT extname::text, extversion::text FROM pg_extension";
@@ -83,12 +84,22 @@ pub mod queries {
          FROM timescaledb_information.dimensions WHERE hypertable_schema = $1 \
          ORDER BY hypertable_name, dimension_number";
 
-    /// `(hypertable::text, segmentby, orderby)`.
-    pub const COLUMNSTORE_SETTINGS: &str = "SELECT hypertable::text, segmentby::text, orderby::text \
-         FROM timescaledb_information.hypertable_columnstore_settings";
+    /// `(hypertable::text, segmentby, orderby)` for the hypertables in schema `$1`.
+    pub const COLUMNSTORE_SETTINGS: &str = "SELECT s.hypertable::text, s.segmentby::text, \
+         s.orderby::text \
+         FROM timescaledb_information.hypertable_columnstore_settings s \
+         JOIN pg_class c ON c.oid = s.hypertable::oid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1";
 
     /// `(proc_name, hypertable_name, drop_after, compress_after, start_offset, end_offset,
     /// schedule_interval)`, each interval as three `(months, days, micros)` columns.
+    ///
+    /// Scoped to schema `$1`: columnstore and retention jobs of its hypertables,
+    /// and refresh jobs of its continuous aggregates. A refresh job names either
+    /// the aggregate's view (2.30) or its materialization hypertable in
+    /// `_timescaledb_internal` (2.18), so the latter is matched through the
+    /// schema's aggregates.
     pub const JOBS: &str = "SELECT proc_name::text, hypertable_name::text, \
          (EXTRACT(YEAR FROM (config->>'drop_after')::interval) * 12 \
           + EXTRACT(MONTH FROM (config->>'drop_after')::interval))::int4, \
@@ -119,9 +130,16 @@ pub mod queries {
          (EXTRACT(HOUR FROM schedule_interval) * 3600000000 \
           + EXTRACT(MINUTE FROM schedule_interval) * 60000000 \
           + EXTRACT(MICROSECONDS FROM schedule_interval))::int8 \
-         FROM timescaledb_information.jobs \
-         WHERE proc_name IN ('policy_compression', 'policy_retention', \
-                             'policy_refresh_continuous_aggregate')";
+         FROM timescaledb_information.jobs j \
+         WHERE j.proc_name IN ('policy_compression', 'policy_retention', \
+                               'policy_refresh_continuous_aggregate') \
+           AND (j.hypertable_schema = $1 \
+                OR (j.proc_name = 'policy_refresh_continuous_aggregate' \
+                    AND (j.hypertable_schema, j.hypertable_name) IN ( \
+                        SELECT materialization_hypertable_schema, \
+                               materialization_hypertable_name \
+                        FROM timescaledb_information.continuous_aggregates \
+                        WHERE view_schema = $1)))";
 
     /// `(view_name, hypertable_name, materialization_hypertable_name, materialized_only,
     /// view_definition, comment)`.
@@ -898,6 +916,23 @@ mod tests {
         assert!(timescale_version_supported("2.30.2"));
         assert!(timescale_version_supported("3.0.0"));
         assert!(!timescale_version_supported("garbage"));
+    }
+
+    #[test]
+    fn test_queries_are_schema_scoped() {
+        use super::queries::*;
+        for (name, sql) in [
+            ("HYPERTABLES", HYPERTABLES),
+            ("DIMENSIONS", DIMENSIONS),
+            ("COLUMNSTORE_SETTINGS", COLUMNSTORE_SETTINGS),
+            ("JOBS", JOBS),
+            ("AGGREGATES", AGGREGATES),
+            ("COLUMNS", COLUMNS),
+            ("VIEWS", VIEWS),
+        ] {
+            assert!(sql.contains("= $1"), "{name} is not scoped to the schema");
+        }
+        assert!(!EXTENSIONS.contains('$'));
     }
 
     #[test]

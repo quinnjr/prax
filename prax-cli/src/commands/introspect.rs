@@ -386,7 +386,7 @@ pub mod postgres {
                 }
 
                 for r in client
-                    .query(ts::COLUMNSTORE_SETTINGS, &[])
+                    .query(ts::COLUMNSTORE_SETTINGS, s)
                     .await
                     .map_err(|e| db_err("columnstore settings", e))?
                 {
@@ -404,7 +404,7 @@ pub mod postgres {
                 }
 
                 for r in client
-                    .query(ts::JOBS, &[])
+                    .query(ts::JOBS, s)
                     .await
                     .map_err(|e| db_err("jobs", e))?
                 {
