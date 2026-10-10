@@ -2349,6 +2349,37 @@ mod tests {
         }
 
         #[test]
+        fn test_aggregate_drop_precedes_table_drop() {
+            use crate::timescale::AggregateState;
+            let mut diff = SchemaDiff::default();
+            diff.drop_models.push("Metric".into());
+            diff.timescale.changes.push(TimescaleChange {
+                kind: TimescaleChangeKind::AggregateSet {
+                    drop_aggregates: vec![AggregateState {
+                        view: "HourlyMetric".into(),
+                        source: "Metric".into(),
+                        sql: Some("SELECT 1".into()),
+                        materialized_only: true,
+                        policy: None,
+                    }],
+                    drop_views: Vec::new(),
+                    create: Vec::new(),
+                    handoff_views: Vec::new(),
+                    coupled_columns: Vec::new(),
+                },
+                gated: true,
+                note: None,
+            });
+            let sql = PostgresSqlGenerator.generate(&diff);
+            let agg = sql
+                .up
+                .find("DROP MATERIALIZED VIEW IF EXISTS \"HourlyMetric\"")
+                .unwrap();
+            let table = sql.up.find("DROP TABLE IF EXISTS \"Metric\"").unwrap();
+            assert!(agg < table, "{}", sql.up);
+        }
+
+        #[test]
         fn test_mysql_generator_ignores_timescale_diff() {
             let sql = MySqlGenerator.generate(&retention_diff(None));
             assert!(!sql.up.contains("retention_policy"));
