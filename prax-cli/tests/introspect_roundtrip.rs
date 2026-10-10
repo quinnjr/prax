@@ -109,11 +109,12 @@ mod postgres {
         let url = url().expect("POSTGRES_URL required");
         exec(&url, "CREATE EXTENSION IF NOT EXISTS vector;").await;
 
-        let catalog =
-            prax_cli::commands::introspect::introspect_postgres_catalog("postgres", &url, None)
-                .await
-                .expect("catalog")
-                .expect("postgres provider yields a catalog");
+        let catalog = prax_cli::commands::introspect::introspect_postgres_catalog(
+            "postgres", &url, None, true,
+        )
+        .await
+        .expect("catalog")
+        .expect("postgres provider yields a catalog");
         assert!(
             catalog.extensions.iter().any(|e| e == "vector"),
             "extensions: {:?}",

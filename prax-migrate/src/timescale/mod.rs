@@ -14,7 +14,9 @@ pub use catalog::{
     aggregate_record, interval_parts_sql, parse_aggregate_record, timescale_version_at_least,
     timescale_version_supported,
 };
-pub use diff::{TimescaleChange, TimescaleChangeKind, TimescaleDiff, diff_timescale};
+pub use diff::{
+    TimescaleChange, TimescaleChangeKind, TimescaleDiff, diff_timescale, opts_into_timescale,
+};
 pub use quote::{ident_list_literal, name_literal, quote_ident, quote_literal, regclass_literal};
 pub use resolve::{resolve_aggregates, resolve_hypertables};
 pub use sql::TimescaleSql;

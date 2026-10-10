@@ -112,6 +112,7 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
                 &config.database.provider,
                 &database_url,
                 args.schema.as_deref(),
+                true,
             )
             .await?
             .and_then(|c| c.timescale);

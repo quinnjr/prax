@@ -633,7 +633,10 @@ impl SchemaDiffer {
     /// Set the database's TimescaleDB state.
     ///
     /// The catalog, not the source schema, is the source of Timescale state;
-    /// without one the database is treated as having none.
+    /// without one the database is treated as having none. Pass it only when
+    /// the target opts in ([`crate::timescale::opts_into_timescale`]), as
+    /// `prax migrate` does: once passed, every hypertable the target models
+    /// must declare `@@timescale.hypertable`.
     #[must_use]
     pub fn with_timescale_catalog(mut self, catalog: TimescaleCatalog) -> Self {
         self.timescale_catalog = Some(catalog);

@@ -221,8 +221,8 @@ impl TimescaleChangeKind {
 ///
 /// Returns [`MigrationError::InvalidMigration`] when a change cannot be made in
 /// place (spec §4.3): changing a hypertable's time column; adding, removing or
-/// changing its space column; adding `space` to an existing table; removing
-/// `@@timescale.hypertable` from an existing hypertable; declaring
+/// changing its space column; adding `space` to an existing table; a hypertable
+/// whose model does not declare `@@timescale.hypertable`; declaring
 /// `@@timescale.*` on a relation the catalog lists as unsupported; declaring a
 /// continuous aggregate `source` that differs from the database while its SQL
 /// is unchanged; declaring a continuous aggregate without SQL; or, on a
@@ -251,9 +251,11 @@ pub fn diff_timescale(
         for table in catalog.hypertables.keys() {
             if target_model(table).is_some_and(|m| m.timescale().is_none()) {
                 return Err(invalid(format!(
-                    "Table \"{table}\" is a hypertable and cannot be converted back to a plain \
-                     table. Restore @@timescale.hypertable on its model, or create a plain table, \
-                     copy the rows into it, and drop the hypertable manually."
+                    "Table \"{table}\" is a hypertable in the database, but its model does not \
+                     declare @@timescale.hypertable. Declare @@timescale.hypertable on the model, \
+                     or remove the table from the schema; converting a hypertable back to a \
+                     plain table is not supported (to do it manually, create a plain table, copy \
+                     the rows into it, and drop the hypertable)."
                 )));
             }
         }
@@ -274,6 +276,32 @@ pub fn diff_timescale(
     }
     diff_aggregates(target, catalog, generic, &mut diff)?;
     Ok(diff)
+}
+
+/// Whether `target` opts into TimescaleDB management: `timescaledb` is in its
+/// datasource `extensions` (aliases canonicalized), or a model or view declares
+/// an `@@timescale.*` attribute.
+///
+/// Only an opted-in target should be diffed against the database's Timescale
+/// state (see [`crate::SchemaDiffer::with_timescale_catalog`]); `prax migrate`
+/// does not even read that state otherwise, so hypertables and continuous
+/// aggregates managed by hand never block migrations of a schema that does not
+/// use TimescaleDB attributes.
+#[must_use]
+pub fn opts_into_timescale(target: &Schema) -> bool {
+    let extension = target.datasource.as_ref().is_some_and(|ds| {
+        ds.extensions
+            .iter()
+            .any(|e| prax_schema::ast::canonical_extension_name(&e.name) == "timescaledb")
+    });
+    let declared = |attrs: &[prax_schema::ast::Attribute]| {
+        attrs
+            .iter()
+            .any(|a| a.name.as_str().starts_with("timescale."))
+    };
+    extension
+        || target.models.values().any(|m| declared(&m.attributes))
+        || target.views.values().any(|v| declared(&v.attributes))
 }
 
 fn invalid(message: String) -> MigrationError {
@@ -914,8 +942,36 @@ mod tests {
             Some(&plain_metric()),
             Some(catalog(vec![metric_state()])),
         ));
-        assert!(msg.contains("cannot be converted back"), "{msg}");
+        assert!(
+            msg.contains(
+                "is a hypertable in the database, but its model does not declare \
+                 @@timescale.hypertable"
+            ),
+            "{msg}"
+        );
+        assert!(msg.contains("remove the table from the schema"), "{msg}");
         assert!(msg.contains("\"Metric\""), "{msg}");
+    }
+
+    #[test]
+    fn test_opts_into_timescale() {
+        // `timescaledb` in the datasource extensions.
+        assert!(opts_into_timescale(&schema(&plain_metric())));
+        // An `@@timescale.*` attribute on a model or a view, even without the
+        // extension (validation rejects that, but it still opts in).
+        assert!(opts_into_timescale(&schema(
+            "model M {\n  time DateTime\n  @@id([time])\n  @@timescale.hypertable(time)\n}\n"
+        )));
+        assert!(opts_into_timescale(&schema(
+            "view V {\n  bucket DateTime\n  @@timescale.continuous(source: M, scheduleInterval: \"1 hour\")\n}\n"
+        )));
+        // Neither.
+        assert!(!opts_into_timescale(&schema(
+            "model M {\n  time DateTime\n  @@id([time])\n}\n"
+        )));
+        assert!(!opts_into_timescale(&schema(
+            "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [pgvector]\n}\nmodel M {\n  time DateTime\n  @@id([time])\n}\n"
+        )));
     }
 
     #[test]

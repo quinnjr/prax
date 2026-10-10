@@ -93,19 +93,25 @@ pub fn default_schema(db_type: DatabaseType) -> &'static str {
 pub struct PostgresCatalog {
     /// Names of the installed extensions.
     pub extensions: Vec<String>,
-    /// TimescaleDB state; `None` when the extension is not installed. When the
-    /// installed version is older than 2.18 only the version is populated.
+    /// TimescaleDB state; `None` when the extension is not installed or the
+    /// state was not requested. When the installed version is older than 2.18
+    /// only the version is populated.
     pub timescale: Option<prax_migrate::TimescaleCatalog>,
 }
 
-/// Read the Postgres extension and TimescaleDB catalog state.
+/// Read the Postgres extension and, when `with_timescale` is set, the
+/// TimescaleDB catalog state.
 ///
 /// Returns `Ok(None)` for non-Postgres providers (and when the `postgres`
-/// feature is not compiled in). `schema` defaults to `"public"`.
+/// feature is not compiled in). `schema` defaults to `"public"`. `prax
+/// migrate` sets `with_timescale` only when the target schema opts in
+/// ([`prax_migrate::timescale::opts_into_timescale`]); `prax db pull` always
+/// sets it.
 pub async fn introspect_postgres_catalog(
     provider: &str,
     database_url: &str,
     schema: Option<&str>,
+    with_timescale: bool,
 ) -> CliResult<Option<PostgresCatalog>> {
     if !matches!(get_database_type(provider)?, DatabaseType::PostgreSQL) {
         return Ok(None);
@@ -114,13 +120,13 @@ pub async fn introspect_postgres_catalog(
     {
         let introspector = postgres::PostgresIntrospector::new(database_url.to_string());
         introspector
-            .read_catalog(schema.unwrap_or("public"))
+            .read_catalog(schema.unwrap_or("public"), with_timescale)
             .await
             .map(Some)
     }
     #[cfg(not(feature = "postgres"))]
     {
-        let _ = (database_url, schema);
+        let _ = (database_url, schema, with_timescale);
         Ok(None)
     }
 }
@@ -321,15 +327,20 @@ pub mod postgres {
     }
 
     impl PostgresIntrospector {
-        /// Read installed extensions and, when TimescaleDB 2.18+ is installed,
-        /// its catalog for `schema`.
+        /// Read installed extensions and, when `with_timescale` is set and
+        /// TimescaleDB 2.18+ is installed, its catalog for `schema`.
         ///
-        /// The extension query runs first; the Timescale queries run only if
-        /// the extension is installed at a supported version (the columnstore
-        /// settings view does not exist on older servers). An unsupported
-        /// version yields a catalog holding just the extension row so the
-        /// caller can report the version.
-        pub async fn read_catalog(&self, schema: &str) -> CliResult<PostgresCatalog> {
+        /// The extension query runs first. Without `with_timescale` no
+        /// Timescale query runs and `timescale` is `None`. Otherwise the
+        /// Timescale queries run only if the extension is installed at a
+        /// supported version (the columnstore settings view does not exist on
+        /// older servers); an unsupported version yields a catalog holding
+        /// just the extension row so the caller can report the version.
+        pub async fn read_catalog(
+            &self,
+            schema: &str,
+            with_timescale: bool,
+        ) -> CliResult<PostgresCatalog> {
             use prax_migrate::timescale::catalog::{
                 AggregateRow, ColumnRow, ColumnstoreSettingsRow, DimensionRow, ExtensionRow,
                 HypertableRow, JobRow, ViewRow, queries as ts, timescale_version_supported,
@@ -350,6 +361,12 @@ pub mod postgres {
                 });
             }
             let extensions: Vec<String> = rows.extensions.iter().map(|e| e.name.clone()).collect();
+            if !with_timescale {
+                return Ok(PostgresCatalog {
+                    extensions,
+                    timescale: None,
+                });
+            }
 
             let supported = rows
                 .extensions

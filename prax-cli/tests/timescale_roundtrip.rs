@@ -31,7 +31,7 @@ use prax_cli::commands::introspect::{
 use prax_cli::commands::schema_from_db::schema_from_database;
 use prax_cli::config::Config;
 use prax_migrate::timescale::catalog::{ColumnstoreSettings, aggregate_record};
-use prax_migrate::timescale::{TimescaleChangeKind, quote_literal};
+use prax_migrate::timescale::{TimescaleChangeKind, opts_into_timescale, quote_literal};
 use prax_migrate::{
     IntrospectionConfig, MigrateResult, MigrationError, SchemaDiff, SchemaDiffer, SqlBackend,
     SqlDialect, TimescaleCatalog,
@@ -197,8 +197,17 @@ impl Ts {
             .expect("timescaledb is installed")
     }
 
-    /// Introspect the test schema the way `prax migrate` does.
+    /// Introspect the test schema, including its Timescale catalog.
     async fn introspect(&self) -> (prax_schema::Schema, PostgresCatalog) {
+        self.introspect_with(true).await
+    }
+
+    /// Introspect the test schema the way `prax migrate` does: the Timescale
+    /// catalog is read only `with_timescale`.
+    async fn introspect_with(
+        &self,
+        with_timescale: bool,
+    ) -> (prax_schema::Schema, PostgresCatalog) {
         let options = IntrospectionOptions {
             schema: Some(self.schema.clone()),
             ..Default::default()
@@ -209,10 +218,11 @@ impl Ts {
         let source = schema_from_database(&db, IntrospectionConfig::default())
             .expect("map introspected schema")
             .schema;
-        let catalog = introspect_postgres_catalog(PROVIDER, &self.url, Some(&self.schema))
-            .await
-            .expect("read catalog")
-            .expect("postgres provider yields a catalog");
+        let catalog =
+            introspect_postgres_catalog(PROVIDER, &self.url, Some(&self.schema), with_timescale)
+                .await
+                .expect("read catalog")
+                .expect("postgres provider yields a catalog");
         (source, catalog)
     }
 
@@ -225,11 +235,12 @@ impl Ts {
             .expect("timescaledb is installed")
     }
 
-    /// Diff `prax` against the database, as `generate_migration_sql` does.
+    /// Diff `prax` against the database, as `prax migrate` does: the Timescale
+    /// catalog is read and passed only when the target opts in.
     async fn try_diff(&self, prax: &str) -> MigrateResult<SchemaDiff> {
         let target = prax_schema::validate_schema(prax)
             .unwrap_or_else(|e| panic!("target schema validates: {e}\n{prax}"));
-        let (source, catalog) = self.introspect().await;
+        let (source, catalog) = self.introspect_with(opts_into_timescale(&target)).await;
         let mut differ = SchemaDiffer::new(target)
             .with_source(source)
             .with_installed_extensions(catalog.extensions);
@@ -720,6 +731,47 @@ async fn convert_populated_table() {
     ts.finish().await;
 }
 
+/// A table Prax created and the user turned into a hypertable by hand, still
+/// modeled as a plain table: a schema that does not opt into TimescaleDB
+/// migrates exactly as before (the Timescale catalog is not even read), and
+/// opting in requires declaring the hypertable.
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn undeclared_hypertable_ignored_without_opt_in() {
+    let Some(ts) = Ts::connect("undeclared_hypertable_ignored_without_opt_in").await else {
+        return;
+    };
+    let plain = metric("", "");
+    ts.apply_clean(&plain, false).await;
+    ts.exec(
+        "SELECT create_hypertable('\"Metric\"', by_range('time', INTERVAL '1 day'), \
+         create_default_indexes => false)",
+    )
+    .await;
+
+    // Not opted in: no Timescale state, so nothing to do, and other changes
+    // still migrate.
+    let (_, catalog) = ts.introspect_with(false).await;
+    assert!(catalog.timescale.is_none());
+    assert!(catalog.extensions.iter().any(|e| e == "timescaledb"));
+    assert_empty(&ts.diff(&plain).await, &plain);
+    let up = ts
+        .apply_clean(&metric("  note     String?", ""), false)
+        .await;
+    assert!(up.contains("ADD COLUMN \"note\""), "{up}");
+
+    // Opted in: the hypertable must be declared.
+    let opted_in = format!("{DATASOURCE}{}", metric("  note     String?", ""));
+    match ts.try_diff(&opted_in).await {
+        Err(MigrationError::InvalidMigration(msg)) => assert!(
+            msg.contains("its model does not declare @@timescale.hypertable"),
+            "{msg}"
+        ),
+        other => panic!("expected InvalidMigration, got {other:?}"),
+    }
+    ts.finish().await;
+}
+
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
 async fn retention_add_skipped_then_applied() {
@@ -997,7 +1049,7 @@ async fn db_pull_output_rediffs_empty() {
     let db = introspect_database(PROVIDER, &ts.url, &options)
         .await
         .expect("introspect database");
-    let timescale = introspect_postgres_catalog(PROVIDER, &ts.url, Some(&ts.schema))
+    let timescale = introspect_postgres_catalog(PROVIDER, &ts.url, Some(&ts.schema), true)
         .await
         .expect("read catalog")
         .and_then(|c| c.timescale);

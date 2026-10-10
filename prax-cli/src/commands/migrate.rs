@@ -68,7 +68,7 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
 
     // Resolve the current database structure as the diff source (introspected),
     // or None when no database is reachable (greenfield → full-creation DDL).
-    let source = resolve_source_schema(&config).await?;
+    let source = resolve_source_schema(&config, &schema).await?;
     let generated = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
 
     // 4. Generate migration
@@ -316,7 +316,7 @@ async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
     // Resolve the current database structure as the diff source (introspected),
     // or None when no database is reachable (greenfield → full-creation DDL).
     output::step(2, 2, "Comparing schema to database...");
-    let source = resolve_source_schema(&config).await?;
+    let source = resolve_source_schema(&config, &schema).await?;
     let generated = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
     let ddl_sql = if generated.has_statements {
         generated.sql.clone()
@@ -480,18 +480,30 @@ fn create_migration(migrations_dir: &Path, name: &str, sql: &str) -> CliResult<P
 /// history — is the source of truth for structure, so a database migrated by
 /// a foreign runner (empty/absent prax history) still diffs off its real
 /// structure.
-async fn resolve_source_schema(config: &Config) -> CliResult<Option<DiffSource>> {
+///
+/// The TimescaleDB catalog is read only when `target` opts in
+/// ([`prax_migrate::timescale::opts_into_timescale`]).
+async fn resolve_source_schema(
+    config: &Config,
+    target: &prax_schema::ast::Schema,
+) -> CliResult<Option<DiffSource>> {
     // No URL configured/available → greenfield source.
     let Ok(database_url) = get_database_url(config) else {
         output::list_item("No DATABASE_URL configured; treating as a new database.");
         return Ok(None);
     };
 
-    introspect_source_schema(config, &database_url).await
+    introspect_source_schema(
+        config,
+        &database_url,
+        prax_migrate::timescale::opts_into_timescale(target),
+    )
+    .await
 }
 
 /// The introspected diff source: the database structure plus, for Postgres,
-/// the installed extensions and TimescaleDB catalog.
+/// the installed extensions and (when the target opts in) the TimescaleDB
+/// catalog.
 pub(crate) struct DiffSource {
     /// Database structure mapped to a Prax schema.
     pub schema: prax_schema::ast::Schema,
@@ -511,7 +523,9 @@ impl From<prax_schema::ast::Schema> for DiffSource {
 /// Introspect `database_url` and map the result to a diff-source schema.
 ///
 /// Dispatches to the backend matching the configured provider (PostgreSQL,
-/// MySQL, SQLite, MSSQL), each behind its cargo feature.
+/// MySQL, SQLite, MSSQL), each behind its cargo feature. For Postgres the
+/// installed extensions are always read, the TimescaleDB catalog only when
+/// `with_timescale` is set.
 ///
 /// Error handling splits two cases so `migrate dev` is both safe and honest:
 /// - **Unreachable database** ([`CliError::Unreachable`]) or a provider whose
@@ -524,6 +538,7 @@ impl From<prax_schema::ast::Schema> for DiffSource {
 async fn introspect_source_schema(
     config: &Config,
     database_url: &str,
+    with_timescale: bool,
 ) -> CliResult<Option<DiffSource>> {
     use crate::commands::introspect::{
         IntrospectionOptions, introspect_database, introspect_postgres_catalog,
@@ -549,6 +564,7 @@ async fn introspect_source_schema(
                 &config.database.provider,
                 database_url,
                 options.schema.as_deref(),
+                with_timescale,
             )
             .await?;
             Ok(Some(DiffSource {
@@ -664,11 +680,16 @@ fn report_no_statements(generated: &GeneratedMigration, tail: &str) {
 
 /// Diff the desired `schema` (target) against an optional introspected
 /// `source`, render the resulting `SchemaDiff` through the provider's dialect
-/// generator, and return the `up` SQL.
+/// generator, and return a [`GeneratedMigration`]: the migration text (header,
+/// warnings, skipped notes, then the `up` SQL), whether it has statements, and
+/// the skipped notes and warnings for reporting.
 ///
 /// When `allow_destructive` is false (the default), drops (tables, columns,
-/// enums, foreign keys, indexes, enum-value removals) are stripped from the
-/// diff before generation so a stale schema never silently destroys data.
+/// enums, foreign keys, indexes, enum-value removals) and gated TimescaleDB
+/// changes are stripped from the diff before generation so a stale schema
+/// never silently destroys data. The source's TimescaleDB catalog is passed to
+/// the differ only when `schema` opts in
+/// ([`prax_migrate::timescale::opts_into_timescale`]).
 fn generate_migration_sql(
     schema: &prax_schema::ast::Schema,
     source: Option<DiffSource>,
@@ -701,7 +722,9 @@ fn generate_migration_sql(
                     )));
                 }
                 differ = differ.with_installed_extensions(catalog.extensions);
-                if let Some(ts) = catalog.timescale {
+                if let Some(ts) = catalog.timescale
+                    && prax_migrate::timescale::opts_into_timescale(schema)
+                {
                     differ = differ.with_timescale_catalog(ts);
                 }
             }
@@ -1211,6 +1234,78 @@ mod tests {
         let err = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("2.17.2") && msg.contains("2.18"), "msg: {msg}");
+    }
+
+    /// A catalog holding a hand-made `Metric` hypertable on `time`.
+    fn hypertable_catalog() -> crate::commands::introspect::PostgresCatalog {
+        use prax_migrate::timescale::catalog::{DimensionRow, ExtensionRow, HypertableRow};
+        crate::commands::introspect::PostgresCatalog {
+            extensions: vec!["timescaledb".to_string()],
+            timescale: prax_migrate::TimescaleCatalog::from_rows(prax_migrate::CatalogRows {
+                extensions: vec![ExtensionRow {
+                    name: "timescaledb".to_string(),
+                    version: "2.18.2".to_string(),
+                }],
+                hypertables: vec![HypertableRow {
+                    table: "Metric".to_string(),
+                    columnstore_enabled: false,
+                }],
+                dimensions: vec![DimensionRow {
+                    table: "Metric".to_string(),
+                    column: "time".to_string(),
+                    is_time: true,
+                    interval: Some((0, 7, 0)),
+                    partitions: None,
+                }],
+                ..Default::default()
+            })
+            .unwrap(),
+        }
+    }
+
+    const PLAIN_METRIC: &str = r#"
+        model Metric {
+            time  DateTime
+            value Float
+            @@id([time])
+        }
+    "#;
+
+    #[test]
+    fn test_generate_ignores_timescale_state_without_opt_in() {
+        // A hypertable created by hand and modeled as a plain table, in a
+        // schema that never mentions TimescaleDB: nothing to do.
+        let target = parse(PLAIN_METRIC);
+        let source = DiffSource {
+            schema: parse(PLAIN_METRIC),
+            catalog: Some(hypertable_catalog()),
+        };
+        let generated = generate_migration_sql(&target, Some(source), &pg_config(), false)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!generated.has_statements, "sql: {}", generated.sql);
+    }
+
+    #[test]
+    fn test_generate_opted_in_rejects_undeclared_hypertable() {
+        let datasource = r#"
+            datasource db {
+                provider = "postgresql"
+                url = "postgres://x"
+                extensions = [timescaledb]
+            }
+        "#;
+        let target = parse(&format!("{datasource}{PLAIN_METRIC}"));
+        let source = DiffSource {
+            schema: parse(PLAIN_METRIC),
+            catalog: Some(hypertable_catalog()),
+        };
+        let msg = generate_migration_sql(&target, Some(source), &pg_config(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            msg.contains("its model does not declare @@timescale.hypertable"),
+            "msg: {msg}"
+        );
     }
 
     #[test]
