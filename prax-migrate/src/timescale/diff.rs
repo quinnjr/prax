@@ -7,7 +7,7 @@
 use prax_schema::Schema;
 use prax_schema::ast::{Model, PgInterval};
 
-use crate::diff::SchemaDiff;
+use crate::diff::{SchemaDiff, index_column_name, primary_key_columns};
 use crate::error::{MigrateResult, MigrationError};
 use crate::timescale::aggregates::diff_aggregates;
 use crate::timescale::catalog::{
@@ -269,9 +269,12 @@ pub fn diff_timescale(
             Some(have) => alter_hypertable(have, &want, &mut diff.changes)?,
             None => {
                 let created = generic.create_models.iter().any(|m| m.table_name == table);
-                let exists = !created
-                    && source.is_some_and(|s| s.models.values().any(|m| m.table_name() == table));
-                create_hypertable(&want, created, exists, &mut diff.changes)?;
+                let existing = if created {
+                    None
+                } else {
+                    source.and_then(|s| s.models.values().find(|m| m.table_name() == table))
+                };
+                create_hypertable(&want, created, existing, &mut diff.changes)?;
             }
         }
     }
@@ -387,15 +390,16 @@ fn change(kind: TimescaleChangeKind, gated: bool, note: Option<String>) -> Times
 }
 
 /// A table without a hypertable in the catalog. `created`: the table is created
-/// in this migration, so it is empty. `exists`: it already exists and holds
-/// rows to convert.
+/// in this migration, so it is empty. `existing`: the source model of a table
+/// that already exists and holds rows to convert.
 fn create_hypertable(
     want: &HypertableState,
     created: bool,
-    exists: bool,
+    existing: Option<&Model>,
     out: &mut Vec<TimescaleChange>,
 ) -> MigrateResult<()> {
     let table = &want.table;
+    let exists = existing.is_some();
     if exists && let Some((column, _)) = &want.space {
         return Err(invalid(format!(
             "Cannot add a space dimension on \"{column}\" to existing table \"{table}\": \
@@ -403,6 +407,9 @@ fn create_hypertable(
              @@timescale.hypertable, or create a new hypertable with the space dimension, copy \
              the rows into it, and swap the tables manually."
         )));
+    }
+    if let Some(model) = existing {
+        check_existing_keys(model, want)?;
     }
     let note = exists.then(|| {
         format!(
@@ -437,6 +444,112 @@ fn create_hypertable(
         _ => retention_change(table, None, want.retention, out),
     }
     Ok(())
+}
+
+/// Refuse converting an existing table whose primary key or a unique
+/// constraint or index (from its source model) omits a partitioning column:
+/// TimescaleDB requires every one of them to include the time (and space)
+/// column, and Prax never changes the keys of an existing table, so
+/// `create_hypertable` would fail when the migration is applied.
+fn check_existing_keys(model: &Model, want: &HypertableState) -> MigrateResult<()> {
+    let table = &want.table;
+    let mut required = vec![want.time_column.clone()];
+    if let Some((column, _)) = &want.space {
+        required.push(column.clone());
+    }
+    let missing = |columns: &[String]| -> Vec<String> {
+        required
+            .iter()
+            .filter(|r| !columns.contains(r))
+            .cloned()
+            .collect()
+    };
+    let quoted = |columns: &[String]| -> String {
+        columns
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    // (description, example fix) per key that omits a partitioning column.
+    let mut offending: Vec<(String, String)> = Vec::new();
+    let primary_key = primary_key_columns(model);
+    if !primary_key.is_empty() {
+        let lacking = missing(&primary_key);
+        if !lacking.is_empty() {
+            let fixed = [primary_key.clone(), lacking].concat();
+            offending.push((
+                format!("primary key ({})", quoted(&primary_key)),
+                format!(
+                    "ALTER TABLE \"{table}\" DROP CONSTRAINT \"{table}_pkey\", ADD PRIMARY KEY ({})",
+                    quoted(&fixed)
+                ),
+            ));
+        }
+    }
+    let mut unique_sets: Vec<(Option<String>, Vec<String>)> = model
+        .fields
+        .values()
+        .filter(|f| f.has_attribute("unique"))
+        .map(|f| (None, vec![index_column_name(model, f.name())]))
+        .collect();
+    for attr in model.attributes.iter().filter(|a| a.name() == "unique") {
+        let fields: Vec<String> = match attr.first_arg() {
+            Some(prax_schema::ast::AttributeValue::FieldRef(f)) => vec![f.to_string()],
+            Some(prax_schema::ast::AttributeValue::FieldRefList(l)) => {
+                l.iter().map(ToString::to_string).collect()
+            }
+            _ => continue,
+        };
+        let name = attr
+            .get_arg("map")
+            .or_else(|| attr.get_arg("name"))
+            .and_then(|v| v.as_string())
+            .map(str::to_string);
+        let columns = fields.iter().map(|f| index_column_name(model, f)).collect();
+        unique_sets.push((name, columns));
+    }
+    for (name, columns) in unique_sets {
+        let lacking = missing(&columns);
+        if lacking.is_empty() {
+            continue;
+        }
+        let constraint = name
+            .clone()
+            .unwrap_or_else(|| format!("{table}_{}_key", columns.join("_")));
+        let fixed = [columns.clone(), lacking].concat();
+        offending.push((
+            match &name {
+                Some(name) => format!("unique constraint \"{name}\" ({})", quoted(&columns)),
+                None => format!("unique constraint ({})", quoted(&columns)),
+            },
+            format!(
+                "ALTER TABLE \"{table}\" DROP CONSTRAINT \"{constraint}\", ADD UNIQUE ({})",
+                quoted(&fixed)
+            ),
+        ));
+    }
+    let Some((_, example)) = offending.first() else {
+        return Ok(());
+    };
+
+    let mut columns = format!("the time column \"{}\"", want.time_column);
+    if let Some((space, _)) = &want.space {
+        columns.push_str(&format!(" and the space column \"{space}\""));
+    }
+    let one = offending.len() == 1;
+    let keys: Vec<&str> = offending.iter().map(|(d, _)| d.as_str()).collect();
+    Err(invalid(format!(
+        "Cannot convert existing table \"{table}\" to a hypertable: TimescaleDB requires every \
+         primary key and unique constraint or index of a hypertable to include {columns}, but \
+         its {} {} not. Prax does not change the keys of an existing table, so recreate {} \
+         manually to include {columns} (for example: {example}; for a unique index, drop it and \
+         create it again with the column), then re-run the migration.",
+        keys.join(", "),
+        if one { "does" } else { "do" },
+        if one { "it" } else { "them" },
+    )))
 }
 
 /// A hypertable in both the catalog and the target.
@@ -820,6 +933,90 @@ mod tests {
         assert!(!change.gated);
         assert!(note(change).contains("rewrites its rows"), "{change:?}");
         assert!(note(change).contains("\"Metric\""), "{change:?}");
+    }
+
+    /// A `Reading` table with `body` as its fields and model attributes.
+    fn reading(body: &str) -> String {
+        format!("{DATASOURCE}\nmodel Reading {{\n{body}\n}}\n")
+    }
+
+    const READING_HYPERTABLE: &str = "  id       Int\n  time     DateTime\n  email    String\n  value    Float @map(\"val\")\n\n  @@id([id, time])\n  @@timescale.hypertable(time, chunkInterval: \"1 day\")";
+
+    #[test]
+    fn test_existing_table_with_primary_key_missing_time_is_invalid() {
+        let source = reading(
+            "  id    Int      @id\n  time  DateTime\n  email String\n  value Float @map(\"val\")",
+        );
+        let msg = invalid(run(&reading(READING_HYPERTABLE), Some(&source), None));
+        for needle in [
+            "\"Reading\"",
+            "primary key (\"id\")",
+            "time column \"time\"",
+            "recreate",
+            "re-run",
+        ] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
+    }
+
+    #[test]
+    fn test_existing_table_with_unique_missing_time_is_invalid() {
+        // Field-level `@unique` (a mapped column) and `@@unique`.
+        for (body, needle) in [
+            (
+                "  id    Int\n  time  DateTime\n  email String\n  value Float @map(\"val\") @unique\n\n  @@id([id, time])",
+                "unique constraint (\"val\")",
+            ),
+            (
+                "  id    Int\n  time  DateTime\n  email String\n  value Float @map(\"val\")\n\n  @@id([id, time])\n  @@unique([email, value], map: \"reading_email_val_key\")",
+                "unique constraint \"reading_email_val_key\" (\"email\", \"val\")",
+            ),
+        ] {
+            let msg = invalid(run(
+                &reading(READING_HYPERTABLE),
+                Some(&reading(body)),
+                None,
+            ));
+            assert!(msg.contains(needle), "{needle}: {msg}");
+            assert!(!msg.contains("primary key (\""), "{msg}");
+        }
+    }
+
+    #[test]
+    fn test_existing_table_with_keys_including_time_converts() {
+        let source = reading(
+            "  id    Int\n  time  DateTime\n  email String\n  value Float @map(\"val\")\n\n  @@id([id, time])\n  @@unique([email, time])",
+        );
+        let diff = run(&reading(READING_HYPERTABLE), Some(&source), None).unwrap();
+        assert!(matches!(
+            &single(&diff).kind,
+            TimescaleChangeKind::CreateHypertable {
+                migrate_data: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_new_table_keys_are_not_checked_against_a_source() {
+        // Only an existing table is checked; a new one is created with the
+        // target's keys (validated by rule 5).
+        let source = reading(
+            "  id    Int      @id\n  time  DateTime\n  email String\n  value Float @map(\"val\")",
+        );
+        let target = format!(
+            "{}\nmodel Other {{\n  id   Int @id\n}}\n",
+            metric(&["@@timescale.hypertable(time, chunkInterval: \"1 day\")"])
+        );
+        // `Reading` is dropped, `Metric` is new: no key check.
+        let diff = run(&target, Some(&source), None).unwrap();
+        assert!(matches!(
+            &single(&diff).kind,
+            TimescaleChangeKind::CreateHypertable {
+                migrate_data: false,
+                ..
+            }
+        ));
     }
 
     #[test]

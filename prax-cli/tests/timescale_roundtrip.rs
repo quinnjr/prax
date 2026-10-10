@@ -751,6 +751,64 @@ async fn convert_populated_table() {
     ts.finish().await;
 }
 
+/// Converting an existing table whose primary key omits the time column is
+/// refused before any SQL runs (TimescaleDB's `create_hypertable` would reject
+/// it); once the key is recreated manually, the conversion goes through.
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn convert_table_with_key_missing_time_is_refused() {
+    let Some(ts) = Ts::connect("convert_table_with_key_missing_time_is_refused").await else {
+        return;
+    };
+    let plain = format!(
+        "{DATASOURCE}\nmodel Reading {{\n  id    Int      @id\n  time  DateTime\n  value Float\n}}\n"
+    );
+    ts.apply_clean(&plain, false).await;
+    ts.exec(
+        "INSERT INTO \"Reading\" (\"id\", \"time\", \"value\") \
+         SELECT i, now() - make_interval(hours => i), i FROM generate_series(1, 50) i",
+    )
+    .await;
+
+    let hyper = format!(
+        "{DATASOURCE}\nmodel Reading {{\n  id    Int\n  time  DateTime\n  value Float\n\n  @@id([id, time])\n  @@timescale.hypertable(time, chunkInterval: \"1 day\")\n}}\n"
+    );
+    match ts.try_diff(&hyper).await {
+        Err(MigrationError::InvalidMigration(msg)) => {
+            for needle in [
+                "\"Reading\"",
+                "primary key (\"id\")",
+                "time column \"time\"",
+            ] {
+                assert!(msg.contains(needle), "{needle}: {msg}");
+            }
+        }
+        other => panic!("expected InvalidMigration, got {other:?}"),
+    }
+    // What the refusal prevents: TimescaleDB rejects the conversion.
+    let rejected = ts
+        .try_rolled_back(
+            "SELECT create_hypertable('\"Reading\"', by_range('time', INTERVAL '1 day'), \
+             create_default_indexes => false, migrate_data => true)",
+        )
+        .await;
+    assert!(
+        rejected.is_err(),
+        "create_hypertable accepted a key without the time column"
+    );
+
+    // The manual fix from the message, then the conversion.
+    ts.exec(
+        "ALTER TABLE \"Reading\" DROP CONSTRAINT \"Reading_pkey\", \
+         ADD PRIMARY KEY (\"id\", \"time\")",
+    )
+    .await;
+    let up = ts.apply_clean(&hyper, false).await;
+    assert!(up.contains("migrate_data => true"), "{up}");
+    assert_eq!(ts.count("SELECT count(*) FROM \"Reading\"").await, 50);
+    ts.finish().await;
+}
+
 /// A table Prax created and the user turned into a hypertable by hand, still
 /// modeled as a plain table: a schema that does not opt into TimescaleDB
 /// migrates exactly as before (the Timescale catalog is not even read), and
