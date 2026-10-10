@@ -101,6 +101,29 @@ mod postgres {
 
     #[tokio::test]
     #[ignore = "requires running PostgreSQL via docker-compose"]
+    async fn postgres_catalog_without_timescale() {
+        if !e2e() {
+            eprintln!("skipping: PRAX_E2E not set");
+            return;
+        }
+        let url = url().expect("POSTGRES_URL required");
+        exec(&url, "CREATE EXTENSION IF NOT EXISTS vector;").await;
+
+        let catalog =
+            prax_cli::commands::introspect::introspect_postgres_catalog("postgres", &url, None)
+                .await
+                .expect("catalog")
+                .expect("postgres provider yields a catalog");
+        assert!(
+            catalog.extensions.iter().any(|e| e == "vector"),
+            "extensions: {:?}",
+            catalog.extensions
+        );
+        assert!(catalog.timescale.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running PostgreSQL via docker-compose"]
     async fn roundtrip_empty_and_delta() {
         if !e2e() {
             eprintln!("skipping: PRAX_E2E not set");

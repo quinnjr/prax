@@ -475,7 +475,7 @@ fn create_migration(migrations_dir: &Path, name: &str, sql: &str) -> CliResult<P
 /// history — is the source of truth for structure, so a database migrated by
 /// a foreign runner (empty/absent prax history) still diffs off its real
 /// structure.
-async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema::ast::Schema>> {
+async fn resolve_source_schema(config: &Config) -> CliResult<Option<DiffSource>> {
     // No URL configured/available → greenfield source.
     let Ok(database_url) = get_database_url(config) else {
         output::list_item("No DATABASE_URL configured; treating as a new database.");
@@ -483,6 +483,24 @@ async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema:
     };
 
     introspect_source_schema(config, &database_url).await
+}
+
+/// The introspected diff source: the database structure plus, for Postgres,
+/// the installed extensions and TimescaleDB catalog.
+pub(crate) struct DiffSource {
+    /// Database structure mapped to a Prax schema.
+    pub schema: prax_schema::ast::Schema,
+    /// Postgres extension and TimescaleDB state (`None` for other providers).
+    pub catalog: Option<crate::commands::introspect::PostgresCatalog>,
+}
+
+impl From<prax_schema::ast::Schema> for DiffSource {
+    fn from(schema: prax_schema::ast::Schema) -> Self {
+        Self {
+            schema,
+            catalog: None,
+        }
+    }
 }
 
 /// Introspect `database_url` and map the result to a diff-source schema.
@@ -501,8 +519,10 @@ async fn resolve_source_schema(config: &Config) -> CliResult<Option<prax_schema:
 async fn introspect_source_schema(
     config: &Config,
     database_url: &str,
-) -> CliResult<Option<prax_schema::ast::Schema>> {
-    use crate::commands::introspect::{IntrospectionOptions, introspect_database};
+) -> CliResult<Option<DiffSource>> {
+    use crate::commands::introspect::{
+        IntrospectionOptions, introspect_database, introspect_postgres_catalog,
+    };
     use crate::commands::schema_from_db::schema_from_database;
 
     // Scope introspection to a single schema/database where the provider needs
@@ -520,7 +540,16 @@ async fn introspect_source_schema(
             for warning in &result.warnings {
                 output::warn(warning);
             }
-            Ok(Some(result.schema))
+            let catalog = introspect_postgres_catalog(
+                &config.database.provider,
+                database_url,
+                options.schema.as_deref(),
+            )
+            .await?;
+            Ok(Some(DiffSource {
+                schema: result.schema,
+                catalog,
+            }))
         }
         // Only "no database reachable", or a backend whose introspection
         // feature is not compiled in, falls back to greenfield. A reachable
@@ -603,7 +632,7 @@ fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBacken
 /// diff before generation so a stale schema never silently destroys data.
 fn generate_migration_sql(
     schema: &prax_schema::ast::Schema,
-    source: Option<prax_schema::ast::Schema>,
+    source: Option<DiffSource>,
     config: &Config,
     allow_destructive: bool,
 ) -> CliResult<String> {
@@ -611,9 +640,34 @@ fn generate_migration_sql(
 
     let backend = sql_backend_for_provider(&config.database.provider)?;
 
+    let uses_timescale = schema.models.values().any(|m| m.timescale().is_some())
+        || schema
+            .views
+            .values()
+            .any(|v| v.continuous_aggregate().is_some());
+
     let differ = SchemaDiffer::new(schema.clone());
     let differ = match source {
-        Some(src) => differ.with_source(src),
+        Some(src) => {
+            let mut differ = differ.with_source(src.schema);
+            if let Some(catalog) = src.catalog {
+                if uses_timescale
+                    && let Some(ts) = &catalog.timescale
+                    && !prax_migrate::timescale::catalog::timescale_version_supported(&ts.version)
+                {
+                    return Err(CliError::Migration(format!(
+                        "TimescaleDB {} is installed, but Prax requires TimescaleDB 2.18 or \
+                         newer for @@timescale.* attributes. Upgrade the extension.",
+                        ts.version
+                    )));
+                }
+                differ = differ.with_installed_extensions(catalog.extensions);
+                if let Some(ts) = catalog.timescale {
+                    differ = differ.with_timescale_catalog(ts);
+                }
+            }
+            differ
+        }
         None => differ,
     };
 
@@ -822,7 +876,8 @@ mod tests {
         // Source == target => empty diff => empty SQL (no spurious churn).
         let schema = parse(USERS_V1);
         let source = parse(USERS_V1);
-        let sql = generate_migration_sql(&schema, Some(source), &pg_config(), false).unwrap();
+        let sql =
+            generate_migration_sql(&schema, Some(source.into()), &pg_config(), false).unwrap();
         assert!(sql.trim().is_empty(), "expected no changes, got: {sql}");
     }
 
@@ -853,7 +908,8 @@ mod tests {
             "#,
         );
 
-        let sql = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        let sql =
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), false).unwrap();
 
         // Added column on the existing table.
         assert!(
@@ -894,8 +950,8 @@ mod tests {
         );
         let target = parse(USERS_V1);
 
-        let sql =
-            generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
+        let sql = generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
+            .unwrap();
         assert!(
             !sql.to_uppercase().contains("DROP"),
             "additive-only must not drop: {sql}"
@@ -903,7 +959,7 @@ mod tests {
 
         // With --allow-destructive the drops appear.
         let sql_destructive =
-            generate_migration_sql(&target, Some(source), &pg_config(), true).unwrap();
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), true).unwrap();
         assert!(
             sql_destructive.contains("DROP TABLE") && sql_destructive.contains("DROP COLUMN"),
             "destructive should drop: {sql_destructive}"
@@ -948,14 +1004,15 @@ mod tests {
         );
 
         let additive =
-            generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
+            generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
+                .unwrap();
         assert!(
             !additive.to_uppercase().contains("DROP"),
             "additive-only must strip FK/index drops: {additive}"
         );
 
         let destructive =
-            generate_migration_sql(&target, Some(source), &pg_config(), true).unwrap();
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), true).unwrap();
         assert!(
             destructive.contains("DROP CONSTRAINT") && destructive.contains("post_author_fk"),
             "destructive should drop the FK constraint: {destructive}"
@@ -1003,10 +1060,73 @@ mod tests {
             "#,
         );
 
-        let a = generate_migration_sql(&target, Some(source.clone()), &pg_config(), false).unwrap();
-        let b = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        let a = generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
+            .unwrap();
+        let b = generate_migration_sql(&target, Some(source.into()), &pg_config(), false).unwrap();
         assert_eq!(a, b, "same inputs must yield identical SQL");
         assert!(a.contains("ADD COLUMN \"nickname\""), "sql: {a}");
+    }
+
+    const TS_TARGET: &str = r#"
+        datasource db {
+            provider = "postgresql"
+            url = "postgres://x"
+            extensions = [timescaledb]
+        }
+        model Metric {
+            time DateTime
+            @@id([time])
+            @@timescale.hypertable(time)
+        }
+    "#;
+
+    fn ts_catalog(version: &str) -> crate::commands::introspect::PostgresCatalog {
+        crate::commands::introspect::PostgresCatalog {
+            extensions: vec!["timescaledb".to_string()],
+            timescale: prax_migrate::TimescaleCatalog::from_rows(prax_migrate::CatalogRows {
+                extensions: vec![prax_migrate::timescale::catalog::ExtensionRow {
+                    name: "timescaledb".to_string(),
+                    version: version.to_string(),
+                }],
+                ..Default::default()
+            })
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn test_generate_rejects_old_timescale() {
+        let target = parse(TS_TARGET);
+        let source = DiffSource {
+            schema: parse(""),
+            catalog: Some(ts_catalog("2.17.2")),
+        };
+        let err = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("2.17.2") && msg.contains("2.18"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_generate_passes_installed_extensions() {
+        let target = parse(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = "postgres://x"
+                extensions = [timescaledb]
+            }
+            model A { id Int @id }
+            "#,
+        );
+        let source = DiffSource {
+            schema: parse(""),
+            catalog: Some(crate::commands::introspect::PostgresCatalog {
+                extensions: vec!["timescaledb".to_string()],
+                timescale: None,
+            }),
+        };
+        let sql = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        assert!(!sql.contains("CREATE EXTENSION"), "sql: {sql}");
     }
 
     #[test]

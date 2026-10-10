@@ -87,6 +87,44 @@ pub fn default_schema(db_type: DatabaseType) -> &'static str {
     }
 }
 
+/// Installed Postgres extensions and the TimescaleDB catalog, read for the
+/// migration differ.
+#[derive(Debug, Clone)]
+pub struct PostgresCatalog {
+    /// Names of the installed extensions.
+    pub extensions: Vec<String>,
+    /// TimescaleDB state; `None` when the extension is not installed. When the
+    /// installed version is older than 2.18 only the version is populated.
+    pub timescale: Option<prax_migrate::TimescaleCatalog>,
+}
+
+/// Read the Postgres extension and TimescaleDB catalog state.
+///
+/// Returns `Ok(None)` for non-Postgres providers (and when the `postgres`
+/// feature is not compiled in). `schema` defaults to `"public"`.
+pub async fn introspect_postgres_catalog(
+    provider: &str,
+    database_url: &str,
+    schema: Option<&str>,
+) -> CliResult<Option<PostgresCatalog>> {
+    if !matches!(get_database_type(provider)?, DatabaseType::PostgreSQL) {
+        return Ok(None);
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let introspector = postgres::PostgresIntrospector::new(database_url.to_string());
+        introspector
+            .read_catalog(schema.unwrap_or("public"))
+            .await
+            .map(Some)
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        let _ = (database_url, schema);
+        Ok(None)
+    }
+}
+
 /// Introspect a database, dispatching to the backend matching `provider`.
 ///
 /// This is the single entry point shared by `db pull` and the migration
@@ -263,6 +301,186 @@ pub mod postgres {
             };
 
             Ok(client)
+        }
+    }
+
+    fn db_err(what: &str, e: tokio_postgres::Error) -> CliError {
+        CliError::Database(format!("Failed to query {what}: {e}"))
+    }
+
+    /// Three nullable interval columns starting at `idx`, or `None` unless all
+    /// three are present.
+    fn interval_at(row: &Row, idx: usize) -> CliResult<Option<(i32, i32, i64)>> {
+        let months: Option<i32> = row.try_get(idx).map_err(|e| db_err("interval", e))?;
+        let days: Option<i32> = row.try_get(idx + 1).map_err(|e| db_err("interval", e))?;
+        let micros: Option<i64> = row.try_get(idx + 2).map_err(|e| db_err("interval", e))?;
+        Ok(match (months, days, micros) {
+            (Some(m), Some(d), Some(u)) => Some((m, d, u)),
+            _ => None,
+        })
+    }
+
+    impl PostgresIntrospector {
+        /// Read installed extensions and, when TimescaleDB 2.18+ is installed,
+        /// its catalog for `schema`.
+        ///
+        /// The extension query runs first; the Timescale queries run only if
+        /// the extension is installed at a supported version (the columnstore
+        /// settings view does not exist on older servers). An unsupported
+        /// version yields a catalog holding just the extension row so the
+        /// caller can report the version.
+        pub async fn read_catalog(&self, schema: &str) -> CliResult<PostgresCatalog> {
+            use prax_migrate::timescale::catalog::{
+                AggregateRow, ColumnRow, ColumnstoreSettingsRow, DimensionRow, ExtensionRow,
+                HypertableRow, JobRow, ViewRow, queries as ts, timescale_version_supported,
+            };
+            use prax_migrate::{CatalogRows, TimescaleCatalog};
+
+            let client = self.connect().await?;
+
+            let ext_rows = client
+                .query(ts::EXTENSIONS, &[])
+                .await
+                .map_err(|e| db_err("extensions", e))?;
+            let mut rows = CatalogRows::default();
+            for r in &ext_rows {
+                rows.extensions.push(ExtensionRow {
+                    name: r.try_get(0).map_err(|e| db_err("extensions", e))?,
+                    version: r.try_get(1).map_err(|e| db_err("extensions", e))?,
+                });
+            }
+            let extensions: Vec<String> = rows.extensions.iter().map(|e| e.name.clone()).collect();
+
+            let supported = rows
+                .extensions
+                .iter()
+                .find(|e| e.name == "timescaledb")
+                .map(|e| timescale_version_supported(&e.version));
+
+            if supported == Some(true) {
+                let s = &[&schema as &(dyn tokio_postgres::types::ToSql + Sync)];
+
+                for r in client
+                    .query(ts::HYPERTABLES, s)
+                    .await
+                    .map_err(|e| db_err("hypertables", e))?
+                {
+                    rows.hypertables.push(HypertableRow {
+                        table: r.try_get(0).map_err(|e| db_err("hypertables", e))?,
+                        columnstore_enabled: r.try_get(1).map_err(|e| db_err("hypertables", e))?,
+                    });
+                }
+
+                for r in client
+                    .query(ts::DIMENSIONS, s)
+                    .await
+                    .map_err(|e| db_err("dimensions", e))?
+                {
+                    rows.dimensions.push(DimensionRow {
+                        table: r.try_get(0).map_err(|e| db_err("dimensions", e))?,
+                        column: r.try_get(1).map_err(|e| db_err("dimensions", e))?,
+                        is_time: r.try_get(2).map_err(|e| db_err("dimensions", e))?,
+                        interval: interval_at(&r, 3)?,
+                        partitions: r.try_get(6).map_err(|e| db_err("dimensions", e))?,
+                    });
+                }
+
+                for r in client
+                    .query(ts::COLUMNSTORE_SETTINGS, &[])
+                    .await
+                    .map_err(|e| db_err("columnstore settings", e))?
+                {
+                    rows.columnstore_settings.push(ColumnstoreSettingsRow {
+                        relation: r
+                            .try_get(0)
+                            .map_err(|e| db_err("columnstore settings", e))?,
+                        segment_by: r
+                            .try_get(1)
+                            .map_err(|e| db_err("columnstore settings", e))?,
+                        order_by: r
+                            .try_get(2)
+                            .map_err(|e| db_err("columnstore settings", e))?,
+                    });
+                }
+
+                for r in client
+                    .query(ts::JOBS, &[])
+                    .await
+                    .map_err(|e| db_err("jobs", e))?
+                {
+                    let Some(schedule_interval) = interval_at(&r, 14)? else {
+                        continue;
+                    };
+                    rows.jobs.push(JobRow {
+                        proc_name: r.try_get(0).map_err(|e| db_err("jobs", e))?,
+                        relation: r.try_get(1).map_err(|e| db_err("jobs", e))?,
+                        drop_after: interval_at(&r, 2)?,
+                        after: interval_at(&r, 5)?,
+                        start_offset: interval_at(&r, 8)?,
+                        end_offset: interval_at(&r, 11)?,
+                        schedule_interval,
+                    });
+                }
+
+                for r in client
+                    .query(ts::AGGREGATES, s)
+                    .await
+                    .map_err(|e| db_err("continuous aggregates", e))?
+                {
+                    rows.aggregates.push(AggregateRow {
+                        view: r
+                            .try_get(0)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                        hypertable_name: r
+                            .try_get(1)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                        materialization_hypertable: r
+                            .try_get(2)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                        materialized_only: r
+                            .try_get(3)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                        view_definition: r
+                            .try_get(4)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                        comment: r
+                            .try_get(5)
+                            .map_err(|e| db_err("continuous aggregates", e))?,
+                    });
+                }
+
+                for r in client
+                    .query(ts::COLUMNS, s)
+                    .await
+                    .map_err(|e| db_err("aggregate columns", e))?
+                {
+                    rows.columns.push(ColumnRow {
+                        relation: r.try_get(0).map_err(|e| db_err("aggregate columns", e))?,
+                        name: r.try_get(1).map_err(|e| db_err("aggregate columns", e))?,
+                        udt_name: r.try_get(2).map_err(|e| db_err("aggregate columns", e))?,
+                        nullable: r.try_get(3).map_err(|e| db_err("aggregate columns", e))?,
+                    });
+                }
+
+                for r in client
+                    .query(ts::VIEWS, s)
+                    .await
+                    .map_err(|e| db_err("views", e))?
+                {
+                    rows.views.push(ViewRow {
+                        name: r.try_get(0).map_err(|e| db_err("views", e))?,
+                        is_materialized: r.try_get(1).map_err(|e| db_err("views", e))?,
+                    });
+                }
+            }
+
+            let timescale = TimescaleCatalog::from_rows(rows).map_err(|e| {
+                CliError::Database(format!("Failed to read TimescaleDB catalog: {e}"))
+            })?;
+            Ok(PostgresCatalog {
+                extensions,
+                timescale,
+            })
         }
     }
 
