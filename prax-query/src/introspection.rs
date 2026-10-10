@@ -1098,10 +1098,6 @@ fn escape_map_value(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn generate_model(table: &TableInfo, all_tables: &[TableInfo]) -> String {
-    generate_model_with(table, all_tables, &[])
-}
-
 fn generate_model_with(
     table: &TableInfo,
     all_tables: &[TableInfo],
@@ -1833,7 +1829,7 @@ mod tests {
             ..Default::default()
         };
 
-        let schema = generate_model(&table, &[]);
+        let schema = generate_model_with(&table, &[], &[]);
         assert!(schema.contains("model Users"));
         assert!(schema.contains("id Int @id @auto"));
         assert!(schema.contains("email String @unique"));
