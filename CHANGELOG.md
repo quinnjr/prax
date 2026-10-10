@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TimescaleDB schema + migrations** (`prax-schema`, `prax-migrate`, `prax-cli`) - `@@timescale.hypertable`, `@@timescale.columnstore`, `@@timescale.retention`, and `@@timescale.continuous`. Generated, introspected, and diffed DDL for TimescaleDB 2.18 or later; `prax db pull` emits the attributes.
+
+### Changed
+
+- **BREAKING**: `SchemaDiff` gains a public `timescale` field. It is not `#[non_exhaustive]`, so struct-literal construction without `..Default::default()` breaks.
+
+### Fixed
+
+- Datasource `extensions = [...]` now produce `CREATE EXTENSION` in generated migrations (create-only; aliases such as `pgvector` normalized) and are introspected from `pg_extension`.
+- `prax migrate` no longer reports "No changes" when changes were skipped for lacking `--allow-destructive`; skipped changes are listed.
+- `db pull` no longer emits field-level `@id` on members of a composite primary key (previously both `@id` and `@@id`, which failed validation).
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed

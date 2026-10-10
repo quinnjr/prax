@@ -448,6 +448,55 @@ const indexTypes = `model SearchDocument {
     @@unique([email], nulls: NotDistinct)
 }`;
 
+// TimescaleDB
+const timescaleExample = `datasource db {
+    provider   = "postgresql"
+    extensions = [timescaledb]
+}
+
+model Metric {
+    time     DateTime
+    deviceId String
+    value    Float
+
+    @@id([deviceId, time])
+    @@timescale.hypertable(time, chunkInterval: "1 day", space: hash(deviceId, 4))
+    @@timescale.columnstore(segmentBy: [deviceId], orderBy: [desc(time)], after: "7 days")
+    @@timescale.retention(dropAfter: "90 days")
+}
+
+view HourlyMetric {
+    bucket   DateTime
+    deviceId String
+    avgValue Float
+
+    @@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour")
+}
+
+@@sql("HourlyMetric", """
+SELECT time_bucket('1 hour', "time") AS bucket, "deviceId", avg("value") AS "avgValue"
+FROM "Metric"
+GROUP BY 1, 2
+""")`;
+
+const timescaleBackfill = `-- WARNING: "HourlyMetric" is created empty; the policy only covers the last 3 days.
+-- To backfill history, run outside a transaction:
+-- CALL refresh_continuous_aggregate('"HourlyMetric"', NULL, now() - INTERVAL '3 days');`;
+
+const timescaleAttrs = [
+  { attr: '@@timescale.hypertable', on: 'model', args: 'Positional time field (required); chunkInterval: "<interval>" (default "7 days", always emitted); space: hash(<field>, <n>) (optional)' },
+  { attr: '@@timescale.columnstore', on: 'model', args: 'segmentBy: [fields] (default none, emitted as an empty string to suppress TimescaleDB\'s heuristic pick); orderBy: [field | asc(field) | desc(field), ...] (default [desc(<time field>)]); after: "<interval>" (optional; absent means no conversion policy)' },
+  { attr: '@@timescale.retention', on: 'model', args: 'dropAfter: "<interval>" (required)' },
+  { attr: '@@timescale.continuous', on: 'view', args: 'source: <Model or continuous View> (required); scheduleInterval: "<interval>" (required); startOffset, endOffset (optional; absent means NULL); materializedOnly: Boolean (default true, always emitted)' },
+];
+
+const timescaleGating = [
+  { change: 'Adding a retention policy to an existing hypertable, or shortening dropAfter', why: 'Deletes data on a schedule. Adding retention to a hypertable created in the same migration is not gated.' },
+  { change: 'Recreating or dropping a continuous aggregate', why: 'Discards materialized data, which may be unrecoverable if retention already dropped the raw chunks.' },
+  { change: 'Materialized view to continuous aggregate', why: 'Discards the old view\'s stored rows.' },
+  { change: 'Disabling columnstore', why: 'Rewrites every converted chunk back to rowstore.' },
+];
+
 // Vector Index Types
 const vectorIndexTypes = `// Vector indexes for AI/ML similarity search (requires pgvector)
 // Database URL is configured in prax.toml, not in the schema
@@ -536,6 +585,7 @@ const vectorOpsTable = [
         <li><a href="/schema/attributes#documentation" class="text-accent hover:underline">Documentation</a></li>
         <li><a href="/schema/attributes#index-types" class="text-accent hover:underline">Index Types</a></li>
         <li><a href="/schema/attributes#vector-indexes" class="text-accent hover:underline">Vector Indexes</a></li>
+        <li><a href="/schema/attributes#timescaledb" class="text-accent hover:underline">TimescaleDB</a></li>
       </ul>
     </nav>
 
@@ -1271,6 +1321,104 @@ const vectorOpsTable = [
         </div>
 
         <CodeBlock code={vectorIndexTypes} lang="prax" filename="prax/schema.prax" />
+      </section>
+
+      <!-- TimescaleDB -->
+      <section id="timescaledb">
+        <h2 class="text-2xl font-semibold mb-4">TimescaleDB</h2>
+        <p class="text-muted mb-4">
+          Declare hypertables, columnstore, retention, and continuous aggregates in the schema. Prax generates,
+          introspects, and diffs the DDL for TimescaleDB 2.18 or later. Declare the extension in the
+          <code>datasource</code> block with <code>extensions = [timescaledb]</code>; Prax emits
+          <code>CREATE EXTENSION</code> (create-only: removing it from the schema never drops it).
+          Self-hosted servers must list <code>timescaledb</code> in <code>shared_preload_libraries</code>;
+          otherwise PostgreSQL's own <code>CREATE EXTENSION</code> error tells you so.
+        </p>
+
+        <CodeBlock code={timescaleExample} lang="prax" filename="prax/schema.prax" />
+
+        <p class="text-sm text-muted my-4">
+          Attribute arguments must stay on one line: the grammar does not allow line breaks inside <code>( ... )</code>.
+          Prax does not rename identifiers, so this example produces table <code>"Metric"</code> with column
+          <code>"deviceId"</code>, which is why the <code>@@sql</code> body quotes them.
+        </p>
+
+        <h3 class="text-xl font-medium mb-3 mt-8">Attributes</h3>
+        <div class="overflow-x-auto mb-6">
+          <table class="w-full text-sm border border-border rounded-lg">
+            <thead class="bg-muted/50">
+              <tr>
+                <th class="text-left px-4 py-3 font-semibold">Attribute</th>
+                <th class="text-left px-4 py-3 font-semibold">On</th>
+                <th class="text-left px-4 py-3 font-semibold">Arguments</th>
+              </tr>
+            </thead>
+            <tbody>
+              {timescaleAttrs.map((row) => (
+                <tr class="border-t border-border">
+                  <td class="px-4 py-2 font-mono text-primary">{row.attr}</td>
+                  <td class="px-4 py-2">{row.on}</td>
+                  <td class="px-4 py-2 text-muted">{row.args}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted mb-4">
+          <code>source:</code> names the relation the aggregate's SQL reads. Prax does not parse the SQL, so
+          <code>source</code> gives the diff its dependency order, the retention-overlap check, and
+          recreation when the source table's column types change or columns are dropped. It is checked against the
+          database on every diff. <code>@@timescale.continuous</code> implies a materialized view; an explicit
+          <code>@@materialized</code> alongside it is redundant and allowed. Foreign keys that reference a
+          hypertable are allowed.
+        </p>
+
+        <h3 class="text-xl font-medium mb-3 mt-8">Destructive changes</h3>
+        <p class="text-muted mb-4">
+          <code>--allow-destructive</code> gates any change that loses data or rewrites all stored data of a
+          hypertable, so a stale schema (for example an old branch) never triggers either. Lengthening or removing
+          retention, policy schedule changes, and columnstore settings changes are not gated.
+        </p>
+        <div class="overflow-x-auto mb-6">
+          <table class="w-full text-sm border border-border rounded-lg">
+            <thead class="bg-muted/50">
+              <tr>
+                <th class="text-left px-4 py-3 font-semibold">Gated change</th>
+                <th class="text-left px-4 py-3 font-semibold">Why</th>
+              </tr>
+            </thead>
+            <tbody>
+              {timescaleGating.map((row) => (
+                <tr class="border-t border-border">
+                  <td class="px-4 py-2">{row.change}</td>
+                  <td class="px-4 py-2 text-muted">{row.why}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted mb-4">
+          <code>prax migrate dev</code> and <code>prax migrate diff</code> list changes skipped for lacking the flag
+          as <code>-- SKIPPED (needs --allow-destructive): ...</code> rather than reporting "No changes".
+          Column alters that TimescaleDB rejects on a columnstore-enabled hypertable (dropping or changing the type
+          of a <code>segmentBy</code>/<code>orderBy</code> column, or <code>SET NOT NULL</code> on TimescaleDB
+          before 2.30) are refused at diff time with the manual steps to follow.
+        </p>
+
+        <h3 class="text-xl font-medium mb-3 mt-8">Backfilling continuous aggregates</h3>
+        <p class="text-muted mb-4">
+          The refresh policy only covers <code>[now - startOffset, now - endOffset]</code>, so an aggregate created
+          over existing data never materializes older buckets on its own. Every create and recreate emits a warning
+          and a commented-out statement to run <strong>outside a transaction</strong>:
+        </p>
+        <CodeBlock code={timescaleBackfill} lang="sql" />
+
+        <h3 class="text-xl font-medium mb-3 mt-8">Introspection</h3>
+        <p class="text-muted mb-4">
+          <code>prax db pull</code> emits these attributes. A continuous aggregate it cannot represent (for example
+          one without a refresh policy) is reported as a
+          <code>// prax: continuous aggregate "..." was not pulled: ...</code> comment.
+        </p>
       </section>
     </div>
   </article>

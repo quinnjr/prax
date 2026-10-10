@@ -111,6 +111,13 @@ prax/
 | Hybrid vector + full-text search (RRF) | `query.rs` |
 | Vector filter integration | `filter.rs` |
 
+### TimescaleDB (`prax-migrate/src/timescale/`)
+
+| Feature | Module |
+|---------|--------|
+| Hypertables, columnstore, retention, continuous aggregates (`@@timescale.*`) | `prax-migrate/src/timescale/` |
+| Schema attributes and validation | `prax-schema/` |
+
 ### DuckDB Analytics (`prax-duckdb/`)
 
 In-process OLAP database with Parquet/CSV/JSON support, window functions, and async connection pooling.
