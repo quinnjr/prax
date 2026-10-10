@@ -71,19 +71,28 @@ pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
     for (view, agg) in &catalog.aggregates {
         // Aggregates never render as plain views, representable or not.
         extras.skip_views.insert(view.clone());
-        // `scheduleInterval` is required, so an aggregate without a refresh
-        // policy has no representable attribute.
-        let Some(policy) = &agg.policy else { continue };
-        if catalog.unsupported.contains_key(view) {
+        if let Some(reason) = catalog.unsupported.get(view) {
+            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+            extras.extra_blocks.push(format!(
+                "// prax: continuous aggregate \"{view}\" was not pulled: {reason}."
+            ));
             continue;
         }
+        // `scheduleInterval` is required, so an aggregate without a refresh
+        // policy has no representable attribute.
+        let Some(policy) = &agg.policy else {
+            extras.extra_blocks.push(format!(
+                "// prax: continuous aggregate \"{view}\" was not pulled: it has no refresh policy, and @@timescale.continuous requires scheduleInterval."
+            ));
+            continue;
+        };
         let name = pascal_case(view);
         let sql = agg
             .sql
             .as_deref()
             .or_else(|| catalog.aggregate_definitions.get(view).map(String::as_str))
             .unwrap_or_default();
-        let inline = sql.contains("\"\"\"");
+        let inline = sql.contains("\"\"\"") || sql.starts_with('"') || sql.ends_with('"');
 
         let mut block = String::new();
         if agg.sql.is_none() {
@@ -265,6 +274,44 @@ mod tests {
     }
 
     #[test]
+    fn test_aggregate_without_policy_is_reported() {
+        let mut c = catalog(Some(AUTHORED));
+        c.aggregates.get_mut("HourlyMetric").unwrap().policy = None;
+        let extras = render_extras(&c);
+        assert_eq!(
+            extras.extra_blocks,
+            vec![
+                r#"// prax: continuous aggregate "HourlyMetric" was not pulled: it has no refresh policy, and @@timescale.continuous requires scheduleInterval."#
+            ]
+        );
+        assert!(extras.skip_views.contains("HourlyMetric"));
+    }
+
+    #[test]
+    fn test_unsupported_aggregate_is_reported() {
+        let mut c = catalog(Some(AUTHORED));
+        c.unsupported
+            .insert("HourlyMetric".into(), "some reason".into());
+        let extras = render_extras(&c);
+        assert_eq!(
+            extras.extra_blocks,
+            vec![r#"// prax: continuous aggregate "HourlyMetric" was not pulled: some reason."#]
+        );
+    }
+
+    #[test]
+    fn test_sql_ending_in_quote_is_inline_and_validates() {
+        let sql = "SELECT time_bucket('1 hour', \"time\") AS bucket FROM \"Metric\" GROUP BY 1 ORDER BY \"bucket\"";
+        let extras = render_extras(&catalog(Some(sql)));
+        assert!(extras.extra_blocks[0].contains("    @@sql(\""));
+        assert!(!extras.extra_blocks[0].contains("\"\"\""));
+        let out = render_schema(&catalog(Some(sql)));
+        let schema = prax_schema::validate_schema(&out).unwrap_or_else(|e| panic!("{e:?}\n{out}"));
+        let view = schema.views.get("HourlyMetric").unwrap();
+        assert_eq!(view.resolved_sql(&schema), Some(sql));
+    }
+
+    #[test]
     fn test_unsupported_hypertable_renders_nothing() {
         let mut c = catalog(Some(AUTHORED));
         c.unsupported.insert("Metric".into(), "why".into());
@@ -286,6 +333,26 @@ mod tests {
             is_primary_key: pk,
             ..Default::default()
         }
+    }
+
+    fn render_schema(cat: &TimescaleCatalog) -> String {
+        let schema = DatabaseSchema {
+            name: "db".into(),
+            tables: vec![TableInfo {
+                name: "Metric".into(),
+                columns: vec![
+                    column("time", "timestamptz", true),
+                    column("deviceId", "text", true),
+                    column("value", "float8", false),
+                ],
+                primary_key: vec!["deviceId".into(), "time".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut config = Config::default();
+        config.database.provider = "postgresql".into();
+        format_as_prax(&schema, &config, Some(cat))
     }
 
     #[test]
