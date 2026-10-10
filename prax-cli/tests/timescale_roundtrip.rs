@@ -92,6 +92,17 @@ impl Ts {
             let _ = connection.await;
         });
 
+        // Policy jobs start running in background workers as soon as they are
+        // added and race the end-of-test DROP SCHEMA: on 2.30.2 a retention
+        // job hitting a dropped hypertable segfaulted, restarting the server
+        // under the next test. The tests only read policy configuration, so
+        // stop this database's job scheduler (idempotent; it stays stopped
+        // until started again or the server restarts).
+        client
+            .batch_execute("SELECT _timescaledb_functions.stop_background_workers()")
+            .await
+            .unwrap_or_else(|e| panic!("stop background workers: {}", pg_err(&e)));
+
         // A test that panicked earlier leaves its schema behind.
         let leftovers = client
             .query(
