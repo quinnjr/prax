@@ -479,8 +479,8 @@ FROM "Metric"
 GROUP BY 1, 2
 """)`;
 
-const timescaleBackfill = `-- WARNING: "HourlyMetric" is created empty; the policy only covers the last 3 days.
--- To backfill history, run outside a transaction:
+const timescaleBackfill = `-- "HourlyMetric" is created empty; its refresh policy only covers the last 3 days.
+-- To backfill older data, run outside a transaction:
 -- CALL refresh_continuous_aggregate('"HourlyMetric"', NULL, now() - INTERVAL '3 days');`;
 
 const timescaleAttrs = [
@@ -1334,6 +1334,15 @@ const vectorOpsTable = [
           Self-hosted servers must list <code>timescaledb</code> in <code>shared_preload_libraries</code>;
           otherwise PostgreSQL's own <code>CREATE EXTENSION</code> error tells you so.
         </p>
+        <p class="text-muted mb-4">
+          TimescaleDB management is opt-in: <code>prax migrate</code> reads and diffs the database's TimescaleDB
+          state only when the schema lists <code>timescaledb</code> in the datasource <code>extensions</code> or a
+          model or view declares an <code>@@timescale.*</code> attribute. A schema that does neither migrates
+          exactly as before, even when the database holds hypertables created by hand. Once a schema opts in,
+          every hypertable it models must declare <code>@@timescale.hypertable</code>: a hypertable modeled as a
+          plain table is refused, because converting a hypertable back to a plain table is not supported. Declare
+          the attribute, or remove the table from the schema.
+        </p>
 
         <CodeBlock code={timescaleExample} lang="prax" filename="prax/schema.prax" />
 
@@ -1367,8 +1376,11 @@ const vectorOpsTable = [
         <p class="text-muted mb-4">
           <code>source:</code> names the relation the aggregate's SQL reads. Prax does not parse the SQL, so
           <code>source</code> gives the diff its dependency order, the retention-overlap check, and
-          recreation when the source table's column types change or columns are dropped. It is checked against the
-          database on every diff. <code>@@timescale.continuous</code> implies a materialized view; an explicit
+          recreation when the source table's column types change or columns are dropped. For an aggregate Prax
+          created (its view comment carries Prax's definition record), <code>source</code> is checked against the
+          database on every diff; an aggregate created outside Prax has no record, so neither its SQL nor its
+          <code>source</code> is compared, it is never recreated automatically, and every diff warns about it.
+          <code>@@timescale.continuous</code> implies a materialized view; an explicit
           <code>@@materialized</code> alongside it is redundant and allowed. Foreign keys that reference a
           hypertable are allowed.
         </p>
@@ -1400,16 +1412,29 @@ const vectorOpsTable = [
         <p class="text-muted mb-4">
           <code>prax migrate dev</code> and <code>prax migrate diff</code> list changes skipped for lacking the flag
           as <code>-- SKIPPED (needs --allow-destructive): ...</code> rather than reporting "No changes".
-          Column alters that TimescaleDB rejects on a columnstore-enabled hypertable (dropping or changing the type
-          of a <code>segmentBy</code>/<code>orderBy</code> column, or <code>SET NOT NULL</code> on TimescaleDB
-          before 2.30) are refused at diff time with the manual steps to follow.
+          Column alters that TimescaleDB rejects on a columnstore-enabled hypertable (changing the type of any
+          column, dropping a <code>segmentBy</code>/<code>orderBy</code> column, or <code>SET NOT NULL</code> on
+          TimescaleDB before 2.30) are refused at diff time with the manual steps to follow.
+        </p>
+
+        <h3 class="text-xl font-medium mb-3 mt-8">Converting existing tables</h3>
+        <p class="text-muted mb-4">
+          Adding <code>@@timescale.hypertable</code> to a table that already exists converts it in place
+          (<code>migrate_data =&gt; true</code>), rewriting its rows into chunks; the migration warns that this
+          holds locks and cannot be undone by the down migration. TimescaleDB requires the primary key and every
+          unique constraint or index of a hypertable to include the time column. Prax does not change the keys of
+          an existing table, so if the database's keys omit the time column (for example a primary key on
+          <code>id</code> alone) the conversion is refused at diff time: recreate those keys with the time column
+          manually, then run the migration again. A <code>space</code> dimension cannot be added to an existing
+          table.
         </p>
 
         <h3 class="text-xl font-medium mb-3 mt-8">Backfilling continuous aggregates</h3>
         <p class="text-muted mb-4">
           The refresh policy only covers <code>[now - startOffset, now - endOffset]</code>, so an aggregate created
-          over existing data never materializes older buckets on its own. Every create and recreate emits a warning
-          and a commented-out statement to run <strong>outside a transaction</strong>:
+          over existing data never materializes older buckets on its own. Every create and recreate emits a warning;
+          when the policy has a <code>startOffset</code>, the migration also carries a commented-out statement to
+          run <strong>outside a transaction</strong>:
         </p>
         <CodeBlock code={timescaleBackfill} lang="sql" />
 
@@ -1418,6 +1443,14 @@ const vectorOpsTable = [
           <code>prax db pull</code> emits these attributes. A continuous aggregate it cannot represent (for example
           one without a refresh policy) is reported as a
           <code>// prax: continuous aggregate "..." was not pulled: ...</code> comment.
+        </p>
+        <p class="text-muted mb-4">
+          Some TimescaleDB setups are outside what the attributes can express: hypertables with an integer time
+          dimension or a <code>*_created_before</code> policy, and continuous aggregates built (directly or through
+          other aggregates) on such a hypertable or on a relation outside the introspected schema. Prax leaves them
+          unmanaged: migrations never alter or drop them, <code>db pull</code> renders such hypertables as plain
+          models and reports such aggregates with the comment above, and declaring <code>@@timescale.*</code> on
+          one is refused with the reason.
         </p>
       </section>
     </div>

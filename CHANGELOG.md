@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **TimescaleDB schema + migrations** (`prax-schema`, `prax-migrate`, `prax-cli`) - `@@timescale.hypertable`, `@@timescale.columnstore`, `@@timescale.retention`, and `@@timescale.continuous`. Generated, introspected, and diffed DDL for TimescaleDB 2.18 or later; `prax db pull` emits the attributes.
+  - Opt-in: `prax migrate` reads and diffs the database's TimescaleDB state only when the schema lists `timescaledb` in the datasource `extensions` or declares an `@@timescale.*` attribute. Other schemas migrate exactly as before, even over hypertables created by hand. Once opted in, a hypertable modeled without `@@timescale.hypertable` is refused (converting back to a plain table is not supported).
+  - Converting an existing table requires its primary key and every unique constraint or index to include the time column (TimescaleDB rule). Prax does not change the keys of an existing table, so such a conversion is refused at diff time with the manual steps.
+  - Hypertables with an integer time dimension or a `*_created_before` policy, and continuous aggregates built on them or on a relation outside the introspected schema, are left unmanaged: never altered or dropped, and refused if declared with `@@timescale.*`. `db pull` renders such hypertables as plain models and reports such aggregates in a `// prax:` comment.
 
 ### Changed
 
