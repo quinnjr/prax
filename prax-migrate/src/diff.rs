@@ -9,6 +9,7 @@ use crate::error::MigrateResult;
 use crate::procedure::{
     ProcedureDefinition, ProcedureDiff, ProcedureDiffer, ProcedureLanguage, Volatility,
 };
+use crate::timescale::{TimescaleCatalog, TimescaleDiff, diff_timescale};
 
 /// A diff between two schemas.
 #[derive(Debug, Clone, Default)]
@@ -41,6 +42,8 @@ pub struct SchemaDiff {
     pub drop_indexes: Vec<IndexDiff>,
     /// Procedure changes.
     pub procedures: Option<ProcedureDiff>,
+    /// TimescaleDB changes (hypertables, columnstore, retention).
+    pub timescale: TimescaleDiff,
 }
 
 /// Diff for PostgreSQL extensions.
@@ -71,6 +74,7 @@ impl SchemaDiff {
             && self.create_indexes.is_empty()
             && self.drop_indexes.is_empty()
             && self.procedures.as_ref().is_none_or(|p| p.is_empty())
+            && self.timescale.is_empty()
     }
 
     /// Get a human-readable summary of the diff.
@@ -139,6 +143,13 @@ impl SchemaDiff {
             if !proc_diff.alter_triggers.is_empty() {
                 parts.push(format!("Alter {} triggers", proc_diff.alter_triggers.len()));
             }
+        }
+
+        if !self.timescale.is_empty() {
+            parts.push(format!(
+                "Apply {} TimescaleDB changes",
+                self.timescale.changes.len()
+            ));
         }
 
         if parts.is_empty() {
@@ -521,6 +532,8 @@ pub struct SchemaDiffer {
     target: Schema,
     /// Extensions known to be installed in the database, if introspected.
     installed_extensions: Option<Vec<String>>,
+    /// The database's TimescaleDB state, if introspected.
+    timescale_catalog: Option<TimescaleCatalog>,
 }
 
 impl SchemaDiffer {
@@ -530,6 +543,7 @@ impl SchemaDiffer {
             source: None,
             target,
             installed_extensions: None,
+            timescale_catalog: None,
         }
     }
 
@@ -546,6 +560,16 @@ impl SchemaDiffer {
     #[must_use]
     pub fn with_installed_extensions(mut self, names: Vec<String>) -> Self {
         self.installed_extensions = Some(names);
+        self
+    }
+
+    /// Set the database's TimescaleDB state.
+    ///
+    /// The catalog, not the source schema, is the source of Timescale state;
+    /// without one the database is treated as having none.
+    #[must_use]
+    pub fn with_timescale_catalog(mut self, catalog: TimescaleCatalog) -> Self {
+        self.timescale_catalog = Some(catalog);
         self
     }
 
@@ -828,6 +852,13 @@ impl SchemaDiffer {
                 }
             }
         }
+
+        result.timescale = diff_timescale(
+            &self.target,
+            self.source.as_ref(),
+            self.timescale_catalog.as_ref(),
+            &result,
+        )?;
 
         Ok(result)
     }
