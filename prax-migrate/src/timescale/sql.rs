@@ -67,7 +67,10 @@ fn owns_first_statement(kind: &TimescaleChangeKind, phase: Phase) -> bool {
             (phase == Phase::Pre) == old.is_some()
         }
         TimescaleChangeKind::DisableColumnstore { .. } => phase == Phase::Pre,
-        _ => phase == Phase::Post,
+        TimescaleChangeKind::CreateHypertable { .. }
+        | TimescaleChangeKind::SetChunkInterval { .. }
+        | TimescaleChangeKind::SetPartitions { .. }
+        | TimescaleChangeKind::ConfigureColumnstore { .. } => phase == Phase::Post,
     }
 }
 
@@ -75,96 +78,105 @@ fn change_sql(change: &TimescaleChange, phase: Phase) -> (Vec<String>, Vec<Strin
     let mut up = Vec::new();
     let mut down = Vec::new();
     let mut warnings = Vec::new();
-    match (&change.kind, phase) {
-        (
-            TimescaleChangeKind::CreateHypertable {
-                table,
-                time_column,
-                chunk_interval,
-                space,
-                migrate_data,
-            },
-            Phase::Post,
-        ) => {
-            let migrate = if *migrate_data {
-                ", migrate_data => true"
-            } else {
-                ""
-            };
-            up.push(format!(
-                "SELECT create_hypertable({}, by_range({}, {}), create_default_indexes => false{});",
-                regclass_literal(table),
-                name_literal(time_column),
-                chunk_interval.to_sql(),
-                migrate
-            ));
-            if let Some((column, partitions)) = space {
+    match &change.kind {
+        TimescaleChangeKind::CreateHypertable {
+            table,
+            time_column,
+            chunk_interval,
+            space,
+            migrate_data,
+        } => {
+            if phase == Phase::Post {
+                let migrate = if *migrate_data {
+                    ", migrate_data => true"
+                } else {
+                    ""
+                };
                 up.push(format!(
-                    "SELECT add_dimension({}, by_hash({}, {}));",
+                    "SELECT create_hypertable({}, by_range({}, {}), create_default_indexes => false{});",
                     regclass_literal(table),
-                    name_literal(column),
-                    partitions
+                    name_literal(time_column),
+                    chunk_interval.to_sql(),
+                    migrate
                 ));
-            }
-            if *migrate_data {
-                down.push(format!(
-                    "-- irreversible: {} was converted to a hypertable",
-                    quote_ident(table)
-                ));
-                warnings.push(format!(
-                    "Table {} was converted to a hypertable; the down migration cannot convert it back",
-                    quote_ident(table)
-                ));
-            }
-        }
-        (TimescaleChangeKind::SetChunkInterval { table, old, new }, Phase::Post) => {
-            up.push(set_chunk_interval(table, &new.to_sql()));
-            down.push(set_chunk_interval(table, &old.to_sql()));
-        }
-        (TimescaleChangeKind::SetPartitions { table, old, new }, Phase::Post) => {
-            up.push(set_partitions(table, *new));
-            down.push(set_partitions(table, *old));
-        }
-        (TimescaleChangeKind::ConfigureColumnstore { table, old, new }, Phase::Post) => {
-            up.push(configure_columnstore(table, new));
-            match old {
-                None => down.extend(disable_columnstore(table)),
-                Some(old) => down.push(configure_columnstore(table, old)),
+                if let Some((column, partitions)) = space {
+                    up.push(format!(
+                        "SELECT add_dimension({}, by_hash({}, {}));",
+                        regclass_literal(table),
+                        name_literal(column),
+                        partitions
+                    ));
+                }
+                if *migrate_data {
+                    down.push(format!(
+                        "-- irreversible: {} was converted to a hypertable",
+                        quote_ident(table)
+                    ));
+                    warnings.push(format!(
+                        "Table {} was converted to a hypertable; the down migration cannot convert it back",
+                        quote_ident(table)
+                    ));
+                }
             }
         }
-        (TimescaleChangeKind::DisableColumnstore { table, old }, Phase::Pre) => {
-            up.extend(disable_columnstore(table));
-            down.push(configure_columnstore(table, &old.settings));
-            if let Some(after) = &old.after {
-                down.push(add_columnstore_policy(table, &after.to_sql()));
+        TimescaleChangeKind::SetChunkInterval { table, old, new } => {
+            if phase == Phase::Post {
+                up.push(set_chunk_interval(table, &new.to_sql()));
+                down.push(set_chunk_interval(table, &old.to_sql()));
             }
         }
-        (TimescaleChangeKind::ReplaceColumnstorePolicy { table, old, new }, Phase::Pre) => {
-            if let Some(old) = old {
-                up.push(remove_columnstore_policy(table));
-                down.push(add_columnstore_policy(table, &old.to_sql()));
-            }
-            let _ = new;
-        }
-        (TimescaleChangeKind::ReplaceColumnstorePolicy { table, new, .. }, Phase::Post) => {
-            if let Some(new) = new {
-                up.push(add_columnstore_policy(table, &new.to_sql()));
-                down.push(remove_columnstore_policy(table));
+        TimescaleChangeKind::SetPartitions { table, old, new } => {
+            if phase == Phase::Post {
+                up.push(set_partitions(table, *new));
+                down.push(set_partitions(table, *old));
             }
         }
-        (TimescaleChangeKind::ReplaceRetentionPolicy { table, old, .. }, Phase::Pre) => {
-            if let Some(old) = old {
-                up.push(remove_retention_policy(table));
-                down.push(add_retention_policy(table, &old.to_sql()));
+        TimescaleChangeKind::ConfigureColumnstore { table, old, new } => {
+            if phase == Phase::Post {
+                up.push(configure_columnstore(table, new));
+                match old {
+                    None => down.extend(disable_columnstore(table)),
+                    Some(old) => down.push(configure_columnstore(table, old)),
+                }
             }
         }
-        (TimescaleChangeKind::ReplaceRetentionPolicy { table, new, .. }, Phase::Post) => {
-            if let Some(new) = new {
-                up.push(add_retention_policy(table, &new.to_sql()));
-                down.push(remove_retention_policy(table));
+        TimescaleChangeKind::DisableColumnstore { table, old } => {
+            if phase == Phase::Pre {
+                up.extend(disable_columnstore(table));
+                down.push(configure_columnstore(table, &old.settings));
+                if let Some(after) = &old.after {
+                    down.push(add_columnstore_policy(table, &after.to_sql()));
+                }
             }
         }
-        _ => {}
+        TimescaleChangeKind::ReplaceColumnstorePolicy { table, old, new } => match phase {
+            Phase::Pre => {
+                if let Some(old) = old {
+                    up.push(remove_columnstore_policy(table));
+                    down.push(add_columnstore_policy(table, &old.to_sql()));
+                }
+            }
+            Phase::Post => {
+                if let Some(new) = new {
+                    up.push(add_columnstore_policy(table, &new.to_sql()));
+                    down.push(remove_columnstore_policy(table));
+                }
+            }
+        },
+        TimescaleChangeKind::ReplaceRetentionPolicy { table, old, new } => match phase {
+            Phase::Pre => {
+                if let Some(old) = old {
+                    up.push(remove_retention_policy(table));
+                    down.push(add_retention_policy(table, &old.to_sql()));
+                }
+            }
+            Phase::Post => {
+                if let Some(new) = new {
+                    up.push(add_retention_policy(table, &new.to_sql()));
+                    down.push(remove_retention_policy(table));
+                }
+            }
+        },
     }
     (up, down, warnings)
 }
