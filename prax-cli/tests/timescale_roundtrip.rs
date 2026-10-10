@@ -1232,16 +1232,19 @@ async fn probe_columnstore_alter_column_restrictions() {
     let Some(ts) = Ts::connect("probe_columnstore_alter_column_restrictions").await else {
         return;
     };
-    let model = |extra: &str| {
+    let model_with = |extra: &str, segment_by: &str| {
         format!(
             "{DATASOURCE}{}",
             metric(
                 extra,
-                "  @@timescale.hypertable(time, chunkInterval: \"1 day\")\n  \
-                 @@timescale.columnstore(segmentBy: [region], orderBy: [desc(time)])"
+                &format!(
+                    "  @@timescale.hypertable(time, chunkInterval: \"1 day\")\n  \
+                     @@timescale.columnstore({segment_by}orderBy: [desc(time)])"
+                )
             )
         )
     };
+    let model = |extra: &str| model_with(extra, "segmentBy: [region], ");
     let base = "  region   String?\n  note     String?\n  extra    Int?\n";
     ts.apply_clean(&model(base), false).await;
     ts.exec(INSERT_METRICS).await;
@@ -1281,7 +1284,7 @@ async fn probe_columnstore_alter_column_restrictions() {
     // The differ refuses the rejected alters and allows the others.
     let type_change = model("  region   String?\n  note     String?\n  extra    BigInt?\n");
     assert!(is_invalid_migration(&ts.try_diff(&type_change).await));
-    let drop_region = model("  note     String?\n  extra    Int?\n");
+    let drop_region = model_with("  note     String?\n  extra    Int?\n", "");
     assert!(is_invalid_migration(&ts.try_diff(&drop_region).await));
     let drop_note = model("  region   String?\n  extra    Int?\n");
     assert!(ts.try_diff(&drop_note).await.is_ok());
