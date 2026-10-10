@@ -6,6 +6,7 @@ use crate::diff::{
     ModelAlterDiff, ModelDiff, SchemaDiff, ViewDiff,
 };
 use crate::procedure::{DatabaseType as ProcedureDbType, ProcedureSqlGenerator};
+use crate::timescale::sql as timescale_sql;
 
 /// SQL generator for PostgreSQL.
 pub struct PostgresSqlGenerator;
@@ -18,6 +19,11 @@ impl PostgresSqlGenerator {
         let mut up = Vec::new();
         let mut down = Vec::new();
         let mut warnings = Vec::new();
+
+        // TimescaleDB pre-phase: policy removal and columnstore teardown run
+        // before the generic pipeline.
+        let ts_pre = timescale_sql::pre(&diff.timescale);
+        let ts_post = timescale_sql::post(&diff.timescale);
 
         // Create extensions first (they provide types used by tables)
         for ext in &diff.create_extensions {
@@ -167,9 +173,21 @@ impl PostgresSqlGenerator {
             }
         }
 
+        // TimescaleDB: pre-phase statements lead `up`, post-phase statements
+        // trail it; `down` mirrors that.
+        let mut full_up = ts_pre.up;
+        full_up.extend(up);
+        full_up.extend(ts_post.up);
+        let mut full_down = ts_post.down;
+        full_down.extend(down);
+        full_down.extend(ts_pre.down);
+        warnings.extend(ts_pre.warnings);
+        warnings.extend(ts_post.warnings);
+        warnings.extend(diff.timescale.warnings.iter().cloned());
+
         MigrationSql {
-            up: up.join("\n\n"),
-            down: down.join("\n\n"),
+            up: full_up.join("\n\n"),
+            down: full_down.join("\n\n"),
             warnings,
         }
     }
@@ -2254,6 +2272,113 @@ impl DuckDbSqlGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod timescale_gen {
+        use super::*;
+        use crate::diff::{ModelAlterDiff, SchemaDiffer};
+        use crate::timescale::{TimescaleChange, TimescaleChangeKind};
+        use prax_schema::ast::PgInterval;
+
+        const METRIC: &str = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n\nmodel Metric {\n  time     DateTime\n  deviceId String\n  value    Float\n\n  @@id([deviceId, time])\n  @@timescale.hypertable(time, chunkInterval: \"1 day\", space: hash(deviceId, 4))\n  @@timescale.columnstore(segmentBy: [deviceId], orderBy: [desc(time)], after: \"7 days\")\n  @@timescale.retention(dropAfter: \"90 days\")\n}\n";
+
+        const fn days(n: i32) -> PgInterval {
+            PgInterval::new(0, n, 0)
+        }
+
+        fn retention_diff(note: Option<&str>) -> SchemaDiff {
+            let mut diff = SchemaDiff::default();
+            diff.alter_models.push(ModelAlterDiff {
+                name: "Metric".into(),
+                table_name: "Metric".into(),
+                add_fields: vec![],
+                drop_fields: vec!["value".into()],
+                alter_fields: vec![],
+                add_indexes: vec![],
+                drop_indexes: vec![],
+                add_foreign_keys: vec![],
+                drop_foreign_keys: vec![],
+            });
+            diff.timescale.changes.push(TimescaleChange {
+                kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+                    table: "Metric".into(),
+                    old: Some(days(30)),
+                    new: Some(days(90)),
+                },
+                gated: false,
+                note: note.map(str::to_string),
+            });
+            diff
+        }
+
+        #[test]
+        fn test_generator_phase_order_for_new_hypertable() {
+            let target = prax_schema::parse_schema(METRIC).unwrap();
+            let diff = SchemaDiffer::new(target).diff().unwrap();
+            let sql = PostgresSqlGenerator.generate(&diff);
+            let needles = [
+                "CREATE EXTENSION IF NOT EXISTS \"timescaledb\"",
+                "CREATE TABLE \"Metric\"",
+                "create_hypertable",
+                "add_dimension",
+                "timescaledb.enable_columnstore = true",
+                "add_columnstore_policy",
+                "add_retention_policy",
+            ];
+            let mut last = 0;
+            for n in needles {
+                let pos = sql
+                    .up
+                    .find(n)
+                    .unwrap_or_else(|| panic!("missing {n}: {}", sql.up));
+                assert!(pos >= last, "{n} out of order in:\n{}", sql.up);
+                last = pos;
+            }
+        }
+
+        #[test]
+        fn test_generator_pre_phase_precedes_pipeline() {
+            let sql = PostgresSqlGenerator.generate(&retention_diff(None));
+            let rm = sql.up.find("remove_retention_policy").unwrap();
+            let drop = sql.up.find("DROP COLUMN").unwrap();
+            let add = sql.up.find("add_retention_policy").unwrap();
+            assert!(rm < drop && drop < add, "{}", sql.up);
+            assert!(
+                sql.down.find("remove_retention_policy").unwrap()
+                    < sql.down.find("add_retention_policy").unwrap()
+            );
+        }
+
+        #[test]
+        fn test_mysql_generator_ignores_timescale_diff() {
+            let sql = MySqlGenerator.generate(&retention_diff(None));
+            assert!(!sql.up.contains("retention_policy"));
+            assert!(!sql.down.contains("retention_policy"));
+        }
+
+        #[test]
+        fn test_change_notes_become_warnings() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes.push(TimescaleChange {
+                kind: TimescaleChangeKind::CreateHypertable {
+                    table: "Metric".into(),
+                    time_column: "time".into(),
+                    chunk_interval: days(1),
+                    space: None,
+                    migrate_data: true,
+                },
+                gated: false,
+                note: Some("Converting \"Metric\" rewrites its rows".into()),
+            });
+            let sql = PostgresSqlGenerator.generate(&diff);
+            assert_eq!(
+                sql.warnings
+                    .iter()
+                    .filter(|w| w.contains("rewrites its rows"))
+                    .count(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn test_create_enum() {
