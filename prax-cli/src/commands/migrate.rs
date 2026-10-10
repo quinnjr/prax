@@ -69,16 +69,16 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
     // Resolve the current database structure as the diff source (introspected),
     // or None when no database is reachable (greenfield → full-creation DDL).
     let source = resolve_source_schema(&config).await?;
-    let migration_sql = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
+    let generated = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
 
     // 4. Generate migration
     output::step(4, total_steps, "Generating migration...");
-    if migration_sql.trim().is_empty() {
+    if !generated.has_statements {
         output::newline();
-        success("No changes: the database already matches the schema. No migration created.");
+        report_no_statements(&generated, "No migration created.");
         return Ok(());
     }
-    let migration_path = create_migration(&migrations_dir, &migration_name, &migration_sql)?;
+    let migration_path = create_migration(&migrations_dir, &migration_name, &generated.sql)?;
 
     // 5. Apply migration (if not --create-only)
     if !args.create_only {
@@ -317,11 +317,16 @@ async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
     // or None when no database is reachable (greenfield → full-creation DDL).
     output::step(2, 2, "Comparing schema to database...");
     let source = resolve_source_schema(&config).await?;
-    let ddl_sql = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
+    let generated = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
+    let ddl_sql = if generated.has_statements {
+        generated.sql.clone()
+    } else {
+        String::new()
+    };
 
     output::newline();
-    if ddl_sql.trim().is_empty() {
-        output::info("No changes: the database already matches the schema.");
+    if !generated.has_statements {
+        report_no_statements(&generated, "No DDL generated.");
     }
 
     output::newline();
@@ -623,6 +628,40 @@ fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBacken
     }
 }
 
+/// The outcome of [`generate_migration_sql`].
+#[derive(Debug, Clone)]
+pub(crate) struct GeneratedMigration {
+    /// Header, `-- WARNING:` lines, `-- SKIPPED` lines, then the `up` SQL.
+    pub sql: String,
+    /// Whether `up` contains any statement.
+    pub has_statements: bool,
+    /// Notes for changes skipped for lacking `--allow-destructive`.
+    pub skipped: Vec<String>,
+    /// Warnings raised while generating the migration.
+    pub warnings: Vec<String>,
+}
+
+/// Explain an empty migration: print any warnings and skipped changes, then
+/// either the "No changes" message or the "does not match" message.
+fn report_no_statements(generated: &GeneratedMigration, tail: &str) {
+    for warning in &generated.warnings {
+        output::warn(warning);
+    }
+    if generated.skipped.is_empty() {
+        success(&format!(
+            "No changes: the database already matches the schema. {tail}"
+        ));
+        return;
+    }
+    for note in &generated.skipped {
+        output::warn(note);
+    }
+    output::warn(&format!(
+        "The database does not match the schema: {} change(s) need --allow-destructive. {tail}",
+        generated.skipped.len()
+    ));
+}
+
 /// Diff the desired `schema` (target) against an optional introspected
 /// `source`, render the resulting `SchemaDiff` through the provider's dialect
 /// generator, and return the `up` SQL.
@@ -635,7 +674,7 @@ fn generate_migration_sql(
     source: Option<DiffSource>,
     config: &Config,
     allow_destructive: bool,
-) -> CliResult<String> {
+) -> CliResult<GeneratedMigration> {
     use prax_migrate::{SchemaDiffer, SqlDialect};
 
     let backend = sql_backend_for_provider(&config.database.provider)?;
@@ -675,9 +714,11 @@ fn generate_migration_sql(
         .diff()
         .map_err(|e| CliError::Migration(format!("Failed to diff schema against database: {e}")))?;
 
-    if !allow_destructive {
-        strip_destructive(&mut diff);
-    }
+    let skipped = if allow_destructive {
+        Vec::new()
+    } else {
+        strip_destructive(&mut diff)
+    };
 
     let migration = SqlDialect::for_backend(backend).generate_migration(&diff);
 
@@ -691,39 +732,70 @@ fn generate_migration_sql(
     for warning in &migration.warnings {
         out.push_str(&format!("-- WARNING: {}\n", warning));
     }
+    for note in &skipped {
+        out.push_str(&format!(
+            "-- SKIPPED (needs --allow-destructive): {}\n",
+            note
+        ));
+    }
     out.push('\n');
     out.push_str(migration.up.trim_end());
     if !migration.up.trim_end().is_empty() {
         out.push('\n');
     }
 
-    // A header-only result (no statements) counts as "no changes" to callers.
-    if migration.up.trim().is_empty() {
-        return Ok(String::new());
-    }
-
-    Ok(out)
+    Ok(GeneratedMigration {
+        sql: out,
+        has_statements: !migration.up.trim().is_empty(),
+        skipped,
+        warnings: migration.warnings.clone(),
+    })
 }
 
 /// Remove every destructive operation from a `SchemaDiff` in place, leaving
 /// only additive/altering changes. Column *type/nullability/default* alters
 /// are kept (they are not drops); dropped columns, tables, enums, enum values,
-/// foreign keys, indexes, extensions, procedures, and triggers are removed.
+/// foreign keys, indexes, extensions, procedures, and triggers are removed,
+/// followed by gated TimescaleDB changes. Returns one note per removed item.
 ///
 /// `alter_views` is intentionally **kept**: a view alter recreates the view
 /// (drop + create), but views hold no data, so recreation is non-destructive
 /// and safe under the additive-only default.
-fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
-    diff.drop_models.clear();
-    diff.drop_enums.clear();
-    diff.drop_views.clear();
-    diff.drop_extensions.clear();
-    diff.drop_indexes.clear();
+fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) -> Vec<String> {
+    let mut notes = Vec::new();
+
+    for name in std::mem::take(&mut diff.drop_models) {
+        notes.push(format!("Drop table \"{name}\""));
+    }
+    for name in std::mem::take(&mut diff.drop_enums) {
+        notes.push(format!("Drop enum \"{name}\""));
+    }
+    for name in std::mem::take(&mut diff.drop_views) {
+        notes.push(format!("Drop view \"{name}\""));
+    }
+    for name in std::mem::take(&mut diff.drop_extensions) {
+        notes.push(format!("Drop extension \"{name}\""));
+    }
+    for index in std::mem::take(&mut diff.drop_indexes) {
+        notes.push(format!("Drop index \"{}\"", index.name));
+    }
 
     for alter in &mut diff.alter_models {
-        alter.drop_fields.clear();
-        alter.drop_indexes.clear();
-        alter.drop_foreign_keys.clear();
+        for column in std::mem::take(&mut alter.drop_fields) {
+            notes.push(format!(
+                "Drop column \"{column}\" from table \"{}\"",
+                alter.table_name
+            ));
+        }
+        for index in std::mem::take(&mut alter.drop_indexes) {
+            notes.push(format!("Drop index \"{index}\""));
+        }
+        for fk in std::mem::take(&mut alter.drop_foreign_keys) {
+            notes.push(format!(
+                "Drop foreign key \"{fk}\" on table \"{}\"",
+                alter.table_name
+            ));
+        }
     }
     // An alter that now carries no changes would still be harmless (the
     // generator emits nothing for it), but drop the empties for a clean diff.
@@ -735,7 +807,12 @@ fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
     });
 
     for alter in &mut diff.alter_enums {
-        alter.remove_values.clear();
+        for value in std::mem::take(&mut alter.remove_values) {
+            notes.push(format!(
+                "Remove value \"{value}\" from enum \"{}\"",
+                alter.name
+            ));
+        }
     }
     diff.alter_enums.retain(|a| !a.add_values.is_empty());
 
@@ -743,12 +820,19 @@ fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) {
     // on `SchemaDiff::procedures`; clear both channels and drop the whole
     // procedure diff if nothing additive/altering remains.
     if let Some(procs) = diff.procedures.as_mut() {
-        procs.drop.clear();
-        procs.drop_triggers.clear();
+        for name in std::mem::take(&mut procs.drop) {
+            notes.push(format!("Drop procedure \"{name}\""));
+        }
+        for name in std::mem::take(&mut procs.drop_triggers) {
+            notes.push(format!("Drop trigger \"{name}\""));
+        }
         if procs.is_empty() {
             diff.procedures = None;
         }
     }
+
+    notes.extend(diff.strip_timescale_gated());
+    notes
 }
 
 async fn apply_migration(migration_path: &Path, _config: &Config) -> CliResult<()> {
@@ -851,6 +935,14 @@ mod tests {
         prax_schema::parse_schema(schema).expect("schema parses")
     }
 
+    /// The SQL with `--` comment lines (header, warnings, skipped notes) removed.
+    fn statements_only(sql: &str) -> String {
+        sql.lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     const USERS_V1: &str = r#"
         model User {
             id    Int    @id @auto
@@ -864,7 +956,9 @@ mod tests {
     fn greenfield_generates_full_create_table() {
         // No source (None) => differ emits full creation DDL.
         let schema = parse(USERS_V1);
-        let sql = generate_migration_sql(&schema, None, &pg_config(), false).unwrap();
+        let sql = generate_migration_sql(&schema, None, &pg_config(), false)
+            .unwrap()
+            .sql;
         assert!(sql.contains("CREATE TABLE \"users\""), "sql: {sql}");
         assert!(sql.contains("SERIAL"), "auto id -> SERIAL: {sql}");
         // Incremental generator never uses IF NOT EXISTS (the old bug).
@@ -876,9 +970,13 @@ mod tests {
         // Source == target => empty diff => empty SQL (no spurious churn).
         let schema = parse(USERS_V1);
         let source = parse(USERS_V1);
-        let sql =
+        let generated =
             generate_migration_sql(&schema, Some(source.into()), &pg_config(), false).unwrap();
-        assert!(sql.trim().is_empty(), "expected no changes, got: {sql}");
+        assert!(
+            !generated.has_statements,
+            "expected no changes, got: {}",
+            generated.sql
+        );
     }
 
     #[test]
@@ -908,8 +1006,9 @@ mod tests {
             "#,
         );
 
-        let sql =
-            generate_migration_sql(&target, Some(source.into()), &pg_config(), false).unwrap();
+        let sql = generate_migration_sql(&target, Some(source.into()), &pg_config(), false)
+            .unwrap()
+            .sql;
 
         // Added column on the existing table.
         assert!(
@@ -951,15 +1050,18 @@ mod tests {
         let target = parse(USERS_V1);
 
         let sql = generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
-            .unwrap();
+            .unwrap()
+            .sql;
         assert!(
-            !sql.to_uppercase().contains("DROP"),
+            !statements_only(&sql).to_uppercase().contains("DROP"),
             "additive-only must not drop: {sql}"
         );
 
         // With --allow-destructive the drops appear.
         let sql_destructive =
-            generate_migration_sql(&target, Some(source.into()), &pg_config(), true).unwrap();
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), true)
+                .unwrap()
+                .sql;
         assert!(
             sql_destructive.contains("DROP TABLE") && sql_destructive.contains("DROP COLUMN"),
             "destructive should drop: {sql_destructive}"
@@ -1005,14 +1107,16 @@ mod tests {
 
         let additive =
             generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
-                .unwrap();
+                .unwrap()
+                .sql;
         assert!(
-            !additive.to_uppercase().contains("DROP"),
+            !statements_only(&additive).to_uppercase().contains("DROP"),
             "additive-only must strip FK/index drops: {additive}"
         );
 
-        let destructive =
-            generate_migration_sql(&target, Some(source.into()), &pg_config(), true).unwrap();
+        let destructive = generate_migration_sql(&target, Some(source.into()), &pg_config(), true)
+            .unwrap()
+            .sql;
         assert!(
             destructive.contains("DROP CONSTRAINT") && destructive.contains("post_author_fk"),
             "destructive should drop the FK constraint: {destructive}"
@@ -1061,8 +1165,11 @@ mod tests {
         );
 
         let a = generate_migration_sql(&target, Some(source.clone().into()), &pg_config(), false)
-            .unwrap();
-        let b = generate_migration_sql(&target, Some(source.into()), &pg_config(), false).unwrap();
+            .unwrap()
+            .sql;
+        let b = generate_migration_sql(&target, Some(source.into()), &pg_config(), false)
+            .unwrap()
+            .sql;
         assert_eq!(a, b, "same inputs must yield identical SQL");
         assert!(a.contains("ADD COLUMN \"nickname\""), "sql: {a}");
     }
@@ -1125,7 +1232,9 @@ mod tests {
                 timescale: None,
             }),
         };
-        let sql = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        let sql = generate_migration_sql(&target, Some(source), &pg_config(), false)
+            .unwrap()
+            .sql;
         assert!(!sql.contains("CREATE EXTENSION"), "sql: {sql}");
     }
 
@@ -1166,6 +1275,222 @@ mod tests {
         assert!(diff.alter_models.is_empty());
         // The alter_enum had only removals -> pruned entirely.
         assert!(diff.alter_enums.is_empty());
+    }
+
+    const USERS_WITH_LEGACY: &str = r#"
+        model User {
+            id     Int     @id @auto
+            email  String  @unique
+            legacy String?
+
+            @@map("users")
+        }
+    "#;
+
+    #[test]
+    fn test_skipped_changes_reported_when_nothing_else_changes() {
+        let source = parse(USERS_WITH_LEGACY);
+        let target = parse(USERS_V1);
+        let generated =
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), false).unwrap();
+        assert!(!generated.has_statements, "sql: {}", generated.sql);
+        assert_eq!(
+            generated.skipped,
+            vec!["Drop column \"legacy\" from table \"users\"".to_string()]
+        );
+        assert!(
+            generated.sql.contains(
+                "-- SKIPPED (needs --allow-destructive): Drop column \"legacy\" from table \"users\""
+            ),
+            "sql: {}",
+            generated.sql
+        );
+    }
+
+    #[test]
+    fn test_allow_destructive_emits_and_skips_nothing() {
+        let source = parse(USERS_WITH_LEGACY);
+        let target = parse(USERS_V1);
+        let generated =
+            generate_migration_sql(&target, Some(source.into()), &pg_config(), true).unwrap();
+        assert!(generated.has_statements);
+        assert!(generated.skipped.is_empty());
+        assert!(!generated.sql.contains("SKIPPED"), "sql: {}", generated.sql);
+    }
+
+    #[test]
+    fn test_skipped_timescale_change_reported() {
+        use prax_migrate::timescale::catalog::HypertableState;
+        let source_prax = r#"
+            datasource db {
+                provider = "postgresql"
+                url = "postgres://x"
+                extensions = [timescaledb]
+            }
+            model Metric {
+                time DateTime
+                @@id([time])
+                @@timescale.hypertable(time, chunkInterval: "1 day")
+            }
+        "#;
+        let target_prax = r#"
+            datasource db {
+                provider = "postgresql"
+                url = "postgres://x"
+                extensions = [timescaledb]
+            }
+            model Metric {
+                time DateTime
+                @@id([time])
+                @@timescale.hypertable(time, chunkInterval: "1 day")
+                @@timescale.retention(dropAfter: "90 days")
+            }
+        "#;
+        let mut catalog = ts_catalog("2.18.0");
+        if let Some(ts) = catalog.timescale.as_mut() {
+            ts.hypertables.insert(
+                "Metric".into(),
+                HypertableState {
+                    table: "Metric".into(),
+                    time_column: "time".into(),
+                    chunk_interval: prax_schema::ast::PgInterval::new(0, 1, 0),
+                    space: None,
+                    columnstore: None,
+                    retention: None,
+                },
+            );
+        }
+        let source = DiffSource {
+            schema: parse(source_prax),
+            catalog: Some(catalog),
+        };
+        let generated =
+            generate_migration_sql(&parse(target_prax), Some(source), &pg_config(), false).unwrap();
+        assert!(!generated.has_statements, "sql: {}", generated.sql);
+        assert!(
+            generated
+                .skipped
+                .iter()
+                .any(|n| n.contains("automatically drops chunks older than 90 days")),
+            "skipped: {:?}",
+            generated.skipped
+        );
+    }
+
+    #[test]
+    fn test_strip_destructive_notes_cover_every_category() {
+        use prax_migrate::{EnumAlterDiff, IndexDiff, ModelAlterDiff, ProcedureDiff, SchemaDiff};
+        let mut diff = SchemaDiff {
+            drop_models: vec!["t".into()],
+            drop_enums: vec!["e".into()],
+            drop_views: vec!["v".into()],
+            drop_extensions: vec!["x".into()],
+            drop_indexes: vec![IndexDiff {
+                name: "i".into(),
+                table_name: "t".into(),
+                columns: vec!["c".into()],
+                unique: false,
+                index_type: None,
+                vector_ops: None,
+                hnsw_m: None,
+                hnsw_ef_construction: None,
+                ivfflat_lists: None,
+            }],
+            alter_enums: vec![EnumAlterDiff {
+                name: "e2".into(),
+                add_values: Vec::new(),
+                remove_values: vec!["val".into()],
+            }],
+            alter_models: vec![ModelAlterDiff {
+                name: "M".into(),
+                table_name: "t2".into(),
+                add_fields: Vec::new(),
+                drop_fields: vec!["c".into()],
+                alter_fields: Vec::new(),
+                add_indexes: Vec::new(),
+                drop_indexes: vec!["i2".into()],
+                add_foreign_keys: Vec::new(),
+                drop_foreign_keys: vec!["fk".into()],
+            }],
+            procedures: Some(ProcedureDiff {
+                drop: vec!["p".into()],
+                drop_triggers: vec!["tr".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let notes = strip_destructive(&mut diff);
+        assert_eq!(
+            notes,
+            vec![
+                "Drop table \"t\"",
+                "Drop enum \"e\"",
+                "Drop view \"v\"",
+                "Drop extension \"x\"",
+                "Drop index \"i\"",
+                "Drop column \"c\" from table \"t2\"",
+                "Drop index \"i2\"",
+                "Drop foreign key \"fk\" on table \"t2\"",
+                "Remove value \"val\" from enum \"e2\"",
+                "Drop procedure \"p\"",
+                "Drop trigger \"tr\"",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_warnings_survive_an_empty_migration() {
+        use prax_migrate::timescale::catalog::{AggregatePolicy, AggregateState, HypertableState};
+        use prax_schema::ast::PgInterval;
+        const DS: &str = "datasource db {\n  provider = \"postgresql\"\n  url = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
+        const SQL: &str = "SELECT time_bucket('1 hour', \"time\") AS bucket, \"deviceId\", avg(\"value\") AS \"avgValue\"\nFROM \"Metric\"\nGROUP BY 1, 2";
+        let target = parse(&format!(
+            "{DS}\nmodel Metric {{\n  time DateTime\n  deviceId String\n  value Float\n\n  @@id([deviceId, time])\n  @@timescale.hypertable(time, chunkInterval: \"1 day\")\n}}\n\nview HourlyMetric {{\n  bucket DateTime\n  deviceId String\n  avgValue Float\n\n  @@timescale.continuous(source: Metric, scheduleInterval: \"1 hour\", startOffset: \"3 days\", endOffset: \"1 hour\")\n}}\n\n@@sql(\"HourlyMetric\", \"\"\"\n{SQL}\n\"\"\")\n"
+        ));
+        let source_schema = parse(&format!(
+            "{DS}\nmodel Metric {{\n  time DateTime\n  deviceId String\n  value Float\n\n  @@id([deviceId, time])\n}}\n"
+        ));
+        let mut catalog = ts_catalog("2.18.0");
+        if let Some(ts) = catalog.timescale.as_mut() {
+            ts.hypertables.insert(
+                "Metric".into(),
+                HypertableState {
+                    table: "Metric".into(),
+                    time_column: "time".into(),
+                    chunk_interval: PgInterval::new(0, 1, 0),
+                    space: None,
+                    columnstore: None,
+                    retention: None,
+                },
+            );
+            ts.aggregates.insert(
+                "HourlyMetric".into(),
+                AggregateState {
+                    view: "HourlyMetric".into(),
+                    source: "Metric".into(),
+                    sql: None,
+                    materialized_only: true,
+                    policy: Some(AggregatePolicy {
+                        start_offset: Some(PgInterval::new(0, 3, 0)),
+                        end_offset: Some(PgInterval::new(0, 0, 3_600_000_000)),
+                        schedule_interval: PgInterval::new(0, 0, 3_600_000_000),
+                    }),
+                },
+            );
+        }
+        let source = DiffSource {
+            schema: source_schema,
+            catalog: Some(catalog),
+        };
+        let generated = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap();
+        assert!(!generated.has_statements, "sql: {}", generated.sql);
+        assert!(generated.skipped.is_empty());
+        assert_eq!(generated.warnings.len(), 1, "{:?}", generated.warnings);
+        assert!(
+            generated.warnings[0].contains("not created by Prax"),
+            "{:?}",
+            generated.warnings
+        );
     }
 
     // -- honest-error paths ---------------------------------------------------
