@@ -56,7 +56,11 @@ pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
                     }
                 })
                 .collect();
-            parts.push(format!("orderBy: [{}]", order.join(", ")));
+            // `orderBy: []` does not parse; omitted, it defaults to the time
+            // column descending.
+            if !order.is_empty() {
+                parts.push(format!("orderBy: [{}]", order.join(", ")));
+            }
             if let Some(after) = &cs.after {
                 parts.push(format!("after: \"{after}\""));
             }
@@ -242,6 +246,27 @@ mod tests {
             ]
         );
         assert!(extras.skip_views.contains("HourlyMetric"));
+    }
+
+    #[test]
+    fn test_empty_order_by_is_omitted_and_validates() {
+        let mut c = catalog(Some(AUTHORED));
+        c.hypertables
+            .get_mut("Metric")
+            .and_then(|h| h.columnstore.as_mut())
+            .unwrap()
+            .settings
+            .order_by
+            .clear();
+        let extras = render_extras(&c);
+        assert_eq!(
+            extras.model_attributes["Metric"][1],
+            r#"    @@timescale.columnstore(segmentBy: [deviceId], after: "7 days")"#
+        );
+        let out = render_schema(&c);
+        if let Err(e) = prax_schema::validate_schema(&out) {
+            panic!("{e:?}\n{out}");
+        }
     }
 
     #[test]
