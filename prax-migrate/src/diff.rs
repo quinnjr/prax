@@ -2845,6 +2845,7 @@ mod tests {
             aggregate_columns: BTreeMap::new(),
             other_views: BTreeMap::new(),
             unsupported: BTreeMap::new(),
+            unsupported_aggregates: Default::default(),
         };
 
         let diff = SchemaDiffer::new(target)

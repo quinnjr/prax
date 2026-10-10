@@ -309,6 +309,26 @@ impl Ts {
         ))
         .await
     }
+
+    /// The test schema as `prax db pull` renders it.
+    async fn pull(&self) -> String {
+        let options = IntrospectionOptions {
+            schema: Some(self.schema.clone()),
+            ..Default::default()
+        };
+        let db = introspect_database(PROVIDER, &self.url, &options)
+            .await
+            .expect("introspect database");
+        let timescale = introspect_postgres_catalog(PROVIDER, &self.url, Some(&self.schema), true)
+            .await
+            .expect("read catalog")
+            .and_then(|c| c.timescale);
+        format_as_prax(
+            &db,
+            &Config::default_for_provider(PROVIDER),
+            timescale.as_ref(),
+        )
+    }
 }
 
 /// The CLI's `strip_destructive` (private to `commands::migrate`) for these
@@ -772,6 +792,114 @@ async fn undeclared_hypertable_ignored_without_opt_in() {
     ts.finish().await;
 }
 
+/// An integer-time hypertable with a continuous aggregate over it, created by
+/// hand.
+const RAW_INTEGER_AGGREGATE: &str = r#"
+CREATE TABLE "Ticks" ("t" bigint NOT NULL, "value" double precision NOT NULL, PRIMARY KEY ("t"));
+SELECT create_hypertable('"Ticks"', by_range('t', 1000), create_default_indexes => false);
+CREATE FUNCTION ticks_now() RETURNS bigint LANGUAGE SQL STABLE
+  AS $$ SELECT coalesce(max("t"), 0) FROM "Ticks" $$;
+SELECT set_integer_now_func('"Ticks"', 'ticks_now');
+CREATE MATERIALIZED VIEW "TickBuckets" WITH (timescaledb.continuous) AS
+SELECT time_bucket(100::bigint, "t") AS bucket, avg("value") AS "avgValue"
+FROM "Ticks" GROUP BY 1 WITH NO DATA;
+"#;
+
+/// A continuous aggregate over a hypertable Prax cannot represent is
+/// unsupported: never dropped (even with --allow-destructive), and reported by
+/// `db pull` instead of rendered.
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn aggregate_over_unsupported_hypertable_is_left_alone() {
+    let Some(ts) = Ts::connect("aggregate_over_unsupported_hypertable_is_left_alone").await else {
+        return;
+    };
+    ts.exec(RAW_INTEGER_AGGREGATE).await;
+    let catalog = ts.catalog().await;
+    assert!(catalog.unsupported["Ticks"].contains("integer time"));
+    let reason = &catalog.unsupported["TickBuckets"];
+    assert!(reason.contains("built on \"Ticks\""), "{reason}");
+    assert!(catalog.unsupported_aggregates.contains("TickBuckets"));
+    assert!(catalog.aggregates.is_empty() && !catalog.other_views.contains_key("TickBuckets"));
+
+    // An opted-in schema that leaves both unmanaged.
+    let prax = format!("{DATASOURCE}\nmodel Ticks {{\n  t     BigInt @id\n  value Float\n}}\n");
+    let diff = ts.diff(&prax).await;
+    assert!(diff.timescale.is_empty(), "{:#?}", diff.timescale.changes);
+    let generated = ts.generate(&prax, true).await;
+    assert!(!generated.up.contains("TickBuckets"), "{}", generated.up);
+    assert!(generated.skipped.is_empty(), "{:?}", generated.skipped);
+
+    let pulled = ts.pull().await;
+    assert!(
+        pulled.contains(
+            "// prax: continuous aggregate \"TickBuckets\" was not pulled: it is built on \"Ticks\""
+        ),
+        "{pulled}"
+    );
+    assert!(!pulled.contains("view TickBuckets"), "{pulled}");
+    if let Err(e) = prax_schema::validate_schema(&pulled) {
+        panic!("pulled schema does not validate: {e}\n{pulled}");
+    }
+    ts.finish().await;
+}
+
+/// A continuous aggregate reading a hypertable of another schema (the
+/// aggregates query qualifies its name) is unsupported: left alone when
+/// undeclared, refused when declared.
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn aggregate_over_other_schema_is_unsupported() {
+    let Some(ts) = Ts::connect("aggregate_over_other_schema_is_unsupported").await else {
+        return;
+    };
+    let other = format!("{}_other", ts.schema);
+    let base = format!(
+        "{DATASOURCE}{}",
+        metric(
+            "",
+            r#"  @@timescale.hypertable(time, chunkInterval: "1 day")"#
+        )
+    );
+    ts.apply_clean(&base, false).await;
+    ts.exec(&format!(
+        "CREATE SCHEMA \"{other}\"; \
+         CREATE TABLE \"{other}\".\"Metric\" (\"time\" timestamptz NOT NULL, \
+           \"deviceId\" text NOT NULL, \"value\" double precision NOT NULL, \
+           PRIMARY KEY (\"deviceId\", \"time\")); \
+         SELECT create_hypertable('\"{other}\".\"Metric\"', by_range('time', INTERVAL '1 day'), \
+           create_default_indexes => false); \
+         CREATE MATERIALIZED VIEW \"HourlyMetric\" WITH (timescaledb.continuous) AS \
+         SELECT time_bucket('1 hour', \"time\") AS bucket, \"deviceId\", avg(\"value\") AS \"avgValue\" \
+         FROM \"{other}\".\"Metric\" GROUP BY 1, 2 WITH NO DATA"
+    ))
+    .await;
+
+    let catalog = ts.catalog().await;
+    let reason = &catalog.unsupported["HourlyMetric"];
+    assert!(
+        reason.contains(&format!(
+            "built on \"{other}.Metric\", which is not a hypertable"
+        )),
+        "{reason}"
+    );
+    assert!(catalog.hypertables.contains_key("Metric"));
+
+    let generated = ts.generate(&base, true).await;
+    assert!(!generated.up.contains("HourlyMetric"), "{}", generated.up);
+
+    let declared = format!("{base}{}", hourly(HOURLY_SQL));
+    match ts.try_diff(&declared).await {
+        Err(MigrationError::InvalidMigration(msg)) => {
+            assert!(msg.contains("\"HourlyMetric\""), "{msg}");
+            assert!(msg.contains("not a hypertable in this schema"), "{msg}");
+        }
+        other => panic!("expected InvalidMigration, got {other:?}"),
+    }
+    ts.exec(&format!("DROP SCHEMA \"{other}\" CASCADE")).await;
+    ts.finish().await;
+}
+
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
 async fn retention_add_skipped_then_applied() {
@@ -1042,22 +1170,7 @@ async fn db_pull_output_rediffs_empty() {
     };
     ts.apply_clean(&spec_example(), false).await;
 
-    let options = IntrospectionOptions {
-        schema: Some(ts.schema.clone()),
-        ..Default::default()
-    };
-    let db = introspect_database(PROVIDER, &ts.url, &options)
-        .await
-        .expect("introspect database");
-    let timescale = introspect_postgres_catalog(PROVIDER, &ts.url, Some(&ts.schema), true)
-        .await
-        .expect("read catalog")
-        .and_then(|c| c.timescale);
-    let pulled = format_as_prax(
-        &db,
-        &Config::default_for_provider(PROVIDER),
-        timescale.as_ref(),
-    );
+    let pulled = ts.pull().await;
     assert!(pulled.contains("@@timescale.hypertable"), "{pulled}");
     assert!(pulled.contains("@@timescale.continuous"), "{pulled}");
     if let Err(e) = prax_schema::validate_schema(&pulled) {

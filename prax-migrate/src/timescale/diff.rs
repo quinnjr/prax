@@ -223,7 +223,8 @@ impl TimescaleChangeKind {
 /// place (spec §4.3): changing a hypertable's time column; adding, removing or
 /// changing its space column; adding `space` to an existing table; a hypertable
 /// whose model does not declare `@@timescale.hypertable`; declaring
-/// `@@timescale.*` on a relation the catalog lists as unsupported; declaring a
+/// `@@timescale.*` on a relation the catalog lists as unsupported (including
+/// a continuous aggregate built on one); declaring a
 /// continuous aggregate `source` that differs from the database while its SQL
 /// is unchanged; declaring a continuous aggregate without SQL; or, on a
 /// hypertable whose columnstore is enabled, changing a column's type, dropping
@@ -715,6 +716,7 @@ mod tests {
             aggregate_columns: BTreeMap::new(),
             other_views: BTreeMap::new(),
             unsupported: BTreeMap::new(),
+            unsupported_aggregates: Default::default(),
         }
     }
 

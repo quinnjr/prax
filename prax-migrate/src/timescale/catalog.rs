@@ -3,7 +3,7 @@
 //! prax-migrate has no database driver: the CLI runs the [`queries`] and fills
 //! [`CatalogRows`], and [`TimescaleCatalog::from_rows`] assembles the state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use prax_schema::ast::PgInterval;
 
@@ -143,10 +143,23 @@ pub mod queries {
 
     /// `(view_name, hypertable_name, materialization_hypertable_name, materialized_only,
     /// view_definition, comment)`.
-    pub const AGGREGATES: &str = "SELECT view_name::text, hypertable_name::text, \
-         materialization_hypertable_name::text, materialized_only, view_definition::text, \
-         obj_description(format('%I.%I', view_schema, view_name)::regclass, 'pg_class') \
-         FROM timescaledb_information.continuous_aggregates WHERE view_schema = $1";
+    ///
+    /// `hypertable_name` is qualified as `schema.name` when the aggregate reads
+    /// a hypertable of another schema (a parent aggregate's materialization
+    /// hypertable is left bare), so it never matches this schema's hypertables.
+    pub const AGGREGATES: &str = "SELECT a.view_name::text, \
+         CASE WHEN a.hypertable_schema = $1 \
+                OR (a.hypertable_schema, a.hypertable_name) IN ( \
+                    SELECT p.materialization_hypertable_schema, \
+                           p.materialization_hypertable_name \
+                    FROM timescaledb_information.continuous_aggregates p \
+                    WHERE p.view_schema = $1) \
+              THEN a.hypertable_name::text \
+              ELSE (a.hypertable_schema || '.' || a.hypertable_name)::text END, \
+         a.materialization_hypertable_name::text, a.materialized_only, \
+         a.view_definition::text, \
+         obj_description(format('%I.%I', a.view_schema, a.view_name)::regclass, 'pg_class') \
+         FROM timescaledb_information.continuous_aggregates a WHERE a.view_schema = $1";
 
     /// `(table_name, column_name, udt_name, is_nullable)` for the aggregates' views.
     pub const COLUMNS: &str = "SELECT table_name::text, column_name::text, udt_name::text, \
@@ -231,7 +244,8 @@ pub struct JobRow {
 pub struct AggregateRow {
     /// User-facing view name.
     pub view: String,
-    /// Source hypertable (or parent materialization hypertable).
+    /// Source hypertable (or parent materialization hypertable); `schema.name`
+    /// for a hypertable of another schema.
     pub hypertable_name: String,
     /// This aggregate's own materialization hypertable.
     pub materialization_hypertable: String,
@@ -373,9 +387,13 @@ pub struct TimescaleCatalog {
     pub aggregate_columns: BTreeMap<String, Vec<CatalogColumn>>,
     /// Non-aggregate views; the value is whether the view is materialized.
     pub other_views: BTreeMap<String, bool>,
-    /// Valid Timescale relations Prax cannot represent (relation to reason);
-    /// omitted from `hypertables`.
+    /// Valid Timescale relations Prax cannot represent (relation to reason):
+    /// hypertables, omitted from `hypertables`, and continuous aggregates,
+    /// omitted from `aggregates` and `other_views`.
     pub unsupported: BTreeMap<String, String>,
+    /// The continuous aggregates among `unsupported` (`db pull` reports them
+    /// instead of rendering a view).
+    pub unsupported_aggregates: BTreeSet<String>,
 }
 
 fn interval(parts: IntervalParts) -> PgInterval {
@@ -471,10 +489,17 @@ impl TimescaleCatalog {
     /// Build the catalog from rows. Returns `None` when the `timescaledb`
     /// extension is not installed.
     ///
+    /// Valid state Prax cannot represent lands in `unsupported` with a reason
+    /// instead of failing: a hypertable with an integer time dimension or a
+    /// columnstore or retention policy without its interval
+    /// (`*_created_before`), and every continuous aggregate built (directly or
+    /// through parent aggregates) on such a hypertable or on a relation that
+    /// is not a hypertable of this schema.
+    ///
     /// # Errors
     ///
     /// Returns `MigrationError::Database` when a hypertable has no time
-    /// dimension or a policy job lacks its required interval.
+    /// dimension.
     pub fn from_rows(rows: CatalogRows) -> MigrateResult<Option<Self>> {
         let Some(ext) = rows.extensions.iter().find(|e| e.name == "timescaledb") else {
             return Ok(None);
@@ -619,6 +644,17 @@ impl TimescaleCatalog {
             }
         }
 
+        // Aggregates built on a relation Prax cannot represent (spec non-goals)
+        // can never be declared in a schema, so they are left unmanaged.
+        let mut unsupported_aggregates = BTreeSet::new();
+        for (view, reason) in unsupported_aggregate_reasons(&aggregates, &hypertables, &unsupported)
+        {
+            aggregates.remove(&view);
+            aggregate_definitions.remove(&view);
+            unsupported.insert(view.clone(), reason);
+            unsupported_aggregates.insert(view);
+        }
+
         let mut aggregate_columns: BTreeMap<String, Vec<CatalogColumn>> = BTreeMap::new();
         for c in &rows.columns {
             if aggregates.contains_key(&c.relation) {
@@ -636,7 +672,9 @@ impl TimescaleCatalog {
         let other_views = rows
             .views
             .iter()
-            .filter(|v| !aggregates.contains_key(&v.name))
+            .filter(|v| {
+                !aggregates.contains_key(&v.name) && !unsupported_aggregates.contains(&v.name)
+            })
             .map(|v| (v.name.clone(), v.is_materialized))
             .collect();
 
@@ -648,8 +686,43 @@ impl TimescaleCatalog {
             aggregate_columns,
             other_views,
             unsupported,
+            unsupported_aggregates,
         }))
     }
+}
+
+/// The aggregates whose source chain (through parent aggregates) ends at a
+/// relation that is unsupported or not a hypertable of this schema, with the
+/// reason.
+fn unsupported_aggregate_reasons(
+    aggregates: &BTreeMap<String, AggregateState>,
+    hypertables: &BTreeMap<String, HypertableState>,
+    unsupported: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for view in aggregates.keys() {
+        // Follow parent aggregates to the relation the chain is built on; a
+        // cycle (impossible in TimescaleDB) stops at the repeated view.
+        let mut seen = BTreeSet::new();
+        let mut relation = view;
+        while let Some(parent) = aggregates.get(relation) {
+            if !seen.insert(relation) {
+                break;
+            }
+            relation = &parent.source;
+        }
+        let reason = if let Some(why) = unsupported.get(relation) {
+            format!(
+                "it is built on \"{relation}\", whose TimescaleDB setup Prax cannot manage: {why}"
+            )
+        } else if hypertables.contains_key(relation) {
+            continue;
+        } else {
+            format!("it is built on \"{relation}\", which is not a hypertable in this schema")
+        };
+        out.push((view.clone(), reason));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -844,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_aggregate_parent_derivation() {
-        let mut rows = base_rows();
+        let mut rows = metric_rows();
         rows.aggregates = vec![
             agg("HourlyMetric", "Metric", "_materialized_hypertable_2", None),
             agg(
@@ -862,11 +935,11 @@ mod tests {
 
     #[test]
     fn test_aggregate_record_parsing() {
-        let mut rows = base_rows();
+        let mut rows = metric_rows();
         rows.aggregates = vec![
-            agg("A", "M", "_m1", Some("prax:cagg:v1\nSELECT 1")),
-            agg("B", "M", "_m2", None),
-            agg("C", "M", "_m3", Some("hand written")),
+            agg("A", "Metric", "_m1", Some("prax:cagg:v1\nSELECT 1")),
+            agg("B", "Metric", "_m2", None),
+            agg("C", "Metric", "_m3", Some("hand written")),
         ];
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert_eq!(cat.aggregates["A"].sql.as_deref(), Some("SELECT 1"));
@@ -877,8 +950,11 @@ mod tests {
 
     #[test]
     fn test_refresh_job_maps_by_view_or_materialization() {
-        let mut rows = base_rows();
-        rows.aggregates = vec![agg("A", "M", "_m1", None), agg("B", "M", "_m2", None)];
+        let mut rows = metric_rows();
+        rows.aggregates = vec![
+            agg("A", "Metric", "_m1", None),
+            agg("B", "Metric", "_m2", None),
+        ];
         let mut ja = job("policy_refresh_continuous_aggregate", "A");
         ja.start_offset = Some((0, 3, 0));
         let jb = job("policy_refresh_continuous_aggregate", "_m2");
@@ -892,7 +968,7 @@ mod tests {
 
     #[test]
     fn test_other_views_exclude_aggregates() {
-        let mut rows = base_rows();
+        let mut rows = metric_rows();
         rows.aggregates = vec![agg("HourlyMetric", "Metric", "_m1", None)];
         rows.views = vec![
             ViewRow {
@@ -907,6 +983,103 @@ mod tests {
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert_eq!(cat.other_views.len(), 1);
         assert!(cat.other_views["report"]);
+    }
+
+    /// `HourlyMetric` over `source` and `DailyMetric` over `HourlyMetric`, with
+    /// refresh policies, view rows and columns.
+    fn add_hierarchy(rows: &mut CatalogRows, source: &str) {
+        rows.aggregates = vec![
+            agg("HourlyMetric", source, "_m1", None),
+            agg("DailyMetric", "_m1", "_m2", None),
+        ];
+        rows.jobs
+            .push(job("policy_refresh_continuous_aggregate", "HourlyMetric"));
+        rows.jobs
+            .push(job("policy_refresh_continuous_aggregate", "_m2"));
+        for view in ["HourlyMetric", "DailyMetric"] {
+            rows.views.push(ViewRow {
+                name: view.into(),
+                is_materialized: false,
+            });
+            rows.columns.push(ColumnRow {
+                relation: view.into(),
+                name: "bucket".into(),
+                udt_name: "timestamptz".into(),
+                nullable: true,
+            });
+        }
+    }
+
+    /// Both aggregates of [`add_hierarchy`] are unsupported (with a reason
+    /// containing each of `reason_parts`) and appear nowhere else.
+    #[track_caller]
+    fn assert_hierarchy_unsupported(cat: &TimescaleCatalog, reason_parts: &[&str]) {
+        for view in ["HourlyMetric", "DailyMetric"] {
+            let reason = &cat.unsupported[view];
+            for part in reason_parts {
+                assert!(reason.contains(part), "{view}: {reason}");
+            }
+            assert!(cat.unsupported_aggregates.contains(view), "{view}");
+            assert!(!cat.aggregates.contains_key(view), "{view}");
+            assert!(!cat.aggregate_definitions.contains_key(view), "{view}");
+            assert!(!cat.aggregate_columns.contains_key(view), "{view}");
+            assert!(!cat.other_views.contains_key(view), "{view}");
+        }
+    }
+
+    #[test]
+    fn test_aggregates_over_integer_time_hypertable_are_unsupported() {
+        let mut rows = metric_rows();
+        rows.dimensions[0].interval = None;
+        add_hierarchy(&mut rows, "Metric");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert_hierarchy_unsupported(
+            &cat,
+            &[
+                "built on \"Metric\"",
+                "integer time dimensions are not supported",
+            ],
+        );
+        assert!(!cat.unsupported_aggregates.contains("Metric"));
+    }
+
+    #[test]
+    fn test_aggregates_over_created_before_policy_hypertable_are_unsupported() {
+        let mut rows = metric_rows();
+        rows.jobs = vec![job("policy_retention", "Metric")];
+        add_hierarchy(&mut rows, "Metric");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert_hierarchy_unsupported(&cat, &["built on \"Metric\"", "drop_created_before"]);
+    }
+
+    #[test]
+    fn test_aggregates_over_unknown_relation_are_unsupported() {
+        // A hypertable in another schema (the query qualifies its name), and
+        // a relation missing from the catalog.
+        for source in ["other.Metric", "Gone"] {
+            let mut rows = metric_rows();
+            add_hierarchy(&mut rows, source);
+            let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+            assert_hierarchy_unsupported(
+                &cat,
+                &[
+                    &format!("built on \"{source}\""),
+                    "not a hypertable in this schema",
+                ],
+            );
+            assert!(cat.hypertables.contains_key("Metric"));
+        }
+    }
+
+    #[test]
+    fn test_aggregates_over_supported_hypertable_are_kept() {
+        let mut rows = metric_rows();
+        add_hierarchy(&mut rows, "Metric");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(cat.unsupported.is_empty() && cat.unsupported_aggregates.is_empty());
+        assert_eq!(cat.aggregates["DailyMetric"].source, "HourlyMetric");
+        assert!(cat.aggregates["DailyMetric"].policy.is_some());
+        assert_eq!(cat.aggregate_columns.len(), 2);
     }
 
     #[test]

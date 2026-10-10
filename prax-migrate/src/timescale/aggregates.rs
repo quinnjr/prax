@@ -58,8 +58,9 @@ pub(crate) fn topo_order(aggs: &[AggregateState]) -> Vec<AggregateState> {
 ///
 /// # Errors
 ///
-/// Returns [`MigrationError::InvalidMigration`] when a target aggregate has no
-/// SQL, or declares a `source` that differs from the database while its SQL is
+/// Returns [`MigrationError::InvalidMigration`] when a target aggregate is
+/// declared on a relation the catalog lists as unsupported, has no SQL, or
+/// declares a `source` that differs from the database while its SQL is
 /// unchanged.
 pub(crate) fn diff_aggregates(
     target: &Schema,
@@ -72,6 +73,21 @@ pub(crate) fn diff_aggregates(
     let no_views = BTreeMap::new();
     let have = catalog.map_or(&no_aggregates, |c| &c.aggregates);
     let other_views = catalog.map_or(&no_views, |c| &c.other_views);
+
+    // Unsupported aggregates are not in `have`, so undeclared ones are left
+    // alone; declaring one is an error (spec non-goals).
+    if let Some(catalog) = catalog {
+        for name in want.keys() {
+            if let Some(reason) = catalog.unsupported.get(name) {
+                return Err(MigrationError::InvalidMigration(format!(
+                    "View \"{name}\" declares @@timescale.continuous, but the database relation \
+                     \"{name}\" cannot be managed by Prax: {reason}. Remove the view from the \
+                     schema to leave it unmanaged, or drop it manually so the migration can \
+                     create the continuous aggregate from the schema."
+                )));
+            }
+        }
+    }
 
     // Catalog aggregates that must go (spec §5.5): changed SQL, no longer an
     // aggregate in the target (handed off when the target declares a view of
@@ -521,6 +537,7 @@ mod tests {
                 .map(|(n, m)| ((*n).to_string(), *m))
                 .collect(),
             unsupported: BTreeMap::new(),
+            unsupported_aggregates: Default::default(),
         }
     }
 
@@ -964,6 +981,46 @@ mod tests {
         assert!(set.handoff_views.is_empty(), "{set:?}");
         assert!(set.note.contains("discard"), "{}", set.note);
         assert!(diff.drop_views.is_empty(), "{:?}", diff.drop_views);
+    }
+
+    /// A catalog whose `HourlyMetric` and `DailyMetric` are unsupported.
+    fn unsupported_hierarchy_catalog() -> TimescaleCatalog {
+        let mut c = catalog(Vec::new(), &[]);
+        for view in ["HourlyMetric", "DailyMetric"] {
+            c.unsupported.insert(
+                view.into(),
+                "it is built on \"other.Metric\", which is not a hypertable in this schema".into(),
+            );
+            c.unsupported_aggregates.insert(view.into());
+        }
+        c
+    }
+
+    #[test]
+    fn test_undeclared_unsupported_aggregates_are_ignored() {
+        let diff = run(&target(&[]), Some(unsupported_hierarchy_catalog())).unwrap();
+        assert!(diff.timescale.is_empty(), "{:#?}", diff.timescale.changes);
+        assert!(diff.timescale.warnings.is_empty(), "{:?}", diff.timescale);
+        assert!(diff.drop_views.is_empty(), "{:?}", diff.drop_views);
+    }
+
+    #[test]
+    fn test_declared_unsupported_aggregate_is_invalid() {
+        let result = run(
+            &target(&[view("HourlyMetric", HOURLY, HOURLY_SQL)]),
+            Some(unsupported_hierarchy_catalog()),
+        );
+        let Err(MigrationError::InvalidMigration(msg)) = result else {
+            panic!("expected InvalidMigration, got {result:?}");
+        };
+        for needle in [
+            "\"HourlyMetric\"",
+            "@@timescale.continuous",
+            "not a hypertable in this schema",
+            "Remove the view from the schema",
+        ] {
+            assert!(msg.contains(needle), "{needle}: {msg}");
+        }
     }
 
     #[test]

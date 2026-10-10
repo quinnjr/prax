@@ -1,5 +1,7 @@
 //! Render TimescaleDB catalog state as `.prax` attributes for `prax db pull`.
 
+use std::collections::BTreeSet;
+
 use prax_migrate::TimescaleCatalog;
 use prax_query::introspection::{RenderExtras, camel_case, normalize_type, pascal_case};
 use prax_query::sql::DatabaseType;
@@ -12,7 +14,9 @@ fn escape(raw: &str) -> String {
 /// Build the extra model attributes and view blocks for a Timescale catalog.
 ///
 /// Every `@@timescale.*` attribute is rendered on a single line. Relations in
-/// `catalog.unsupported` get no Timescale attributes.
+/// `catalog.unsupported` get no Timescale attributes; an unsupported or
+/// unrepresentable continuous aggregate gets a `// prax:` comment naming the
+/// reason instead of a view block.
 #[must_use]
 pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
     let mut extras = RenderExtras::default();
@@ -72,16 +76,24 @@ pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
         extras.model_attributes.insert(table.clone(), lines);
     }
 
-    for (view, agg) in &catalog.aggregates {
+    let views: BTreeSet<&String> = catalog
+        .aggregates
+        .keys()
+        .chain(&catalog.unsupported_aggregates)
+        .collect();
+    for view in views {
         // Aggregates never render as plain views, representable or not.
         extras.skip_views.insert(view.clone());
-        if let Some(reason) = catalog.unsupported.get(view) {
-            let reason = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(agg) = catalog.aggregates.get(view) else {
+            let reason = catalog.unsupported.get(view).map_or_else(
+                || "Prax cannot manage it".to_string(),
+                |r| r.split_whitespace().collect::<Vec<_>>().join(" "),
+            );
             extras.extra_blocks.push(format!(
                 "// prax: continuous aggregate \"{view}\" was not pulled: {reason}."
             ));
             continue;
-        }
+        };
         // `scheduleInterval` is required, so an aggregate without a refresh
         // policy has no representable attribute.
         let Some(policy) = &agg.policy else {
@@ -185,6 +197,7 @@ mod tests {
             aggregate_columns: Default::default(),
             other_views: Default::default(),
             unsupported: Default::default(),
+            unsupported_aggregates: Default::default(),
         };
         c.hypertables.insert(
             "Metric".into(),
@@ -314,14 +327,31 @@ mod tests {
 
     #[test]
     fn test_unsupported_aggregate_is_reported() {
+        // As `TimescaleCatalog::from_rows` leaves it: in `unsupported` and
+        // `unsupported_aggregates`, not in `aggregates`.
         let mut c = catalog(Some(AUTHORED));
-        c.unsupported
-            .insert("HourlyMetric".into(), "some reason".into());
+        c.aggregates.clear();
+        c.aggregate_definitions.clear();
+        c.aggregate_columns.clear();
+        c.unsupported.insert(
+            "HourlyMetric".into(),
+            "it is built on \"Gone\", which is not a hypertable in this schema".into(),
+        );
+        c.unsupported_aggregates.insert("HourlyMetric".into());
         let extras = render_extras(&c);
         assert_eq!(
             extras.extra_blocks,
-            vec![r#"// prax: continuous aggregate "HourlyMetric" was not pulled: some reason."#]
+            vec![
+                r#"// prax: continuous aggregate "HourlyMetric" was not pulled: it is built on "Gone", which is not a hypertable in this schema."#
+            ]
         );
+        assert!(extras.skip_views.contains("HourlyMetric"));
+        // The pulled schema still validates.
+        let out = render_schema(&c);
+        assert!(!out.contains("view HourlyMetric"), "{out}");
+        if let Err(e) = prax_schema::validate_schema(&out) {
+            panic!("{e:?}\n{out}");
+        }
     }
 
     #[test]
