@@ -365,6 +365,14 @@ GROUP BY 1, 2
 
 /// The `HourlyMetric` aggregate over `"Metric"` with the given SQL.
 fn hourly(sql: &str) -> String {
+    hourly_with(
+        r#"scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour""#,
+        sql,
+    )
+}
+
+/// The `HourlyMetric` aggregate with the given policy arguments.
+fn hourly_with(policy: &str, sql: &str) -> String {
     format!(
         r#"
 view HourlyMetric {{
@@ -372,7 +380,7 @@ view HourlyMetric {{
   deviceId String
   avgValue Float
 
-  @@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour")
+  @@timescale.continuous(source: Metric, {policy})
 }}
 
 @@sql("HourlyMetric", """{sql}""")
@@ -457,6 +465,65 @@ async fn roundtrip_spec_example_is_empty() {
     let hourly = &catalog.aggregates["HourlyMetric"];
     assert_eq!(hourly.source, "Metric");
     assert!(hourly.sql.is_some() && hourly.policy.is_some());
+    ts.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires TimescaleDB via docker-compose"]
+async fn policy_changes_roundtrip() {
+    let Some(ts) = Ts::connect("policy_changes_roundtrip").await else {
+        return;
+    };
+    ts.apply_clean(&spec_example(), false).await;
+
+    // Lengthened retention, a new columnstore `after` and a new refresh
+    // policy: all ungated, each a remove followed by an add.
+    let model = metric(
+        "",
+        r#"  @@timescale.hypertable(time, chunkInterval: "1 day", space: hash(deviceId, 4))
+  @@timescale.columnstore(segmentBy: [deviceId], orderBy: [desc(time)], after: "14 days")
+  @@timescale.retention(dropAfter: "120 days")"#,
+    );
+    let changed = format!(
+        "{DATASOURCE}{model}{}",
+        hourly_with(
+            r#"scheduleInterval: "2 hours", startOffset: "5 days", endOffset: "2 hours", materializedOnly: false"#,
+            HOURLY_SQL
+        )
+    );
+    let generated = ts.generate(&changed, false).await;
+    assert!(generated.skipped.is_empty(), "{:?}", generated.skipped);
+    for call in [
+        "remove_columnstore_policy",
+        "add_columnstore_policy",
+        "remove_retention_policy",
+        "add_retention_policy",
+        "remove_continuous_aggregate_policy",
+        "add_continuous_aggregate_policy",
+        "timescaledb.materialized_only = false",
+    ] {
+        assert!(
+            generated.up.contains(call),
+            "missing {call}:\n{}",
+            generated.up
+        );
+    }
+    ts.exec(&generated.up).await;
+    assert_empty(&ts.diff(&changed).await, &generated.up);
+
+    let catalog = ts.catalog().await;
+    let metric = &catalog.hypertables["Metric"];
+    assert_eq!(metric.retention, Some(PgInterval::new(0, 120, 0)));
+    assert_eq!(
+        metric.columnstore.as_ref().and_then(|c| c.after),
+        Some(PgInterval::new(0, 14, 0))
+    );
+    let hourly = &catalog.aggregates["HourlyMetric"];
+    assert!(!hourly.materialized_only);
+    assert_eq!(
+        hourly.policy.as_ref().map(|p| p.schedule_interval),
+        Some(PgInterval::new(0, 0, 2 * HOUR_MICROS))
+    );
     ts.finish().await;
 }
 
