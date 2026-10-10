@@ -34,6 +34,32 @@ services:
       retries: 5
     network_mode: host
 
+  # TimescaleDB for the live round-trip suite (prax-cli/tests/timescale_roundtrip.rs).
+  # Unlike the services above it uses the default bridge network so its
+  # published port (5434) does not clash with `postgres` on host port 5432.
+  # The data directory is a tmpfs: every start is a fresh database, so switching
+  # images (e.g. TIMESCALE_IMAGE=timescale/timescaledb:2.18.2-pg17 for the
+  # version floor) never reuses a data directory initialized by another version.
+  timescaledb:
+    image: ${TIMESCALE_IMAGE:-timescale/timescaledb:2.30.2-pg17}
+    container_name: prax-timescaledb
+    environment:
+      POSTGRES_USER: prax
+      POSTGRES_PASSWORD: prax_test_password
+      POSTGRES_DB: prax_test
+      # Keep timescaledb-tune from sizing shared_buffers to the host's RAM.
+      TS_TUNE_MEMORY: 1GB
+      TS_TUNE_NUM_CPUS: "2"
+    ports:
+      - "5434:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prax -d prax_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   mysql:
     image: mysql:8.0
     container_name: prax-mysql

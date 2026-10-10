@@ -159,6 +159,55 @@ jobs:
       - name: Run tests (including live DB integration tests)
         run: cargo test --workspace --all-features -- --include-ignored
 
+  timescale-e2e:
+    name: TimescaleDB E2E (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported floor (2.18) and the current release.
+        image:
+          - "timescale/timescaledb:2.18.2-pg17"
+          - "timescale/timescaledb:2.30.2-pg17"
+    env:
+      PRAX_E2E: "1"
+      TIMESCALE_URL: postgres://prax:prax_test_password@localhost:5434/prax_test
+    services:
+      timescaledb:
+        image: ${{ matrix.image }}
+        env:
+          POSTGRES_USER: prax
+          POSTGRES_PASSWORD: prax_test_password
+          POSTGRES_DB: prax_test
+        options: >-
+          --health-cmd "pg_isready -U prax -d prax_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5434:5432
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-timescale-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-timescale-
+
+      - name: Run TimescaleDB round-trip suite
+        run: cargo test -p prax-orm-cli --features postgres --test timescale_roundtrip -- --ignored
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest
