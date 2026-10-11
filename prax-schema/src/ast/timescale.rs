@@ -14,10 +14,11 @@ const MICROS_PER_MS: i64 = 1_000;
 const MICROS_PER_SEC: i64 = 1_000_000;
 const MICROS_PER_MIN: i64 = 60 * MICROS_PER_SEC;
 const MICROS_PER_HOUR: i64 = 60 * MICROS_PER_MIN;
-const MICROS_PER_DAY: i128 = 86_400_000_000;
+const MICROS_PER_DAY: i64 = 24 * MICROS_PER_HOUR;
 
 /// Error produced when parsing a [`PgInterval`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum IntervalError {
     /// The input was empty or whitespace only.
     #[error("interval is empty")]
@@ -123,12 +124,13 @@ impl PgInterval {
             return None;
         }
         i64::from(self.days)
-            .checked_mul(MICROS_PER_DAY as i64)
+            .checked_mul(MICROS_PER_DAY)
             .and_then(|d| d.checked_add(self.micros))
     }
 
     fn total_micros(&self, days_per_month: i128) -> i128 {
-        (i128::from(self.months) * days_per_month + i128::from(self.days)) * MICROS_PER_DAY
+        (i128::from(self.months) * days_per_month + i128::from(self.days))
+            * i128::from(MICROS_PER_DAY)
             + i128::from(self.micros)
     }
 
@@ -198,6 +200,7 @@ pub const DEFAULT_CHUNK_INTERVAL: PgInterval = PgInterval::new(0, 7, 0);
 
 /// Typed `@@timescale.*` configuration of a model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TimescaleModelConfig {
     /// Hypertable settings (`@@timescale.hypertable`).
     pub hypertable: HypertableConfig,
@@ -209,6 +212,7 @@ pub struct TimescaleModelConfig {
 
 /// Hypertable settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HypertableConfig {
     /// Time dimension field.
     pub time_field: SmolStr,
@@ -220,6 +224,7 @@ pub struct HypertableConfig {
 
 /// A hash-partitioned space dimension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct HashDimension {
     /// Field to partition on.
     pub field: SmolStr,
@@ -229,6 +234,7 @@ pub struct HashDimension {
 
 /// Columnstore settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ColumnstoreConfig {
     /// Segment-by fields (empty means none).
     pub segment_by: Vec<SmolStr>,
@@ -240,6 +246,7 @@ pub struct ColumnstoreConfig {
 
 /// One column of a columnstore order-by list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OrderByColumn {
     /// Field name.
     pub field: SmolStr,
@@ -249,6 +256,7 @@ pub struct OrderByColumn {
 
 /// Retention policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct RetentionConfig {
     /// Drop chunks older than this.
     pub drop_after: PgInterval,
@@ -256,6 +264,7 @@ pub struct RetentionConfig {
 
 /// Typed `@@timescale.continuous` configuration of a view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ContinuousAggregateConfig {
     /// Model or continuous view the aggregate reads.
     pub source: SmolStr,
@@ -400,36 +409,24 @@ fn field_list(
     name: &str,
     v: &AttributeValue,
 ) -> Result<Vec<SmolStr>, SchemaError> {
-    match v {
-        AttributeValue::FieldRefList(l) => Ok(l.clone()),
-        AttributeValue::Array(items) => items
-            .iter()
-            .map(|i| match i {
-                AttributeValue::Ident(s) | AttributeValue::FieldRef(s) => Ok(s.clone()),
-                _ => Err(args.err(format!("`{name}` must be a list of field names"))),
-            })
-            .collect(),
-        _ => Err(args.err(format!("`{name}` must be a list of field names"))),
-    }
+    v.as_field_names()
+        .map(|names| names.into_iter().map(SmolStr::new).collect())
+        .ok_or_else(|| args.err(format!("`{name}` must be a list of field names")))
 }
 
 fn order_by_list(args: &Args<'_>, v: &AttributeValue) -> Result<Vec<OrderByColumn>, SchemaError> {
     let bad = || args.err("`orderBy` must be a list of `field`, `asc(field)` or `desc(field)`");
-    let items: Vec<OrderByColumn> = match v {
-        AttributeValue::FieldRefList(l) => l
-            .iter()
-            .map(|f| OrderByColumn {
-                field: f.clone(),
-                descending: false,
-            })
-            .collect(),
-        AttributeValue::Array(items) => items
+    let plain = |f: &str| OrderByColumn {
+        field: SmolStr::new(f),
+        descending: false,
+    };
+    let items: Vec<OrderByColumn> = if let Some(names) = v.as_field_names() {
+        names.into_iter().map(plain).collect()
+    } else if let AttributeValue::Array(items) = v {
+        items
             .iter()
             .map(|i| match i {
-                AttributeValue::Ident(f) | AttributeValue::FieldRef(f) => Ok(OrderByColumn {
-                    field: f.clone(),
-                    descending: false,
-                }),
+                AttributeValue::Ident(f) | AttributeValue::FieldRef(f) => Ok(plain(f)),
                 AttributeValue::Function(func, a) if func == "asc" || func == "desc" => {
                     match a.as_slice() {
                         [AttributeValue::Ident(f)] => Ok(OrderByColumn {
@@ -441,8 +438,9 @@ fn order_by_list(args: &Args<'_>, v: &AttributeValue) -> Result<Vec<OrderByColum
                 }
                 _ => Err(bad()),
             })
-            .collect::<Result<_, _>>()?,
-        _ => return Err(bad()),
+            .collect::<Result<_, _>>()?
+    } else {
+        return Err(bad());
     };
     if items.is_empty() {
         return Err(args.err("`orderBy` must not be empty"));

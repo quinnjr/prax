@@ -9,6 +9,15 @@ use super::{
     TimescaleModelConfig,
 };
 
+/// One uniqueness constraint of a model (a primary key or unique key).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueKeySet {
+    /// Where the key was declared: `"@id"`, `"@unique"`, `"@@id"` or `"@@unique"`.
+    pub label: String,
+    /// Field NAMES (not column names) that make up the key.
+    pub fields: Vec<String>,
+}
+
 /// A model definition (maps to a database table).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Model {
@@ -28,11 +37,53 @@ pub struct Model {
 }
 
 impl Model {
-    /// Typed `@@timescale.*` configuration, or `None` when absent or invalid.
+    /// Typed `@@timescale.*` configuration.
     ///
-    /// Use [`TimescaleModelConfig::from_model`] to get the validation error.
+    /// Returns `None` both when the model has no `@@timescale.*` attribute and
+    /// when the configuration is invalid. Migration and diff code must call
+    /// [`TimescaleModelConfig::from_model`] instead so that invalid
+    /// configuration surfaces as an error rather than silently disappearing.
     pub fn timescale(&self) -> Option<TimescaleModelConfig> {
         TimescaleModelConfig::from_model(self).ok().flatten()
+    }
+
+    /// Every uniqueness constraint declared on this model.
+    ///
+    /// Field-level `@id` / `@unique` yield one set per field (`fields` is that
+    /// field's name); model-level `@@id` / `@@unique` yield the listed field
+    /// names (positional list or named `fields:` argument). Model-level
+    /// attributes whose argument is not a plain field list are skipped.
+    pub fn unique_key_sets(&self) -> Vec<UniqueKeySet> {
+        let mut sets = Vec::new();
+        for f in self.fields.values() {
+            for label in ["id", "unique"] {
+                if f.has_attribute(label) {
+                    sets.push(UniqueKeySet {
+                        label: format!("@{label}"),
+                        fields: vec![f.name().to_string()],
+                    });
+                }
+            }
+        }
+        for a in &self.attributes {
+            let label = match a.name() {
+                "id" => "@@id",
+                "unique" => "@@unique",
+                _ => continue,
+            };
+            let Some(names) = a
+                .get_arg("fields")
+                .or_else(|| a.first_arg())
+                .and_then(|v| v.as_field_names())
+            else {
+                continue;
+            };
+            sets.push(UniqueKeySet {
+                label: label.to_string(),
+                fields: names.into_iter().map(str::to_string).collect(),
+            });
+        }
+        sets
     }
 
     /// Create a new model.
@@ -287,9 +338,13 @@ pub struct View {
 }
 
 impl View {
-    /// Typed `@@timescale.continuous` configuration, or `None` when absent or invalid.
+    /// Typed `@@timescale.continuous` configuration.
     ///
-    /// Use [`ContinuousAggregateConfig::from_view`] to get the validation error.
+    /// Returns `None` both when the view has no `@@timescale.continuous`
+    /// attribute and when the configuration is invalid. Migration and diff
+    /// code must call [`ContinuousAggregateConfig::from_view`] instead so that
+    /// invalid configuration surfaces as an error rather than silently
+    /// disappearing.
     pub fn continuous_aggregate(&self) -> Option<ContinuousAggregateConfig> {
         ContinuousAggregateConfig::from_view(self).ok().flatten()
     }
@@ -840,5 +895,50 @@ mod tests {
         let v2 = View::new(make_ident("Stats"), make_span());
 
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_unique_key_sets() {
+        let mut model = Model::new(make_ident("T"), make_span());
+        let mut id = make_id_field();
+        id.attributes
+            .push(Attribute::simple(make_ident("unique"), make_span()));
+        model.add_field(id);
+        model.attributes.push(Attribute::new(
+            make_ident("unique"),
+            vec![AttributeArg::positional(
+                AttributeValue::FieldRefList(vec!["id".into(), "ts".into()]),
+                make_span(),
+            )],
+            make_span(),
+        ));
+        model.attributes.push(Attribute::new(
+            make_ident("id"),
+            vec![AttributeArg::named(
+                make_ident("fields"),
+                AttributeValue::Array(vec![AttributeValue::Ident("ts".into())]),
+                make_span(),
+            )],
+            make_span(),
+        ));
+        let sets = model.unique_key_sets();
+        let got: Vec<(&str, Vec<&str>)> = sets
+            .iter()
+            .map(|s| {
+                (
+                    s.label.as_str(),
+                    s.fields.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("@id", vec!["id"]),
+                ("@unique", vec!["id"]),
+                ("@@unique", vec!["id", "ts"]),
+                ("@@id", vec!["ts"]),
+            ]
+        );
     }
 }

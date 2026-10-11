@@ -1,4 +1,4 @@
-//! Validator coverage for the TimescaleDB rules (spec section 3.4).
+//! Validator coverage for the TimescaleDB rules.
 
 use prax_schema::{SchemaError, validate_schema};
 
@@ -174,8 +174,8 @@ fn rule5_unique_without_space() {
     );
 }
 
-/// Rule 6 was dropped (spec §8 item 4): TimescaleDB accepts foreign keys
-/// that reference a hypertable.
+/// TimescaleDB 2.18 and 2.30 both accept foreign keys that reference a
+/// hypertable, so the validator must not reject them.
 #[test]
 fn fk_to_hypertable_is_allowed() {
     let s = ts(&format!(
