@@ -36,10 +36,12 @@ use prax_cli::commands::introspect::{
 };
 use prax_cli::commands::migrate::{DiffSource, generate_migration_sql};
 use prax_cli::commands::schema_from_db::schema_from_database;
+use prax_cli::commands::timescale_pull::render_extras;
 use prax_cli::config::Config;
 use prax_migrate::timescale::catalog::{ColumnstoreSettings, aggregate_record};
 use prax_migrate::timescale::{
-    TimescaleChangeKind, opts_into_timescale, quote_literal, timescale_version_at_least,
+    SET_NOT_NULL_ON_COLUMNSTORE_SINCE, TimescaleChangeKind, opts_into_timescale, quote_literal,
+    timescale_version_at_least,
 };
 use prax_migrate::{
     IntrospectionConfig, MigrateResult, MigrationError, SchemaDiff, SchemaDiffer, TimescaleCatalog,
@@ -258,12 +260,13 @@ impl Ts {
             .expect("timescaledb is installed")
     }
 
-    /// Diff `prax` against the database, as `prax migrate` does: the Timescale
-    /// catalog is read and passed only when the target opts in.
+    /// Diff `prax` against the database, as `prax migrate` does: the installed
+    /// extensions and the Timescale catalog are always passed, and the differ
+    /// decides whether the target opts in.
     async fn try_diff(&self, prax: &str) -> MigrateResult<SchemaDiff> {
         let target = prax_schema::validate_schema(prax)
             .unwrap_or_else(|e| panic!("target schema validates: {e}\n{prax}"));
-        let (source, catalog) = self.introspect_with(opts_into_timescale(&target)).await;
+        let (source, catalog) = self.introspect().await;
         let mut differ = SchemaDiffer::new(target)
             .with_source(source)
             .with_installed_extensions(catalog.extensions);
@@ -361,10 +364,12 @@ impl Ts {
             .await
             .expect("read catalog")
             .and_then(|c| c.timescale);
+        let extras = timescale.as_ref().map(render_extras).unwrap_or_default();
         format_as_prax_with(
             &db,
             &Config::default_for_provider(PROVIDER),
-            timescale.as_ref(),
+            &["timescaledb"],
+            &extras,
         )
     }
 }
@@ -887,10 +892,9 @@ async fn aggregate_over_unsupported_hypertable_is_left_alone() {
     };
     ts.exec(RAW_INTEGER_AGGREGATE).await;
     let catalog = ts.catalog().await;
-    assert!(catalog.unsupported["Ticks"].contains("integer time"));
-    let reason = &catalog.unsupported["TickBuckets"];
+    assert!(catalog.unsupported_hypertables["Ticks"].contains("integer time"));
+    let reason = &catalog.unsupported_aggregates["TickBuckets"];
     assert!(reason.contains("built on \"Ticks\""), "{reason}");
-    assert!(catalog.unsupported_aggregates.contains("TickBuckets"));
     assert!(catalog.aggregates.is_empty() && !catalog.other_views.contains_key("TickBuckets"));
 
     // An opted-in schema that leaves both unmanaged.
@@ -947,7 +951,7 @@ async fn aggregate_over_other_schema_is_unsupported() {
     .await;
 
     let catalog = ts.catalog().await;
-    let reason = &catalog.unsupported["HourlyMetric"];
+    let reason = &catalog.unsupported_aggregates["HourlyMetric"];
     assert!(
         reason.contains(&format!(
             "built on \"{other}.Metric\", which is not a hypertable"
@@ -1694,9 +1698,10 @@ async fn probe_columnstore_alter_column_restrictions() {
     // SET NOT NULL is rejected on 2.18 and accepted on 2.30.
     // Verified live only on 2.18.2 and 2.30.2; unprobed 2.19-2.29 are treated
     // as rejecting.
+    let since = SET_NOT_NULL_ON_COLUMNSTORE_SINCE;
     assert_eq!(
         set_not_null.is_err(),
-        !timescale_version_at_least(&version, 2, 30)
+        !timescale_version_at_least(&version, since.0, since.1)
     );
 
     // The differ refuses the rejected alters and allows the others.
