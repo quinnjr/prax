@@ -427,6 +427,13 @@ impl Schema {
             relation_count: self.relations.len(),
         }
     }
+
+    /// Whether any model or view carries a `@@timescale.*` attribute (the bare
+    /// `@@timescale` included).
+    pub fn uses_timescale_attributes(&self) -> bool {
+        self.models.values().any(Model::declares_timescale)
+            || self.views.values().any(View::declares_timescale)
+    }
 }
 
 impl std::fmt::Display for Schema {
@@ -1037,5 +1044,28 @@ mod tests {
         let stats = schema.stats();
         assert_eq!(stats.model_count, 1);
         assert_eq!(stats.policy_count, 2);
+    }
+
+    #[test]
+    fn test_uses_timescale_attributes() {
+        let mut schema = Schema::new();
+        assert!(!schema.uses_timescale_attributes());
+        schema.add_model(make_model("Plain"));
+        assert!(!schema.uses_timescale_attributes());
+
+        let mut ts = make_model("Metric");
+        ts.attributes.push(Attribute::simple(
+            make_ident("timescale.hypertable"),
+            make_span(),
+        ));
+        schema.add_model(ts);
+        assert!(schema.uses_timescale_attributes());
+
+        let mut schema = Schema::new();
+        let mut view = View::new(make_ident("Hourly"), make_span());
+        view.attributes
+            .push(Attribute::simple(make_ident("timescale"), make_span()));
+        schema.add_view(view);
+        assert!(schema.uses_timescale_attributes());
     }
 }

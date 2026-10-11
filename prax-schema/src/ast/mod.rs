@@ -13,6 +13,7 @@ pub mod procedure;
 mod relation;
 mod schema;
 mod server_group;
+mod timescale;
 mod types;
 mod validation;
 
@@ -27,5 +28,6 @@ pub use procedure::*;
 pub use relation::*;
 pub use schema::*;
 pub use server_group::*;
+pub use timescale::*;
 pub use types::*;
 pub use validation::*;

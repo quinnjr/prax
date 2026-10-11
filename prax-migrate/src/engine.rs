@@ -445,23 +445,7 @@ impl<H: MigrationHistoryRepository, S: MigrationEventStore> MigrationEngine<H, S
         if !diff.is_empty() {
             // Check for data loss
             if !self.config.allow_data_loss {
-                if !diff.drop_models.is_empty() {
-                    plan.warnings.push(format!(
-                        "Would drop {} tables: {}. Set allow_data_loss=true to proceed.",
-                        diff.drop_models.len(),
-                        diff.drop_models.join(", ")
-                    ));
-                }
-
-                for alter in &diff.alter_models {
-                    if !alter.drop_fields.is_empty() {
-                        plan.warnings.push(format!(
-                            "Would drop columns in '{}': {}. Set allow_data_loss=true to proceed.",
-                            alter.name,
-                            alter.drop_fields.join(", ")
-                        ));
-                    }
-                }
+                plan.warnings.extend(data_loss_warnings(&diff));
             }
 
             let sql = self.sql_generator.generate(&diff);
@@ -837,6 +821,37 @@ pub struct RollbackResult {
     pub event_id: i64,
     /// Duration in milliseconds.
     pub duration_ms: i64,
+}
+
+/// Warnings for changes that lose data and need `allow_data_loss`.
+fn data_loss_warnings(diff: &crate::diff::SchemaDiff) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if !diff.drop_models.is_empty() {
+        warnings.push(format!(
+            "Would drop {} tables: {}. Set allow_data_loss=true to proceed.",
+            diff.drop_models.len(),
+            diff.drop_models.join(", ")
+        ));
+    }
+
+    for alter in &diff.alter_models {
+        if !alter.drop_fields.is_empty() {
+            warnings.push(format!(
+                "Would drop columns in '{}': {}. Set allow_data_loss=true to proceed.",
+                alter.name,
+                alter.drop_fields.join(", ")
+            ));
+        }
+    }
+
+    let proceed = "Set allow_data_loss=true to proceed.";
+    warnings.extend(
+        diff.timescale
+            .gated_notes()
+            .iter()
+            .map(|note| crate::diff::append_sentence(note, proceed)),
+    );
+    warnings
 }
 
 #[cfg(test)]
@@ -1288,5 +1303,25 @@ mod tests {
             matches!(err, MigrationError::NotImplemented(_)),
             "expected NotImplemented, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_data_loss_warnings_report_gated_timescale_changes() {
+        use crate::diff::SchemaDiff;
+        use crate::timescale::{TimescaleChange, TimescaleChangeKind};
+
+        let mut diff = SchemaDiff::default();
+        diff.timescale.changes.push(TimescaleChange::gated(
+            TimescaleChangeKind::ReplaceRetentionPolicy {
+                table: "Metric".into(),
+                old: None,
+                new: None,
+            },
+            "Adding retention to \"Metric\" drops old chunks".into(),
+        ));
+        let warnings = data_loss_warnings(&diff);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("allow_data_loss=true"), "{warnings:?}");
+        assert!(warnings[0].contains("drops old chunks"), "{warnings:?}");
     }
 }

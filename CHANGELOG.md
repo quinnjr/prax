@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **TimescaleDB schema + migrations** (`prax-schema`, `prax-migrate`, `prax-cli`) - `@@timescale.hypertable`, `@@timescale.columnstore`, `@@timescale.retention`, and `@@timescale.continuous`. Generated, introspected, and diffed DDL for TimescaleDB 2.18 or later; `prax db pull` emits the attributes.
+  - Opt-in: `prax migrate` reads and diffs the database's TimescaleDB state only when the schema lists `timescaledb` in the datasource `extensions` or declares an `@@timescale.*` attribute. For other schemas the TimescaleDB behaviour is unchanged: hypertables created by hand are migrated as plain tables, as before. Once opted in, TimescaleDB 2.18 or later is required, and a hypertable modeled without `@@timescale.hypertable` is refused (converting back to a plain table is not supported).
+  - Converting an existing table requires its primary key and every unique constraint or index to include the time column (TimescaleDB rule). Prax does not change the keys of an existing table, so such a conversion is refused at diff time with the manual steps.
+  - Hypertables with an integer time dimension or a `*_created_before` policy, and continuous aggregates built on them or on a relation outside the introspected schema, are left unmanaged: never altered or dropped, and refused if declared with `@@timescale.*`. `db pull` renders such hypertables as plain models and reports them, and such aggregates, in a `// prax:` comment.
+  - `prax db pull` adds `extensions = [timescaledb]` to the datasource when TimescaleDB 2.18 or later is installed, and reads the TimescaleDB catalog to render the attributes and continuous-aggregate views. If that read fails, or the installed TimescaleDB is older, it warns and pulls the tables and views without TimescaleDB attributes. A hypertable or aggregate whose names cannot be written as `.prax` identifiers, or an aggregate without a refresh policy or SQL definition, is reported in a `// prax:` comment instead.
+
+### Changed
+
+- **BREAKING**: `SchemaDiff` gains a public `timescale` field. It is not `#[non_exhaustive]`, so struct-literal construction without `..Default::default()` breaks.
+- `prax migrate` now emits `CREATE EXTENSION IF NOT EXISTS` for each datasource `extensions = [...]` entry not installed in the database (installed extensions are read from `pg_extension`). It is create-only: removing an entry never drops the extension. Aliases such as `pgvector` are normalized.
+- Generated migrations record changes skipped for lacking `--allow-destructive` as `-- SKIPPED (needs --allow-destructive): …` comment lines. `prax migrate dev` also prints them, with a count, when the migration has other statements.
+
+### Fixed
+
+- `prax migrate` no longer reports "No changes" when changes were skipped for lacking `--allow-destructive`; skipped changes are listed.
+- `db pull` no longer emits field-level `@id` on members of a composite primary key (previously both `@id` and `@@id`, which failed validation).
+- `db pull` now emits `@@map` whenever the model or view name differs from the table or view name, including case-only differences (previously the table `users` became `model Users` without `@@map`).
+- SQLite introspection now reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run.
+
+### Security
+
+- Database-sourced names in generated migration comments (`-- WARNING:`, `-- SKIPPED`) and in `db pull` `// prax:` comments are kept on one line, so a name containing a newline can no longer end the comment and inject SQL or schema text.
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed

@@ -158,6 +158,16 @@ pub enum WellKnownExtension {
     PlPgSQL,
 }
 
+/// Normalize an extension name or alias to the name used in `CREATE EXTENSION`.
+///
+/// Well-known aliases (`pgvector`, `uuid_ossp`) map to their real names
+/// (`vector`, `uuid-ossp`); unknown names are returned unchanged.
+pub fn canonical_extension_name(name: &str) -> String {
+    WellKnownExtension::from_str(name)
+        .map(|e| e.extension_name().to_string())
+        .unwrap_or_else(|| name.to_string())
+}
+
 impl WellKnownExtension {
     /// Get the extension name as used in CREATE EXTENSION.
     pub fn extension_name(&self) -> &'static str {

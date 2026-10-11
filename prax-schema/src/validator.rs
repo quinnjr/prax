@@ -9,6 +9,8 @@
 use crate::ast::*;
 use crate::error::{SchemaError, SchemaResult};
 
+mod timescale;
+
 /// Schema validator for semantic analysis.
 #[derive(Debug)]
 pub struct Validator {
@@ -60,6 +62,9 @@ impl Validator {
         for v in schema.views.values() {
             self.validate_view(v, &schema);
         }
+
+        // Validate TimescaleDB attributes
+        self.validate_timescale(&schema);
 
         // Validate each server group
         for sg in schema.server_groups.values() {

@@ -5,9 +5,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use prax_schema::Schema;
 use prax_schema::ast::{Field, FieldType, GeneratedAttribute, IndexType, Model, VectorOps, View};
 
-use crate::error::MigrateResult;
+use crate::error::{MigrateResult, MigrationError};
 use crate::procedure::{
     ProcedureDefinition, ProcedureDiff, ProcedureDiffer, ProcedureLanguage, Volatility,
+};
+use crate::timescale::{
+    TimescaleCatalog, TimescaleChangeKind, TimescaleDiff, diff_timescale, opts_into_timescale,
 };
 
 /// A diff between two schemas.
@@ -41,6 +44,9 @@ pub struct SchemaDiff {
     pub drop_indexes: Vec<IndexDiff>,
     /// Procedure changes.
     pub procedures: Option<ProcedureDiff>,
+    /// TimescaleDB changes (hypertables, columnstore, retention, continuous
+    /// aggregates).
+    pub timescale: TimescaleDiff,
 }
 
 /// Diff for PostgreSQL extensions.
@@ -71,6 +77,56 @@ impl SchemaDiff {
             && self.create_indexes.is_empty()
             && self.drop_indexes.is_empty()
             && self.procedures.as_ref().is_none_or(|p| p.is_empty())
+            && self.timescale.is_empty()
+    }
+
+    /// Remove every gated TimescaleDB change and what is coupled to it.
+    ///
+    /// Drops the gated entries of `timescale.changes`, the `create_views`
+    /// entries a stripped aggregate set hands off, and the column alters and
+    /// drops that force a stripped recreation (`alter_models` entries left
+    /// empty are removed). Returns one note per stripped change, in change
+    /// order. A stripped aggregate set that creates aggregates also reports
+    /// that their refresh policy and `materializedOnly` values are deferred.
+    pub fn strip_timescale_gated(&mut self) -> Vec<String> {
+        let mut notes = Vec::new();
+        let mut handoffs: Vec<String> = Vec::new();
+        let mut coupled: Vec<(String, String)> = Vec::new();
+
+        let changes = std::mem::take(&mut self.timescale.changes);
+        for change in changes {
+            if !change.gated {
+                self.timescale.changes.push(change);
+                continue;
+            }
+            let mut note = change.note.unwrap_or_default();
+            if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
+                if !set.create.is_empty() {
+                    note = append_sentence(
+                        &note,
+                        "The recreated aggregates' new refresh-policy and materializedOnly \
+                         values are deferred with it",
+                    );
+                }
+                handoffs.extend(set.handoff_views.iter().cloned());
+                coupled.extend(set.coupled_columns.iter().cloned());
+            }
+            notes.push(note);
+        }
+
+        // Hand-offs are database view names.
+        self.create_views
+            .retain(|v| !handoffs.contains(&v.view_name));
+
+        for alter in &mut self.alter_models {
+            for (_, column) in coupled.iter().filter(|(t, _)| *t == alter.table_name) {
+                alter.alter_fields.retain(|f| f.column_name != *column);
+                alter.drop_fields.retain(|c| c != column);
+            }
+        }
+        self.alter_models.retain(|a| !a.is_empty());
+
+        notes
     }
 
     /// Get a human-readable summary of the diff.
@@ -139,6 +195,13 @@ impl SchemaDiff {
             if !proc_diff.alter_triggers.is_empty() {
                 parts.push(format!("Alter {} triggers", proc_diff.alter_triggers.len()));
             }
+        }
+
+        if !self.timescale.is_empty() {
+            parts.push(format!(
+                "Apply {} TimescaleDB changes",
+                self.timescale.changes.len()
+            ));
         }
 
         if parts.is_empty() {
@@ -275,6 +338,27 @@ pub struct ModelAlterDiff {
     pub add_foreign_keys: Vec<ForeignKeyDiff>,
     /// Foreign keys to drop (by constraint name).
     pub drop_foreign_keys: Vec<String>,
+}
+
+impl ModelAlterDiff {
+    /// Whether the alter changes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.add_fields.is_empty()
+            && self.drop_fields.is_empty()
+            && self.alter_fields.is_empty()
+            && self.add_indexes.is_empty()
+            && self.drop_indexes.is_empty()
+            && self.add_foreign_keys.is_empty()
+            && self.drop_foreign_keys.is_empty()
+    }
+}
+
+/// Append `sentence` to the user-facing `note` as a new sentence: `note` ends
+/// in exactly one period (added when missing, collapsed when repeated), then
+/// a space and `sentence`.
+pub(crate) fn append_sentence(note: &str, sentence: &str) -> String {
+    format!("{}. {sentence}", note.trim_end().trim_end_matches('.'))
 }
 
 /// A foreign key constraint diff.
@@ -519,6 +603,10 @@ pub struct SchemaDiffer {
     source: Option<Schema>,
     /// Target schema (desired state).
     target: Schema,
+    /// Extensions known to be installed in the database, if introspected.
+    installed_extensions: Option<Vec<String>>,
+    /// The database's TimescaleDB state, if introspected.
+    timescale_catalog: Option<TimescaleCatalog>,
 }
 
 impl SchemaDiffer {
@@ -527,6 +615,8 @@ impl SchemaDiffer {
         Self {
             source: None,
             target,
+            installed_extensions: None,
+            timescale_catalog: None,
         }
     }
 
@@ -536,9 +626,96 @@ impl SchemaDiffer {
         self
     }
 
+    /// Set the extensions installed in the database (names or aliases).
+    ///
+    /// When set, this takes precedence over the source schema's datasource
+    /// extensions when deciding which extensions to create.
+    ///
+    /// [`diff`](Self::diff) adds a `create_extensions` entry (rendered as
+    /// `CREATE EXTENSION IF NOT EXISTS`) for every extension the target's
+    /// datasource declares that is not installed. A source schema built by
+    /// introspecting tables carries no `extensions`, so callers diffing
+    /// against an introspected database should pass the database's installed
+    /// extensions here; otherwise every migration repeats the
+    /// `CREATE EXTENSION IF NOT EXISTS` statements.
+    #[must_use]
+    pub fn with_installed_extensions(mut self, names: Vec<String>) -> Self {
+        self.installed_extensions = Some(names);
+        self
+    }
+
+    /// Set the database's TimescaleDB state.
+    ///
+    /// The catalog, not the source schema, is the source of Timescale state;
+    /// without one the database is treated as having none. [`diff`](Self::diff)
+    /// ignores it unless the target opts in
+    /// ([`crate::timescale::opts_into_timescale`]); when it does, every
+    /// hypertable the target models must declare `@@timescale.hypertable`.
+    #[must_use]
+    pub fn with_timescale_catalog(mut self, catalog: TimescaleCatalog) -> Self {
+        self.timescale_catalog = Some(catalog);
+        self
+    }
+
     /// Compute the diff between schemas.
+    ///
+    /// Extensions are create-only: every extension the target's datasource
+    /// declares that is not installed becomes a `create_extensions` entry.
+    /// "Installed" means the list passed to
+    /// [`with_installed_extensions`](Self::with_installed_extensions), or else
+    /// the source schema's datasource `extensions`, or else nothing. Pass the
+    /// installed extensions when the source is introspected, or each
+    /// migration re-emits `CREATE EXTENSION IF NOT EXISTS` for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::MigrationError::InvalidMigration`] when the target
+    /// opts into TimescaleDB but the installed version is older than
+    /// [`crate::timescale::TIMESCALE_MIN_VERSION`], when the target's
+    /// `@@timescale.*` attributes are invalid, or when a TimescaleDB change
+    /// cannot be made (see [`crate::timescale::diff_timescale`]).
     pub fn diff(&self) -> MigrateResult<SchemaDiff> {
+        // The Timescale catalog only applies to a target that opts in.
+        let timescale_catalog = match &self.timescale_catalog {
+            Some(catalog) if opts_into_timescale(&self.target) => {
+                if let Some(message) = catalog.version_error() {
+                    return Err(MigrationError::InvalidMigration(message));
+                }
+                Some(catalog)
+            }
+            _ => None,
+        };
         let mut result = SchemaDiff::default();
+
+        // Extensions are create-only: databases carry undeclared extensions,
+        // so `drop_extensions` is never populated. Names are normalized so
+        // aliases (`pgvector`) match installed names (`vector`); versions are
+        // ignored to avoid churn.
+        let installed: HashSet<String> = match (&self.installed_extensions, &self.source) {
+            (Some(names), _) => names
+                .iter()
+                .map(|n| prax_schema::ast::canonical_extension_name(n))
+                .collect(),
+            (None, Some(source)) => source
+                .datasource
+                .iter()
+                .flat_map(|d| d.extensions.iter())
+                .map(|e| prax_schema::ast::canonical_extension_name(&e.name))
+                .collect(),
+            (None, None) => HashSet::new(),
+        };
+        if let Some(ds) = &self.target.datasource {
+            for ext in &ds.extensions {
+                let name = prax_schema::ast::canonical_extension_name(&ext.name);
+                if !installed.contains(&name) {
+                    result.create_extensions.push(ExtensionDiff {
+                        name,
+                        schema: ext.schema.as_ref().map(|s| s.to_string()),
+                        version: ext.version.as_ref().map(|v| v.to_string()),
+                    });
+                }
+            }
+        }
 
         // Models are keyed by their database table name (`@@map` or model
         // name), not the Prax model name: the table is the stable database
@@ -672,15 +849,42 @@ impl SchemaDiffer {
             }
         }
 
-        // Diff views
+        // Diff views. Continuous aggregates are left to `diff_timescale`: the
+        // target's (views declaring `@@timescale.*`) on both sides, and the
+        // catalog's on the source side. An aggregate the target turns into a
+        // plain or materialized view (a hand-off, dropped by the Timescale
+        // pre-phase) is then a target view missing from the source, so it is
+        // created below.
+        let target_aggregates: HashSet<&str> = self
+            .target
+            .views
+            .values()
+            .filter(|v| v.declares_timescale())
+            .map(View::view_name)
+            .collect();
         let source_views: HashMap<&str, &View> = self
             .source
             .as_ref()
-            .map(|s| s.views.values().map(|v| (v.name(), v)).collect())
+            .map(|s| {
+                s.views
+                    .values()
+                    .filter(|v| {
+                        let name = v.view_name();
+                        !target_aggregates.contains(name)
+                            && !timescale_catalog.is_some_and(|c| c.aggregates.contains_key(name))
+                    })
+                    .map(|v| (v.name(), v))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let target_views: HashMap<&str, &View> =
-            self.target.views.values().map(|v| (v.name(), v)).collect();
+        let target_views: HashMap<&str, &View> = self
+            .target
+            .views
+            .values()
+            .filter(|v| !v.declares_timescale())
+            .map(|v| (v.name(), v))
+            .collect();
 
         // Find views to create
         for (name, view) in &target_views {
@@ -705,8 +909,8 @@ impl SchemaDiffer {
                 let source_sql = self
                     .source
                     .as_ref()
-                    .and_then(|s| resolve_view_sql(source_view, s));
-                let target_sql = resolve_view_sql(target_view, &self.target);
+                    .and_then(|s| source_view.resolved_sql(s));
+                let target_sql = target_view.resolved_sql(&self.target);
 
                 // Check if SQL or materialized status changed
                 let sql_changed = source_sql != target_sql;
@@ -785,6 +989,13 @@ impl SchemaDiffer {
                 }
             }
         }
+
+        result.timescale = diff_timescale(
+            &self.target,
+            self.source.as_ref(),
+            timescale_catalog,
+            &result,
+        )?;
 
         Ok(result)
     }
@@ -1547,24 +1758,10 @@ fn diff_models(
     }
 }
 
-/// Resolve the SQL defining a view: the inline `@@sql` attribute if present,
-/// otherwise a top-level `@@sql` definition (`schema.raw_sql`) whose name
-/// matches the view's database name (`@@map`) or model name.
-fn resolve_view_sql<'a>(view: &'a View, schema: &'a Schema) -> Option<&'a str> {
-    if let Some(sql) = view.sql_query() {
-        return Some(sql);
-    }
-    schema
-        .raw_sql
-        .iter()
-        .find(|r| r.name.as_str() == view.view_name() || r.name.as_str() == view.name())
-        .map(|r| r.sql.as_str())
-}
-
 /// Convert a view to a diff for creation.
 fn view_to_diff(view: &View, schema: &Schema) -> Option<ViewDiff> {
     // Views require a SQL definition (inline @@sql or top-level @@sql) to be migrated
-    let sql_query = resolve_view_sql(view, schema)?.to_string();
+    let sql_query = view.resolved_sql(schema)?.to_string();
 
     let fields: Vec<ViewFieldDiff> = view
         .fields
@@ -1767,6 +1964,249 @@ fn ast_procedure_to_definition(p: &prax_schema::ast::Procedure) -> ProcedureDefi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod strip_gated {
+        use super::*;
+        use crate::timescale::catalog::AggregateState;
+        use crate::timescale::{AggregateSetChange, TimescaleChange, TimescaleChangeKind};
+        use prax_schema::ast::PgInterval;
+
+        fn days(n: i32) -> PgInterval {
+            PgInterval {
+                months: 0,
+                days: n,
+                micros: 0,
+            }
+        }
+
+        fn retention(note: &str) -> TimescaleChange {
+            TimescaleChange::gated(
+                TimescaleChangeKind::ReplaceRetentionPolicy {
+                    table: "Metric".into(),
+                    old: None,
+                    new: Some(days(90)),
+                },
+                note.into(),
+            )
+        }
+
+        fn columnstore_policy() -> TimescaleChange {
+            TimescaleChange::ungated(
+                TimescaleChangeKind::ReplaceColumnstorePolicy {
+                    table: "Metric".into(),
+                    old: Some(days(7)),
+                    new: Some(days(14)),
+                },
+                None,
+            )
+        }
+
+        fn aggregate(create: bool, note: &str) -> TimescaleChange {
+            let state = AggregateState {
+                view: "HourlyMetric".into(),
+                source: "Metric".into(),
+                sql: Some("SELECT 1".into()),
+                materialized_only: false,
+                policy: None,
+            };
+            TimescaleChange::gated(
+                TimescaleChangeKind::AggregateSet(AggregateSetChange {
+                    drop_aggregates: vec![state.clone()],
+                    drop_views: vec![],
+                    create: if create { vec![state] } else { vec![] },
+                    handoff_views: vec!["HourlyMetric".into()],
+                    coupled_columns: vec![("Metric".into(), "value".into())],
+                }),
+                note.into(),
+            )
+        }
+
+        fn alter(table: &str) -> ModelAlterDiff {
+            ModelAlterDiff {
+                name: table.into(),
+                table_name: table.into(),
+                add_fields: vec![],
+                drop_fields: vec![],
+                alter_fields: vec![],
+                add_indexes: vec![],
+                drop_indexes: vec![],
+                add_foreign_keys: vec![],
+                drop_foreign_keys: vec![],
+            }
+        }
+
+        fn field_alter(column: &str) -> FieldAlterDiff {
+            FieldAlterDiff {
+                name: column.into(),
+                column_name: column.into(),
+                old_type: Some("INTEGER".into()),
+                new_type: Some("BIGINT".into()),
+                old_nullable: None,
+                new_nullable: None,
+                old_default: None,
+                new_default: None,
+            }
+        }
+
+        fn view(name: &str) -> ViewDiff {
+            ViewDiff {
+                name: name.into(),
+                view_name: name.into(),
+                sql_query: "SELECT 1".into(),
+                is_materialized: false,
+                refresh_interval: None,
+                fields: vec![],
+            }
+        }
+
+        #[test]
+        fn test_strip_removes_gated_and_keeps_ungated() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![retention("adds retention"), columnstore_policy()];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["adds retention".to_string()]);
+            assert_eq!(diff.timescale.changes.len(), 1);
+            assert!(!diff.timescale.changes[0].gated);
+        }
+
+        #[test]
+        fn test_strip_removes_handoff_view() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
+            diff.create_views = vec![view("HourlyMetric"), view("Other")];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["drops aggregate".to_string()]);
+            assert_eq!(diff.create_views.len(), 1);
+            assert_eq!(diff.create_views[0].name, "Other");
+        }
+
+        #[test]
+        fn test_strip_matches_handoffs_on_view_name_only() {
+            // A view whose model name equals a hand-off but whose database
+            // name differs is not the handed-off view.
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
+            let mut renamed = view("HourlyMetric");
+            renamed.view_name = "hourly_report".into();
+            diff.create_views = vec![renamed];
+            diff.strip_timescale_gated();
+            assert_eq!(diff.create_views.len(), 1);
+            assert_eq!(diff.create_views[0].view_name, "hourly_report");
+        }
+
+        #[test]
+        fn test_append_sentence_handles_trailing_period() {
+            assert_eq!(append_sentence("Drops x.", "More"), "Drops x. More");
+            assert_eq!(append_sentence("Drops x", "More."), "Drops x. More.");
+            assert_eq!(append_sentence("Drops x.. ", "More"), "Drops x. More");
+        }
+
+        #[test]
+        fn test_model_alter_diff_is_empty() {
+            let mut metric = alter("Metric");
+            assert!(metric.is_empty());
+            metric.drop_fields = vec!["value".into()];
+            assert!(!metric.is_empty());
+        }
+
+        #[test]
+        fn test_strip_removes_coupled_column_alter() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
+            let mut metric = alter("Metric");
+            metric.alter_fields = vec![field_alter("value")];
+            let mut other = alter("Metric2");
+            other.alter_fields = vec![field_alter("value")];
+            let mut partial = alter("Metric");
+            partial.alter_fields = vec![field_alter("value"), field_alter("keep")];
+            partial.drop_fields = vec!["value".into(), "gone".into()];
+            diff.alter_models = vec![metric, other, partial];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes, vec!["drops aggregate".to_string()]);
+            assert_eq!(diff.alter_models.len(), 2, "empty alter removed");
+            assert_eq!(diff.alter_models[0].table_name, "Metric2");
+            assert_eq!(diff.alter_models[1].alter_fields.len(), 1);
+            assert_eq!(diff.alter_models[1].alter_fields[0].column_name, "keep");
+            assert_eq!(diff.alter_models[1].drop_fields, vec!["gone".to_string()]);
+        }
+
+        #[test]
+        fn test_strip_notes_deferred_policy_when_creating_aggregates() {
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(true, "Recreates \"HourlyMetric\".")];
+            let notes = diff.strip_timescale_gated();
+            assert_eq!(notes.len(), 1);
+            assert!(
+                notes[0].starts_with("Recreates \"HourlyMetric\"."),
+                "{notes:?}"
+            );
+            assert!(
+                notes[0].contains("refresh-policy and materializedOnly values are deferred"),
+                "{notes:?}"
+            );
+            assert!(!notes[0].contains(".."), "{notes:?}");
+        }
+    }
+
+    fn ext_schema(exts: &str) -> Schema {
+        prax_schema::parse_schema(&format!(
+            "datasource db {{\n  provider = \"postgresql\"\n  url = \"postgres://x\"\n  extensions = [{exts}]\n}}\n"
+        ))
+        .unwrap()
+    }
+
+    fn create_names(diff: &SchemaDiff) -> Vec<&str> {
+        diff.create_extensions
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn test_extension_diff_creates_missing() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb, pgvector"))
+            .with_installed_extensions(vec!["vector".to_string()])
+            .diff()
+            .unwrap();
+        assert_eq!(create_names(&diff), vec!["timescaledb"]);
+    }
+
+    #[test]
+    fn test_extension_diff_never_drops() {
+        let target = prax_schema::parse_schema("model A { id Int @id }").unwrap();
+        let diff = SchemaDiffer::new(target)
+            .with_installed_extensions(vec!["vector".into(), "uuid-ossp".into(), "pgcrypto".into()])
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+        assert!(diff.drop_extensions.is_empty());
+    }
+
+    #[test]
+    fn test_extension_diff_normalizes_alias() {
+        let diff = SchemaDiffer::new(ext_schema("pgvector, uuid_ossp"))
+            .diff()
+            .unwrap();
+        assert_eq!(create_names(&diff), vec!["vector", "uuid-ossp"]);
+    }
+
+    #[test]
+    fn test_extension_diff_falls_back_to_source_datasource() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb"))
+            .with_source(ext_schema("timescaledb"))
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+    }
+
+    #[test]
+    fn test_extension_version_does_not_churn() {
+        let diff = SchemaDiffer::new(ext_schema("timescaledb(version: \"2.18.0\")"))
+            .with_installed_extensions(vec!["timescaledb".to_string()])
+            .diff()
+            .unwrap();
+        assert!(diff.create_extensions.is_empty());
+    }
 
     #[test]
     fn test_schema_diff_empty() {
@@ -2402,6 +2842,68 @@ mod tests {
             view.sql_query
         );
         assert_eq!(view.fields.len(), 2);
+    }
+
+    #[test]
+    fn test_generic_view_diff_ignores_aggregates() {
+        use std::collections::BTreeMap;
+
+        use crate::timescale::{AggregateState, TimescaleCatalog};
+
+        let view = |name: &str, attr: &str, sql: &str| {
+            format!(
+                "view {name} {{\n  bucket DateTime\n  {attr}\n}}\n\n@@sql(\"{name}\", \"\"\"\n{sql}\n\"\"\")\n"
+            )
+        };
+        let datasource = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
+        let metric =
+            "model Metric {\n  time DateTime\n  @@id([time])\n  @@timescale.hypertable(time)\n}\n";
+        let target = prax_schema::parse_schema(&format!(
+            "{datasource}\n{metric}\n{}\n{}",
+            view(
+                "HourlyMetric",
+                "@@timescale.continuous(source: Metric, scheduleInterval: \"1 hour\")",
+                "SELECT time_bucket('1 hour', \"time\") AS bucket FROM \"Metric\" GROUP BY 1",
+            ),
+            view("Plain", "", "SELECT 1 AS bucket"),
+        ))
+        .unwrap();
+        // A source schema whose views would otherwise alter `HourlyMetric` and
+        // drop `OldAggregate`, a catalog aggregate the target no longer has.
+        let source = prax_schema::parse_schema(&format!(
+            "{datasource}\n{metric}\n{}\n{}",
+            view("HourlyMetric", "", "SELECT 2 AS bucket"),
+            view("OldAggregate", "", "SELECT 3 AS bucket"),
+        ))
+        .unwrap();
+        let catalog = TimescaleCatalog {
+            version: "2.18.0".into(),
+            aggregates: BTreeMap::from([(
+                "OldAggregate".to_string(),
+                AggregateState {
+                    view: "OldAggregate".into(),
+                    source: "Metric".into(),
+                    sql: Some("SELECT 3 AS bucket".into()),
+                    materialized_only: true,
+                    policy: None,
+                },
+            )]),
+            ..TimescaleCatalog::default()
+        };
+
+        let diff = SchemaDiffer::new(target)
+            .with_source(source)
+            .with_timescale_catalog(catalog)
+            .diff()
+            .unwrap();
+        let created: Vec<&str> = diff
+            .create_views
+            .iter()
+            .map(|v| v.view_name.as_str())
+            .collect();
+        assert_eq!(created, ["Plain"]);
+        assert!(diff.alter_views.is_empty(), "{:?}", diff.alter_views);
+        assert!(diff.drop_views.is_empty(), "{:?}", diff.drop_views);
     }
 
     #[test]
