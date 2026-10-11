@@ -44,6 +44,7 @@ services:
     image: ${TIMESCALE_IMAGE:-timescale/timescaledb:2.30.2-pg17}
     container_name: prax-timescaledb
     environment:
+      # Keep credentials in sync with the timescale-e2e job in .github/workflows/ci.yml.
       POSTGRES_USER: prax
       POSTGRES_PASSWORD: prax_test_password
       POSTGRES_DB: prax_test
@@ -51,7 +52,7 @@ services:
       TS_TUNE_MEMORY: 1GB
       TS_TUNE_NUM_CPUS: "2"
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:
