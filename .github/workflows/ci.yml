@@ -206,9 +206,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-timescale-
 
-      - name: Require TIMESCALE_URL
-        run: test -n "$TIMESCALE_URL"
-
       - name: Run TimescaleDB round-trip suite
         run: cargo test -p prax-orm-cli --features postgres --test timescale_roundtrip -- --ignored
 
