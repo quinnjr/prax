@@ -5,7 +5,7 @@
 
 use prax_query::introspection::{
     ColumnInfo, DatabaseSchema, ForeignKeyInfo, IndexColumn, IndexInfo, ReferentialAction,
-    SortOrder, TableInfo, generate_prax_schema, generate_prax_schema_with, normalize_type, queries,
+    RenderExtras, SortOrder, TableInfo, generate_prax_schema_with, normalize_type, queries,
 };
 // `ViewInfo` is only constructed by the PostgreSQL introspector (the other
 // backends build views differently or not at all); `EnumInfo`/`NormalizedType`
@@ -215,6 +215,41 @@ pub async fn introspect_database(
     }
 }
 
+/// [`introspect_database`] plus, for PostgreSQL, the catalog
+/// [`introspect_postgres_catalog`] reads, both over one connection.
+///
+/// The catalog is `None` for other providers. `with_timescale` is as for
+/// [`introspect_postgres_catalog`].
+pub async fn introspect_database_with_catalog(
+    provider: &str,
+    database_url: &str,
+    options: &IntrospectionOptions,
+    with_timescale: bool,
+) -> CliResult<(DatabaseSchema, Option<PostgresCatalog>)> {
+    if !matches!(get_database_type(provider)?, DatabaseType::PostgreSQL) {
+        return Ok((
+            introspect_database(provider, database_url, options).await?,
+            None,
+        ));
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let (schema, catalog) = postgres::PostgresIntrospector::new(database_url.to_string())
+            .introspect_with_catalog(options, with_timescale)
+            .await?;
+        Ok((schema, Some(catalog)))
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        // Reports that the `postgres` feature is missing.
+        let _ = with_timescale;
+        Ok((
+            introspect_database(provider, database_url, options).await?,
+            None,
+        ))
+    }
+}
+
 // ============================================================================
 // PostgreSQL Introspector
 // ============================================================================
@@ -324,15 +359,17 @@ pub mod postgres {
         row.try_get(idx).map_err(|e| db_err(what, e))
     }
 
-    /// Run one catalog query inside the read transaction; `what` names the
-    /// query in errors.
-    async fn fetch(
+    /// Run one catalog query inside the read transaction and convert each row
+    /// with `parse`; `what` names the query in errors.
+    async fn fetch<T>(
         tx: &Transaction<'_>,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
         what: &str,
-    ) -> CliResult<Vec<Row>> {
-        tx.query(sql, params).await.map_err(|e| db_err(what, e))
+        parse: impl Fn(&Row, &str) -> CliResult<T>,
+    ) -> CliResult<Vec<T>> {
+        let rows = tx.query(sql, params).await.map_err(|e| db_err(what, e))?;
+        rows.iter().map(|r| parse(r, what)).collect()
     }
 
     /// Three nullable interval columns starting at `idx`, or `None` unless all
@@ -371,14 +408,16 @@ pub mod postgres {
                 CliError::Database(format!("Failed to start the catalog read transaction: {e}"))
             })?;
 
-        let mut rows = CatalogRows::default();
-        let what = "extensions";
-        for r in fetch(&tx, ts::EXTENSIONS, &[], what).await? {
-            rows.extensions.push(ExtensionRow {
-                name: get(&r, cols::extensions::NAME, what)?,
-                version: get(&r, cols::extensions::VERSION, what)?,
-            });
-        }
+        let mut rows = CatalogRows {
+            extensions: fetch(&tx, ts::EXTENSIONS, &[], "extensions", |r, what| {
+                Ok(ExtensionRow {
+                    name: get(r, cols::extensions::NAME, what)?,
+                    version: get(r, cols::extensions::VERSION, what)?,
+                })
+            })
+            .await?,
+            ..Default::default()
+        };
 
         // The Timescale queries read views that older servers lack, so they
         // run only at a supported version.
@@ -400,6 +439,10 @@ pub mod postgres {
     }
 
     /// Read the TimescaleDB catalog rows for `schema` into `rows`.
+    ///
+    /// The queries are independent reads of the transaction's snapshot, so
+    /// they run concurrently and tokio-postgres pipelines them on the
+    /// connection.
     async fn read_timescale_rows(
         tx: &Transaction<'_>,
         schema: &str,
@@ -411,91 +454,95 @@ pub mod postgres {
         };
 
         let s: &[&(dyn ToSql + Sync)] = &[&schema];
+        let dimensions_sql = ts::dimensions_sql();
+        let jobs_sql = ts::jobs_sql();
 
-        let what = "hypertables";
-        for r in fetch(tx, ts::HYPERTABLES, s, what).await? {
-            rows.hypertables.push(HypertableRow {
-                table: get(&r, cols::hypertables::TABLE, what)?,
-                columnstore_enabled: get(&r, cols::hypertables::COLUMNSTORE_ENABLED, what)?,
-            });
-        }
-
-        let what = "dimensions";
-        for r in fetch(tx, &ts::dimensions_sql(), s, what).await? {
-            rows.dimensions.push(DimensionRow {
-                table: get(&r, cols::dimensions::TABLE, what)?,
-                column: get(&r, cols::dimensions::COLUMN, what)?,
-                is_time: get(&r, cols::dimensions::IS_TIME, what)?,
-                interval: interval_at(&r, cols::dimensions::CHUNK_INTERVAL, what)?,
-                partitions: get(&r, cols::dimensions::PARTITIONS, what)?,
-            });
-        }
-
-        let what = "columnstore settings";
-        for r in fetch(tx, ts::COLUMNSTORE_SETTINGS, s, what).await? {
-            rows.columnstore_settings.push(ColumnstoreSettingsRow {
-                relation: get(&r, cols::columnstore_settings::RELATION, what)?,
-                segment_by: get(&r, cols::columnstore_settings::SEGMENT_BY, what)?,
-                order_by: get(&r, cols::columnstore_settings::ORDER_BY, what)?,
-            });
-        }
-
-        let what = "jobs";
-        for r in fetch(tx, &ts::jobs_sql(), s, what).await? {
-            let proc_name: String = get(&r, cols::jobs::PROC_NAME, what)?;
-            let relation: String = get(&r, cols::jobs::RELATION, what)?;
-            let Some(schedule_interval) = interval_at(&r, cols::jobs::SCHEDULE_INTERVAL, what)?
-            else {
-                return Err(CliError::Database(format!(
-                    "Malformed TimescaleDB catalog: the {proc_name} job on \"{relation}\" has \
-                     no schedule_interval"
-                )));
-            };
-            rows.jobs.push(JobRow {
-                drop_after: interval_at(&r, cols::jobs::DROP_AFTER, what)?,
-                after: interval_at(&r, cols::jobs::COMPRESS_AFTER, what)?,
-                start_offset: interval_at(&r, cols::jobs::START_OFFSET, what)?,
-                end_offset: interval_at(&r, cols::jobs::END_OFFSET, what)?,
-                proc_name,
-                relation,
-                schedule_interval,
-            });
-        }
-
-        let what = "continuous aggregates";
-        for r in fetch(tx, ts::AGGREGATES, s, what).await? {
-            rows.aggregates.push(AggregateRow {
-                view: get(&r, cols::aggregates::VIEW, what)?,
-                hypertable_name: get(&r, cols::aggregates::HYPERTABLE, what)?,
-                materialization_hypertable: get(
-                    &r,
-                    cols::aggregates::MATERIALIZATION_HYPERTABLE,
-                    what,
-                )?,
-                materialized_only: get(&r, cols::aggregates::MATERIALIZED_ONLY, what)?,
-                view_definition: get(&r, cols::aggregates::VIEW_DEFINITION, what)?,
-                comment: get(&r, cols::aggregates::COMMENT, what)?,
-            });
-        }
-
-        let what = "aggregate columns";
-        for r in fetch(tx, ts::COLUMNS, s, what).await? {
-            rows.columns.push(ColumnRow {
-                relation: get(&r, cols::columns::RELATION, what)?,
-                name: get(&r, cols::columns::NAME, what)?,
-                udt_name: get(&r, cols::columns::UDT_NAME, what)?,
-                nullable: get(&r, cols::columns::NULLABLE, what)?,
-            });
-        }
-
-        let what = "views";
-        for r in fetch(tx, ts::VIEWS, s, what).await? {
-            rows.views.push(ViewRow {
-                name: get(&r, cols::views::NAME, what)?,
-                is_materialized: get(&r, cols::views::IS_MATERIALIZED, what)?,
-            });
-        }
-
+        (
+            rows.hypertables,
+            rows.dimensions,
+            rows.columnstore_settings,
+            rows.jobs,
+            rows.aggregates,
+            rows.columns,
+            rows.views,
+        ) = tokio::try_join!(
+            fetch(tx, ts::HYPERTABLES, s, "hypertables", |r, what| {
+                Ok(HypertableRow {
+                    table: get(r, cols::hypertables::TABLE, what)?,
+                    columnstore_enabled: get(r, cols::hypertables::COLUMNSTORE_ENABLED, what)?,
+                })
+            }),
+            fetch(tx, &dimensions_sql, s, "dimensions", |r, what| {
+                Ok(DimensionRow {
+                    table: get(r, cols::dimensions::TABLE, what)?,
+                    column: get(r, cols::dimensions::COLUMN, what)?,
+                    is_time: get(r, cols::dimensions::IS_TIME, what)?,
+                    interval: interval_at(r, cols::dimensions::CHUNK_INTERVAL, what)?,
+                    partitions: get(r, cols::dimensions::PARTITIONS, what)?,
+                })
+            }),
+            fetch(
+                tx,
+                ts::COLUMNSTORE_SETTINGS,
+                s,
+                "columnstore settings",
+                |r, what| {
+                    Ok(ColumnstoreSettingsRow {
+                        relation: get(r, cols::columnstore_settings::RELATION, what)?,
+                        segment_by: get(r, cols::columnstore_settings::SEGMENT_BY, what)?,
+                        order_by: get(r, cols::columnstore_settings::ORDER_BY, what)?,
+                    })
+                }
+            ),
+            fetch(tx, &jobs_sql, s, "jobs", |r, what| {
+                let proc_name: String = get(r, cols::jobs::PROC_NAME, what)?;
+                let relation: String = get(r, cols::jobs::RELATION, what)?;
+                let Some(schedule_interval) = interval_at(r, cols::jobs::SCHEDULE_INTERVAL, what)?
+                else {
+                    return Err(CliError::Database(format!(
+                        "Malformed TimescaleDB catalog: the {proc_name} job on \"{relation}\" \
+                         has no schedule_interval"
+                    )));
+                };
+                Ok(JobRow {
+                    drop_after: interval_at(r, cols::jobs::DROP_AFTER, what)?,
+                    after: interval_at(r, cols::jobs::COMPRESS_AFTER, what)?,
+                    start_offset: interval_at(r, cols::jobs::START_OFFSET, what)?,
+                    end_offset: interval_at(r, cols::jobs::END_OFFSET, what)?,
+                    proc_name,
+                    relation,
+                    schedule_interval,
+                })
+            }),
+            fetch(tx, ts::AGGREGATES, s, "continuous aggregates", |r, what| {
+                Ok(AggregateRow {
+                    view: get(r, cols::aggregates::VIEW, what)?,
+                    hypertable_name: get(r, cols::aggregates::HYPERTABLE, what)?,
+                    materialization_hypertable: get(
+                        r,
+                        cols::aggregates::MATERIALIZATION_HYPERTABLE,
+                        what,
+                    )?,
+                    materialized_only: get(r, cols::aggregates::MATERIALIZED_ONLY, what)?,
+                    view_definition: get(r, cols::aggregates::VIEW_DEFINITION, what)?,
+                    comment: get(r, cols::aggregates::COMMENT, what)?,
+                })
+            }),
+            fetch(tx, ts::COLUMNS, s, "aggregate columns", |r, what| {
+                Ok(ColumnRow {
+                    relation: get(r, cols::columns::RELATION, what)?,
+                    name: get(r, cols::columns::NAME, what)?,
+                    udt_name: get(r, cols::columns::UDT_NAME, what)?,
+                    nullable: get(r, cols::columns::NULLABLE, what)?,
+                })
+            }),
+            fetch(tx, ts::VIEWS, s, "views", |r, what| {
+                Ok(ViewRow {
+                    name: get(r, cols::views::NAME, what)?,
+                    is_materialized: get(r, cols::views::IS_MATERIALIZED, what)?,
+                })
+            }),
+        )?;
         Ok(())
     }
 
@@ -525,9 +572,37 @@ pub mod postgres {
             with_timescale: bool,
         ) -> CliResult<PostgresCatalog> {
             let mut client = self.connect().await?;
+            Self::read_catalog_with(&mut client, schema, with_timescale).await
+        }
+
+        /// Introspect the database structure (as
+        /// [`Introspector::introspect`]) and read the catalog of the same
+        /// schema (as [`Self::read_catalog`]) over one connection.
+        ///
+        /// # Errors
+        ///
+        /// Returns the errors of either read.
+        pub async fn introspect_with_catalog(
+            &self,
+            options: &IntrospectionOptions,
+            with_timescale: bool,
+        ) -> CliResult<(DatabaseSchema, PostgresCatalog)> {
+            let mut client = self.connect().await?;
+            let db_schema = Self::introspect_schema(&client, options).await?;
+            let schema = options.schema.as_deref().unwrap_or("public");
+            let catalog = Self::read_catalog_with(&mut client, schema, with_timescale).await?;
+            Ok((db_schema, catalog))
+        }
+
+        /// [`Self::read_catalog`] over an open connection.
+        async fn read_catalog_with(
+            client: &mut Client,
+            schema: &str,
+            with_timescale: bool,
+        ) -> CliResult<PostgresCatalog> {
             let rows = tokio::time::timeout(
                 std::time::Duration::from_secs(CATALOG_READ_TIMEOUT_SECS),
-                read_catalog_rows(&mut client, schema, with_timescale),
+                read_catalog_rows(client, schema, with_timescale),
             )
             .await
             .map_err(|_| {
@@ -558,6 +633,17 @@ pub mod postgres {
     impl Introspector for PostgresIntrospector {
         async fn introspect(&self, options: &IntrospectionOptions) -> CliResult<DatabaseSchema> {
             let client = self.connect().await?;
+            Self::introspect_schema(&client, options).await
+        }
+    }
+
+    impl PostgresIntrospector {
+        /// Introspect the tables, enums and views of `options.schema`
+        /// (default `public`) over an open connection.
+        async fn introspect_schema(
+            client: &Client,
+            options: &IntrospectionOptions,
+        ) -> CliResult<DatabaseSchema> {
             let schema_name = options.schema.as_deref().unwrap_or("public");
 
             let mut db_schema = DatabaseSchema {
@@ -2078,20 +2164,21 @@ pub mod mssql {
 
 /// Generate Prax schema output.
 ///
-/// Equivalent to [`format_as_prax_with`] without a TimescaleDB catalog.
+/// Equivalent to [`format_as_prax_with`] without extensions or extras.
 pub fn format_as_prax(schema: &DatabaseSchema, config: &Config) -> String {
-    format_as_prax_with(schema, config, None)
+    format_as_prax_with(schema, config, &[], &RenderExtras::default())
 }
 
-/// Generate Prax schema output, optionally with the TimescaleDB state.
+/// Generate Prax schema output with database-specific additions.
 ///
-/// When `timescale` is `Some`, the datasource declares `extensions =
-/// [timescaledb]` and the body carries the Timescale attributes and
-/// continuous-aggregate views.
+/// A non-empty `extensions` is declared in the datasource as `extensions =
+/// [a, b]`; `extras` (e.g. the TimescaleDB attributes and continuous-aggregate
+/// views of `prax db pull`) is applied to the generated body.
 pub fn format_as_prax_with(
     schema: &DatabaseSchema,
     config: &Config,
-    timescale: Option<&prax_migrate::TimescaleCatalog>,
+    extensions: &[&str],
+    extras: &RenderExtras,
 ) -> String {
     let mut output = String::new();
 
@@ -2104,8 +2191,8 @@ pub fn format_as_prax_with(
         config.database.provider
     ));
     output.push_str("    url      = env(\"DATABASE_URL\")\n");
-    if timescale.is_some() {
-        output.push_str("    extensions = [timescaledb]\n");
+    if !extensions.is_empty() {
+        output.push_str(&format!("    extensions = [{}]\n", extensions.join(", ")));
     }
     output.push_str("}\n\n");
 
@@ -2114,13 +2201,7 @@ pub fn format_as_prax_with(
     output.push_str("    output   = \"./src/generated\"\n");
     output.push_str("}\n\n");
 
-    match timescale {
-        Some(catalog) => output.push_str(&generate_prax_schema_with(
-            schema,
-            &crate::commands::timescale_pull::render_extras(catalog),
-        )),
-        None => output.push_str(&generate_prax_schema(schema)),
-    }
+    output.push_str(&generate_prax_schema_with(schema, extras));
 
     output
 }
@@ -2247,8 +2328,28 @@ mod format_tests {
         let schema = DatabaseSchema::default();
         let config = Config::default_for_provider("postgresql");
         let out = format_as_prax(&schema, &config);
-        assert_eq!(out, format_as_prax_with(&schema, &config, None));
+        assert_eq!(
+            out,
+            format_as_prax_with(&schema, &config, &[], &RenderExtras::default())
+        );
         assert!(out.starts_with("// Generated by `prax db pull`"), "{out}");
+        assert!(!out.contains("extensions"), "{out}");
         assert!(!out.contains("timescaledb"), "{out}");
+    }
+
+    #[test]
+    fn test_format_as_prax_with_declares_extensions() {
+        let schema = DatabaseSchema::default();
+        let config = Config::default_for_provider("postgresql");
+        let out = format_as_prax_with(
+            &schema,
+            &config,
+            &["timescaledb", "vector"],
+            &RenderExtras::default(),
+        );
+        assert!(
+            out.contains("\")\n    extensions = [timescaledb, vector]\n}\n\ngenerator client {"),
+            "{out}"
+        );
     }
 }

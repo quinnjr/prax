@@ -543,9 +543,7 @@ async fn introspect_source_schema(
     database_url: &str,
     with_timescale: bool,
 ) -> CliResult<Option<DiffSource>> {
-    use crate::commands::introspect::{
-        IntrospectionOptions, introspect_database, introspect_postgres_catalog,
-    };
+    use crate::commands::introspect::{IntrospectionOptions, introspect_database_with_catalog};
     use crate::commands::schema_from_db::schema_from_database;
 
     // Scope introspection to a single schema/database where the provider needs
@@ -557,19 +555,19 @@ async fn introspect_source_schema(
         options.schema = mysql_database_from_url(database_url);
     }
 
-    match introspect_database(&config.database.provider, database_url, &options).await {
-        Ok(db_schema) => {
+    match introspect_database_with_catalog(
+        &config.database.provider,
+        database_url,
+        &options,
+        with_timescale,
+    )
+    .await
+    {
+        Ok((db_schema, catalog)) => {
             let result = schema_from_database(&db_schema, Default::default())?;
             for warning in &result.warnings {
                 output::warn(warning);
             }
-            let catalog = introspect_postgres_catalog(
-                &config.database.provider,
-                database_url,
-                options.schema.as_deref(),
-                with_timescale,
-            )
-            .await?;
             Ok(Some(DiffSource {
                 schema: result.schema,
                 catalog,
@@ -674,14 +672,14 @@ impl GeneratedMigration {
 }
 
 /// Print every warning and skipped change, then, when changes were skipped,
-/// how many and how to include them. Database-sourced names in the notes are
-/// kept on one line.
+/// how many and how to include them. The notes were made one-line-safe when the
+/// migration was generated.
 fn print_notes(generated: &GeneratedMigration) {
     for warning in &generated.warnings {
-        output::warn(&comment_safe(warning));
+        output::warn(warning);
     }
     for note in &generated.skipped {
-        output::warn(&comment_safe(note));
+        output::warn(note);
     }
     if !generated.skipped.is_empty() {
         output::warn(&format!(
@@ -704,17 +702,23 @@ fn report_no_statements(generated: &GeneratedMigration, tail: &str) {
     }
 }
 
-/// Append one `-- {prefix}{line}` comment per entry of `lines`. Entries may
-/// carry database-sourced names, so each is first made safe for a one-line
-/// comment: a raw newline would otherwise end the comment and turn the rest
-/// of the name into executable SQL.
+/// Append one `-- {prefix}{line}` comment per entry of `lines`. Entries must
+/// already be one-line-safe ([`comment_safe`]): a raw newline would otherwise
+/// end the comment and turn the rest of a database-sourced name into
+/// executable SQL.
 fn push_comment_lines(out: &mut String, prefix: &str, lines: &[String]) {
     for line in lines {
         out.push_str("-- ");
         out.push_str(prefix);
-        out.push_str(&comment_safe(line));
+        out.push_str(line);
         out.push('\n');
     }
+}
+
+/// Make each note safe to embed in a single-line `--` comment (and to print),
+/// since database-sourced names in it can contain newlines.
+fn one_line_safe(notes: Vec<String>) -> Vec<String> {
+    notes.iter().map(|note| comment_safe(note)).collect()
 }
 
 /// Diff the desired `schema` (target) against an optional introspected
@@ -726,9 +730,8 @@ fn push_comment_lines(out: &mut String, prefix: &str, lines: &[String]) {
 /// When `allow_destructive` is false (the default), drops (tables, columns,
 /// enums, foreign keys, indexes, enum-value removals) and gated TimescaleDB
 /// changes are stripped from the diff before generation so a stale schema
-/// never silently destroys data. The source's TimescaleDB catalog is passed to
-/// the differ only when `schema` opts in
-/// ([`prax_migrate::timescale::opts_into_timescale`]).
+/// never silently destroys data. The source's TimescaleDB catalog is handed to
+/// the differ, which ignores it unless `schema` opts in.
 ///
 /// Public only so the live integration suite can drive the real CLI path;
 /// not a stable API.
@@ -750,45 +753,28 @@ pub fn generate_migration_sql(
 
     let backend = sql_backend_for_provider(&config.database.provider)?;
 
-    // One opt-in decision drives both the version gate and the catalog
-    // hand-off, so they can never disagree.
-    let opted_in = prax_migrate::timescale::opts_into_timescale(schema);
-
-    let differ = SchemaDiffer::new(schema.clone());
-    let differ = match source {
-        Some(src) => {
-            let mut differ = differ.with_source(src.schema);
-            if let Some(catalog) = src.catalog {
-                if opted_in
-                    && let Some(ts) = &catalog.timescale
-                    && !prax_migrate::timescale::timescale_version_supported(&ts.version)
-                {
-                    let (major, minor) = prax_migrate::timescale::TIMESCALE_MIN_VERSION;
-                    return Err(CliError::Migration(format!(
-                        "TimescaleDB {} is installed, but the schema opts into TimescaleDB \
-                         (`extensions = [timescaledb]` or `@@timescale.*`) and Prax requires \
-                         TimescaleDB {major}.{minor} or newer. Upgrade the extension.",
-                        ts.version
-                    )));
-                }
-                differ = differ.with_installed_extensions(catalog.extensions);
-                if opted_in && let Some(ts) = catalog.timescale {
-                    differ = differ.with_timescale_catalog(ts);
-                }
+    // The differ owns the TimescaleDB opt-in and minimum-version policy, so
+    // pass it whatever the source carries.
+    let mut differ = SchemaDiffer::new(schema.clone());
+    if let Some(src) = source {
+        differ = differ.with_source(src.schema);
+        if let Some(catalog) = src.catalog {
+            differ = differ.with_installed_extensions(catalog.extensions);
+            if let Some(ts) = catalog.timescale {
+                differ = differ.with_timescale_catalog(ts);
             }
-            differ
         }
-        None => differ,
-    };
+    }
 
     let mut diff = differ
         .diff()
         .map_err(|e| CliError::Migration(format!("Failed to diff schema against database: {e}")))?;
 
+    // Database-sourced names reach the notes; make them one-line-safe once.
     let skipped = if allow_destructive {
         Vec::new()
     } else {
-        strip_destructive(&mut diff)
+        one_line_safe(strip_destructive(&mut diff))
     };
 
     let migration = SqlDialect::for_backend(backend).generate_migration(&diff);
@@ -800,19 +786,21 @@ pub fn generate_migration_sql(
              --allow-destructive to include them.\n",
         );
     }
-    push_comment_lines(&mut out, "WARNING: ", &migration.warnings);
+    let warnings = one_line_safe(migration.warnings);
+    push_comment_lines(&mut out, "WARNING: ", &warnings);
     push_comment_lines(&mut out, "SKIPPED (needs --allow-destructive): ", &skipped);
     out.push('\n');
-    out.push_str(migration.up.trim_end());
-    if !migration.up.trim_end().is_empty() {
+    let up = migration.up.trim_end();
+    out.push_str(up);
+    if !up.is_empty() {
         out.push('\n');
     }
 
     Ok(GeneratedMigration {
         sql: out,
-        has_statements: !migration.up.trim().is_empty(),
+        has_statements: !up.is_empty(),
         skipped,
-        warnings: migration.warnings.clone(),
+        warnings,
     })
 }
 
@@ -863,12 +851,7 @@ fn strip_destructive(diff: &mut prax_migrate::SchemaDiff) -> Vec<String> {
     }
     // An alter that now carries no changes would still be harmless (the
     // generator emits nothing for it), but drop the empties for a clean diff.
-    diff.alter_models.retain(|a| {
-        !a.add_fields.is_empty()
-            || !a.alter_fields.is_empty()
-            || !a.add_indexes.is_empty()
-            || !a.add_foreign_keys.is_empty()
-    });
+    diff.alter_models.retain(|a| !a.is_empty());
 
     for alter in &mut diff.alter_enums {
         for value in std::mem::take(&mut alter.remove_values) {
@@ -1335,12 +1318,18 @@ mod tests {
         // A database-sourced name carrying a newline must stay inside the
         // comment rather than become an executable statement.
         let mut out = String::new();
+        // The same composition `generate_migration_sql` uses: notes are made
+        // one-line-safe once, then written as comment lines.
         push_comment_lines(
             &mut out,
             "SKIPPED (needs --allow-destructive): ",
-            &["Drop table \"x\nDROP TABLE users; --\"".to_string()],
+            &one_line_safe(vec!["Drop table \"x\nDROP TABLE users; --\"".to_string()]),
         );
-        push_comment_lines(&mut out, "WARNING: ", &["a\r\nb\u{2028}c".to_string()]);
+        push_comment_lines(
+            &mut out,
+            "WARNING: ",
+            &one_line_safe(vec!["a\r\nb\u{2028}c".to_string()]),
+        );
         assert_eq!(out.lines().count(), 2, "out: {out:?}");
         assert!(out.lines().all(|l| l.starts_with("-- ")), "out: {out:?}");
         assert!(

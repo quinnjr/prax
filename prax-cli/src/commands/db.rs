@@ -5,12 +5,13 @@ use std::path::Path;
 use crate::cli::{DbArgs, OutputFormat};
 use crate::commands::introspect::{
     IntrospectionOptions, format_as_json, format_as_prax_with, format_as_sql, get_database_type,
-    introspect_postgres_catalog,
+    introspect_database, introspect_database_with_catalog,
 };
 use crate::commands::seed::{SeedRunner, find_seed_file, get_database_url};
 use crate::config::{CONFIG_FILE_NAME, Config, SCHEMA_FILE_PATH};
 use crate::error::{CliError, CliResult};
 use crate::output::{self, success, warn};
+use prax_query::introspection::RenderExtras;
 
 /// Run the db command
 pub async fn run(args: DbArgs) -> CliResult<()> {
@@ -98,21 +99,26 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     // provider string that used to match loosely now errors as unsupported.
     output::step(1, 3, "Introspecting database...");
 
-    let db_schema = crate::commands::introspect::introspect_database(
-        &config.database.provider,
+    let (db_schema, catalog) = introspect_for_pull(
+        &config,
         &database_url,
         &options,
+        matches!(args.format, OutputFormat::Prax),
     )
     .await?;
 
     // Generate output
     output::step(2, 3, "Generating schema...");
     let schema_content = match args.format {
-        OutputFormat::Prax => {
-            let timescale =
-                pull_timescale_catalog(&config, &database_url, args.schema.as_deref()).await;
-            format_as_prax_with(&db_schema, &config, timescale.as_ref())
-        }
+        OutputFormat::Prax => match supported_timescale(catalog) {
+            Some(timescale) => format_as_prax_with(
+                &db_schema,
+                &config,
+                &["timescaledb"],
+                &crate::commands::timescale_pull::render_extras(&timescale),
+            ),
+            None => format_as_prax_with(&db_schema, &config, &[], &RenderExtras::default()),
+        },
         OutputFormat::Json => format_as_json(&db_schema)?,
         OutputFormat::Sql => format_as_sql(&db_schema, db_type),
     };
@@ -167,37 +173,56 @@ async fn run_pull(args: crate::cli::DbPullArgs) -> CliResult<()> {
     Ok(())
 }
 
-/// Read the TimescaleDB catalog to render with `db pull`.
+/// Introspect the database for `db pull`, reading the TimescaleDB catalog on
+/// the same connection when `with_timescale` is set.
 ///
-/// Returns `None` (rendering without TimescaleDB attributes or views) when the
-/// provider is not Postgres or the extension is not installed, and also, with
-/// a warning, when the catalog cannot be read or the installed TimescaleDB is
-/// older than Prax supports: the tables and views are still pulled, only their
-/// TimescaleDB state is not.
-async fn pull_timescale_catalog(
+/// When the catalog cannot be read, warns and falls back to a plain
+/// introspection: the tables and views are still pulled, only their TimescaleDB
+/// state is not.
+async fn introspect_for_pull(
     config: &Config,
     database_url: &str,
-    schema: Option<&str>,
+    options: &IntrospectionOptions,
+    with_timescale: bool,
+) -> CliResult<(
+    prax_query::introspection::DatabaseSchema,
+    Option<crate::commands::introspect::PostgresCatalog>,
+)> {
+    let provider = &config.database.provider;
+    if !with_timescale {
+        return Ok((
+            introspect_database(provider, database_url, options).await?,
+            None,
+        ));
+    }
+    match introspect_database_with_catalog(provider, database_url, options, true).await {
+        Ok(pulled) => Ok(pulled),
+        Err(e) => {
+            let schema = introspect_database(provider, database_url, options).await?;
+            warn(&format!(
+                "Could not read the extension and TimescaleDB catalog ({e}); TimescaleDB \
+                 hypertables and continuous aggregates, if any, were not pulled."
+            ));
+            Ok((schema, None))
+        }
+    }
+}
+
+/// The TimescaleDB catalog to render, or `None` (rendering without TimescaleDB
+/// attributes or views) when the extension is not installed or its version is
+/// older than Prax supports, which is reported with a warning.
+fn supported_timescale(
+    catalog: Option<crate::commands::introspect::PostgresCatalog>,
 ) -> Option<prax_migrate::TimescaleCatalog> {
-    let catalog =
-        match introspect_postgres_catalog(&config.database.provider, database_url, schema, true)
-            .await
-        {
-            Ok(catalog) => catalog?.timescale?,
-            Err(e) => {
-                warn(&format!(
-                    "Could not read the extension and TimescaleDB catalog ({e}); TimescaleDB \
-                     hypertables and continuous aggregates, if any, were not pulled."
-                ));
-                return None;
-            }
-        };
-    match crate::commands::timescale_pull::supported_catalog(catalog) {
-        Ok(catalog) => Some(catalog),
-        Err(message) => {
-            warn(&message);
+    let timescale = catalog?.timescale?;
+    match timescale.version_error() {
+        Some(message) => {
+            warn(&format!(
+                "{message}; hypertables and continuous aggregates were not pulled."
+            ));
             None
         }
+        None => Some(timescale),
     }
 }
 

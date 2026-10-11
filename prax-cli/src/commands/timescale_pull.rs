@@ -3,42 +3,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use prax_migrate::TimescaleCatalog;
-use prax_migrate::timescale::{
-    HypertableState, TIMESCALE_MIN_VERSION, comment_safe, timescale_version_supported,
-};
+use prax_migrate::timescale::{HypertableState, comment_safe};
 use prax_query::introspection::{
     RenderExtras, camel_case, escape_map_value, normalize_type, pascal_case,
 };
-use prax_query::sql::DatabaseType;
-
-/// Keep `catalog` for rendering when the installed TimescaleDB is a version
-/// Prax supports.
-///
-/// # Errors
-///
-/// Returns the warning to show instead when the installed TimescaleDB is
-/// older than [`TIMESCALE_MIN_VERSION`]: such a catalog carries only the
-/// version, so none of its hypertables or continuous aggregates can be pulled.
-pub fn supported_catalog(catalog: TimescaleCatalog) -> Result<TimescaleCatalog, String> {
-    if timescale_version_supported(&catalog.version) {
-        return Ok(catalog);
-    }
-    let (major, minor) = TIMESCALE_MIN_VERSION;
-    Err(format!(
-        "TimescaleDB {} is older than {major}.{minor}, the minimum Prax supports; \
-         hypertables and continuous aggregates were not pulled.",
-        comment_safe(&catalog.version)
-    ))
-}
-
-/// Whether `ident` is a valid `.prax` identifier (`[A-Za-z_][A-Za-z0-9_]*`).
-fn is_prax_ident(ident: &str) -> bool {
-    let mut chars = ident.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
+use prax_query::sql::{DatabaseType, is_valid_sql_identifier};
 
 /// The first of `names` that cannot be rendered as `convert(name)`: it holds a
 /// control character (which could end the line it is rendered on), or its
@@ -49,7 +18,7 @@ fn first_unrepresentable<'a>(
 ) -> Option<&'a str> {
     names
         .into_iter()
-        .find(|name| name.chars().any(char::is_control) || !is_prax_ident(&convert(name)))
+        .find(|name| name.chars().any(char::is_control) || !is_valid_sql_identifier(&convert(name)))
 }
 
 /// The reason given for a name that cannot be rendered.
@@ -87,15 +56,13 @@ pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
     let mut extras = RenderExtras::default();
 
     // Unsupported hypertables are left out of `catalog.hypertables`.
-    for (table, reason) in &catalog.unsupported {
-        if !catalog.unsupported_aggregates.contains(table) {
-            extras
-                .extra_blocks
-                .push(not_pulled("hypertable", table, &one_line(reason)));
-        }
+    for (table, reason) in &catalog.unsupported_hypertables {
+        extras
+            .extra_blocks
+            .push(not_pulled("hypertable", table, &one_line(reason)));
     }
     for (table, h) in &catalog.hypertables {
-        if catalog.unsupported.contains_key(table) {
+        if catalog.unsupported_hypertables.contains_key(table) {
             continue; // reported above
         }
         if let Some(name) = unrepresentable_hypertable_name(table, h) {
@@ -112,7 +79,7 @@ pub fn render_extras(catalog: &TimescaleCatalog) -> RenderExtras {
     let views: BTreeSet<&str> = catalog
         .aggregates
         .keys()
-        .chain(&catalog.unsupported_aggregates)
+        .chain(catalog.unsupported_aggregates.keys())
         .map(String::as_str)
         .collect();
     let mut rendered: BTreeMap<&str, Result<String, String>> = views
@@ -234,7 +201,7 @@ fn render_aggregate(catalog: &TimescaleCatalog, view: &str) -> Result<String, St
     let skip = |reason: &str| not_pulled("continuous aggregate", view, reason);
     let Some(agg) = catalog.aggregates.get(view) else {
         let reason = catalog
-            .unsupported
+            .unsupported_aggregates
             .get(view)
             .map(String::as_str)
             .map_or_else(|| "Prax cannot manage it".to_string(), one_line);
@@ -351,13 +318,7 @@ mod tests {
     fn catalog(sql: Option<&str>) -> TimescaleCatalog {
         let mut c = TimescaleCatalog {
             version: "2.18.0".into(),
-            hypertables: Default::default(),
-            aggregates: Default::default(),
-            aggregate_definitions: Default::default(),
-            aggregate_columns: Default::default(),
-            other_views: Default::default(),
-            unsupported: Default::default(),
-            unsupported_aggregates: Default::default(),
+            ..Default::default()
         };
         c.hypertables.insert(
             "Metric".into(),
@@ -487,17 +448,16 @@ mod tests {
 
     #[test]
     fn test_unsupported_aggregate_is_reported() {
-        // As `TimescaleCatalog::from_rows` leaves it: in `unsupported` and
+        // As `TimescaleCatalog::from_rows` leaves it: in
         // `unsupported_aggregates`, not in `aggregates`.
         let mut c = catalog(Some(AUTHORED));
         c.aggregates.clear();
         c.aggregate_definitions.clear();
         c.aggregate_columns.clear();
-        c.unsupported.insert(
+        c.unsupported_aggregates.insert(
             "HourlyMetric".into(),
             "it is built on \"Gone\", which is not a hypertable in this schema".into(),
         );
-        c.unsupported_aggregates.insert("HourlyMetric".into());
         let extras = render_extras(&c);
         assert_eq!(
             extras.extra_blocks,
@@ -528,14 +488,14 @@ mod tests {
 
     #[test]
     fn test_unsupported_hypertable_is_reported() {
-        // As `TimescaleCatalog::from_rows` leaves it: in `unsupported`, not
+        // As `TimescaleCatalog::from_rows` leaves it: in `unsupported_hypertables`, not
         // in `hypertables`. Its aggregate is unsupported with it.
         let mut c = catalog(Some(AUTHORED));
         c.hypertables.clear();
         c.aggregates.clear();
         c.aggregate_definitions.clear();
         c.aggregate_columns.clear();
-        c.unsupported.insert(
+        c.unsupported_hypertables.insert(
             "Metric".into(),
             "integer time dimensions are\n  not supported".into(),
         );
@@ -556,7 +516,8 @@ mod tests {
     #[test]
     fn test_hypertable_also_listed_unsupported_renders_no_attributes() {
         let mut c = catalog(Some(AUTHORED));
-        c.unsupported.insert("Metric".into(), "why".into());
+        c.unsupported_hypertables
+            .insert("Metric".into(), "why".into());
         let extras = render_extras(&c);
         assert!(extras.model_attributes.is_empty());
         assert_eq!(
@@ -700,9 +661,8 @@ mod tests {
         c.aggregates.clear();
         c.aggregate_definitions.clear();
         c.aggregate_columns.clear();
-        c.unsupported
+        c.unsupported_aggregates
             .insert("x\nview Evil {".into(), "reason\r\nmodel Evil {}".into());
-        c.unsupported_aggregates.insert("x\nview Evil {".into());
         let extras = render_extras(&c);
         assert_eq!(
             extras.extra_blocks,
@@ -713,19 +673,15 @@ mod tests {
     }
 
     #[test]
-    fn test_old_timescale_is_not_pulled() {
+    fn test_old_timescale_has_version_error() {
         let mut old = catalog(Some(AUTHORED));
         old.version = "2.17.2".into();
-        let message = supported_catalog(old).unwrap_err();
-        let (major, minor) = TIMESCALE_MIN_VERSION;
+        let message = old.version_error().unwrap();
         assert!(
-            message.contains("2.17.2") && message.contains(&format!("{major}.{minor}")),
+            message.contains("2.17.2") && message.contains("2.18"),
             "{message}"
         );
-        assert!(message.contains("were not pulled"), "{message}");
-
-        let current = catalog(Some(AUTHORED));
-        assert_eq!(supported_catalog(current.clone()), Ok(current));
+        assert_eq!(catalog(Some(AUTHORED)).version_error(), None);
     }
 
     fn column(name: &str, db_type: &str, pk: bool) -> ColumnInfo {
@@ -767,7 +723,7 @@ mod tests {
         };
         let mut config = Config::default();
         config.database.provider = "postgresql".into();
-        format_as_prax_with(&schema, &config, Some(cat))
+        format_as_prax_with(&schema, &config, &["timescaledb"], &render_extras(cat))
     }
 
     #[test]
@@ -788,7 +744,12 @@ mod tests {
         };
         let mut config = Config::default();
         config.database.provider = "postgresql".into();
-        let out = format_as_prax_with(&schema, &config, Some(&catalog(Some(AUTHORED))));
+        let out = format_as_prax_with(
+            &schema,
+            &config,
+            &["timescaledb"],
+            &render_extras(&catalog(Some(AUTHORED))),
+        );
         assert!(out.contains("extensions = [timescaledb]"));
         assert!(out.contains("@@timescale.hypertable(time,"));
         assert!(out.contains("view HourlyMetric {"));
