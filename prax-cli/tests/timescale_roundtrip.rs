@@ -1,16 +1,22 @@
-//! Docker-gated TimescaleDB round-trip tests (spec §8, §11).
+//! Docker-gated TimescaleDB round-trip tests.
 //!
 //! Each test introspects a live TimescaleDB through the same calls `prax
 //! migrate` uses (`introspect_database` + `schema_from_database` for the
 //! structure, `introspect_postgres_catalog` for the extension and Timescale
 //! state), generates the migration, applies it with `batch_execute`, then
 //! introspects again and asserts the re-diff is **empty**. The `probe_*` tests
-//! pin the TimescaleDB behaviour the implementation relies on (spec §8).
+//! pin the TimescaleDB behaviour the implementation relies on (catalog view
+//! shapes, which DDL the server rejects, how intervals decode).
 //!
 //! Every test is `#[ignore]` and self-skips unless `PRAX_E2E=1` and
 //! `TIMESCALE_URL` is set, following the workspace convention. Each test owns
-//! a fresh schema `t_<name>` (dropped at the end) and the tests run one at a
-//! time, because each first drops the `t_*` schemas a failed run left behind.
+//! a fresh schema `prax_t_<name>` (dropped at the end) and the tests run
+//! one at a time, because each first drops the `prax_t_*` schemas a failed
+//! run left behind.
+//!
+//! The suite needs a **dedicated database**: it has database-wide side effects
+//! (it stops the database's background workers and drops every
+//! `prax_t_*` schema). Never point `TIMESCALE_URL` at a shared database.
 //! Run via docker compose:
 //!
 //! ```sh
@@ -25,22 +31,24 @@
 #![cfg(feature = "postgres")]
 
 use prax_cli::commands::introspect::{
-    IntrospectionOptions, PostgresCatalog, format_as_prax, introspect_database,
+    IntrospectionOptions, PostgresCatalog, format_as_prax_with, introspect_database,
     introspect_postgres_catalog,
 };
+use prax_cli::commands::migrate::{DiffSource, generate_migration_sql};
 use prax_cli::commands::schema_from_db::schema_from_database;
 use prax_cli::config::Config;
 use prax_migrate::timescale::catalog::{ColumnstoreSettings, aggregate_record};
-use prax_migrate::timescale::{TimescaleChangeKind, opts_into_timescale, quote_literal};
+use prax_migrate::timescale::{
+    TimescaleChangeKind, opts_into_timescale, quote_literal, timescale_version_at_least,
+};
 use prax_migrate::{
-    IntrospectionConfig, MigrateResult, MigrationError, SchemaDiff, SchemaDiffer, SqlBackend,
-    SqlDialect, TimescaleCatalog,
+    IntrospectionConfig, MigrateResult, MigrationError, SchemaDiff, SchemaDiffer, TimescaleCatalog,
 };
 use prax_schema::ast::PgInterval;
 use tokio::sync::{Mutex, MutexGuard};
 use tokio_postgres::{Client, NoTls};
 
-/// Serializes the tests: each one starts by dropping every leftover `t_*`
+/// Serializes the tests: each one starts by dropping every leftover `prax_t_*`
 /// schema, which would pull the schema out from under a concurrent test.
 static SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -73,7 +81,7 @@ fn pg_err(e: &tokio_postgres::Error) -> String {
 }
 
 impl Ts {
-    /// Connect and create a fresh schema `t_<name>`, or `None` when the live
+    /// Connect and create a fresh schema `prax_t_<name>`, or `None` when the live
     /// suite is not enabled.
     async fn connect(name: &str) -> Option<Self> {
         if std::env::var("PRAX_E2E").ok().as_deref() != Some("1") {
@@ -81,6 +89,11 @@ impl Ts {
             return None;
         }
         let Ok(url) = std::env::var("TIMESCALE_URL") else {
+            // On CI a missing URL must fail loudly, not pass vacuously.
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "PRAX_E2E=1 on CI but TIMESCALE_URL is not set"
+            );
             eprintln!("skipping: TIMESCALE_URL not set");
             return None;
         };
@@ -92,6 +105,10 @@ impl Ts {
             let _ = connection.await;
         });
 
+        // Remove once a 2.30.x matrix run passes without it; observed
+        // 2026-10-10 on TimescaleDB 2.30.2 (retention job segfault during
+        // DROP SCHEMA); no upstream issue filed yet.
+        //
         // Policy jobs start running in background workers as soon as they are
         // added and race the end-of-test DROP SCHEMA: on 2.30.2 a retention
         // job hitting a dropped hypertable segfaulted, restarting the server
@@ -106,7 +123,7 @@ impl Ts {
         // A test that panicked earlier leaves its schema behind.
         let leftovers = client
             .query(
-                "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 't\\_%'",
+                "SELECT nspname::text FROM pg_namespace WHERE nspname LIKE 'prax\\_t\\_%'",
                 &[],
             )
             .await
@@ -119,7 +136,13 @@ impl Ts {
                 .unwrap_or_else(|e| panic!("drop leftover schema {old}: {}", pg_err(&e)));
         }
 
-        let schema = format!("t_{name}");
+        let schema = format!("prax_t_{name}");
+        // Postgres silently truncates identifiers past 63 bytes, which would make
+        // the introspection queries (bound to the full name) see no schema.
+        assert!(
+            schema.len() <= 63,
+            "test schema name `{schema}` exceeds Postgres's 63-byte identifier limit"
+        );
         client
             .batch_execute(&format!(
                 "CREATE SCHEMA \"{schema}\"; SET search_path TO \"{schema}\", public"
@@ -256,19 +279,34 @@ impl Ts {
             .unwrap_or_else(|e| panic!("diff: {e}"))
     }
 
-    /// Generate the migration for `prax`, stripping gated changes unless
-    /// `allow_destructive`.
+    /// Generate the migration for `prax` through the CLI's own
+    /// `generate_migration_sql`, which gates destructive changes unless
+    /// `allow_destructive`. `up` is the SQL without the header and `--` note
+    /// comment lines.
     async fn generate(&self, prax: &str, allow_destructive: bool) -> Generated {
-        let mut diff = self.diff(prax).await;
-        let skipped = if allow_destructive {
-            Vec::new()
-        } else {
-            strip_destructive(&mut diff)
+        let target = prax_schema::validate_schema(prax)
+            .unwrap_or_else(|e| panic!("target schema validates: {e}\n{prax}"));
+        let (schema, catalog) = self.introspect_with(opts_into_timescale(&target)).await;
+        let source = DiffSource {
+            schema,
+            catalog: Some(catalog),
         };
-        let migration = SqlDialect::for_backend(SqlBackend::Postgres).generate_migration(&diff);
+        let config = Config::default_for_provider(PROVIDER);
+        let migration = generate_migration_sql(&target, Some(source), &config, allow_destructive)
+            .unwrap_or_else(|e| panic!("generate migration: {e}"));
+        let up = if migration.has_statements {
+            migration
+                .sql
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("--"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
         Generated {
-            up: migration.up,
-            skipped,
+            up,
+            skipped: migration.skipped,
             warnings: migration.warnings,
         }
     }
@@ -323,32 +361,12 @@ impl Ts {
             .await
             .expect("read catalog")
             .and_then(|c| c.timescale);
-        format_as_prax(
+        format_as_prax_with(
             &db,
             &Config::default_for_provider(PROVIDER),
             timescale.as_ref(),
         )
     }
-}
-
-/// The CLI's `strip_destructive` (private to `commands::migrate`) for these
-/// fixtures: they never produce generic drops, which is asserted, so only the
-/// gated Timescale changes are stripped.
-fn strip_destructive(diff: &mut SchemaDiff) -> Vec<String> {
-    let notes = diff.strip_timescale_gated();
-    assert!(
-        diff.drop_models.is_empty()
-            && diff.drop_views.is_empty()
-            && diff.drop_indexes.is_empty()
-            && diff.drop_enums.is_empty()
-            && diff
-                .alter_models
-                .iter()
-                .all(|a| a.drop_fields.is_empty() && a.drop_foreign_keys.is_empty()),
-        "fixture produced generic drops: {}",
-        diff.summary()
-    );
-    notes
 }
 
 #[track_caller]
@@ -364,12 +382,6 @@ fn assert_empty(diff: &SchemaDiff, up: &str) {
 /// Whether `diff` failed with `InvalidMigration`.
 fn is_invalid_migration(diff: &MigrateResult<SchemaDiff>) -> bool {
     matches!(diff, Err(MigrationError::InvalidMigration(_)))
-}
-
-/// Major and minor of a version string such as `2.18.2`.
-fn major_minor(version: &str) -> (u32, u32) {
-    let mut parts = version.split('.').map(|p| p.parse::<u32>().unwrap_or(0));
-    (parts.next().unwrap_or(0), parts.next().unwrap_or(0))
 }
 
 // ============================================================================
@@ -453,7 +465,7 @@ GROUP BY 1, 2
 """)
 "#;
 
-/// The spec §3.1 example.
+/// The reference example: hypertable, columnstore, policies and aggregates.
 fn spec_example() -> String {
     let model = metric(
         "",
@@ -797,7 +809,8 @@ async fn convert_table_with_key_missing_time_is_refused() {
         "create_hypertable accepted a key without the time column"
     );
 
-    // The manual fix from the message, then the conversion.
+    // The manual fix the message describes (Postgres named the primary key
+    // `Reading_pkey`), then the conversion.
     ts.exec(
         "ALTER TABLE \"Reading\" DROP CONSTRAINT \"Reading_pkey\", \
          ADD PRIMARY KEY (\"id\", \"time\")",
@@ -1170,8 +1183,13 @@ async fn plain_view_to_aggregate() {
         .apply_clean(&format!("{DATASOURCE}{model}{}", hourly(HOURLY_SQL)), false)
         .await;
     assert!(
-        up.find("DROP VIEW IF EXISTS \"HourlyMetric\"")
-            < up.find("CREATE MATERIALIZED VIEW \"HourlyMetric\""),
+        matches!(
+            (
+                up.find("DROP VIEW IF EXISTS \"HourlyMetric\""),
+                up.find("CREATE MATERIALIZED VIEW \"HourlyMetric\"")
+            ),
+            (Some(d), Some(c)) if d < c
+        ),
         "{up}"
     );
     assert!(ts.catalog().await.aggregates.contains_key("HourlyMetric"));
@@ -1240,10 +1258,10 @@ async fn db_pull_output_rediffs_empty() {
 }
 
 // ============================================================================
-// Spec §8 probes
+// Probes of TimescaleDB behaviour
 // ============================================================================
 
-/// §8 item 1: `hypertable_columnstore_settings` has `hypertable`, `segmentby`
+/// Pins: `hypertable_columnstore_settings` has `hypertable`, `segmentby`
 /// and `orderby`, and the catalog read decodes them.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1292,7 +1310,7 @@ async fn probe_columnstore_settings_view_shape() {
     ts.finish().await;
 }
 
-/// §8 item 2: enabling the columnstore with `ALTER TABLE` adds no policy.
+/// Pins: enabling the columnstore with `ALTER TABLE` adds no policy.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
 async fn probe_alter_table_adds_no_implicit_policy() {
@@ -1323,7 +1341,7 @@ async fn probe_alter_table_adds_no_implicit_policy() {
     ts.finish().await;
 }
 
-/// §8 item 3: `add_columnstore_policy` is a procedure taking `after`, stored
+/// Pins: `add_columnstore_policy` is a procedure taking `after`, stored
 /// as `compress_after`.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1371,7 +1389,7 @@ async fn probe_add_columnstore_policy_after_param() {
     ts.finish().await;
 }
 
-/// §8 item 4: foreign keys referencing a hypertable are accepted on every
+/// Pins: foreign keys referencing a hypertable are accepted on every
 /// supported version, so validation rule 6 was dropped: a schema with such a
 /// relation validates, applies and round-trips.
 #[tokio::test]
@@ -1415,7 +1433,7 @@ model Alert {{
     ts.finish().await;
 }
 
-/// §8 item 5: a column cannot be in both `segmentby` and `orderby` (rule 8).
+/// Pins: a column cannot be in both `segmentby` and `orderby`.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
 async fn probe_segmentby_orderby_overlap_rejected() {
@@ -1444,11 +1462,24 @@ async fn probe_segmentby_orderby_overlap_rejected() {
             "  @@timescale.hypertable(time)\n  @@timescale.columnstore(segmentBy: [deviceId], orderBy: [deviceId, desc(time)])"
         )
     );
-    assert!(prax_schema::validate_schema(&overlapping).is_err());
+    let err = match prax_schema::validate_schema(&overlapping)
+        .expect_err("segmentBy/orderBy overlap is rejected")
+    {
+        prax_schema::SchemaError::ValidationFailed { errors, .. } => errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    };
+    assert!(
+        err.contains("deviceId") && err.contains("both segmentBy and orderBy"),
+        "{err}"
+    );
     ts.finish().await;
 }
 
-/// §8 item 6: chunk intervals decode to the same `fixed_micros()` whichever
+/// Pins: chunk intervals decode to the same `fixed_micros()` whichever
 /// unit they were declared in, so the differ compares them that way.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1491,7 +1522,7 @@ async fn probe_chunk_interval_decodes_fixed() {
     ts.finish().await;
 }
 
-/// §8 item 7: policy intervals keep their `(months, days, micros)` parts in
+/// Pins: policy intervals keep their `(months, days, micros)` parts in
 /// `jobs.config` (`1 day` is not stored as `24:00:00`), so they compare
 /// structurally.
 #[tokio::test]
@@ -1542,7 +1573,7 @@ async fn probe_policy_interval_parts_preserved() {
     ts.finish().await;
 }
 
-/// §8 item 8: `COMMENT ON VIEW` and `obj_description` work on an aggregate's
+/// Pins: `COMMENT ON VIEW` and `obj_description` work on an aggregate's
 /// view, including a multi-line comment.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1564,7 +1595,7 @@ async fn probe_comment_on_aggregate_view() {
     ts.finish().await;
 }
 
-/// §8 item 9: the generated columnstore teardown (`CALL convert_to_rowstore`
+/// Pins: the generated columnstore teardown (`CALL convert_to_rowstore`
 /// in a `DO` loop over `show_chunks`) works inside a transaction.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1605,7 +1636,7 @@ async fn probe_convert_to_rowstore_in_do_block() {
     ts.finish().await;
 }
 
-/// §8 item 10: which column alters TimescaleDB rejects on a hypertable with
+/// Pins: which column alters TimescaleDB rejects on a hypertable with
 /// the columnstore enabled and a converted chunk, and that the differ refuses
 /// exactly those with `InvalidMigration`.
 #[tokio::test]
@@ -1661,7 +1692,12 @@ async fn probe_columnstore_alter_column_restrictions() {
     assert_eq!(drop_other, Ok(()));
     assert_eq!(drop_not_null, Ok(()));
     // SET NOT NULL is rejected on 2.18 and accepted on 2.30.
-    assert_eq!(set_not_null.is_err(), major_minor(&version) < (2, 30));
+    // Verified live only on 2.18.2 and 2.30.2; unprobed 2.19-2.29 are treated
+    // as rejecting.
+    assert_eq!(
+        set_not_null.is_err(),
+        !timescale_version_at_least(&version, 2, 30)
+    );
 
     // The differ refuses the rejected alters and allows the others.
     let type_change = model("  region   String?\n  note     String?\n  extra    BigInt?\n");
@@ -1678,7 +1714,7 @@ async fn probe_columnstore_alter_column_restrictions() {
     ts.finish().await;
 }
 
-/// §8 item 11: a hierarchical aggregate's `hypertable_name` is its parent's
+/// Pins: a hierarchical aggregate's `hypertable_name` is its parent's
 /// materialization hypertable, so the catalog maps it back to the parent view.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
@@ -1705,7 +1741,7 @@ async fn probe_hierarchical_parent_mapping() {
     ts.finish().await;
 }
 
-/// §8 item 12: which relation a refresh job's `hypertable_name` names; the
+/// Pins: which relation a refresh job's `hypertable_name` names; the
 /// catalog accepts the view or its materialization hypertable.
 #[tokio::test]
 #[ignore = "requires TimescaleDB via docker-compose"]
