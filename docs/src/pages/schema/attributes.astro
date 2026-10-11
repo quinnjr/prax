@@ -1440,17 +1440,19 @@ const vectorOpsTable = [
 
         <h3 class="text-xl font-medium mb-3 mt-8">Introspection</h3>
         <p class="text-muted mb-4">
-          <code>prax db pull</code> emits these attributes. A continuous aggregate it cannot represent (for example
-          one without a refresh policy) is reported as a
-          <code>// prax: continuous aggregate "..." was not pulled: ...</code> comment.
+          <code>prax db pull</code> emits these attributes. Anything it cannot represent (a continuous aggregate
+          without a refresh policy, the unmanaged setups below, or a name that is not a valid
+          <code>.prax</code> identifier) is reported as a <code>// prax: ... was not pulled: ...</code> comment
+          instead. On TimescaleDB older than 2.18, <code>db pull</code> prints a warning and pulls no TimescaleDB
+          attributes; if the TimescaleDB catalog cannot be read, it warns and pulls the plain schema.
         </p>
         <p class="text-muted mb-4">
           Some TimescaleDB setups are outside what the attributes can express: hypertables with an integer time
           dimension or a <code>*_created_before</code> policy, and continuous aggregates built (directly or through
           other aggregates) on such a hypertable or on a relation outside the introspected schema. Prax leaves them
           unmanaged: migrations never alter or drop them, <code>db pull</code> renders such hypertables as plain
-          models and reports such aggregates with the comment above, and declaring <code>@@timescale.*</code> on
-          one is refused with the reason.
+          models and reports both their TimescaleDB settings and such aggregates with the comment above, and
+          declaring <code>@@timescale.*</code> on one is refused with the reason.
         </p>
       </section>
     </div>

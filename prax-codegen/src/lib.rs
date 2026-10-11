@@ -163,8 +163,8 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 }
 
 /// `prax::find_many!` — schema-aware declarative DSL for the
-/// fluent-builder's `find_many` operation. See spec §4 for the full
-/// grammar.
+/// fluent-builder's `find_many` operation. See the `prax::find_many!`
+/// example below for the grammar.
 ///
 /// ```rust,ignore
 /// prax::find_many!(client.user, {
@@ -391,7 +391,7 @@ pub fn create(input: TokenStream) -> TokenStream {
 /// keys: `where:` (required, unique), `data:` (required), `include`
 /// xor `select`. Atomic operators (`increment`, `decrement`,
 /// `multiply`, `divide`, `unset`) work via `{ <op>: V }` blocks inside
-/// `data:` — see spec §4.
+/// `data:`.
 ///
 /// ```rust,ignore
 /// prax::update!(client.user, {
@@ -590,7 +590,8 @@ fn generate_from_schema(schema_path: &str) -> Result<proc_macro2::TokenStream, s
 mod tests {
     use super::generate_from_schema;
 
-    /// The TimescaleDB spec's §3.1 example.
+    /// A representative TimescaleDB schema: hypertable, compression, retention
+    /// and a continuous aggregate.
     const TIMESCALE_EXAMPLE: &str = r#"
 datasource db {
   provider   = "postgresql"
