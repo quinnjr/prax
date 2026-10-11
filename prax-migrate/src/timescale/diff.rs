@@ -6,7 +6,7 @@
 //! sides are compared in table/column-name form; see [`resolve_hypertables`].
 
 use prax_schema::Schema;
-use prax_schema::ast::{Attribute, Model, PgInterval};
+use prax_schema::ast::{KeyKind, Model, PgInterval};
 
 use crate::diff::{SchemaDiff, index_column_name, primary_key_columns};
 use crate::error::{MigrateResult, MigrationError};
@@ -36,14 +36,13 @@ impl TimescaleDiff {
         self.changes.is_empty()
     }
 
-    /// One description per gated change: its note, or `<Kind> on "<relation>"`
-    /// when it has none.
+    /// The note of each gated change, in change order.
     #[must_use]
     pub fn gated_notes(&self) -> Vec<String> {
         self.changes
             .iter()
             .filter(|c| c.gated)
-            .map(TimescaleChange::description)
+            .filter_map(|c| c.note.clone())
             .collect()
     }
 }
@@ -58,17 +57,29 @@ pub struct TimescaleChange {
     /// (retention dropping chunks, dropping a continuous aggregate or a
     /// materialized view) or rewrites every columnstore chunk.
     pub gated: bool,
-    /// User-facing explanation, emitted as a migration warning.
+    /// User-facing explanation, emitted as a migration warning. Every gated
+    /// change has one.
     pub note: Option<String>,
 }
 
 impl TimescaleChange {
-    /// The note, or `<Kind> on "<relation>"` when the change has none.
-    pub(crate) fn description(&self) -> String {
-        self.note.clone().unwrap_or_else(|| {
-            let (kind, relation) = self.kind.label();
-            format!("{kind} on \"{relation}\"")
-        })
+    /// A change that needs `--allow-destructive`; `note` says what it
+    /// discards or rewrites.
+    pub(crate) fn gated(kind: TimescaleChangeKind, note: String) -> Self {
+        Self {
+            kind,
+            gated: true,
+            note: Some(note),
+        }
+    }
+
+    /// A change that runs without `--allow-destructive`.
+    pub(crate) fn ungated(kind: TimescaleChangeKind, note: Option<String>) -> Self {
+        Self {
+            kind,
+            gated: false,
+            note,
+        }
     }
 }
 
@@ -190,32 +201,6 @@ pub struct AggregateSetChange {
     pub coupled_columns: Vec<(String, String)>,
 }
 
-impl TimescaleChangeKind {
-    /// The variant name and the relation it applies to.
-    fn label(&self) -> (&'static str, &str) {
-        match self {
-            Self::CreateHypertable { table, .. } => ("CreateHypertable", table),
-            Self::SetChunkInterval { table, .. } => ("SetChunkInterval", table),
-            Self::SetPartitions { table, .. } => ("SetPartitions", table),
-            Self::ConfigureColumnstore { table, .. } => ("ConfigureColumnstore", table),
-            Self::DisableColumnstore { table, .. } => ("DisableColumnstore", table),
-            Self::ReplaceColumnstorePolicy { table, .. } => ("ReplaceColumnstorePolicy", table),
-            Self::ReplaceRetentionPolicy { table, .. } => ("ReplaceRetentionPolicy", table),
-            Self::AggregateSet(set) => (
-                "AggregateSet",
-                set.create
-                    .first()
-                    .or_else(|| set.drop_aggregates.first())
-                    .map(|a| a.view.as_str())
-                    .or_else(|| set.drop_views.first().map(|(v, _)| v.as_str()))
-                    .unwrap_or_default(),
-            ),
-            Self::ReplaceAggregatePolicy { view, .. } => ("ReplaceAggregatePolicy", view),
-            Self::SetMaterializedOnly { view, .. } => ("SetMaterializedOnly", view),
-        }
-    }
-}
-
 /// Diff the target's hypertables and continuous aggregates against the live
 /// catalog.
 ///
@@ -250,40 +235,39 @@ pub fn diff_timescale(
     catalog: Option<&TimescaleCatalog>,
     generic: &SchemaDiff,
 ) -> MigrateResult<TimescaleDiff> {
+    let empty = TimescaleCatalog::default();
+    let catalog = catalog.unwrap_or(&empty);
     let target_model = |table: &str| target.models.values().find(|m| m.table_name() == table);
 
-    if let Some(catalog) = catalog {
-        for (relation, reason) in &catalog.unsupported {
-            if target_model(relation).is_some_and(declares_timescale) {
-                return Err(invalid(format!(
-                    "Table \"{relation}\" declares @@timescale.* attributes, but its TimescaleDB \
-                     setup cannot be managed by Prax: {reason}. Remove the @@timescale.* \
-                     attributes from its model to leave it unmanaged, or reconfigure the \
-                     hypertable manually."
-                )));
-            }
+    for (relation, reason) in &catalog.unsupported_hypertables {
+        if target_model(relation).is_some_and(Model::declares_timescale) {
+            return Err(invalid(format!(
+                "Table \"{relation}\" declares @@timescale.* attributes, but its TimescaleDB setup \
+                 cannot be managed by Prax: {reason}. Remove the @@timescale.* attributes from its \
+                 model to leave it unmanaged, or reconfigure the hypertable manually."
+            )));
         }
-        for table in catalog.hypertables.keys() {
-            // Parsed strictly, so an invalid attribute reports its own error
-            // instead of reading as "no hypertable declared".
-            if let Some(model) = target_model(table)
-                && model_timescale(model)?.is_none()
-            {
-                return Err(invalid(format!(
-                    "Table \"{table}\" is a hypertable in the database, but its model does not \
-                     declare @@timescale.hypertable. Declare @@timescale.hypertable on the model, \
-                     or remove the table from the schema; converting a hypertable back to a \
-                     plain table is not supported (to do it manually, create a plain table, copy \
-                     the rows into it, and drop the hypertable)."
-                )));
-            }
-        }
-        check_columnstore_column_alters(catalog, generic)?;
     }
+    for table in catalog.hypertables.keys() {
+        // Parsed strictly, so an invalid attribute reports its own error
+        // instead of reading as "no hypertable declared".
+        if let Some(model) = target_model(table)
+            && model_timescale(model)?.is_none()
+        {
+            return Err(invalid(format!(
+                "Table \"{table}\" is a hypertable in the database, but its model does not \
+                 declare @@timescale.hypertable. Declare @@timescale.hypertable on the model, or \
+                 remove the table from the schema; converting a hypertable back to a plain table \
+                 is not supported (to do it manually, create a plain table, copy the rows into \
+                 it, and drop the hypertable)."
+            )));
+        }
+    }
+    check_columnstore_column_alters(catalog, generic)?;
 
     let mut diff = TimescaleDiff::default();
     for (table, want) in resolve_hypertables(target)? {
-        match catalog.and_then(|c| c.hypertables.get(&table)) {
+        match catalog.hypertables.get(&table) {
             Some(have) => alter_hypertable(have, &want, &mut diff.changes)?,
             None => {
                 let created = generic.create_models.iter().any(|m| m.table_name == table);
@@ -304,11 +288,10 @@ pub fn diff_timescale(
 /// datasource `extensions` (aliases canonicalized), or a model or view declares
 /// an `@@timescale.*` attribute.
 ///
-/// Only an opted-in target should be diffed against the database's Timescale
-/// state (see [`crate::SchemaDiffer::with_timescale_catalog`]); `prax migrate`
-/// does not even read that state otherwise, so hypertables and continuous
-/// aggregates managed by hand never block migrations of a schema that does not
-/// use TimescaleDB attributes.
+/// Only an opted-in target is diffed against the database's Timescale state:
+/// [`crate::SchemaDiffer::diff`] ignores the catalog otherwise, so hypertables
+/// and continuous aggregates managed by hand never block migrations of a
+/// schema that does not use TimescaleDB attributes.
 #[must_use]
 pub fn opts_into_timescale(target: &Schema) -> bool {
     let extension = target.datasource.as_ref().is_some_and(|ds| {
@@ -316,29 +299,12 @@ pub fn opts_into_timescale(target: &Schema) -> bool {
             .iter()
             .any(|e| prax_schema::ast::canonical_extension_name(&e.name) == "timescaledb")
     });
-    extension
-        || target
-            .models
-            .values()
-            .any(|m| m.attributes.iter().any(Attribute::is_timescale))
-        || target
-            .views
-            .values()
-            .any(|v| v.attributes.iter().any(Attribute::is_timescale))
+    extension || target.uses_timescale_attributes()
 }
 
 /// An [`MigrationError::InvalidMigration`] carrying `message`.
 pub(crate) fn invalid(message: String) -> MigrationError {
     MigrationError::InvalidMigration(message)
-}
-
-/// A [`TimescaleChange`].
-pub(crate) fn change(
-    kind: TimescaleChangeKind,
-    gated: bool,
-    note: Option<String>,
-) -> TimescaleChange {
-    TimescaleChange { kind, gated, note }
 }
 
 /// `one` when `n` is 1, `many` otherwise; for the singular/plural words of
@@ -351,7 +317,8 @@ pub(crate) fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
 /// hypertable with columnstore chunks: 2.18 rejects it and 2.30 accepts it
 /// (verified live on 2.18.2 and 2.30.2). Versions in between were not probed
 /// and are treated as rejecting it.
-const SET_NOT_NULL_ON_COLUMNSTORE_SINCE: (u32, u32) = (2, 30);
+#[doc(hidden)]
+pub const SET_NOT_NULL_ON_COLUMNSTORE_SINCE: (u32, u32) = (2, 30);
 
 /// How to make a column change TimescaleDB rejects while the columnstore is
 /// enabled.
@@ -415,11 +382,6 @@ fn check_columnstore_column_alters(
     Ok(())
 }
 
-/// Whether `model` carries any `@@timescale.*` attribute, valid or not.
-fn declares_timescale(model: &Model) -> bool {
-    model.attributes.iter().any(Attribute::is_timescale)
-}
-
 /// A table without a hypertable in the catalog. `created`: the table is created
 /// in this migration, so it is empty. `existing`: the source model of a table
 /// that already exists and holds rows to convert.
@@ -449,7 +411,7 @@ fn create_hypertable(
              the down migration."
         )
     });
-    out.push(change(
+    out.push(TimescaleChange::ungated(
         TimescaleChangeKind::CreateHypertable {
             table: table.clone(),
             time_column: want.time_column.clone(),
@@ -457,23 +419,10 @@ fn create_hypertable(
             space: want.space.clone(),
             migrate_data: exists,
         },
-        false,
         note,
     ));
     columnstore_changes(table, None, want.columnstore.as_ref(), out);
-    match want.retention {
-        // A table created in this migration holds no data the policy could drop.
-        Some(new) if created => out.push(change(
-            TimescaleChangeKind::ReplaceRetentionPolicy {
-                table: table.clone(),
-                old: None,
-                new: Some(new),
-            },
-            false,
-            None,
-        )),
-        _ => retention_change(table, None, want.retention, out),
-    }
+    retention_change(table, None, want.retention, created, out);
     Ok(())
 }
 
@@ -528,7 +477,7 @@ fn check_existing_keys(model: &Model, want: &HypertableState) -> MigrateResult<(
         );
     }
     for key in model.unique_key_sets() {
-        if key.label == "@unique" || key.label == "@@unique" {
+        if key.kind == KeyKind::Unique {
             let columns = key
                 .fields
                 .iter()
@@ -608,13 +557,12 @@ fn alter_hypertable(
 
     if chunk_width_differs(have.chunk_interval, want.chunk_interval) {
         let (old, new) = (have.chunk_interval, want.chunk_interval);
-        out.push(change(
+        out.push(TimescaleChange::ungated(
             TimescaleChangeKind::SetChunkInterval {
                 table: table.clone(),
                 old,
                 new,
             },
-            false,
             Some(format!(
                 "Changing the chunk interval of \"{table}\" from {old} to {new} applies to new \
                  chunks only; existing chunks keep their current size."
@@ -622,13 +570,12 @@ fn alter_hypertable(
         ));
     }
     if let Some((old, new)) = partitions {
-        out.push(change(
+        out.push(TimescaleChange::ungated(
             TimescaleChangeKind::SetPartitions {
                 table: table.clone(),
                 old,
                 new,
             },
-            false,
             Some(format!(
                 "Changing the number of space partitions of \"{table}\" from {old} to {new} \
                  applies to new chunks only; existing chunks keep their current partitioning."
@@ -641,7 +588,7 @@ fn alter_hypertable(
         want.columnstore.as_ref(),
         out,
     );
-    retention_change(table, have.retention, want.retention, out);
+    retention_change(table, have.retention, want.retention, false, out);
     Ok(())
 }
 
@@ -663,48 +610,44 @@ fn columnstore_changes(
     match (old, new) {
         (None, None) => {}
         (None, Some(new)) => {
-            out.push(change(
+            out.push(TimescaleChange::ungated(
                 TimescaleChangeKind::ConfigureColumnstore {
                     table: table.to_string(),
                     old: None,
                     new: new.settings.clone(),
                 },
-                false,
                 None,
             ));
             if new.after.is_some() {
-                out.push(change(
+                out.push(TimescaleChange::ungated(
                     TimescaleChangeKind::ReplaceColumnstorePolicy {
                         table: table.to_string(),
                         old: None,
                         new: new.after,
                     },
-                    false,
                     None,
                 ));
             }
         }
-        (Some(old), None) => out.push(change(
+        (Some(old), None) => out.push(TimescaleChange::gated(
             TimescaleChangeKind::DisableColumnstore {
                 table: table.to_string(),
                 old: old.clone(),
             },
-            true,
-            Some(format!(
+            format!(
                 "Disabling the columnstore on \"{table}\" converts every columnstore chunk back \
                  to rowstore, which can take a long time and needs extra disk space while it \
                  runs."
-            )),
+            ),
         )),
         (Some(old), Some(new)) => {
             if old.settings != new.settings {
-                out.push(change(
+                out.push(TimescaleChange::ungated(
                     TimescaleChangeKind::ConfigureColumnstore {
                         table: table.to_string(),
                         old: Some(old.settings.clone()),
                         new: new.settings.clone(),
                     },
-                    false,
                     Some(format!(
                         "Changing the columnstore settings of \"{table}\" affects only chunks \
                          not yet converted to the columnstore; converted chunks keep their \
@@ -713,13 +656,12 @@ fn columnstore_changes(
                 ));
             }
             if old.after != new.after {
-                out.push(change(
+                out.push(TimescaleChange::ungated(
                     TimescaleChangeKind::ReplaceColumnstorePolicy {
                         table: table.to_string(),
                         old: old.after,
                         new: new.after,
                     },
-                    false,
                     None,
                 ));
             }
@@ -727,21 +669,23 @@ fn columnstore_changes(
     }
 }
 
-/// Adding retention to an existing table or shortening `dropAfter` is gated
-/// (tables created in this migration are handled by `create_hypertable`).
-/// Shortening compares conservatively (`new.lower < old.upper`), so
-/// month-based intervals that might be shorter count as shorter.
+/// Adding retention to an existing table or shortening `dropAfter` is gated;
+/// adding it to a table `created` in this migration is not, since that table
+/// holds no data the policy could drop. Shortening compares conservatively
+/// (`new.lower < old.upper`), so month-based intervals that might be shorter
+/// count as shorter.
 fn retention_change(
     table: &str,
     old: Option<PgInterval>,
     new: Option<PgInterval>,
+    created: bool,
     out: &mut Vec<TimescaleChange>,
 ) {
     if old == new {
         return;
     }
     let gated_note = match (old, new) {
-        (None, Some(new)) => Some(format!(
+        (None, Some(new)) if !created => Some(format!(
             "Adding a retention policy to \"{table}\" automatically drops chunks older than \
              {new}."
         )),
@@ -751,22 +695,19 @@ fn retention_change(
         )),
         _ => None,
     };
-    out.push(change(
-        TimescaleChangeKind::ReplaceRetentionPolicy {
-            table: table.to_string(),
-            old,
-            new,
-        },
-        gated_note.is_some(),
-        gated_note,
-    ));
+    let kind = TimescaleChangeKind::ReplaceRetentionPolicy {
+        table: table.to_string(),
+        old,
+        new,
+    };
+    out.push(match gated_note {
+        Some(note) => TimescaleChange::gated(kind, note),
+        None => TimescaleChange::ungated(kind, None),
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
-    use prax_schema::Schema;
     use prax_schema::ast::PgInterval;
 
     use super::*;
@@ -775,6 +716,7 @@ mod tests {
     use crate::timescale::catalog::{
         ColumnstoreSettings, ColumnstoreState, HypertableState, TimescaleCatalog,
     };
+    use crate::timescale::schema;
 
     const DATASOURCE: &str = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
 
@@ -786,10 +728,6 @@ mod tests {
 
     const fn days(n: i32) -> PgInterval {
         PgInterval::new(0, n, 0)
-    }
-
-    fn schema(prax: &str) -> Schema {
-        prax_schema::parse_schema(prax).unwrap()
     }
 
     /// The reference `Metric` model (time, device, value; keyed on device and
@@ -832,12 +770,7 @@ mod tests {
         TimescaleCatalog {
             version: "2.18.0".into(),
             hypertables: h.into_iter().map(|s| (s.table.clone(), s)).collect(),
-            aggregates: BTreeMap::new(),
-            aggregate_definitions: BTreeMap::new(),
-            aggregate_columns: BTreeMap::new(),
-            other_views: BTreeMap::new(),
-            unsupported: BTreeMap::new(),
-            unsupported_aggregates: Default::default(),
+            ..TimescaleCatalog::default()
         }
     }
 
@@ -1225,6 +1158,39 @@ mod tests {
         )));
     }
 
+    /// `Metric` without the `timescaledb` extension or any `@@timescale.*`
+    /// attribute: a target that does not opt in.
+    const UNMANAGED_METRIC: &str = "model Metric {\n  time     DateTime\n  deviceId String\n  value    Float\n\n  @@id([deviceId, time])\n}\n";
+
+    #[test]
+    fn test_catalog_is_ignored_when_target_does_not_opt_in() {
+        // Opted in, the hypertable without @@timescale.hypertable is refused.
+        let msg = invalid(run(
+            &plain_metric(),
+            Some(&plain_metric()),
+            Some(catalog(vec![metric_state()])),
+        ));
+        assert!(msg.contains("does not declare"), "{msg}");
+
+        // Not opted in, the catalog (even an unsupported version) is ignored.
+        let mut old = catalog(vec![metric_state()]);
+        old.version = "2.17.2".into();
+        for cat in [catalog(vec![metric_state()]), old] {
+            let diff = run(UNMANAGED_METRIC, Some(UNMANAGED_METRIC), Some(cat)).unwrap();
+            assert!(diff.is_empty(), "changes: {:#?}", diff.changes);
+            assert!(diff.warnings.is_empty(), "{:?}", diff.warnings);
+        }
+    }
+
+    #[test]
+    fn test_unsupported_timescale_version_is_invalid_when_opted_in() {
+        let mut cat = catalog(vec![]);
+        cat.version = "2.17.2".into();
+        let msg = invalid(run(&full_metric(), Some(&plain_metric()), Some(cat)));
+        assert!(msg.contains("TimescaleDB 2.17.2 is installed"), "{msg}");
+        assert!(msg.contains("2.18 or newer"), "{msg}");
+    }
+
     #[test]
     fn test_chunk_interval_equivalent_fixed_width_is_unchanged() {
         let mut state = metric_state();
@@ -1553,7 +1519,7 @@ mod tests {
     #[test]
     fn test_target_on_unsupported_relation_is_invalid() {
         let mut cat = catalog(vec![]);
-        cat.unsupported
+        cat.unsupported_hypertables
             .insert("Metric".into(), "integer time dimension".into());
         let msg = invalid(run(&full_metric(), Some(&plain_metric()), Some(cat)));
         assert!(msg.contains("integer time dimension"), "{msg}");
@@ -1563,7 +1529,7 @@ mod tests {
     #[test]
     fn test_unsupported_relation_without_timescale_is_ignored() {
         let mut cat = catalog(vec![]);
-        cat.unsupported
+        cat.unsupported_hypertables
             .insert("Metric".into(), "integer time dimension".into());
         let diff = run(&plain_metric(), Some(&plain_metric()), Some(cat)).unwrap();
         assert!(diff.changes.is_empty(), "changes: {:#?}", diff.changes);
@@ -1590,15 +1556,14 @@ mod tests {
     fn test_schema_diff_is_empty_includes_timescale() {
         let diff = SchemaDiff {
             timescale: TimescaleDiff {
-                changes: vec![TimescaleChange {
-                    kind: TimescaleChangeKind::SetPartitions {
+                changes: vec![TimescaleChange::ungated(
+                    TimescaleChangeKind::SetPartitions {
                         table: "Metric".into(),
                         old: 4,
                         new: 8,
                     },
-                    gated: false,
-                    note: None,
-                }],
+                    None,
+                )],
                 warnings: Vec::new(),
             },
             ..Default::default()

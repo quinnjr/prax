@@ -5,12 +5,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use prax_schema::Schema;
 use prax_schema::ast::{Field, FieldType, GeneratedAttribute, IndexType, Model, VectorOps, View};
 
-use crate::error::MigrateResult;
+use crate::error::{MigrateResult, MigrationError};
 use crate::procedure::{
     ProcedureDefinition, ProcedureDiff, ProcedureDiffer, ProcedureLanguage, Volatility,
 };
 use crate::timescale::{
-    TimescaleCatalog, TimescaleChangeKind, TimescaleDiff, diff_timescale, resolve_aggregates,
+    TimescaleCatalog, TimescaleChangeKind, TimescaleDiff, diff_timescale, opts_into_timescale,
 };
 
 /// A diff between two schemas.
@@ -99,7 +99,7 @@ impl SchemaDiff {
                 self.timescale.changes.push(change);
                 continue;
             }
-            let mut note = change.description();
+            let mut note = change.note.unwrap_or_default();
             if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
                 if !set.create.is_empty() {
                     note = append_sentence(
@@ -647,10 +647,10 @@ impl SchemaDiffer {
     /// Set the database's TimescaleDB state.
     ///
     /// The catalog, not the source schema, is the source of Timescale state;
-    /// without one the database is treated as having none. Pass it only when
-    /// the target opts in ([`crate::timescale::opts_into_timescale`]), as
-    /// `prax migrate` does: once passed, every hypertable the target models
-    /// must declare `@@timescale.hypertable`.
+    /// without one the database is treated as having none. [`diff`](Self::diff)
+    /// ignores it unless the target opts in
+    /// ([`crate::timescale::opts_into_timescale`]); when it does, every
+    /// hypertable the target models must declare `@@timescale.hypertable`.
     #[must_use]
     pub fn with_timescale_catalog(mut self, catalog: TimescaleCatalog) -> Self {
         self.timescale_catalog = Some(catalog);
@@ -669,10 +669,22 @@ impl SchemaDiffer {
     ///
     /// # Errors
     ///
-    /// Returns [`crate::MigrationError::InvalidMigration`] when the target's
+    /// Returns [`crate::MigrationError::InvalidMigration`] when the target
+    /// opts into TimescaleDB but the installed version is older than
+    /// [`crate::timescale::TIMESCALE_MIN_VERSION`], when the target's
     /// `@@timescale.*` attributes are invalid, or when a TimescaleDB change
     /// cannot be made (see [`crate::timescale::diff_timescale`]).
     pub fn diff(&self) -> MigrateResult<SchemaDiff> {
+        // The Timescale catalog only applies to a target that opts in.
+        let timescale_catalog = match &self.timescale_catalog {
+            Some(catalog) if opts_into_timescale(&self.target) => {
+                if let Some(message) = catalog.version_error() {
+                    return Err(MigrationError::InvalidMigration(message));
+                }
+                Some(catalog)
+            }
+            _ => None,
+        };
         let mut result = SchemaDiff::default();
 
         // Extensions are create-only: databases carry undeclared extensions,
@@ -837,26 +849,30 @@ impl SchemaDiffer {
             }
         }
 
-        // Diff views. A view that is a continuous aggregate on either side
-        // (target declaration or catalog) is left to `diff_timescale`,
-        // including transitions to and from plain or materialized views.
-        let aggregate_views: HashSet<String> = resolve_aggregates(&self.target)?
-            .into_keys()
-            .chain(
-                self.timescale_catalog
-                    .iter()
-                    .flat_map(|c| c.aggregates.keys().cloned()),
-            )
+        // Diff views. Continuous aggregates are left to `diff_timescale`: the
+        // target's (views declaring `@@timescale.*`) on both sides, and the
+        // catalog's on the source side. An aggregate the target turns into a
+        // plain or materialized view (a hand-off, dropped by the Timescale
+        // pre-phase) is then a target view missing from the source, so it is
+        // created below.
+        let target_aggregates: HashSet<&str> = self
+            .target
+            .views
+            .values()
+            .filter(|v| v.declares_timescale())
+            .map(View::view_name)
             .collect();
-        let generic_view = |v: &&View| !aggregate_views.contains(v.view_name());
-
         let source_views: HashMap<&str, &View> = self
             .source
             .as_ref()
             .map(|s| {
                 s.views
                     .values()
-                    .filter(generic_view)
+                    .filter(|v| {
+                        let name = v.view_name();
+                        !target_aggregates.contains(name)
+                            && !timescale_catalog.is_some_and(|c| c.aggregates.contains_key(name))
+                    })
                     .map(|v| (v.name(), v))
                     .collect()
             })
@@ -866,7 +882,7 @@ impl SchemaDiffer {
             .target
             .views
             .values()
-            .filter(generic_view)
+            .filter(|v| !v.declares_timescale())
             .map(|v| (v.name(), v))
             .collect();
 
@@ -977,24 +993,9 @@ impl SchemaDiffer {
         result.timescale = diff_timescale(
             &self.target,
             self.source.as_ref(),
-            self.timescale_catalog.as_ref(),
+            timescale_catalog,
             &result,
         )?;
-
-        // Aggregates the target turns into plain or materialized views are
-        // dropped by the Timescale pre-phase; the generic pipeline creates the
-        // views.
-        for change in &result.timescale.changes {
-            if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
-                for name in &set.handoff_views {
-                    if let Some(view) = self.target.views.values().find(|v| v.view_name() == name)
-                        && let Some(view_diff) = view_to_diff(view, &self.target)
-                    {
-                        result.create_views.push(view_diff);
-                    }
-                }
-            }
-        }
 
         Ok(result)
     }
@@ -1978,31 +1979,29 @@ mod tests {
             }
         }
 
-        fn retention(gated: bool, note: &str) -> TimescaleChange {
-            TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+        fn retention(note: &str) -> TimescaleChange {
+            TimescaleChange::gated(
+                TimescaleChangeKind::ReplaceRetentionPolicy {
                     table: "Metric".into(),
                     old: None,
                     new: Some(days(90)),
                 },
-                gated,
-                note: Some(note.into()),
-            }
+                note.into(),
+            )
         }
 
         fn columnstore_policy() -> TimescaleChange {
-            TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceColumnstorePolicy {
+            TimescaleChange::ungated(
+                TimescaleChangeKind::ReplaceColumnstorePolicy {
                     table: "Metric".into(),
                     old: Some(days(7)),
                     new: Some(days(14)),
                 },
-                gated: false,
-                note: None,
-            }
+                None,
+            )
         }
 
-        fn aggregate(create: bool, note: Option<&str>) -> TimescaleChange {
+        fn aggregate(create: bool, note: &str) -> TimescaleChange {
             let state = AggregateState {
                 view: "HourlyMetric".into(),
                 source: "Metric".into(),
@@ -2010,17 +2009,16 @@ mod tests {
                 materialized_only: false,
                 policy: None,
             };
-            TimescaleChange {
-                kind: TimescaleChangeKind::AggregateSet(AggregateSetChange {
+            TimescaleChange::gated(
+                TimescaleChangeKind::AggregateSet(AggregateSetChange {
                     drop_aggregates: vec![state.clone()],
                     drop_views: vec![],
                     create: if create { vec![state] } else { vec![] },
                     handoff_views: vec!["HourlyMetric".into()],
                     coupled_columns: vec![("Metric".into(), "value".into())],
                 }),
-                gated: true,
-                note: note.map(Into::into),
-            }
+                note.into(),
+            )
         }
 
         fn alter(table: &str) -> ModelAlterDiff {
@@ -2064,7 +2062,7 @@ mod tests {
         #[test]
         fn test_strip_removes_gated_and_keeps_ungated() {
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes = vec![retention(true, "adds retention"), columnstore_policy()];
+            diff.timescale.changes = vec![retention("adds retention"), columnstore_policy()];
             let notes = diff.strip_timescale_gated();
             assert_eq!(notes, vec!["adds retention".to_string()]);
             assert_eq!(diff.timescale.changes.len(), 1);
@@ -2074,7 +2072,7 @@ mod tests {
         #[test]
         fn test_strip_removes_handoff_view() {
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes = vec![aggregate(false, Some("drops aggregate"))];
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
             diff.create_views = vec![view("HourlyMetric"), view("Other")];
             let notes = diff.strip_timescale_gated();
             assert_eq!(notes, vec!["drops aggregate".to_string()]);
@@ -2087,7 +2085,7 @@ mod tests {
             // A view whose model name equals a hand-off but whose database
             // name differs is not the handed-off view.
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes = vec![aggregate(false, Some("drops aggregate"))];
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
             let mut renamed = view("HourlyMetric");
             renamed.view_name = "hourly_report".into();
             diff.create_views = vec![renamed];
@@ -2114,7 +2112,7 @@ mod tests {
         #[test]
         fn test_strip_removes_coupled_column_alter() {
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes = vec![aggregate(false, None)];
+            diff.timescale.changes = vec![aggregate(false, "drops aggregate")];
             let mut metric = alter("Metric");
             metric.alter_fields = vec![field_alter("value")];
             let mut other = alter("Metric2");
@@ -2124,7 +2122,7 @@ mod tests {
             partial.drop_fields = vec!["value".into(), "gone".into()];
             diff.alter_models = vec![metric, other, partial];
             let notes = diff.strip_timescale_gated();
-            assert_eq!(notes, vec!["AggregateSet on \"HourlyMetric\"".to_string()]);
+            assert_eq!(notes, vec!["drops aggregate".to_string()]);
             assert_eq!(diff.alter_models.len(), 2, "empty alter removed");
             assert_eq!(diff.alter_models[0].table_name, "Metric2");
             assert_eq!(diff.alter_models[1].alter_fields.len(), 1);
@@ -2135,7 +2133,7 @@ mod tests {
         #[test]
         fn test_strip_notes_deferred_policy_when_creating_aggregates() {
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes = vec![aggregate(true, Some("Recreates \"HourlyMetric\"."))];
+            diff.timescale.changes = vec![aggregate(true, "Recreates \"HourlyMetric\".")];
             let notes = diff.strip_timescale_gated();
             assert_eq!(notes.len(), 1);
             assert!(
@@ -2880,7 +2878,6 @@ mod tests {
         .unwrap();
         let catalog = TimescaleCatalog {
             version: "2.18.0".into(),
-            hypertables: BTreeMap::new(),
             aggregates: BTreeMap::from([(
                 "OldAggregate".to_string(),
                 AggregateState {
@@ -2891,11 +2888,7 @@ mod tests {
                     policy: None,
                 },
             )]),
-            aggregate_definitions: BTreeMap::new(),
-            aggregate_columns: BTreeMap::new(),
-            other_views: BTreeMap::new(),
-            unsupported: BTreeMap::new(),
-            unsupported_aggregates: Default::default(),
+            ..TimescaleCatalog::default()
         };
 
         let diff = SchemaDiffer::new(target)

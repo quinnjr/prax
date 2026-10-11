@@ -37,11 +37,11 @@ pub fn regclass_literal(s: &str) -> String {
 /// Each entry is a column and whether it sorts descending; descending columns
 /// get a `DESC` suffix. An empty list renders `''`.
 #[must_use]
-pub fn ident_list_literal(cols: &[(String, bool)]) -> String {
+pub fn ident_list_literal<'a>(cols: impl IntoIterator<Item = (&'a str, bool)>) -> String {
     let list = cols
-        .iter()
+        .into_iter()
         .map(|(col, desc)| {
-            if *desc {
+            if desc {
                 format!("{} DESC", quote_ident(col))
             } else {
                 quote_ident(col)
@@ -101,9 +101,11 @@ mod tests {
 
     #[test]
     fn test_ident_list_literal() {
-        let cols = vec![("deviceId".to_string(), false), ("time".to_string(), true)];
-        assert_eq!(ident_list_literal(&cols), "'\"deviceId\", \"time\" DESC'");
-        assert_eq!(ident_list_literal(&[]), "''");
+        assert_eq!(
+            ident_list_literal([("deviceId", false), ("time", true)]),
+            "'\"deviceId\", \"time\" DESC'"
+        );
+        assert_eq!(ident_list_literal(Vec::<(&str, bool)>::new()), "''");
     }
 
     #[test]

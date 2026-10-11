@@ -15,7 +15,7 @@ use crate::diff::SchemaDiff;
 use crate::error::MigrateResult;
 use crate::timescale::catalog::{AggregateState, CAGG_RECORD_MARKER, TimescaleCatalog};
 use crate::timescale::diff::{
-    AggregateSetChange, TimescaleChangeKind, TimescaleDiff, change, invalid, plural,
+    AggregateSetChange, TimescaleChange, TimescaleChangeKind, TimescaleDiff, invalid, plural,
 };
 use crate::timescale::resolve::resolve_aggregates;
 
@@ -63,7 +63,7 @@ type OtherViews = BTreeMap<String, bool>;
 /// `generic` supplies the column type changes and drops that force the
 /// aggregates reading a table to be recreated, because Postgres refuses them
 /// on a column a view depends on; default-only and nullability-only alters
-/// do not.
+/// do not. An empty `catalog` means the database has no Timescale state.
 ///
 /// # Errors
 ///
@@ -73,19 +73,15 @@ type OtherViews = BTreeMap<String, bool>;
 /// `source` that differs from the database while its SQL is unchanged.
 pub(crate) fn diff_aggregates(
     target: &Schema,
-    catalog: Option<&TimescaleCatalog>,
+    catalog: &TimescaleCatalog,
     generic: &SchemaDiff,
     out: &mut TimescaleDiff,
 ) -> MigrateResult<()> {
     let want = resolve_aggregates(target)?;
-    let no_aggregates = Aggregates::new();
-    let no_views = OtherViews::new();
-    let have = catalog.map_or(&no_aggregates, |c| &c.aggregates);
-    let other_views = catalog.map_or(&no_views, |c| &c.other_views);
+    let have = &catalog.aggregates;
+    let other_views = &catalog.other_views;
 
-    if let Some(catalog) = catalog {
-        check_declared_supported(&want, catalog)?;
-    }
+    check_declared_supported(&want, catalog)?;
     let drops = plan_drops(target, &want, have, generic)?;
     let creates = plan_creates(&want, have, other_views, &drops.dropped);
     push_sets(&want, have, other_views, &creates, &drops, out);
@@ -98,7 +94,7 @@ pub(crate) fn diff_aggregates(
 /// cannot read or recreate it faithfully.
 fn check_declared_supported(want: &Aggregates, catalog: &TimescaleCatalog) -> MigrateResult<()> {
     for name in want.keys() {
-        if let Some(reason) = catalog.unsupported.get(name) {
+        if let Some(reason) = catalog.unsupported_aggregates.get(name) {
             return Err(invalid(format!(
                 "View \"{name}\" declares @@timescale.continuous, but the database relation \
                  \"{name}\" cannot be managed by Prax: {reason}. Remove the view from the \
@@ -326,9 +322,8 @@ fn push_sets(
         ..AggregateSetChange::default()
     };
     if !ungated.create.is_empty() || !ungated.drop_views.is_empty() {
-        out.changes.push(change(
+        out.changes.push(TimescaleChange::ungated(
             TimescaleChangeKind::AggregateSet(ungated),
-            false,
             None,
         ));
     }
@@ -354,11 +349,12 @@ fn push_sets(
     };
     let note = gated_set_note(&set, &drops.changed, &drops.removed);
     let gated = !set.drop_aggregates.is_empty() || set.drop_views.iter().any(|(_, m)| *m);
-    out.changes.push(change(
-        TimescaleChangeKind::AggregateSet(set),
-        gated,
-        Some(note),
-    ));
+    let kind = TimescaleChangeKind::AggregateSet(set);
+    out.changes.push(if gated {
+        TimescaleChange::gated(kind, note)
+    } else {
+        TimescaleChange::ungated(kind, Some(note))
+    });
 }
 
 /// Policy and `materialized_only` changes for aggregates that stay in place
@@ -385,24 +381,22 @@ fn push_in_place_changes(
             ));
         }
         if h.policy != w.policy {
-            out.changes.push(change(
+            out.changes.push(TimescaleChange::ungated(
                 TimescaleChangeKind::ReplaceAggregatePolicy {
                     view: name.clone(),
                     old: h.policy.clone(),
                     new: w.policy.clone(),
                 },
-                false,
                 None,
             ));
         }
         if h.materialized_only != w.materialized_only {
-            out.changes.push(change(
+            out.changes.push(TimescaleChange::ungated(
                 TimescaleChangeKind::SetMaterializedOnly {
                     view: name.clone(),
                     old: h.materialized_only,
                     new: w.materialized_only,
                 },
-                false,
                 None,
             ));
         }
@@ -521,7 +515,6 @@ fn capitalized(s: &str) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use prax_schema::Schema;
     use prax_schema::ast::PgInterval;
 
     use super::*;
@@ -529,7 +522,7 @@ mod tests {
     use crate::error::MigrationError;
     use crate::timescale::catalog::{AggregatePolicy, HypertableState};
     use crate::timescale::diff::{TimescaleChange, TimescaleChangeKind};
-    use crate::timescale::resolve_aggregates;
+    use crate::timescale::{resolve_aggregates, schema};
 
     const DATASOURCE: &str = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
 
@@ -545,10 +538,6 @@ mod tests {
 
     const fn hours(n: i64) -> PgInterval {
         PgInterval::new(0, 0, n * 3_600_000_000)
-    }
-
-    fn schema(prax: &str) -> Schema {
-        prax_schema::parse_schema(prax).unwrap()
     }
 
     /// A view block carrying `attr`, with its SQL in a top-level `@@sql`.
@@ -596,14 +585,11 @@ mod tests {
             version: "2.18.0".into(),
             hypertables: BTreeMap::from([("Metric".to_string(), metric_state())]),
             aggregates: aggs.into_iter().map(|a| (a.view.clone(), a)).collect(),
-            aggregate_definitions: BTreeMap::new(),
-            aggregate_columns: BTreeMap::new(),
             other_views: other_views
                 .iter()
                 .map(|(n, m)| ((*n).to_string(), *m))
                 .collect(),
-            unsupported: BTreeMap::new(),
-            unsupported_aggregates: Default::default(),
+            ..TimescaleCatalog::default()
         }
     }
 
@@ -1093,11 +1079,10 @@ mod tests {
     fn unsupported_hierarchy_catalog() -> TimescaleCatalog {
         let mut c = catalog(Vec::new(), &[]);
         for view in ["HourlyMetric", "DailyMetric"] {
-            c.unsupported.insert(
+            c.unsupported_aggregates.insert(
                 view.into(),
                 "it is built on \"other.Metric\", which is not a hypertable in this schema".into(),
             );
-            c.unsupported_aggregates.insert(view.into());
         }
         c
     }

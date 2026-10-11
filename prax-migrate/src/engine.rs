@@ -1311,15 +1311,14 @@ mod tests {
         use crate::timescale::{TimescaleChange, TimescaleChangeKind};
 
         let mut diff = SchemaDiff::default();
-        diff.timescale.changes.push(TimescaleChange {
-            kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+        diff.timescale.changes.push(TimescaleChange::gated(
+            TimescaleChangeKind::ReplaceRetentionPolicy {
                 table: "Metric".into(),
                 old: None,
                 new: None,
             },
-            gated: true,
-            note: Some("Adding retention to \"Metric\" drops old chunks".into()),
-        });
+            "Adding retention to \"Metric\" drops old chunks".into(),
+        ));
         let warnings = data_loss_warnings(&diff);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("allow_data_loss=true"), "{warnings:?}");

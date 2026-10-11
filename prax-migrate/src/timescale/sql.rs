@@ -6,8 +6,11 @@
 //! back to rowstore, so the pipeline can alter or drop the tables they depend
 //! on. The post-phase runs after it, once the tables exist: it creates
 //! hypertables, configures the columnstore, adds policies and creates
-//! aggregates. Names interpolated into `--` comment lines go through
-//! [`comment_safe`], so no name can end the comment.
+//! aggregates. Every `--` comment line is built by [`comment_line`], which
+//! passes it through [`comment_safe`], so no name can end the comment.
+//!
+//! Change notes are not rendered here: the generator turns each one into a
+//! warning once (`PostgresSqlGenerator::generate`).
 
 use prax_schema::ast::PgInterval;
 
@@ -15,7 +18,7 @@ use crate::timescale::aggregates::topo_order;
 use crate::timescale::catalog::{
     AggregatePolicy, AggregateState, ColumnstoreSettings, aggregate_record,
 };
-use crate::timescale::diff::{TimescaleChange, TimescaleChangeKind, TimescaleDiff};
+use crate::timescale::diff::{AggregateSetChange, TimescaleChangeKind, TimescaleDiff};
 use crate::timescale::quote::{
     comment_safe, ident_list_literal, quote_ident, quote_literal, regclass_literal,
 };
@@ -28,7 +31,7 @@ pub struct TimescaleSql {
     /// Statements that undo this phase, in execution order (the reverse of
     /// `up`).
     pub down: Vec<String>,
-    /// Warnings: change notes and irreversibility notices.
+    /// Irreversibility and backfill notices.
     pub warnings: Vec<String>,
 }
 
@@ -81,14 +84,9 @@ fn render(diff: &TimescaleDiff, phase: Phase) -> TimescaleSql {
     // inside a section; downs are emitted in reverse group order.
     let mut groups: Vec<(Section, Vec<String>, Vec<String>)> = Vec::new();
     for change in &diff.changes {
-        let sql = change_sql(change, phase);
-        if sql.owns_note
-            && let Some(note) = &change.note
-        {
-            out.warnings.push(note.clone());
-        }
-        out.warnings.extend(sql.warnings);
-        groups.push((sql.section, sql.up, sql.down));
+        let ChangeSql { section, part } = change_sql(&change.kind, phase);
+        out.warnings.extend(part.warnings);
+        groups.push((section, part.up, part.down));
     }
     match phase {
         Phase::Pre => groups.push((
@@ -117,13 +115,7 @@ fn render(diff: &TimescaleDiff, phase: Phase) -> TimescaleSql {
 /// One change's SQL within one phase.
 struct ChangeSql {
     section: Section,
-    up: Vec<String>,
-    down: Vec<String>,
-    warnings: Vec<String>,
-    /// Whether this phase emits the change's note. The note goes with the
-    /// change's first statement: the pre-phase owns it when it emits anything
-    /// for the change, the post-phase otherwise.
-    owns_note: bool,
+    part: Part,
 }
 
 /// A change's statements for one phase.
@@ -144,28 +136,14 @@ impl Part {
     }
 }
 
-fn change_sql(change: &TimescaleChange, phase: Phase) -> ChangeSql {
-    let (pre, post) = phase_parts(&change.kind);
-    // Aggregate sets render their statements across all sets
-    // (`aggregate_drops_up`, `aggregate_creates`), so whether a phase emits
-    // anything for one comes from the set itself.
-    let (pre_emits, post_emits) = match &change.kind {
-        TimescaleChangeKind::AggregateSet(set) => (
-            !set.drop_aggregates.is_empty() || !set.drop_views.is_empty(),
-            !set.create.is_empty(),
-        ),
-        _ => (!pre.up.is_empty(), !post.up.is_empty()),
-    };
-    let (part, owns_note) = match phase {
-        Phase::Pre => (pre, pre_emits),
-        Phase::Post => (post, post_emits && !pre_emits),
-    };
+fn change_sql(kind: &TimescaleChangeKind, phase: Phase) -> ChangeSql {
+    let (pre, post) = phase_parts(kind);
     ChangeSql {
-        section: section(&change.kind, phase),
-        up: part.up,
-        down: part.down,
-        warnings: part.warnings,
-        owns_note,
+        section: section(kind, phase),
+        part: match phase {
+            Phase::Pre => pre,
+            Phase::Post => post,
+        },
     }
 }
 
@@ -207,8 +185,8 @@ fn phase_parts(kind: &TimescaleChangeKind) -> (Part, Part) {
         TimescaleChangeKind::SetChunkInterval { table, old, new } => (
             Part::default(),
             Part::new(
-                vec![set_chunk_interval(table, &new.to_sql())],
-                vec![set_chunk_interval(table, &old.to_sql())],
+                vec![set_chunk_interval(table, new)],
+                vec![set_chunk_interval(table, old)],
             ),
         ),
         TimescaleChangeKind::SetPartitions { table, old, new } => (
@@ -231,7 +209,7 @@ fn phase_parts(kind: &TimescaleChangeKind) -> (Part, Part) {
         TimescaleChangeKind::DisableColumnstore { table, old } => {
             let mut down = vec![configure_columnstore(table, &old.settings)];
             if let Some(after) = &old.after {
-                down.push(add_columnstore_policy(table, &after.to_sql()));
+                down.push(add_columnstore_policy(table, after));
             }
             (Part::new(disable_columnstore(table), down), Part::default())
         }
@@ -239,13 +217,13 @@ fn phase_parts(kind: &TimescaleChangeKind) -> (Part, Part) {
             old.as_ref(),
             new.as_ref(),
             || remove_columnstore_policy(table),
-            |after| add_columnstore_policy(table, &after.to_sql()),
+            |after| add_columnstore_policy(table, after),
         ),
         TimescaleChangeKind::ReplaceRetentionPolicy { table, old, new } => replace_policy(
             old.as_ref(),
             new.as_ref(),
             || remove_retention_policy(table),
-            |drop_after| add_retention_policy(table, &drop_after.to_sql()),
+            |drop_after| add_retention_policy(table, drop_after),
         ),
         // Rendered across all sets by `render` (drops and creates are ordered
         // globally).
@@ -313,10 +291,10 @@ fn create_hypertable(
         ));
     }
     if migrate_data {
-        part.down.push(format!(
-            "-- irreversible: {} was converted to a hypertable",
-            comment_safe(&quote_ident(table))
-        ));
+        part.down.push(comment_line(&format!(
+            "irreversible: {} was converted to a hypertable",
+            quote_ident(table)
+        )));
         part.warnings.push(format!(
             "Table {} was converted to a hypertable; the down migration cannot convert it back",
             quote_ident(table)
@@ -325,16 +303,18 @@ fn create_hypertable(
     part
 }
 
+/// Every aggregate set in `diff`, with whether it is gated.
+fn aggregate_sets(diff: &TimescaleDiff) -> impl Iterator<Item = (&AggregateSetChange, bool)> {
+    diff.changes.iter().filter_map(|c| match &c.kind {
+        TimescaleChangeKind::AggregateSet(set) => Some((set, c.gated)),
+        _ => None,
+    })
+}
+
 /// The drop statement for each view replaced by an aggregate, across all
 /// sets: `(view, materialized)`.
 fn dropped_views(diff: &TimescaleDiff) -> impl Iterator<Item = &(String, bool)> {
-    diff.changes
-        .iter()
-        .filter_map(|c| match &c.kind {
-            TimescaleChangeKind::AggregateSet(set) => Some(&set.drop_views),
-            _ => None,
-        })
-        .flatten()
+    aggregate_sets(diff).flat_map(|(set, _)| &set.drop_views)
 }
 
 /// Every set's replaced views, then its dropped aggregates (children first
@@ -357,14 +337,8 @@ fn aggregate_drops_up(diff: &TimescaleDiff) -> Vec<String> {
 
 /// Dropped aggregates in reverse topological order across all sets.
 fn dropped_aggregates(diff: &TimescaleDiff) -> Vec<AggregateState> {
-    let all: Vec<AggregateState> = diff
-        .changes
-        .iter()
-        .filter_map(|c| match &c.kind {
-            TimescaleChangeKind::AggregateSet(set) => Some(set.drop_aggregates.iter().cloned()),
-            _ => None,
-        })
-        .flatten()
+    let all: Vec<AggregateState> = aggregate_sets(diff)
+        .flat_map(|(set, _)| set.drop_aggregates.iter().cloned())
         .collect();
     let mut ordered = topo_order(&all);
     ordered.reverse();
@@ -376,25 +350,26 @@ fn dropped_aggregates(diff: &TimescaleDiff) -> Vec<AggregateState> {
 fn aggregate_drops_down(diff: &TimescaleDiff) -> Vec<String> {
     let views: Vec<String> = dropped_views(diff)
         .map(|(view, materialized)| {
-            let view = comment_safe(&quote_ident(view));
-            if *materialized {
+            let view = quote_ident(view);
+            let text = if *materialized {
                 format!(
-                    "-- irreversible: materialized view {view} was dropped and its rows were \
+                    "irreversible: materialized view {view} was dropped and its rows were \
                      discarded"
                 )
             } else {
-                format!("-- irreversible: view {view} was dropped")
-            }
+                format!("irreversible: view {view} was dropped")
+            };
+            comment_line(&text)
         })
         .collect();
     dropped_aggregates(diff)
         .iter()
         .rev()
         .map(|a| {
-            format!(
-                "-- irreversible: materialized data of {} was discarded",
-                comment_safe(&quote_ident(&a.view))
-            )
+            comment_line(&format!(
+                "irreversible: materialized data of {} was discarded",
+                quote_ident(&a.view)
+            ))
         })
         .chain(views.into_iter().rev())
         .collect()
@@ -405,12 +380,10 @@ fn aggregate_drops_down(diff: &TimescaleDiff) -> Vec<String> {
 fn aggregate_creates(diff: &TimescaleDiff) -> (Vec<String>, Vec<String>, Vec<String>) {
     let mut all = Vec::new();
     let mut gated_views: Vec<&str> = Vec::new();
-    for change in &diff.changes {
-        if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
-            all.extend(set.create.iter().cloned());
-            if change.gated {
-                gated_views.extend(set.create.iter().map(|a| a.view.as_str()));
-            }
+    for (set, gated) in aggregate_sets(diff) {
+        all.extend(set.create.iter().cloned());
+        if gated {
+            gated_views.extend(set.create.iter().map(|a| a.view.as_str()));
         }
     }
     let ordered = topo_order(&all);
@@ -451,10 +424,9 @@ fn aggregate_creates(diff: &TimescaleDiff) -> (Vec<String>, Vec<String>, Vec<Str
                 up.push(add_aggregate_policy(&agg.view, policy));
                 up.push(backfill_note(&agg.view, policy.start_offset.as_ref()));
             }
-            None => up.push(format!(
-                "-- {} is created empty and has no refresh policy; refresh it manually.",
-                comment_safe(&view)
-            )),
+            None => up.push(comment_line(&format!(
+                "{view} is created empty and has no refresh policy; refresh it manually."
+            ))),
         }
         warnings.push(format!(
             "Continuous aggregate {view} is created WITH NO DATA; see the backfill note in the migration"
@@ -467,15 +439,32 @@ fn aggregate_creates(diff: &TimescaleDiff) -> (Vec<String>, Vec<String>, Vec<Str
     (up, down, warnings)
 }
 
+/// A `--` comment line: `text` through [`comment_safe`], so no name in it can
+/// end the comment.
+fn comment_line(text: &str) -> String {
+    format!("-- {}", comment_safe(text))
+}
+
 fn backfill_note(name: &str, start_offset: Option<&PgInterval>) -> String {
-    let view = comment_safe(&quote_ident(name));
-    let regclass = comment_safe(&regclass_literal(name));
+    let view = quote_ident(name);
     match start_offset {
-        Some(start) => format!(
-            "-- {view} is created empty; its refresh policy only covers the last {start}.\n-- To backfill older data, run outside a transaction:\n-- CALL refresh_continuous_aggregate({regclass}, NULL, now() - {});",
-            start.to_sql()
-        ),
-        None => format!("-- {view} is created empty; the first policy run materializes all data."),
+        Some(start) => [
+            format!("{view} is created empty; its refresh policy only covers the last {start}."),
+            "To backfill older data, run outside a transaction:".to_string(),
+            format!(
+                "CALL refresh_continuous_aggregate({}, NULL, now() - {});",
+                regclass_literal(name),
+                start.to_sql()
+            ),
+        ]
+        .iter()
+        .map(String::as_str)
+        .map(comment_line)
+        .collect::<Vec<_>>()
+        .join("\n"),
+        None => comment_line(&format!(
+            "{view} is created empty; the first policy run materializes all data."
+        )),
     }
 }
 
@@ -511,11 +500,11 @@ fn set_materialized_only(view: &str, value: bool) -> String {
     )
 }
 
-fn set_chunk_interval(table: &str, interval: &str) -> String {
+fn set_chunk_interval(table: &str, interval: &PgInterval) -> String {
     format!(
         "SELECT set_chunk_time_interval({}, {});",
         regclass_literal(table),
-        interval
+        interval.to_sql()
     )
 }
 
@@ -528,16 +517,16 @@ fn set_partitions(table: &str, n: i16) -> String {
 }
 
 fn configure_columnstore(table: &str, settings: &ColumnstoreSettings) -> String {
-    let segment: Vec<(String, bool)> = settings
-        .segment_by
+    let segment = settings.segment_by.iter().map(|c| (c.as_str(), false));
+    let order = settings
+        .order_by
         .iter()
-        .map(|c| (c.clone(), false))
-        .collect();
+        .map(|(c, desc)| (c.as_str(), *desc));
     format!(
         "ALTER TABLE {} SET (timescaledb.enable_columnstore = true, timescaledb.segmentby = {}, timescaledb.orderby = {});",
         quote_ident(table),
-        ident_list_literal(&segment),
-        ident_list_literal(&settings.order_by)
+        ident_list_literal(segment),
+        ident_list_literal(order)
     )
 }
 
@@ -548,11 +537,11 @@ fn remove_columnstore_policy(table: &str) -> String {
     )
 }
 
-fn add_columnstore_policy(table: &str, after: &str) -> String {
+fn add_columnstore_policy(table: &str, after: &PgInterval) -> String {
     format!(
         "CALL add_columnstore_policy({}, after => {});",
         regclass_literal(table),
-        after
+        after.to_sql()
     )
 }
 
@@ -563,11 +552,11 @@ fn remove_retention_policy(table: &str) -> String {
     )
 }
 
-fn add_retention_policy(table: &str, drop_after: &str) -> String {
+fn add_retention_policy(table: &str, drop_after: &PgInterval) -> String {
     format!(
         "SELECT add_retention_policy({}, drop_after => {});",
         regclass_literal(table),
-        drop_after
+        drop_after.to_sql()
     )
 }
 
@@ -592,21 +581,14 @@ mod tests {
 
     use super::*;
     use crate::timescale::catalog::{AggregatePolicy, AggregateState, ColumnstoreState};
-    use crate::timescale::diff::AggregateSetChange;
+    use crate::timescale::diff::TimescaleChange;
 
     const fn days(n: i32) -> PgInterval {
         PgInterval::new(0, n, 0)
     }
 
     fn one(kind: TimescaleChangeKind) -> TimescaleDiff {
-        TimescaleDiff {
-            changes: vec![TimescaleChange {
-                kind,
-                gated: false,
-                note: None,
-            }],
-            warnings: Vec::new(),
-        }
+        diff_of(vec![TimescaleChange::ungated(kind, None)])
     }
 
     fn settings(seg: &[&str], ord: &[(&str, bool)]) -> ColumnstoreSettings {
@@ -785,59 +767,6 @@ mod tests {
         assert_eq!(po.down, vec![rm]);
     }
 
-    /// Whether `phase` emits the note of a change of `kind`.
-    fn owns_note(kind: TimescaleChangeKind, phase: Phase) -> bool {
-        let change = TimescaleChange {
-            kind,
-            gated: false,
-            note: None,
-        };
-        change_sql(&change, phase).owns_note
-    }
-
-    #[test]
-    fn test_aggregate_changes_route_to_phases() {
-        let created = agg("HourlyMetric", "Metric", HOURLY_SQL, false);
-        let set = |drops: bool| {
-            TimescaleChangeKind::AggregateSet(AggregateSetChange {
-                drop_views: if drops {
-                    vec![("HourlyMetric".to_string(), false)]
-                } else {
-                    Vec::new()
-                },
-                create: vec![created.clone()],
-                ..AggregateSetChange::default()
-            })
-        };
-        assert!(owns_note(set(true), Phase::Pre));
-        assert!(!owns_note(set(true), Phase::Post));
-        assert!(owns_note(set(false), Phase::Post));
-        assert!(!owns_note(set(false), Phase::Pre));
-
-        let policy = || crate::timescale::catalog::AggregatePolicy {
-            start_offset: None,
-            end_offset: None,
-            schedule_interval: days(1),
-        };
-        let replace = |old: bool| TimescaleChangeKind::ReplaceAggregatePolicy {
-            view: "HourlyMetric".into(),
-            old: old.then(policy),
-            new: Some(policy()),
-        };
-        assert!(owns_note(replace(true), Phase::Pre));
-        assert!(!owns_note(replace(true), Phase::Post));
-        assert!(owns_note(replace(false), Phase::Post));
-        assert!(!owns_note(replace(false), Phase::Pre));
-
-        let mo = || TimescaleChangeKind::SetMaterializedOnly {
-            view: "HourlyMetric".into(),
-            old: true,
-            new: false,
-        };
-        assert!(owns_note(mo(), Phase::Post));
-        assert!(!owns_note(mo(), Phase::Pre));
-    }
-
     #[test]
     fn test_sections_order_within_each_phase() {
         assert!(Section::PolicyRemovals < Section::Aggregates);
@@ -848,14 +777,17 @@ mod tests {
     }
 
     #[test]
-    fn test_note_emitted_once_from_owning_phase() {
-        let mut d = one(TimescaleChangeKind::ReplaceRetentionPolicy {
-            table: "Metric".into(),
-            old: Some(days(30)),
-            new: Some(days(90)),
-        });
-        d.changes[0].note = Some("note".into());
-        assert_eq!(pre(&d).warnings, vec!["note"]);
+    fn test_phases_do_not_emit_change_notes() {
+        // The generator warns each note once; neither phase repeats it.
+        let d = diff_of(vec![TimescaleChange::ungated(
+            TimescaleChangeKind::ReplaceRetentionPolicy {
+                table: "Metric".into(),
+                old: Some(days(30)),
+                new: Some(days(90)),
+            },
+            Some("note".into()),
+        )]);
+        assert!(pre(&d).warnings.is_empty());
         assert!(post(&d).warnings.is_empty());
     }
 
@@ -879,15 +811,16 @@ mod tests {
         drop_views: Vec<(String, bool)>,
         create: Vec<AggregateState>,
     ) -> TimescaleChange {
-        TimescaleChange {
-            kind: TimescaleChangeKind::AggregateSet(AggregateSetChange {
-                drop_aggregates,
-                drop_views,
-                create,
-                ..AggregateSetChange::default()
-            }),
-            gated,
-            note: None,
+        let kind = TimescaleChangeKind::AggregateSet(AggregateSetChange {
+            drop_aggregates,
+            drop_views,
+            create,
+            ..AggregateSetChange::default()
+        });
+        if gated {
+            TimescaleChange::gated(kind, "drops aggregates".into())
+        } else {
+            TimescaleChange::ungated(kind, None)
         }
     }
 
@@ -1014,24 +947,22 @@ mod tests {
             })
         };
         let d = diff_of(vec![
-            TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceAggregatePolicy {
+            TimescaleChange::ungated(
+                TimescaleChangeKind::ReplaceAggregatePolicy {
                     view: "HourlyMetric".into(),
                     old: policy(true),
                     new: policy(true),
                 },
-                gated: false,
-                note: None,
-            },
-            TimescaleChange {
-                kind: TimescaleChangeKind::SetMaterializedOnly {
+                None,
+            ),
+            TimescaleChange::ungated(
+                TimescaleChangeKind::SetMaterializedOnly {
                     view: "HourlyMetric".into(),
                     old: true,
                     new: false,
                 },
-                gated: false,
-                note: None,
-            },
+                None,
+            ),
         ]);
         let rm =
             "SELECT remove_continuous_aggregate_policy('\"HourlyMetric\"', if_exists => true);";
@@ -1107,32 +1038,30 @@ mod tests {
     #[test]
     fn test_pre_sections_order_policy_removals_aggregate_drops_columnstore() {
         let d = diff_of(vec![
-            TimescaleChange {
-                kind: TimescaleChangeKind::DisableColumnstore {
+            TimescaleChange::gated(
+                TimescaleChangeKind::DisableColumnstore {
                     table: "Metric".into(),
                     old: ColumnstoreState {
                         settings: settings(&["deviceId"], &[("time", true)]),
                         after: None,
                     },
                 },
-                gated: true,
-                note: None,
-            },
+                "disables the columnstore".into(),
+            ),
             set(
                 true,
                 vec![agg("HourlyMetric", "Metric", HOURLY_SQL, false)],
                 vec![],
                 vec![],
             ),
-            TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+            TimescaleChange::ungated(
+                TimescaleChangeKind::ReplaceRetentionPolicy {
                     table: "Metric".into(),
                     old: Some(days(30)),
                     new: None,
                 },
-                gated: false,
-                note: None,
-            },
+                None,
+            ),
         ]);
         let up = pre(&d).up;
         let pos = |needle: &str| up.iter().position(|s| s.starts_with(needle)).unwrap();

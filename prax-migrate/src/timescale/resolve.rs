@@ -113,17 +113,9 @@ pub fn resolve_aggregates(schema: &Schema) -> MigrateResult<BTreeMap<String, Agg
 /// neither exists (the validator rejects that).
 fn relation_name(schema: &Schema, name: &str) -> String {
     schema
-        .models
-        .values()
-        .find(|m| m.name() == name)
+        .get_model(name)
         .map(Model::table_name)
-        .or_else(|| {
-            schema
-                .views
-                .values()
-                .find(|v| v.name() == name)
-                .map(View::view_name)
-        })
+        .or_else(|| schema.get_view(name).map(View::view_name))
         .unwrap_or(name)
         .to_string()
 }
@@ -157,10 +149,7 @@ fn resolve_model(model: &Model, config: &TimescaleModelConfig) -> HypertableStat
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn schema(prax: &str) -> Schema {
-        prax_schema::parse_schema(prax).unwrap()
-    }
+    use crate::timescale::schema;
 
     fn invalid_message<T: std::fmt::Debug>(result: MigrateResult<T>) -> String {
         match result {

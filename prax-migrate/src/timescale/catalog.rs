@@ -501,7 +501,7 @@ pub struct CatalogColumn {
 }
 
 /// The live database's TimescaleDB state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TimescaleCatalog {
     /// Installed `timescaledb` version.
     pub version: String,
@@ -515,13 +515,13 @@ pub struct TimescaleCatalog {
     pub aggregate_columns: BTreeMap<String, Vec<CatalogColumn>>,
     /// Non-aggregate views; the value is whether the view is materialized.
     pub other_views: BTreeMap<String, bool>,
-    /// Valid Timescale relations Prax cannot represent (relation to reason):
-    /// hypertables, omitted from `hypertables`, and continuous aggregates,
-    /// omitted from `aggregates` and `other_views`.
-    pub unsupported: BTreeMap<String, String>,
-    /// The continuous aggregates among `unsupported` (`db pull` reports them
-    /// instead of rendering a view).
-    pub unsupported_aggregates: BTreeSet<String>,
+    /// Valid hypertables Prax cannot represent (table to reason), omitted
+    /// from `hypertables`.
+    pub unsupported_hypertables: BTreeMap<String, String>,
+    /// Valid continuous aggregates Prax cannot represent (view to reason),
+    /// omitted from `aggregates` and `other_views`; `db pull` reports them
+    /// instead of rendering a view.
+    pub unsupported_aggregates: BTreeMap<String, String>,
 }
 
 fn interval(parts: IntervalParts) -> PgInterval {
@@ -597,36 +597,23 @@ pub(crate) fn parse_column_list(s: &str) -> Result<Vec<(String, bool)>, String> 
     Ok(out)
 }
 
-/// Parse a column's ordering modifiers into whether it is descending, or
-/// `None` when they hold a non-default NULLS ordering or an unknown word.
+/// Parse a column's ordering modifiers, `[ASC | DESC] [NULLS FIRST | NULLS
+/// LAST]` (case-insensitive), into whether it is descending, or `None` when
+/// they hold a non-default NULLS ordering or anything else.
 fn parse_ordering(modifiers: &str) -> Option<bool> {
-    let mut descending = None;
-    let mut nulls_first = None;
-    let mut words = modifiers.split_whitespace();
-    while let Some(word) = words.next() {
-        if descending.is_none() && nulls_first.is_none() && word.eq_ignore_ascii_case("asc") {
-            descending = Some(false);
-        } else if descending.is_none() && nulls_first.is_none() && word.eq_ignore_ascii_case("desc")
-        {
-            descending = Some(true);
-        } else if nulls_first.is_none() && word.eq_ignore_ascii_case("nulls") {
-            let position = words.next()?;
-            if position.eq_ignore_ascii_case("first") {
-                nulls_first = Some(true);
-            } else if position.eq_ignore_ascii_case("last") {
-                nulls_first = Some(false);
-            } else {
-                return None;
-            }
-        } else {
-            return None;
-        }
-    }
-    let descending = descending.unwrap_or(false);
+    let lowered = modifiers.to_ascii_lowercase();
+    let words: Vec<&str> = lowered.split_whitespace().collect();
+    let (descending, nulls) = match words.as_slice() {
+        ["asc", rest @ ..] => (false, rest),
+        ["desc", rest @ ..] => (true, rest),
+        rest => (false, rest),
+    };
     // Postgres defaults: NULLS LAST when ascending, NULLS FIRST when descending.
-    match nulls_first {
-        Some(first) if first != descending => None,
-        _ => Some(descending),
+    let default_nulls = if descending { "first" } else { "last" };
+    match nulls {
+        [] => Some(descending),
+        ["nulls", position] if *position == default_nulls => Some(descending),
+        _ => None,
     }
 }
 
@@ -637,16 +624,32 @@ fn malformed(relation: &str, what: &str) -> MigrationError {
 }
 
 impl TimescaleCatalog {
+    /// The error to report when the installed TimescaleDB is older than
+    /// [`TIMESCALE_MIN_VERSION`], or `None` when the version is supported.
+    #[must_use]
+    pub fn version_error(&self) -> Option<String> {
+        if timescale_version_supported(&self.version) {
+            return None;
+        }
+        let (major, minor) = TIMESCALE_MIN_VERSION;
+        Some(format!(
+            "TimescaleDB {} is installed, but Prax requires TimescaleDB {major}.{minor} or \
+             newer for @@timescale.* attributes",
+            self.version
+        ))
+    }
+
     /// Build the catalog from rows. Returns `None` when the `timescaledb`
     /// extension is not installed.
     ///
-    /// Valid state Prax cannot represent lands in `unsupported` with a reason
-    /// instead of failing: a hypertable with an integer time dimension, more
-    /// than one time or space dimension, a columnstore column with a
-    /// non-default NULLS ordering, or a columnstore or retention policy
-    /// without its interval (`*_created_before`), and every continuous
-    /// aggregate built (directly or through parent aggregates) on such a
-    /// hypertable or on a relation that is not a hypertable of this schema.
+    /// Valid state Prax cannot represent is recorded with a reason instead of
+    /// failing. `unsupported_hypertables` gets every hypertable with an
+    /// integer time dimension, more than one time or space dimension, a
+    /// columnstore column with a non-default NULLS ordering, or a columnstore
+    /// or retention policy without its interval (`*_created_before`).
+    /// `unsupported_aggregates` gets every continuous aggregate built
+    /// (directly or through parent aggregates) on such a hypertable or on a
+    /// relation that is not a hypertable of this schema.
     ///
     /// An installed extension older than [`TIMESCALE_MIN_VERSION`] is still
     /// reported: the caller reads no other rows, so the catalog holds only the
@@ -663,7 +666,7 @@ impl TimescaleCatalog {
         let version = ext.version.clone();
 
         let mut hypertables = BTreeMap::new();
-        let mut unsupported = BTreeMap::new();
+        let mut unsupported_hypertables = BTreeMap::new();
         for h in &rows.hypertables {
             let (time_dims, space_dims): (Vec<&DimensionRow>, Vec<&DimensionRow>) = rows
                 .dimensions
@@ -674,7 +677,7 @@ impl TimescaleCatalog {
                 return Err(malformed(&h.table, "hypertable has no time dimension"));
             };
             if time_dims.len() > 1 || space_dims.len() > 1 {
-                unsupported.insert(
+                unsupported_hypertables.insert(
                     h.table.clone(),
                     "hypertables with more than one time or space dimension are not supported"
                         .to_string(),
@@ -682,7 +685,7 @@ impl TimescaleCatalog {
                 continue;
             }
             let Some(chunk_interval) = time.interval.map(interval) else {
-                unsupported.insert(
+                unsupported_hypertables.insert(
                     h.table.clone(),
                     "integer time dimensions are not supported".to_string(),
                 );
@@ -714,7 +717,7 @@ impl TimescaleCatalog {
                         after: None,
                     }),
                     (Err(why), _) | (_, Err(why)) => {
-                        unsupported.insert(h.table.clone(), why);
+                        unsupported_hypertables.insert(h.table.clone(), why);
                         continue;
                     }
                 }
@@ -762,38 +765,37 @@ impl TimescaleCatalog {
 
         for j in &rows.jobs {
             match j.proc_name.as_str() {
-                "policy_compression" => {
-                    if let Some(cs) = hypertables
-                        .get_mut(&j.relation)
-                        .and_then(|h| h.columnstore.as_mut())
-                    {
-                        match j.after {
-                            Some(after) => cs.after = Some(interval(after)),
-                            None => {
-                                hypertables.remove(&j.relation);
-                                unsupported.insert(
-                                    j.relation.clone(),
-                                    "policy_compression without a compress_after interval \
-                                     (compress_created_before) is not supported"
-                                        .to_string(),
-                                );
-                            }
-                        }
-                    }
-                }
-                "policy_retention" => {
-                    if let Some(h) = hypertables.get_mut(&j.relation) {
-                        match j.drop_after {
-                            Some(drop_after) => h.retention = Some(interval(drop_after)),
-                            None => {
-                                hypertables.remove(&j.relation);
-                                unsupported.insert(
-                                    j.relation.clone(),
-                                    "policy_retention without a drop_after interval \
-                                     (drop_created_before) is not supported"
-                                        .to_string(),
-                                );
-                            }
+                // A columnstore or retention policy sets its interval on the
+                // hypertable; one without it (`*_created_before`) makes the
+                // hypertable unsupported.
+                "policy_compression" | "policy_retention" => {
+                    let Some(h) = hypertables.get_mut(&j.relation) else {
+                        continue;
+                    };
+                    let (slot, parts, missing) = if j.proc_name == "policy_compression" {
+                        let Some(cs) = h.columnstore.as_mut() else {
+                            continue;
+                        };
+                        (
+                            &mut cs.after,
+                            j.after,
+                            "compress_after interval (compress_created_before)",
+                        )
+                    } else {
+                        (
+                            &mut h.retention,
+                            j.drop_after,
+                            "drop_after interval (drop_created_before)",
+                        )
+                    };
+                    match parts {
+                        Some(parts) => *slot = Some(interval(parts)),
+                        None => {
+                            hypertables.remove(&j.relation);
+                            unsupported_hypertables.insert(
+                                j.relation.clone(),
+                                format!("{} without a {missing} is not supported", j.proc_name),
+                            );
                         }
                     }
                 }
@@ -820,13 +822,11 @@ impl TimescaleCatalog {
         // Aggregates built on a relation Prax cannot represent (an unsupported
         // hypertable, or a relation that is not a hypertable of this schema)
         // can never be declared in a schema, so they are left unmanaged.
-        let mut unsupported_aggregates = BTreeSet::new();
-        for (view, reason) in unsupported_aggregate_reasons(&aggregates, &hypertables, &unsupported)
-        {
-            aggregates.remove(&view);
-            aggregate_definitions.remove(&view);
-            unsupported.insert(view.clone(), reason);
-            unsupported_aggregates.insert(view);
+        let unsupported_aggregates =
+            unsupported_aggregate_reasons(&aggregates, &hypertables, &unsupported_hypertables);
+        for view in unsupported_aggregates.keys() {
+            aggregates.remove(view);
+            aggregate_definitions.remove(view);
         }
 
         let mut aggregate_columns: BTreeMap<String, Vec<CatalogColumn>> = BTreeMap::new();
@@ -847,7 +847,7 @@ impl TimescaleCatalog {
             .views
             .iter()
             .filter(|v| {
-                !aggregates.contains_key(&v.name) && !unsupported_aggregates.contains(&v.name)
+                !aggregates.contains_key(&v.name) && !unsupported_aggregates.contains_key(&v.name)
             })
             .map(|v| (v.name.clone(), v.is_materialized))
             .collect();
@@ -859,21 +859,21 @@ impl TimescaleCatalog {
             aggregate_definitions,
             aggregate_columns,
             other_views,
-            unsupported,
+            unsupported_hypertables,
             unsupported_aggregates,
         }))
     }
 }
 
 /// The aggregates whose source chain (through parent aggregates) ends at a
-/// relation that is unsupported or not a hypertable of this schema, with the
-/// reason.
+/// relation that is an unsupported hypertable or not a hypertable of this
+/// schema, mapped to the reason.
 fn unsupported_aggregate_reasons(
     aggregates: &BTreeMap<String, AggregateState>,
     hypertables: &BTreeMap<String, HypertableState>,
-    unsupported: &BTreeMap<String, String>,
-) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+    unsupported_hypertables: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
     for view in aggregates.keys() {
         // Follow parent aggregates to the relation the chain is built on; a
         // cycle (impossible in TimescaleDB) stops at the repeated view.
@@ -885,7 +885,7 @@ fn unsupported_aggregate_reasons(
             }
             relation = &parent.source;
         }
-        let reason = if let Some(why) = unsupported.get(relation) {
+        let reason = if let Some(why) = unsupported_hypertables.get(relation) {
             format!(
                 "it is built on \"{relation}\", whose TimescaleDB setup Prax cannot manage: {why}"
             )
@@ -894,7 +894,7 @@ fn unsupported_aggregate_reasons(
         } else {
             format!("it is built on \"{relation}\", which is not a hypertable in this schema")
         };
-        out.push((view.clone(), reason));
+        out.insert(view.clone(), reason);
     }
     out
 }
@@ -1035,7 +1035,7 @@ mod tests {
         rows.jobs = vec![job("policy_compression", "Metric")];
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(!cat.hypertables.contains_key("Metric"));
-        assert!(cat.unsupported["Metric"].contains("policy_compression"));
+        assert!(cat.unsupported_hypertables["Metric"].contains("policy_compression"));
     }
 
     #[test]
@@ -1044,7 +1044,7 @@ mod tests {
         rows.jobs = vec![job("policy_retention", "Metric")];
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(!cat.hypertables.contains_key("Metric"));
-        assert!(cat.unsupported["Metric"].contains("policy_retention"));
+        assert!(cat.unsupported_hypertables["Metric"].contains("policy_retention"));
     }
 
     #[test]
@@ -1053,7 +1053,7 @@ mod tests {
         rows.dimensions[0].interval = None;
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(cat.hypertables.is_empty());
-        assert!(cat.unsupported["Metric"].contains("integer time"));
+        assert!(cat.unsupported_hypertables["Metric"].contains("integer time"));
     }
 
     #[test]
@@ -1131,7 +1131,7 @@ mod tests {
         add_hierarchy(&mut rows, "Metric");
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(!cat.hypertables.contains_key("Metric"));
-        let reason = &cat.unsupported["Metric"];
+        let reason = &cat.unsupported_hypertables["Metric"];
         assert!(
             reason.contains("orderby") && reason.contains("column \"time\""),
             "{reason}"
@@ -1152,9 +1152,9 @@ mod tests {
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(cat.hypertables.is_empty());
         assert!(
-            cat.unsupported["Metric"].contains("more than one time or space dimension"),
+            cat.unsupported_hypertables["Metric"].contains("more than one time or space dimension"),
             "{}",
-            cat.unsupported["Metric"]
+            cat.unsupported_hypertables["Metric"]
         );
     }
 
@@ -1171,7 +1171,9 @@ mod tests {
         add_hierarchy(&mut rows, "Metric");
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
         assert!(cat.hypertables.is_empty());
-        assert!(cat.unsupported["Metric"].contains("more than one time or space dimension"));
+        assert!(
+            cat.unsupported_hypertables["Metric"].contains("more than one time or space dimension")
+        );
         assert_hierarchy_unsupported(&cat, &["more than one time or space dimension"]);
     }
 
@@ -1190,7 +1192,8 @@ mod tests {
         assert_eq!(cat.version, "2.17.2");
         assert!(cat.hypertables.is_empty());
         assert!(cat.aggregates.is_empty());
-        assert!(cat.unsupported.is_empty());
+        assert!(cat.unsupported_hypertables.is_empty());
+        assert!(cat.unsupported_aggregates.is_empty());
         assert!(cat.other_views.is_empty());
     }
 
@@ -1294,11 +1297,11 @@ mod tests {
     #[track_caller]
     fn assert_hierarchy_unsupported(cat: &TimescaleCatalog, reason_parts: &[&str]) {
         for view in ["HourlyMetric", "DailyMetric"] {
-            let reason = &cat.unsupported[view];
+            let reason = &cat.unsupported_aggregates[view];
             for part in reason_parts {
                 assert!(reason.contains(part), "{view}: {reason}");
             }
-            assert!(cat.unsupported_aggregates.contains(view), "{view}");
+            assert!(!cat.unsupported_hypertables.contains_key(view), "{view}");
             assert!(!cat.aggregates.contains_key(view), "{view}");
             assert!(!cat.aggregate_definitions.contains_key(view), "{view}");
             assert!(!cat.aggregate_columns.contains_key(view), "{view}");
@@ -1319,7 +1322,7 @@ mod tests {
                 "integer time dimensions are not supported",
             ],
         );
-        assert!(!cat.unsupported_aggregates.contains("Metric"));
+        assert!(!cat.unsupported_aggregates.contains_key("Metric"));
     }
 
     #[test]
@@ -1355,7 +1358,7 @@ mod tests {
         let mut rows = metric_rows();
         add_hierarchy(&mut rows, "Metric");
         let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
-        assert!(cat.unsupported.is_empty() && cat.unsupported_aggregates.is_empty());
+        assert!(cat.unsupported_hypertables.is_empty() && cat.unsupported_aggregates.is_empty());
         assert_eq!(cat.aggregates["DailyMetric"].source, "HourlyMetric");
         assert!(cat.aggregates["DailyMetric"].policy.is_some());
         assert_eq!(cat.aggregate_columns.len(), 2);
@@ -1374,6 +1377,26 @@ mod tests {
             "{major}.{}.9",
             minor - 1
         )));
+    }
+
+    #[test]
+    fn test_version_error() {
+        let catalog = |version: &str| TimescaleCatalog {
+            version: version.into(),
+            ..Default::default()
+        };
+        let (major, minor) = TIMESCALE_MIN_VERSION;
+        assert_eq!(catalog(&format!("{major}.{minor}.0")).version_error(), None);
+        assert_eq!(catalog("3.0.0").version_error(), None);
+        for version in ["2.17.2", "garbage"] {
+            assert_eq!(
+                catalog(version).version_error(),
+                Some(format!(
+                    "TimescaleDB {version} is installed, but Prax requires TimescaleDB \
+                     {major}.{minor} or newer for @@timescale.* attributes"
+                ))
+            );
+        }
     }
 
     #[test]

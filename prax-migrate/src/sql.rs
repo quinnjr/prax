@@ -181,6 +181,8 @@ impl PostgresSqlGenerator {
         let mut full_down = ts_post.down;
         full_down.extend(down);
         full_down.extend(ts_pre.down);
+        // Each change note becomes one warning, in change order.
+        warnings.extend(diff.timescale.changes.iter().filter_map(|c| c.note.clone()));
         warnings.extend(ts_pre.warnings);
         warnings.extend(ts_post.warnings);
         warnings.extend(diff.timescale.warnings.iter().cloned());
@@ -2298,15 +2300,14 @@ mod tests {
                 add_foreign_keys: vec![],
                 drop_foreign_keys: vec![],
             });
-            diff.timescale.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceRetentionPolicy {
+            diff.timescale.changes.push(TimescaleChange::ungated(
+                TimescaleChangeKind::ReplaceRetentionPolicy {
                     table: "Metric".into(),
                     old: Some(days(30)),
                     new: Some(days(90)),
                 },
-                gated: false,
-                note: note.map(str::to_string),
-            });
+                note.map(str::to_string),
+            ));
             diff
         }
 
@@ -2353,8 +2354,8 @@ mod tests {
             use crate::timescale::AggregateState;
             let mut diff = SchemaDiff::default();
             diff.drop_models.push("Metric".into());
-            diff.timescale.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::AggregateSet(crate::timescale::AggregateSetChange {
+            diff.timescale.changes.push(TimescaleChange::gated(
+                TimescaleChangeKind::AggregateSet(crate::timescale::AggregateSetChange {
                     drop_aggregates: vec![AggregateState {
                         view: "HourlyMetric".into(),
                         source: "Metric".into(),
@@ -2364,9 +2365,8 @@ mod tests {
                     }],
                     ..Default::default()
                 }),
-                gated: true,
-                note: None,
-            });
+                "drops \"HourlyMetric\"".into(),
+            ));
             let sql = PostgresSqlGenerator.generate(&diff);
             let agg = sql
                 .up
@@ -2386,17 +2386,16 @@ mod tests {
         #[test]
         fn test_change_notes_become_warnings() {
             let mut diff = SchemaDiff::default();
-            diff.timescale.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::CreateHypertable {
+            diff.timescale.changes.push(TimescaleChange::ungated(
+                TimescaleChangeKind::CreateHypertable {
                     table: "Metric".into(),
                     time_column: "time".into(),
                     chunk_interval: days(1),
                     space: None,
                     migrate_data: true,
                 },
-                gated: false,
-                note: Some("Converting \"Metric\" rewrites its rows".into()),
-            });
+                Some("Converting \"Metric\" rewrites its rows".into()),
+            ));
             let sql = PostgresSqlGenerator.generate(&diff);
             assert_eq!(
                 sql.warnings
@@ -2405,6 +2404,79 @@ mod tests {
                     .count(),
                 1
             );
+        }
+
+        #[test]
+        fn test_each_change_note_is_warned_exactly_once() {
+            use crate::timescale::{AggregatePolicy, AggregateSetChange, AggregateState};
+
+            let hourly = AggregateState {
+                view: "HourlyMetric".into(),
+                source: "Metric".into(),
+                sql: Some("SELECT 1".into()),
+                materialized_only: true,
+                policy: None,
+            };
+            let policy = AggregatePolicy {
+                start_offset: None,
+                end_offset: None,
+                schedule_interval: days(1),
+            };
+            let mut diff = retention_diff(Some("retention note"));
+            diff.timescale.changes.extend([
+                // Statements in both phases: a drop (pre) and a create (post).
+                TimescaleChange::gated(
+                    TimescaleChangeKind::AggregateSet(AggregateSetChange {
+                        drop_aggregates: vec![hourly.clone()],
+                        create: vec![hourly],
+                        ..Default::default()
+                    }),
+                    "aggregate set note".into(),
+                ),
+                // Statements in the post phase only.
+                TimescaleChange::ungated(
+                    TimescaleChangeKind::ReplaceAggregatePolicy {
+                        view: "HourlyMetric".into(),
+                        old: None,
+                        new: Some(policy),
+                    },
+                    Some("policy note".into()),
+                ),
+                // Statements in the pre phase only.
+                TimescaleChange::gated(
+                    TimescaleChangeKind::DisableColumnstore {
+                        table: "Metric".into(),
+                        old: crate::timescale::ColumnstoreState {
+                            settings: crate::timescale::ColumnstoreSettings {
+                                segment_by: vec![],
+                                order_by: vec![("time".into(), true)],
+                            },
+                            after: None,
+                        },
+                    },
+                    "columnstore note".into(),
+                ),
+            ]);
+            let sql = PostgresSqlGenerator.generate(&diff);
+            let notes = [
+                "retention note",
+                "aggregate set note",
+                "policy note",
+                "columnstore note",
+            ];
+            for note in notes {
+                assert_eq!(
+                    sql.warnings.iter().filter(|w| *w == note).count(),
+                    1,
+                    "{note}: {:?}",
+                    sql.warnings
+                );
+            }
+            let positions: Vec<usize> = notes
+                .iter()
+                .map(|n| sql.warnings.iter().position(|w| w == n).unwrap())
+                .collect();
+            assert!(positions.is_sorted(), "{:?}", sql.warnings);
         }
     }
 
