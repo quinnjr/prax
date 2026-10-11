@@ -9,7 +9,9 @@
 //! shapes, which DDL the server rejects, how intervals decode).
 //!
 //! Every test is `#[ignore]` and self-skips unless `PRAX_E2E=1` and
-//! `TIMESCALE_URL` is set, following the workspace convention. Each test owns
+//! `TIMESCALE_URL` is set, following the workspace convention. With
+//! `PRAX_REQUIRE_TIMESCALE=1` (set by the `timescale-e2e` CI job) a missing
+//! `TIMESCALE_URL` fails instead of skipping. Each test owns
 //! a fresh schema `prax_t_<name>` (dropped at the end) and the tests run
 //! one at a time, because each first drops the `prax_t_*` schemas a failed
 //! run left behind.
@@ -91,10 +93,11 @@ impl Ts {
             return None;
         }
         let Ok(url) = std::env::var("TIMESCALE_URL") else {
-            // On CI a missing URL must fail loudly, not pass vacuously.
+            // The dedicated CI job must fail loudly, not pass vacuously. Other
+            // PRAX_E2E jobs have no TimescaleDB service and skip.
             assert!(
-                std::env::var_os("CI").is_none(),
-                "PRAX_E2E=1 on CI but TIMESCALE_URL is not set"
+                std::env::var("PRAX_REQUIRE_TIMESCALE").ok().as_deref() != Some("1"),
+                "PRAX_REQUIRE_TIMESCALE=1 but TIMESCALE_URL is not set"
             );
             eprintln!("skipping: TIMESCALE_URL not set");
             return None;

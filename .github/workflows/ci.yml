@@ -171,6 +171,8 @@ jobs:
           - "timescale/timescaledb:2.30.2-pg17"
     env:
       PRAX_E2E: "1"
+      # Fail rather than skip if TIMESCALE_URL goes missing.
+      PRAX_REQUIRE_TIMESCALE: "1"
       # Keep credentials in sync with the timescaledb service in docker-compose.yml.
       TIMESCALE_URL: postgres://prax:prax_test_password@localhost:5434/prax_test
     services:
