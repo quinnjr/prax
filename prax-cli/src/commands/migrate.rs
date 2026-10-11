@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use prax_migrate::timescale::comment_safe;
+
 use crate::cli::MigrateArgs;
 use crate::commands::seed::{SeedRunner, find_seed_file, get_database_url};
 use crate::config::{CONFIG_FILE_NAME, Config, MIGRATIONS_DIR, SCHEMA_FILE_PATH};
@@ -73,12 +75,13 @@ async fn run_dev(args: crate::cli::MigrateDevArgs) -> CliResult<()> {
 
     // 4. Generate migration
     output::step(4, total_steps, "Generating migration...");
-    if !generated.has_statements {
+    let Some(migration_sql) = generated.statements_sql() else {
         output::newline();
         report_no_statements(&generated, "No migration created.");
         return Ok(());
-    }
-    let migration_path = create_migration(&migrations_dir, &migration_name, &generated.sql)?;
+    };
+    print_notes(&generated);
+    let migration_path = create_migration(&migrations_dir, &migration_name, migration_sql)?;
 
     // 5. Apply migration (if not --create-only)
     if !args.create_only {
@@ -318,11 +321,7 @@ async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
     output::step(2, 2, "Comparing schema to database...");
     let source = resolve_source_schema(&config, &schema).await?;
     let generated = generate_migration_sql(&schema, source, &config, args.allow_destructive)?;
-    let ddl_sql = if generated.has_statements {
-        generated.sql.clone()
-    } else {
-        String::new()
-    };
+    let ddl_sql = generated.statements_sql().unwrap_or_default();
 
     output::newline();
     if !generated.has_statements {
@@ -331,10 +330,10 @@ async fn run_diff(args: crate::cli::MigrateDiffArgs) -> CliResult<()> {
 
     output::newline();
     output::section("Generated DDL");
-    output::code(&ddl_sql, "sql");
+    output::code(ddl_sql, "sql");
 
     if let Some(output_path) = args.output {
-        std::fs::write(&output_path, &ddl_sql)?;
+        std::fs::write(&output_path, ddl_sql)?;
         output::newline();
         success(&format!("DDL written to {}", output_path.display()));
     }
@@ -504,7 +503,11 @@ async fn resolve_source_schema(
 /// The introspected diff source: the database structure plus, for Postgres,
 /// the installed extensions and (when the target opts in) the TimescaleDB
 /// catalog.
-pub(crate) struct DiffSource {
+///
+/// Public only so the live integration suite can drive
+/// [`generate_migration_sql`]; not a stable API.
+#[doc(hidden)]
+pub struct DiffSource {
     /// Database structure mapped to a Prax schema.
     pub schema: prax_schema::ast::Schema,
     /// Postgres extension and TimescaleDB state (`None` for other providers).
@@ -645,8 +648,12 @@ fn sql_backend_for_provider(provider: &str) -> CliResult<prax_migrate::SqlBacken
 }
 
 /// The outcome of [`generate_migration_sql`].
+///
+/// Public only so the live integration suite can drive
+/// [`generate_migration_sql`]; not a stable API.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
-pub(crate) struct GeneratedMigration {
+pub struct GeneratedMigration {
     /// Header, `-- WARNING:` lines, `-- SKIPPED` lines, then the `up` SQL.
     pub sql: String,
     /// Whether `up` contains any statement.
@@ -657,25 +664,57 @@ pub(crate) struct GeneratedMigration {
     pub warnings: Vec<String>,
 }
 
+impl GeneratedMigration {
+    /// The migration text to write or print, or `None` when `up` holds no
+    /// statement (the text would only be comments).
+    #[must_use]
+    pub fn statements_sql(&self) -> Option<&str> {
+        self.has_statements.then_some(self.sql.as_str())
+    }
+}
+
+/// Print every warning and skipped change, then, when changes were skipped,
+/// how many and how to include them. Database-sourced names in the notes are
+/// kept on one line.
+fn print_notes(generated: &GeneratedMigration) {
+    for warning in &generated.warnings {
+        output::warn(&comment_safe(warning));
+    }
+    for note in &generated.skipped {
+        output::warn(&comment_safe(note));
+    }
+    if !generated.skipped.is_empty() {
+        output::warn(&format!(
+            "{} change(s) skipped — re-run with --allow-destructive to include them.",
+            generated.skipped.len()
+        ));
+    }
+}
+
 /// Explain an empty migration: print any warnings and skipped changes, then
 /// either the "No changes" message or the "does not match" message.
 fn report_no_statements(generated: &GeneratedMigration, tail: &str) {
-    for warning in &generated.warnings {
-        output::warn(warning);
-    }
+    print_notes(generated);
     if generated.skipped.is_empty() {
         success(&format!(
             "No changes: the database already matches the schema. {tail}"
         ));
-        return;
+    } else {
+        output::warn(&format!("The database does not match the schema. {tail}"));
     }
-    for note in &generated.skipped {
-        output::warn(note);
+}
+
+/// Append one `-- {prefix}{line}` comment per entry of `lines`. Entries may
+/// carry database-sourced names, so each is first made safe for a one-line
+/// comment: a raw newline would otherwise end the comment and turn the rest
+/// of the name into executable SQL.
+fn push_comment_lines(out: &mut String, prefix: &str, lines: &[String]) {
+    for line in lines {
+        out.push_str("-- ");
+        out.push_str(prefix);
+        out.push_str(&comment_safe(line));
+        out.push('\n');
     }
-    output::warn(&format!(
-        "The database does not match the schema: {} change(s) need --allow-destructive. {tail}",
-        generated.skipped.len()
-    ));
 }
 
 /// Diff the desired `schema` (target) against an optional introspected
@@ -690,7 +729,18 @@ fn report_no_statements(generated: &GeneratedMigration, tail: &str) {
 /// never silently destroys data. The source's TimescaleDB catalog is passed to
 /// the differ only when `schema` opts in
 /// ([`prax_migrate::timescale::opts_into_timescale`]).
-fn generate_migration_sql(
+///
+/// Public only so the live integration suite can drive the real CLI path;
+/// not a stable API.
+///
+/// # Errors
+///
+/// Returns [`CliError::Config`] for a provider with no SQL backend, and
+/// [`CliError::Migration`] when `schema` opts into TimescaleDB but the
+/// installed extension is older than
+/// [`prax_migrate::timescale::TIMESCALE_MIN_VERSION`], or when the diff fails.
+#[doc(hidden)]
+pub fn generate_migration_sql(
     schema: &prax_schema::ast::Schema,
     source: Option<DiffSource>,
     config: &Config,
@@ -700,31 +750,29 @@ fn generate_migration_sql(
 
     let backend = sql_backend_for_provider(&config.database.provider)?;
 
-    let uses_timescale = schema.models.values().any(|m| m.timescale().is_some())
-        || schema
-            .views
-            .values()
-            .any(|v| v.continuous_aggregate().is_some());
+    // One opt-in decision drives both the version gate and the catalog
+    // hand-off, so they can never disagree.
+    let opted_in = prax_migrate::timescale::opts_into_timescale(schema);
 
     let differ = SchemaDiffer::new(schema.clone());
     let differ = match source {
         Some(src) => {
             let mut differ = differ.with_source(src.schema);
             if let Some(catalog) = src.catalog {
-                if uses_timescale
+                if opted_in
                     && let Some(ts) = &catalog.timescale
-                    && !prax_migrate::timescale::catalog::timescale_version_supported(&ts.version)
+                    && !prax_migrate::timescale::timescale_version_supported(&ts.version)
                 {
+                    let (major, minor) = prax_migrate::timescale::TIMESCALE_MIN_VERSION;
                     return Err(CliError::Migration(format!(
-                        "TimescaleDB {} is installed, but Prax requires TimescaleDB 2.18 or \
-                         newer for @@timescale.* attributes. Upgrade the extension.",
+                        "TimescaleDB {} is installed, but the schema opts into TimescaleDB \
+                         (`extensions = [timescaledb]` or `@@timescale.*`) and Prax requires \
+                         TimescaleDB {major}.{minor} or newer. Upgrade the extension.",
                         ts.version
                     )));
                 }
                 differ = differ.with_installed_extensions(catalog.extensions);
-                if let Some(ts) = catalog.timescale
-                    && prax_migrate::timescale::opts_into_timescale(schema)
-                {
+                if opted_in && let Some(ts) = catalog.timescale {
                     differ = differ.with_timescale_catalog(ts);
                 }
             }
@@ -752,15 +800,8 @@ fn generate_migration_sql(
              --allow-destructive to include them.\n",
         );
     }
-    for warning in &migration.warnings {
-        out.push_str(&format!("-- WARNING: {}\n", warning));
-    }
-    for note in &skipped {
-        out.push_str(&format!(
-            "-- SKIPPED (needs --allow-destructive): {}\n",
-            note
-        ));
-    }
+    push_comment_lines(&mut out, "WARNING: ", &migration.warnings);
+    push_comment_lines(&mut out, "SKIPPED (needs --allow-destructive): ", &skipped);
     out.push('\n');
     out.push_str(migration.up.trim_end());
     if !migration.up.trim_end().is_empty() {
@@ -1233,7 +1274,79 @@ mod tests {
         };
         let err = generate_migration_sql(&target, Some(source), &pg_config(), false).unwrap_err();
         let msg = err.to_string();
+        let (major, minor) = prax_migrate::timescale::TIMESCALE_MIN_VERSION;
+        assert!(
+            msg.contains("2.17.2") && msg.contains(&format!("{major}.{minor}")),
+            "msg: {msg}"
+        );
+        assert!(msg.contains("2.18"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_generate_rejects_old_timescale_when_opted_in_by_extension_only() {
+        // Listing `timescaledb` opts in as much as an `@@timescale.*`
+        // attribute does, so the version gate applies too.
+        let target = parse(
+            r#"
+            datasource db {
+                provider = "postgresql"
+                url = "postgres://x"
+                extensions = [timescaledb]
+            }
+            model A { id Int @id }
+            "#,
+        );
+        let source = DiffSource {
+            schema: parse(""),
+            catalog: Some(ts_catalog("2.17.2")),
+        };
+        let msg = generate_migration_sql(&target, Some(source), &pg_config(), false)
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("2.17.2") && msg.contains("2.18"), "msg: {msg}");
+    }
+
+    #[test]
+    fn test_generate_ignores_old_timescale_without_opt_in() {
+        let target = parse(PLAIN_METRIC);
+        let source = DiffSource {
+            schema: parse(PLAIN_METRIC),
+            catalog: Some(ts_catalog("2.17.2")),
+        };
+        let generated = generate_migration_sql(&target, Some(source), &pg_config(), false)
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(!generated.has_statements, "sql: {}", generated.sql);
+    }
+
+    #[test]
+    fn test_statements_sql_only_when_there_are_statements() {
+        let schema = parse(USERS_V1);
+        let created = generate_migration_sql(&schema, None, &pg_config(), false).unwrap();
+        assert_eq!(created.statements_sql(), Some(created.sql.as_str()));
+
+        let unchanged =
+            generate_migration_sql(&schema, Some(parse(USERS_V1).into()), &pg_config(), false)
+                .unwrap();
+        assert_eq!(unchanged.statements_sql(), None);
+    }
+
+    #[test]
+    fn test_comment_lines_cannot_break_out_into_sql() {
+        // A database-sourced name carrying a newline must stay inside the
+        // comment rather than become an executable statement.
+        let mut out = String::new();
+        push_comment_lines(
+            &mut out,
+            "SKIPPED (needs --allow-destructive): ",
+            &["Drop table \"x\nDROP TABLE users; --\"".to_string()],
+        );
+        push_comment_lines(&mut out, "WARNING: ", &["a\r\nb\u{2028}c".to_string()]);
+        assert_eq!(out.lines().count(), 2, "out: {out:?}");
+        assert!(out.lines().all(|l| l.starts_with("-- ")), "out: {out:?}");
+        assert!(
+            statements_only(&out).trim().is_empty(),
+            "no statement may escape: {out:?}"
+        );
     }
 
     /// A catalog holding a hand-made `Metric` hypertable on `time`.
