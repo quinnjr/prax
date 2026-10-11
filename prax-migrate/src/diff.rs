@@ -89,8 +89,6 @@ impl SchemaDiff {
     /// order. A stripped aggregate set that creates aggregates also reports
     /// that their refresh policy and `materializedOnly` values are deferred.
     pub fn strip_timescale_gated(&mut self) -> Vec<String> {
-        use crate::timescale::TimescaleChangeKind;
-
         let mut notes = Vec::new();
         let mut handoffs: Vec<String> = Vec::new();
         let mut coupled: Vec<(String, String)> = Vec::new();
@@ -102,28 +100,23 @@ impl SchemaDiff {
                 continue;
             }
             let mut note = change.description();
-            if let TimescaleChangeKind::AggregateSet {
-                create,
-                handoff_views,
-                coupled_columns,
-                ..
-            } = &change.kind
-            {
-                if !create.is_empty() {
-                    note.truncate(note.trim_end_matches('.').len());
-                    note.push_str(
-                        ". The recreated aggregates' new refresh-policy and materializedOnly \
+            if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
+                if !set.create.is_empty() {
+                    note = append_sentence(
+                        &note,
+                        "The recreated aggregates' new refresh-policy and materializedOnly \
                          values are deferred with it",
                     );
                 }
-                handoffs.extend(handoff_views.iter().cloned());
-                coupled.extend(coupled_columns.iter().cloned());
+                handoffs.extend(set.handoff_views.iter().cloned());
+                coupled.extend(set.coupled_columns.iter().cloned());
             }
             notes.push(note);
         }
 
+        // Hand-offs are database view names.
         self.create_views
-            .retain(|v| !handoffs.iter().any(|h| *h == v.view_name || *h == v.name));
+            .retain(|v| !handoffs.contains(&v.view_name));
 
         for alter in &mut self.alter_models {
             for (_, column) in coupled.iter().filter(|(t, _)| *t == alter.table_name) {
@@ -131,15 +124,7 @@ impl SchemaDiff {
                 alter.drop_fields.retain(|c| c != column);
             }
         }
-        self.alter_models.retain(|a| {
-            !(a.add_fields.is_empty()
-                && a.drop_fields.is_empty()
-                && a.alter_fields.is_empty()
-                && a.add_indexes.is_empty()
-                && a.drop_indexes.is_empty()
-                && a.add_foreign_keys.is_empty()
-                && a.drop_foreign_keys.is_empty())
-        });
+        self.alter_models.retain(|a| !a.is_empty());
 
         notes
     }
@@ -353,6 +338,27 @@ pub struct ModelAlterDiff {
     pub add_foreign_keys: Vec<ForeignKeyDiff>,
     /// Foreign keys to drop (by constraint name).
     pub drop_foreign_keys: Vec<String>,
+}
+
+impl ModelAlterDiff {
+    /// Whether the alter changes nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.add_fields.is_empty()
+            && self.drop_fields.is_empty()
+            && self.alter_fields.is_empty()
+            && self.add_indexes.is_empty()
+            && self.drop_indexes.is_empty()
+            && self.add_foreign_keys.is_empty()
+            && self.drop_foreign_keys.is_empty()
+    }
+}
+
+/// Append `sentence` to the user-facing `note` as a new sentence: `note` ends
+/// in exactly one period (added when missing, collapsed when repeated), then
+/// a space and `sentence`.
+pub(crate) fn append_sentence(note: &str, sentence: &str) -> String {
+    format!("{}. {sentence}", note.trim_end().trim_end_matches('.'))
 }
 
 /// A foreign key constraint diff.
@@ -624,6 +630,14 @@ impl SchemaDiffer {
     ///
     /// When set, this takes precedence over the source schema's datasource
     /// extensions when deciding which extensions to create.
+    ///
+    /// [`diff`](Self::diff) adds a `create_extensions` entry (rendered as
+    /// `CREATE EXTENSION IF NOT EXISTS`) for every extension the target's
+    /// datasource declares that is not installed. A source schema built by
+    /// introspecting tables carries no `extensions`, so callers diffing
+    /// against an introspected database should pass the database's installed
+    /// extensions here; otherwise every migration repeats the
+    /// `CREATE EXTENSION IF NOT EXISTS` statements.
     #[must_use]
     pub fn with_installed_extensions(mut self, names: Vec<String>) -> Self {
         self.installed_extensions = Some(names);
@@ -644,6 +658,20 @@ impl SchemaDiffer {
     }
 
     /// Compute the diff between schemas.
+    ///
+    /// Extensions are create-only: every extension the target's datasource
+    /// declares that is not installed becomes a `create_extensions` entry.
+    /// "Installed" means the list passed to
+    /// [`with_installed_extensions`](Self::with_installed_extensions), or else
+    /// the source schema's datasource `extensions`, or else nothing. Pass the
+    /// installed extensions when the source is introspected, or each
+    /// migration re-emits `CREATE EXTENSION IF NOT EXISTS` for them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::MigrationError::InvalidMigration`] when the target's
+    /// `@@timescale.*` attributes are invalid, or when a TimescaleDB change
+    /// cannot be made (see [`crate::timescale::diff_timescale`]).
     pub fn diff(&self) -> MigrateResult<SchemaDiff> {
         let mut result = SchemaDiff::default();
 
@@ -812,7 +840,7 @@ impl SchemaDiffer {
         // Diff views. A view that is a continuous aggregate on either side
         // (target declaration or catalog) is left to `diff_timescale`,
         // including transitions to and from plain or materialized views.
-        let aggregate_views: HashSet<String> = resolve_aggregates(&self.target)
+        let aggregate_views: HashSet<String> = resolve_aggregates(&self.target)?
             .into_keys()
             .chain(
                 self.timescale_catalog
@@ -865,8 +893,8 @@ impl SchemaDiffer {
                 let source_sql = self
                     .source
                     .as_ref()
-                    .and_then(|s| resolve_view_sql(source_view, s));
-                let target_sql = resolve_view_sql(target_view, &self.target);
+                    .and_then(|s| source_view.resolved_sql(s));
+                let target_sql = target_view.resolved_sql(&self.target);
 
                 // Check if SQL or materialized status changed
                 let sql_changed = source_sql != target_sql;
@@ -957,8 +985,8 @@ impl SchemaDiffer {
         // dropped by the Timescale pre-phase; the generic pipeline creates the
         // views.
         for change in &result.timescale.changes {
-            if let TimescaleChangeKind::AggregateSet { handoff_views, .. } = &change.kind {
-                for name in handoff_views {
+            if let TimescaleChangeKind::AggregateSet(set) = &change.kind {
+                for name in &set.handoff_views {
                     if let Some(view) = self.target.views.values().find(|v| v.view_name() == name)
                         && let Some(view_diff) = view_to_diff(view, &self.target)
                     {
@@ -1729,17 +1757,10 @@ fn diff_models(
     }
 }
 
-/// Resolve the SQL defining a view: the inline `@@sql` attribute if present,
-/// otherwise a top-level `@@sql` definition (`schema.raw_sql`) whose name
-/// matches the view's database name (`@@map`) or model name.
-fn resolve_view_sql<'a>(view: &'a View, schema: &'a Schema) -> Option<&'a str> {
-    view.resolved_sql(schema)
-}
-
 /// Convert a view to a diff for creation.
 fn view_to_diff(view: &View, schema: &Schema) -> Option<ViewDiff> {
     // Views require a SQL definition (inline @@sql or top-level @@sql) to be migrated
-    let sql_query = resolve_view_sql(view, schema)?.to_string();
+    let sql_query = view.resolved_sql(schema)?.to_string();
 
     let fields: Vec<ViewFieldDiff> = view
         .fields
@@ -1946,7 +1967,7 @@ mod tests {
     mod strip_gated {
         use super::*;
         use crate::timescale::catalog::AggregateState;
-        use crate::timescale::{TimescaleChange, TimescaleChangeKind};
+        use crate::timescale::{AggregateSetChange, TimescaleChange, TimescaleChangeKind};
         use prax_schema::ast::PgInterval;
 
         fn days(n: i32) -> PgInterval {
@@ -1990,13 +2011,13 @@ mod tests {
                 policy: None,
             };
             TimescaleChange {
-                kind: TimescaleChangeKind::AggregateSet {
+                kind: TimescaleChangeKind::AggregateSet(AggregateSetChange {
                     drop_aggregates: vec![state.clone()],
                     drop_views: vec![],
                     create: if create { vec![state] } else { vec![] },
                     handoff_views: vec!["HourlyMetric".into()],
                     coupled_columns: vec![("Metric".into(), "value".into())],
-                },
+                }),
                 gated: true,
                 note: note.map(Into::into),
             }
@@ -2059,6 +2080,35 @@ mod tests {
             assert_eq!(notes, vec!["drops aggregate".to_string()]);
             assert_eq!(diff.create_views.len(), 1);
             assert_eq!(diff.create_views[0].name, "Other");
+        }
+
+        #[test]
+        fn test_strip_matches_handoffs_on_view_name_only() {
+            // A view whose model name equals a hand-off but whose database
+            // name differs is not the handed-off view.
+            let mut diff = SchemaDiff::default();
+            diff.timescale.changes = vec![aggregate(false, Some("drops aggregate"))];
+            let mut renamed = view("HourlyMetric");
+            renamed.view_name = "hourly_report".into();
+            diff.create_views = vec![renamed];
+            diff.strip_timescale_gated();
+            assert_eq!(diff.create_views.len(), 1);
+            assert_eq!(diff.create_views[0].view_name, "hourly_report");
+        }
+
+        #[test]
+        fn test_append_sentence_handles_trailing_period() {
+            assert_eq!(append_sentence("Drops x.", "More"), "Drops x. More");
+            assert_eq!(append_sentence("Drops x", "More."), "Drops x. More.");
+            assert_eq!(append_sentence("Drops x.. ", "More"), "Drops x. More");
+        }
+
+        #[test]
+        fn test_model_alter_diff_is_empty() {
+            let mut metric = alter("Metric");
+            assert!(metric.is_empty());
+            metric.drop_fields = vec!["value".into()];
+            assert!(!metric.is_empty());
         }
 
         #[test]

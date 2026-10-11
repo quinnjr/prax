@@ -1,20 +1,22 @@
-//! Diff continuous aggregates between the target schema and the live catalog
-//! (spec §4.8, §5).
+//! Diff continuous aggregates between the target schema and the live catalog.
 //!
 //! Aggregates are keyed by database view name. The catalog's `source` edges
-//! give the drop order and the descendants dropped with a parent; the target's
-//! give the creation order (spec §5.6). Changes are grouped into at most one
-//! ungated and one gated [`TimescaleChangeKind::AggregateSet`], so stripping
-//! the gated set never leaves half a recreation behind.
+//! give the drop order and the descendants dropped with a parent (Postgres
+//! will not drop an aggregate another one reads); the target's give the
+//! creation order. Changes are grouped into at most one ungated and one gated
+//! [`TimescaleChangeKind::AggregateSet`], so stripping the gated set never
+//! leaves half a recreation behind.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use prax_schema::Schema;
 
 use crate::diff::SchemaDiff;
-use crate::error::{MigrateResult, MigrationError};
+use crate::error::MigrateResult;
 use crate::timescale::catalog::{AggregateState, CAGG_RECORD_MARKER, TimescaleCatalog};
-use crate::timescale::diff::{TimescaleChange, TimescaleChangeKind, TimescaleDiff};
+use crate::timescale::diff::{
+    AggregateSetChange, TimescaleChangeKind, TimescaleDiff, change, invalid, plural,
+};
 use crate::timescale::resolve::resolve_aggregates;
 
 /// Normalize SQL for comparison: collapse whitespace runs, trim, and drop one
@@ -48,56 +50,134 @@ pub(crate) fn topo_order(aggs: &[AggregateState]) -> Vec<AggregateState> {
     ordered
 }
 
+/// Aggregates by database view name.
+type Aggregates = BTreeMap<String, AggregateState>;
+
+/// Non-aggregate views by database view name; `true` for a materialized view.
+type OtherViews = BTreeMap<String, bool>;
+
 /// Append the continuous-aggregate changes to `out`: the ungated
 /// `AggregateSet`, the gated one, then policy and `materialized_only` changes
 /// in view-name order. Unmarked aggregates add warnings.
 ///
 /// `generic` supplies the column type changes and drops that force the
-/// aggregates reading a table to be recreated (spec §4.8); default-only and
-/// nullability-only alters do not.
+/// aggregates reading a table to be recreated, because Postgres refuses them
+/// on a column a view depends on; default-only and nullability-only alters
+/// do not.
 ///
 /// # Errors
 ///
-/// Returns [`MigrationError::InvalidMigration`] when a target aggregate is
-/// declared on a relation the catalog lists as unsupported, has no SQL, or
-/// declares a `source` that differs from the database while its SQL is
-/// unchanged.
+/// Returns [`crate::MigrationError::InvalidMigration`] when a target
+/// aggregate's `@@timescale.continuous` attribute is invalid, it is declared
+/// on a relation the catalog lists as unsupported, has no SQL, or declares a
+/// `source` that differs from the database while its SQL is unchanged.
 pub(crate) fn diff_aggregates(
     target: &Schema,
     catalog: Option<&TimescaleCatalog>,
     generic: &SchemaDiff,
     out: &mut TimescaleDiff,
 ) -> MigrateResult<()> {
-    let want = resolve_aggregates(target);
-    let no_aggregates = BTreeMap::new();
-    let no_views = BTreeMap::new();
+    let want = resolve_aggregates(target)?;
+    let no_aggregates = Aggregates::new();
+    let no_views = OtherViews::new();
     let have = catalog.map_or(&no_aggregates, |c| &c.aggregates);
     let other_views = catalog.map_or(&no_views, |c| &c.other_views);
 
-    // Unsupported aggregates are not in `have`, so undeclared ones are left
-    // alone; declaring one is an error (spec non-goals).
     if let Some(catalog) = catalog {
-        for name in want.keys() {
-            if let Some(reason) = catalog.unsupported.get(name) {
-                return Err(MigrationError::InvalidMigration(format!(
-                    "View \"{name}\" declares @@timescale.continuous, but the database relation \
-                     \"{name}\" cannot be managed by Prax: {reason}. Remove the view from the \
-                     schema to leave it unmanaged, or drop it manually so the migration can \
-                     create the continuous aggregate from the schema."
-                )));
-            }
+        check_declared_supported(&want, catalog)?;
+    }
+    let drops = plan_drops(target, &want, have, generic)?;
+    let creates = plan_creates(&want, have, other_views, &drops.dropped);
+    push_sets(&want, have, other_views, &creates, &drops, out);
+    push_in_place_changes(&want, have, &drops.dropped, out);
+    Ok(())
+}
+
+/// Unsupported aggregates are not in the catalog's `aggregates`, so
+/// undeclared ones are left alone; declaring one is an error, because Prax
+/// cannot read or recreate it faithfully.
+fn check_declared_supported(want: &Aggregates, catalog: &TimescaleCatalog) -> MigrateResult<()> {
+    for name in want.keys() {
+        if let Some(reason) = catalog.unsupported.get(name) {
+            return Err(invalid(format!(
+                "View \"{name}\" declares @@timescale.continuous, but the database relation \
+                 \"{name}\" cannot be managed by Prax: {reason}. Remove the view from the \
+                 schema to leave it unmanaged, or drop it manually so the migration can \
+                 create the continuous aggregate from the schema."
+            )));
         }
     }
+    Ok(())
+}
 
-    // Catalog aggregates that must go (spec §5.5): changed SQL, no longer an
-    // aggregate in the target (handed off when the target declares a view of
-    // that name), or reading a table whose columns are type-changed or dropped.
-    let mut changed = BTreeSet::new();
+/// The catalog aggregates that must be dropped, and why.
+struct DropPlan {
+    /// Aggregates whose recorded SQL differs from the target's.
+    changed: BTreeSet<String>,
+    /// Aggregates the target no longer declares in any form.
+    removed: BTreeSet<String>,
+    /// Aggregates the target now declares as plain or materialized views.
+    handoff_views: Vec<String>,
+    /// `(table, column)` type changes and drops that force a recreation.
+    coupled_columns: BTreeSet<(String, String)>,
+    /// Everything dropped: the above plus every catalog descendant.
+    dropped: BTreeSet<String>,
+}
+
+/// Plan the catalog aggregates to drop: changed SQL, no longer an aggregate
+/// in the target (handed off when the target declares a view of that name
+/// with SQL to create it), or reading a table whose columns are type-changed
+/// or dropped, plus every aggregate built on one of those.
+fn plan_drops(
+    target: &Schema,
+    want: &Aggregates,
+    have: &Aggregates,
+    generic: &SchemaDiff,
+) -> MigrateResult<DropPlan> {
+    let changed = changed_aggregates(want, have)?;
     let mut removed = BTreeSet::new();
     let mut handoff_views = Vec::new();
-    for (name, w) in &want {
+    for name in have.keys().filter(|n| !want.contains_key(*n)) {
+        // The generic pipeline only creates a view that has SQL; without it
+        // the aggregate is simply gone.
+        let handed_off = target
+            .views
+            .values()
+            .any(|v| v.view_name() == name && v.resolved_sql(target).is_some());
+        if handed_off {
+            handoff_views.push(name.clone());
+        } else {
+            removed.insert(name.clone());
+        }
+    }
+    let (coupled_roots, coupled_columns) = coupled_aggregates(have, generic);
+    let roots = changed
+        .iter()
+        .chain(&removed)
+        .chain(&handoff_views)
+        .chain(&coupled_roots);
+    let dropped = with_descendants(have, roots.cloned().collect());
+    Ok(DropPlan {
+        changed,
+        removed,
+        handoff_views,
+        coupled_columns,
+        dropped,
+    })
+}
+
+/// Target aggregates whose SQL differs from the definition recorded in the
+/// catalog.
+///
+/// # Errors
+///
+/// A target aggregate without SQL, or one whose SQL is unchanged but whose
+/// declared `source` differs from the database.
+fn changed_aggregates(want: &Aggregates, have: &Aggregates) -> MigrateResult<BTreeSet<String>> {
+    let mut changed = BTreeSet::new();
+    for (name, w) in want {
         let Some(sql) = &w.sql else {
-            return Err(MigrationError::InvalidMigration(format!(
+            return Err(invalid(format!(
                 "Continuous aggregate \"{name}\" has no SQL. Add an @@sql attribute to its view \
                  or a top-level @@sql(\"{name}\", \"\"\"...\"\"\") definition."
             )));
@@ -109,7 +189,7 @@ pub(crate) fn diff_aggregates(
         if normalize_sql(recorded) != normalize_sql(sql) {
             changed.insert(name.clone());
         } else if h.source != w.source {
-            return Err(MigrationError::InvalidMigration(format!(
+            return Err(invalid(format!(
                 "Continuous aggregate \"{name}\" declares source \"{}\", but in the database it \
                  reads \"{}\" and its SQL is unchanged. Set `source` in @@timescale.continuous to \
                  the relation its SQL reads, or change the SQL to recreate the aggregate.",
@@ -117,15 +197,17 @@ pub(crate) fn diff_aggregates(
             )));
         }
     }
-    for name in have.keys().filter(|n| !want.contains_key(*n)) {
-        if target.views.values().any(|v| v.view_name() == name) {
-            handoff_views.push(name.clone());
-        } else {
-            removed.insert(name.clone());
-        }
-    }
-    let mut coupled_roots = BTreeSet::new();
-    let mut coupled_columns = BTreeSet::new();
+    Ok(changed)
+}
+
+/// The catalog aggregates reading a table whose columns the generic diff
+/// type-changes or drops, and those `(table, column)` pairs.
+fn coupled_aggregates(
+    have: &Aggregates,
+    generic: &SchemaDiff,
+) -> (BTreeSet<String>, BTreeSet<(String, String)>) {
+    let mut roots = BTreeSet::new();
+    let mut columns_out = BTreeSet::new();
     for alter in &generic.alter_models {
         let readers: Vec<&String> = have
             .values()
@@ -145,22 +227,19 @@ pub(crate) fn diff_aggregates(
         if readers.is_empty() || columns.is_empty() {
             continue;
         }
-        coupled_roots.extend(readers.into_iter().cloned());
-        coupled_columns.extend(
+        roots.extend(readers.into_iter().cloned());
+        columns_out.extend(
             columns
                 .into_iter()
                 .map(|c| (alter.table_name.clone(), c.clone())),
         );
     }
+    (roots, columns_out)
+}
 
-    // Dropping an aggregate first drops its catalog descendants (§5.6).
-    let mut dropped: BTreeSet<String> = changed
-        .iter()
-        .chain(&removed)
-        .chain(&handoff_views)
-        .chain(&coupled_roots)
-        .cloned()
-        .collect();
+/// `roots` plus every catalog aggregate built (directly or not) on one of
+/// them: Postgres refuses to drop an aggregate another one reads.
+fn with_descendants(have: &Aggregates, mut dropped: BTreeSet<String>) -> BTreeSet<String> {
     loop {
         let descendants: Vec<String> = have
             .values()
@@ -168,14 +247,22 @@ pub(crate) fn diff_aggregates(
             .map(|a| a.view.clone())
             .collect();
         if descendants.is_empty() {
-            break;
+            return dropped;
         }
         dropped.extend(descendants);
     }
+}
 
-    // Target aggregates to create, and whether the gated set creates them:
-    // dropped ones are recreated there, and replacing a materialized view
-    // discards its rows (§4.1).
+/// Target aggregates to create, and whether the gated set creates them:
+/// dropped ones are recreated there, and replacing a materialized view
+/// discards its rows. A create on top of a gated create joins the gated set,
+/// so stripping that set never leaves an aggregate without its parent.
+fn plan_creates<'a>(
+    want: &'a Aggregates,
+    have: &Aggregates,
+    other_views: &OtherViews,
+    dropped: &BTreeSet<String>,
+) -> BTreeMap<&'a str, bool> {
     let mut creates: BTreeMap<&str, bool> = BTreeMap::new();
     for name in want.keys() {
         if have.contains_key(name) {
@@ -186,8 +273,6 @@ pub(crate) fn diff_aggregates(
             creates.insert(name, other_views.get(name).copied().unwrap_or(false));
         }
     }
-    // A create on top of a gated create joins the gated set, so stripping that
-    // set never leaves an aggregate without its parent.
     loop {
         let joining: Vec<&str> = creates
             .iter()
@@ -200,12 +285,25 @@ pub(crate) fn diff_aggregates(
             .map(|(name, _)| *name)
             .collect();
         if joining.is_empty() {
-            break;
+            return creates;
         }
         for name in joining {
             creates.insert(name, true);
         }
     }
+}
+
+/// Push the ungated set (new aggregates and the plain views they replace),
+/// then the gated set (drops, the views and aggregates they hand off to, and
+/// the recreations).
+fn push_sets(
+    want: &Aggregates,
+    have: &Aggregates,
+    other_views: &OtherViews,
+    creates: &BTreeMap<&str, bool>,
+    drops: &DropPlan,
+    out: &mut TimescaleDiff,
+) {
     let set_creates = |gated: bool| {
         let picked: Vec<AggregateState> = want
             .values()
@@ -222,55 +320,57 @@ pub(crate) fn diff_aggregates(
             .collect()
     };
 
-    let create = set_creates(false);
-    let drop_views = set_drop_views(false);
-    if !create.is_empty() || !drop_views.is_empty() {
-        out.changes.push(TimescaleChange {
-            kind: TimescaleChangeKind::AggregateSet {
-                drop_aggregates: Vec::new(),
-                drop_views,
-                create,
-                handoff_views: Vec::new(),
-                coupled_columns: Vec::new(),
-            },
-            gated: false,
-            note: None,
-        });
+    let ungated = AggregateSetChange {
+        drop_views: set_drop_views(false),
+        create: set_creates(false),
+        ..AggregateSetChange::default()
+    };
+    if !ungated.create.is_empty() || !ungated.drop_views.is_empty() {
+        out.changes.push(change(
+            TimescaleChangeKind::AggregateSet(ungated),
+            false,
+            None,
+        ));
     }
 
     let mut drop_aggregates = topo_order(
         &have
             .values()
-            .filter(|a| dropped.contains(&a.view))
+            .filter(|a| drops.dropped.contains(&a.view))
             .cloned()
             .collect::<Vec<_>>(),
     );
     drop_aggregates.reverse();
     let drop_views = set_drop_views(true);
-    if !drop_aggregates.is_empty() || !drop_views.is_empty() {
-        let set = GatedSet {
-            drop_aggregates,
-            drop_views,
-            create: set_creates(true),
-            handoff_views,
-            coupled_columns: coupled_columns.into_iter().collect(),
-        };
-        let note = set.note(&changed, &removed);
-        out.changes.push(TimescaleChange {
-            gated: !set.drop_aggregates.is_empty() || set.drop_views.iter().any(|(_, m)| *m),
-            note: Some(note),
-            kind: TimescaleChangeKind::AggregateSet {
-                drop_aggregates: set.drop_aggregates,
-                drop_views: set.drop_views,
-                create: set.create,
-                handoff_views: set.handoff_views,
-                coupled_columns: set.coupled_columns,
-            },
-        });
+    if drop_aggregates.is_empty() && drop_views.is_empty() {
+        return;
     }
+    let set = AggregateSetChange {
+        drop_aggregates,
+        drop_views,
+        create: set_creates(true),
+        handoff_views: drops.handoff_views.clone(),
+        coupled_columns: drops.coupled_columns.iter().cloned().collect(),
+    };
+    let note = gated_set_note(&set, &drops.changed, &drops.removed);
+    let gated = !set.drop_aggregates.is_empty() || set.drop_views.iter().any(|(_, m)| *m);
+    out.changes.push(change(
+        TimescaleChangeKind::AggregateSet(set),
+        gated,
+        Some(note),
+    ));
+}
 
-    // Aggregates that stay in place.
-    for (name, w) in &want {
+/// Policy and `materialized_only` changes for aggregates that stay in place
+/// (in the catalog and not `dropped`), and a warning for each one Prax did not
+/// create.
+fn push_in_place_changes(
+    want: &Aggregates,
+    have: &Aggregates,
+    dropped: &BTreeSet<String>,
+    out: &mut TimescaleDiff,
+) {
+    for (name, w) in want {
         let Some(h) = have.get(name) else { continue };
         if dropped.contains(name) {
             continue;
@@ -285,163 +385,129 @@ pub(crate) fn diff_aggregates(
             ));
         }
         if h.policy != w.policy {
-            out.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::ReplaceAggregatePolicy {
+            out.changes.push(change(
+                TimescaleChangeKind::ReplaceAggregatePolicy {
                     view: name.clone(),
                     old: h.policy.clone(),
                     new: w.policy.clone(),
                 },
-                gated: false,
-                note: None,
-            });
+                false,
+                None,
+            ));
         }
         if h.materialized_only != w.materialized_only {
-            out.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::SetMaterializedOnly {
+            out.changes.push(change(
+                TimescaleChangeKind::SetMaterializedOnly {
                     view: name.clone(),
                     old: h.materialized_only,
                     new: w.materialized_only,
                 },
-                gated: false,
-                note: None,
-            });
+                false,
+                None,
+            ));
         }
     }
-    Ok(())
 }
 
-/// The contents of the gated `AggregateSet`.
-struct GatedSet {
-    drop_aggregates: Vec<AggregateState>,
-    drop_views: Vec<(String, bool)>,
-    create: Vec<AggregateState>,
-    handoff_views: Vec<String>,
-    coupled_columns: Vec<(String, String)>,
-}
-
-impl GatedSet {
-    /// Why the set drops what it drops, what is lost, and what is created.
-    fn note(&self, changed: &BTreeSet<String>, removed: &BTreeSet<String>) -> String {
-        let mut sentences = Vec::new();
-        if !changed.is_empty() {
-            sentences.push(format!(
-                "The SQL of {} changed.",
-                counted("continuous aggregate", "continuous aggregates", changed)
-            ));
-        }
-        if !self.coupled_columns.is_empty() {
-            let columns: Vec<String> = self
-                .coupled_columns
-                .iter()
-                .map(|(table, column)| format!("\"{table}\".\"{column}\""))
-                .collect();
-            let one = columns.len() == 1;
-            sentences.push(format!(
-                "{} {} {} type-changed or dropped, which Postgres refuses while a view depends \
-                 on {}.",
-                if one { "Column" } else { "Columns" },
-                columns.join(", "),
-                if one { "is" } else { "are" },
-                if one { "it" } else { "them" },
-            ));
-        }
-        if !removed.is_empty() {
-            sentences.push(format!(
-                "{} {} no longer in the schema.",
-                capitalized(&counted(
-                    "continuous aggregate",
-                    "continuous aggregates",
-                    removed
-                )),
-                if removed.len() == 1 { "is" } else { "are" },
-            ));
-        }
-        if !self.handoff_views.is_empty() {
-            sentences.push(format!(
-                "{} {} now declared as {}.",
-                capitalized(&counted(
-                    "continuous aggregate",
-                    "continuous aggregates",
-                    &self.handoff_views
-                )),
-                if self.handoff_views.len() == 1 {
-                    "is"
-                } else {
-                    "are"
-                },
-                if self.handoff_views.len() == 1 {
-                    "a view"
-                } else {
-                    "views"
-                },
-            ));
-        }
-        if !self.drop_aggregates.is_empty() {
-            let names: Vec<&str> = self
-                .drop_aggregates
-                .iter()
-                .map(|a| a.view.as_str())
-                .collect();
-            sentences.push(format!(
-                "Dropping {} discards {} materialized data, which cannot be recovered where \
-                 retention has already dropped the raw chunks.",
-                counted("continuous aggregate", "continuous aggregates", &names),
-                if names.len() == 1 { "its" } else { "their" },
-            ));
-        }
-        let matviews: Vec<&str> = self
-            .drop_views
+/// Why the gated set drops what it drops, what is lost, and what is created.
+fn gated_set_note(
+    set: &AggregateSetChange,
+    changed: &BTreeSet<String>,
+    removed: &BTreeSet<String>,
+) -> String {
+    const AGGREGATE: (&str, &str) = ("continuous aggregate", "continuous aggregates");
+    let mut sentences = Vec::new();
+    if !changed.is_empty() {
+        sentences.push(format!(
+            "The SQL of {} changed.",
+            counted(AGGREGATE, changed)
+        ));
+    }
+    if !set.coupled_columns.is_empty() {
+        let columns: Vec<String> = set
+            .coupled_columns
             .iter()
-            .filter(|(_, materialized)| *materialized)
-            .map(|(view, _)| view.as_str())
+            .map(|(table, column)| format!("\"{table}\".\"{column}\""))
             .collect();
-        if !matviews.is_empty() {
-            sentences.push(format!(
-                "Replacing {} with {} discards {} stored rows.",
-                counted("materialized view", "materialized views", &matviews),
-                if matviews.len() == 1 {
-                    "a continuous aggregate"
-                } else {
-                    "continuous aggregates"
-                },
-                if matviews.len() == 1 { "its" } else { "their" },
-            ));
-        }
-        if !self.create.is_empty() {
-            let names: Vec<&str> = self.create.iter().map(|a| a.view.as_str()).collect();
-            sentences.push(format!(
-                "{} {} then created empty from the schema.",
-                capitalized(&counted(
-                    "continuous aggregate",
-                    "continuous aggregates",
-                    &names
-                )),
-                if names.len() == 1 { "is" } else { "are" },
-            ));
-        }
-        if !self.handoff_views.is_empty() {
-            sentences.push(format!(
-                "{} {} then created from the schema.",
-                capitalized(&counted("view", "views", &self.handoff_views)),
-                if self.handoff_views.len() == 1 {
-                    "is"
-                } else {
-                    "are"
-                },
-            ));
-        }
-        sentences.join(" ")
+        let n = columns.len();
+        sentences.push(format!(
+            "{} {} {} type-changed or dropped, which Postgres refuses while a view depends \
+             on {}.",
+            plural(n, "Column", "Columns"),
+            columns.join(", "),
+            plural(n, "is", "are"),
+            plural(n, "it", "them"),
+        ));
     }
+    if !removed.is_empty() {
+        sentences.push(format!(
+            "{} {} no longer in the schema.",
+            capitalized(&counted(AGGREGATE, removed)),
+            plural(removed.len(), "is", "are"),
+        ));
+    }
+    let handoffs = set.handoff_views.len();
+    if handoffs > 0 {
+        sentences.push(format!(
+            "{} {} now declared as {}.",
+            capitalized(&counted(AGGREGATE, &set.handoff_views)),
+            plural(handoffs, "is", "are"),
+            plural(handoffs, "a view", "views"),
+        ));
+    }
+    if !set.drop_aggregates.is_empty() {
+        let names: Vec<&str> = set
+            .drop_aggregates
+            .iter()
+            .map(|a| a.view.as_str())
+            .collect();
+        sentences.push(format!(
+            "Dropping {} discards {} materialized data, which cannot be recovered where \
+             retention has already dropped the raw chunks.",
+            counted(AGGREGATE, &names),
+            plural(names.len(), "its", "their"),
+        ));
+    }
+    let matviews: Vec<&str> = set
+        .drop_views
+        .iter()
+        .filter(|(_, materialized)| *materialized)
+        .map(|(view, _)| view.as_str())
+        .collect();
+    if !matviews.is_empty() {
+        let n = matviews.len();
+        sentences.push(format!(
+            "Replacing {} with {} discards {} stored rows.",
+            counted(("materialized view", "materialized views"), &matviews),
+            plural(n, "a continuous aggregate", "continuous aggregates"),
+            plural(n, "its", "their"),
+        ));
+    }
+    if !set.create.is_empty() {
+        let names: Vec<&str> = set.create.iter().map(|a| a.view.as_str()).collect();
+        sentences.push(format!(
+            "{} {} then created empty from the schema.",
+            capitalized(&counted(AGGREGATE, &names)),
+            plural(names.len(), "is", "are"),
+        ));
+    }
+    if handoffs > 0 {
+        sentences.push(format!(
+            "{} {} then created from the schema.",
+            capitalized(&counted(("view", "views"), &set.handoff_views)),
+            plural(handoffs, "is", "are"),
+        ));
+    }
+    sentences.join(" ")
 }
 
-/// `<one> "a"` or `<many> "a", "b"`.
-fn counted<S: AsRef<str>>(one: &str, many: &str, names: impl IntoIterator<Item = S>) -> String {
+/// `<one> "a"` or `<many> "a", "b"`, from a `(one, many)` noun pair.
+fn counted<S: AsRef<str>>((one, many): (&str, &str), names: impl IntoIterator<Item = S>) -> String {
     let quoted: Vec<String> = names
         .into_iter()
         .map(|n| format!("\"{}\"", n.as_ref()))
         .collect();
-    let noun = if quoted.len() == 1 { one } else { many };
-    format!("{noun} {}", quoted.join(", "))
+    format!("{} {}", plural(quoted.len(), one, many), quoted.join(", "))
 }
 
 fn capitalized(s: &str) -> String {
@@ -467,7 +533,7 @@ mod tests {
 
     const DATASOURCE: &str = "datasource db {\n  provider   = \"postgresql\"\n  url        = \"postgres://x\"\n  extensions = [timescaledb]\n}\n";
 
-    /// The §3.1 `HourlyMetric` definition.
+    /// The reference `HourlyMetric` definition: hourly averages per device.
     const HOURLY_SQL: &str = "SELECT time_bucket('1 hour', \"time\") AS bucket, \"deviceId\", avg(\"value\") AS \"avgValue\"\nFROM \"Metric\"\nGROUP BY 1, 2";
     const DAILY_SQL: &str = "SELECT time_bucket('1 day', bucket) AS bucket, \"deviceId\", avg(\"avgValue\") AS \"avgValue\"\nFROM \"HourlyMetric\"\nGROUP BY 1, 2";
     const HOURLY: &str = "@@timescale.continuous(source: Metric, scheduleInterval: \"1 hour\", startOffset: \"3 days\", endOffset: \"1 hour\")";
@@ -541,7 +607,7 @@ mod tests {
         }
     }
 
-    /// §3.1 `HourlyMetric` as recorded in the catalog.
+    /// The reference `HourlyMetric` as recorded in the catalog.
     fn hourly() -> AggregateState {
         AggregateState {
             view: "HourlyMetric".into(),
@@ -610,20 +676,23 @@ mod tests {
         diff.changes
             .iter()
             .filter_map(|c| match &c.kind {
-                TimescaleChangeKind::AggregateSet {
-                    drop_aggregates,
-                    drop_views,
-                    create,
-                    handoff_views,
-                    coupled_columns,
-                } => Some(Set {
+                TimescaleChangeKind::AggregateSet(set) => Some(Set {
                     gated: c.gated,
                     note: c.note.as_deref().unwrap_or(""),
-                    drop_aggregates: drop_aggregates.iter().map(|a| a.view.as_str()).collect(),
-                    drop_views: drop_views.iter().map(|(v, m)| (v.as_str(), *m)).collect(),
-                    create: create.iter().collect(),
-                    handoff_views: handoff_views.iter().map(String::as_str).collect(),
-                    coupled_columns: coupled_columns
+                    drop_aggregates: set
+                        .drop_aggregates
+                        .iter()
+                        .map(|a| a.view.as_str())
+                        .collect(),
+                    drop_views: set
+                        .drop_views
+                        .iter()
+                        .map(|(v, m)| (v.as_str(), *m))
+                        .collect(),
+                    create: set.create.iter().collect(),
+                    handoff_views: set.handoff_views.iter().map(String::as_str).collect(),
+                    coupled_columns: set
+                        .coupled_columns
                         .iter()
                         .map(|(t, c)| (t.as_str(), c.as_str()))
                         .collect(),
@@ -682,7 +751,7 @@ mod tests {
         let prax = format!(
             "{DATASOURCE}\nmodel Metric {{\n  ts DateTime @map(\"time\")\n  @@id([ts])\n  @@map(\"metrics\")\n  @@timescale.hypertable(ts)\n}}\n\nview Hourly {{\n  bucket DateTime\n  @@map(\"hourly_metric\")\n  @@timescale.continuous(source: Metric, scheduleInterval: \"1 hour\")\n}}\n\n@@sql(\"hourly_metric\", \"\"\"\nSELECT 1\n\"\"\")\n\nview Daily {{\n  bucket DateTime\n  @@timescale.continuous(source: Hourly, scheduleInterval: \"1 day\", startOffset: \"3 days\", materializedOnly: false)\n}}\n\n@@sql(\"Daily\", \"\"\"\nSELECT 2\n\"\"\")\n\nview Plain {{\n  bucket DateTime\n}}\n\n@@sql(\"Plain\", \"\"\"\nSELECT 3\n\"\"\")\n"
         );
-        let resolved = resolve_aggregates(&schema(&prax));
+        let resolved = resolve_aggregates(&schema(&prax)).unwrap();
         assert_eq!(
             resolved.keys().map(String::as_str).collect::<Vec<_>>(),
             ["Daily", "hourly_metric"]
@@ -965,6 +1034,43 @@ mod tests {
             assert!(diff.alter_views.is_empty(), "{:?}", diff.alter_views);
             assert!(diff.drop_views.is_empty(), "{:?}", diff.drop_views);
         }
+    }
+
+    #[test]
+    fn test_aggregate_to_view_without_sql_is_removed_not_handed_off() {
+        // The generic pipeline cannot create a view without SQL, so the
+        // aggregate is reported as removed and nothing is handed off.
+        let diff = run(
+            &target(&["view HourlyMetric {\n  bucket DateTime\n}\n".to_string()]),
+            Some(catalog(vec![hourly()], &[])),
+        )
+        .unwrap();
+        let set = only_set(&diff.timescale);
+        assert!(set.gated);
+        assert_eq!(set.drop_aggregates, ["HourlyMetric"]);
+        assert!(set.handoff_views.is_empty(), "{set:?}");
+        assert!(set.note.contains("no longer in the schema"), "{}", set.note);
+        assert!(!set.note.contains("now declared as"), "{}", set.note);
+        assert!(diff.create_views.is_empty(), "{:?}", diff.create_views);
+    }
+
+    #[test]
+    fn test_malformed_continuous_attribute_is_invalid() {
+        // `scheduleInterval` is required; the view must not be treated as a
+        // plain view.
+        let result = run(
+            &target(&[view(
+                "HourlyMetric",
+                "@@timescale.continuous(source: Metric)",
+                HOURLY_SQL,
+            )]),
+            Some(catalog(vec![hourly()], &[])),
+        );
+        let Err(MigrationError::InvalidMigration(msg)) = result else {
+            panic!("expected InvalidMigration, got {result:?}");
+        };
+        assert!(msg.contains("\"HourlyMetric\""), "{msg}");
+        assert!(msg.contains("scheduleInterval"), "{msg}");
     }
 
     #[test]

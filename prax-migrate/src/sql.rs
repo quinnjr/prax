@@ -2354,7 +2354,7 @@ mod tests {
             let mut diff = SchemaDiff::default();
             diff.drop_models.push("Metric".into());
             diff.timescale.changes.push(TimescaleChange {
-                kind: TimescaleChangeKind::AggregateSet {
+                kind: TimescaleChangeKind::AggregateSet(crate::timescale::AggregateSetChange {
                     drop_aggregates: vec![AggregateState {
                         view: "HourlyMetric".into(),
                         source: "Metric".into(),
@@ -2362,11 +2362,8 @@ mod tests {
                         materialized_only: true,
                         policy: None,
                     }],
-                    drop_views: Vec::new(),
-                    create: Vec::new(),
-                    handoff_views: Vec::new(),
-                    coupled_columns: Vec::new(),
-                },
+                    ..Default::default()
+                }),
                 gated: true,
                 note: None,
             });

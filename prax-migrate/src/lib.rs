@@ -254,7 +254,8 @@ pub use sql::{
 };
 pub use state::MigrationState;
 pub use timescale::{
-    CatalogRows, TimescaleCatalog, TimescaleChange, TimescaleChangeKind, TimescaleDiff,
+    AggregateSetChange, CatalogRows, TimescaleCatalog, TimescaleChange, TimescaleChangeKind,
+    TimescaleDiff,
 };
 // Note: state::MigrationStatus not re-exported to avoid conflict with engine::MigrationStatus
 // Access via prax_migrate::state::MigrationStatus if needed for event sourcing state projection

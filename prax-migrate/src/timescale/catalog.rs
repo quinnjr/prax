@@ -1,9 +1,16 @@
 //! The live database's TimescaleDB state, built from plain catalog rows.
 //!
-//! prax-migrate has no database driver: the CLI runs the [`queries`] and fills
+//! prax-migrate has no database driver: the CLI runs the `queries` and fills
 //! [`CatalogRows`], and [`TimescaleCatalog::from_rows`] assembles the state.
+//!
+//! The SQL in `queries`, the column indices in `cols` and the `*Row`
+//! structs are plumbing shared with `prax-cli`. They follow the catalog
+//! layout of the supported TimescaleDB versions and are not a stable API:
+//! they may change in any release.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::iter::Peekable;
+use std::str::Chars;
 
 use prax_schema::ast::PgInterval;
 
@@ -11,6 +18,16 @@ use crate::error::{MigrateResult, MigrationError};
 
 /// An interval decomposed as `(months, days, micros)`.
 pub type IntervalParts = (i32, i32, i64);
+
+/// Oldest TimescaleDB version Prax manages, as `(major, minor)`. Older
+/// servers lack the `hypertable_columnstore_settings` view the catalog reads.
+pub const TIMESCALE_MIN_VERSION: (u32, u32) = (2, 18);
+
+/// Microseconds in an hour, for decomposing intervals in SQL.
+const MICROS_PER_HOUR: i64 = 3_600_000_000;
+
+/// Microseconds in a minute, for decomposing intervals in SQL.
+const MICROS_PER_MINUTE: i64 = 60_000_000;
 
 /// Marker on the first line of a continuous-aggregate definition record.
 pub const CAGG_RECORD_MARKER: &str = "prax:cagg:v1";
@@ -29,10 +46,12 @@ pub fn parse_aggregate_record(comment: &str) -> Option<&str> {
         .and_then(|rest| rest.strip_prefix('\n'))
 }
 
-/// Whether a TimescaleDB version string is at least 2.18.
+/// Whether a TimescaleDB version string is at least
+/// [`TIMESCALE_MIN_VERSION`].
 #[must_use]
 pub fn timescale_version_supported(version: &str) -> bool {
-    timescale_version_at_least(version, 2, 18)
+    let (major, minor) = TIMESCALE_MIN_VERSION;
+    timescale_version_at_least(version, major, minor)
 }
 
 /// Whether a TimescaleDB version string is at least `major.minor`. An
@@ -49,14 +68,16 @@ pub fn timescale_version_at_least(version: &str, major: u32, minor: u32) -> bool
 }
 
 /// SQL selecting `(months, days, micros)` for an interval expression, cast to
-/// `int4, int4, int8`. A `NULL` expression yields three `NULL`s.
+/// `int4, int4, int8` and labelled `{alias}_months`, `{alias}_days` and
+/// `{alias}_micros`. A `NULL` expression yields three `NULL`s.
 #[must_use]
-pub fn interval_parts_sql(expr: &str) -> String {
+pub fn interval_parts_sql(expr: &str, alias: &str) -> String {
     format!(
-        "(EXTRACT(YEAR FROM {expr}) * 12 + EXTRACT(MONTH FROM {expr}))::int4, \
-         EXTRACT(DAY FROM {expr})::int4, \
-         (EXTRACT(HOUR FROM {expr}) * 3600000000 + EXTRACT(MINUTE FROM {expr}) * 60000000 \
-         + EXTRACT(MICROSECONDS FROM {expr}))::int8"
+        "(EXTRACT(YEAR FROM {expr}) * 12 + EXTRACT(MONTH FROM {expr}))::int4 AS {alias}_months, \
+         EXTRACT(DAY FROM {expr})::int4 AS {alias}_days, \
+         (EXTRACT(HOUR FROM {expr}) * {MICROS_PER_HOUR} \
+         + EXTRACT(MINUTE FROM {expr}) * {MICROS_PER_MINUTE} \
+         + EXTRACT(MICROSECONDS FROM {expr}))::int8 AS {alias}_micros"
     )
 }
 
@@ -64,90 +85,86 @@ pub fn interval_parts_sql(expr: &str) -> String {
 /// scoped to the introspected schema, passed as `$1`, so a database with the
 /// same relation names in several schemas (e.g. schema per tenant) never mixes
 /// their state.
+///
+/// Every output column carries an alias; `cols` holds each
+/// query's column indices, in `SELECT` order. Not a stable API.
+#[doc(hidden)]
 pub mod queries {
-    /// `(extname, extversion)`.
-    pub const EXTENSIONS: &str = "SELECT extname::text, extversion::text FROM pg_extension";
+    use super::interval_parts_sql;
 
-    /// `(hypertable_name, compression_enabled)`.
-    pub const HYPERTABLES: &str = "SELECT hypertable_name::text, compression_enabled \
+    /// `(name, version)` of every installed extension.
+    pub const EXTENSIONS: &str =
+        "SELECT extname::text AS name, extversion::text AS version FROM pg_extension";
+
+    /// `(table_name, columnstore_enabled)`.
+    pub const HYPERTABLES: &str = "SELECT hypertable_name::text AS table_name, \
+         compression_enabled AS columnstore_enabled \
          FROM timescaledb_information.hypertables WHERE hypertable_schema = $1";
 
-    /// `(hypertable_name, column_name, is_time, months, days, micros, num_partitions)`.
-    pub const DIMENSIONS: &str = "SELECT hypertable_name::text, column_name::text, \
-         dimension_type = 'Time', \
-         (EXTRACT(YEAR FROM time_interval) * 12 + EXTRACT(MONTH FROM time_interval))::int4, \
-         EXTRACT(DAY FROM time_interval)::int4, \
-         (EXTRACT(HOUR FROM time_interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM time_interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM time_interval))::int8, \
-         num_partitions::int2 \
-         FROM timescaledb_information.dimensions WHERE hypertable_schema = $1 \
-         ORDER BY hypertable_name, dimension_number";
+    /// `(table_name, column_name, is_time, chunk_interval_{months,days,micros},
+    /// num_partitions)`.
+    #[must_use]
+    pub fn dimensions_sql() -> String {
+        format!(
+            "SELECT hypertable_name::text AS table_name, column_name::text AS column_name, \
+             dimension_type = 'Time' AS is_time, {chunk_interval}, \
+             num_partitions::int2 AS num_partitions \
+             FROM timescaledb_information.dimensions WHERE hypertable_schema = $1 \
+             ORDER BY hypertable_name, dimension_number",
+            chunk_interval = interval_parts_sql("time_interval", "chunk_interval"),
+        )
+    }
 
-    /// `(hypertable::text, segmentby, orderby)` for the hypertables in schema `$1`.
-    pub const COLUMNSTORE_SETTINGS: &str = "SELECT s.hypertable::text, s.segmentby::text, \
-         s.orderby::text \
+    /// `(relation, segment_by, order_by)` for the hypertables in schema `$1`;
+    /// `relation` is regclass text.
+    pub const COLUMNSTORE_SETTINGS: &str = "SELECT s.hypertable::text AS relation, \
+         s.segmentby::text AS segment_by, s.orderby::text AS order_by \
          FROM timescaledb_information.hypertable_columnstore_settings s \
          JOIN pg_class c ON c.oid = s.hypertable::oid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1";
 
-    /// `(proc_name, hypertable_name, drop_after, compress_after, start_offset, end_offset,
-    /// schedule_interval)`, each interval as three `(months, days, micros)` columns.
+    /// `(proc_name, relation, drop_after, compress_after, start_offset,
+    /// end_offset, schedule_interval)`, each interval as three
+    /// `{name}_{months,days,micros}` columns.
     ///
     /// Scoped to schema `$1`: columnstore and retention jobs of its hypertables,
     /// and refresh jobs of its continuous aggregates. A refresh job names either
     /// the aggregate's view (2.30) or its materialization hypertable in
     /// `_timescaledb_internal` (2.18), so the latter is matched through the
     /// schema's aggregates.
-    pub const JOBS: &str = "SELECT proc_name::text, hypertable_name::text, \
-         (EXTRACT(YEAR FROM (config->>'drop_after')::interval) * 12 \
-          + EXTRACT(MONTH FROM (config->>'drop_after')::interval))::int4, \
-         EXTRACT(DAY FROM (config->>'drop_after')::interval)::int4, \
-         (EXTRACT(HOUR FROM (config->>'drop_after')::interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM (config->>'drop_after')::interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM (config->>'drop_after')::interval))::int8, \
-         (EXTRACT(YEAR FROM (config->>'compress_after')::interval) * 12 \
-          + EXTRACT(MONTH FROM (config->>'compress_after')::interval))::int4, \
-         EXTRACT(DAY FROM (config->>'compress_after')::interval)::int4, \
-         (EXTRACT(HOUR FROM (config->>'compress_after')::interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM (config->>'compress_after')::interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM (config->>'compress_after')::interval))::int8, \
-         (EXTRACT(YEAR FROM (config->>'start_offset')::interval) * 12 \
-          + EXTRACT(MONTH FROM (config->>'start_offset')::interval))::int4, \
-         EXTRACT(DAY FROM (config->>'start_offset')::interval)::int4, \
-         (EXTRACT(HOUR FROM (config->>'start_offset')::interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM (config->>'start_offset')::interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM (config->>'start_offset')::interval))::int8, \
-         (EXTRACT(YEAR FROM (config->>'end_offset')::interval) * 12 \
-          + EXTRACT(MONTH FROM (config->>'end_offset')::interval))::int4, \
-         EXTRACT(DAY FROM (config->>'end_offset')::interval)::int4, \
-         (EXTRACT(HOUR FROM (config->>'end_offset')::interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM (config->>'end_offset')::interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM (config->>'end_offset')::interval))::int8, \
-         (EXTRACT(YEAR FROM schedule_interval) * 12 + EXTRACT(MONTH FROM schedule_interval))::int4, \
-         EXTRACT(DAY FROM schedule_interval)::int4, \
-         (EXTRACT(HOUR FROM schedule_interval) * 3600000000 \
-          + EXTRACT(MINUTE FROM schedule_interval) * 60000000 \
-          + EXTRACT(MICROSECONDS FROM schedule_interval))::int8 \
-         FROM timescaledb_information.jobs j \
-         WHERE j.proc_name IN ('policy_compression', 'policy_retention', \
-                               'policy_refresh_continuous_aggregate') \
-           AND (j.hypertable_schema = $1 \
-                OR (j.proc_name = 'policy_refresh_continuous_aggregate' \
-                    AND (j.hypertable_schema, j.hypertable_name) IN ( \
-                        SELECT materialization_hypertable_schema, \
-                               materialization_hypertable_name \
-                        FROM timescaledb_information.continuous_aggregates \
-                        WHERE view_schema = $1)))";
+    #[must_use]
+    pub fn jobs_sql() -> String {
+        let config =
+            |key: &str| interval_parts_sql(&format!("(j.config->>'{key}')::interval"), key);
+        format!(
+            "SELECT j.proc_name::text AS proc_name, j.hypertable_name::text AS relation, \
+             {drop_after}, {compress_after}, {start_offset}, {end_offset}, {schedule} \
+             FROM timescaledb_information.jobs j \
+             WHERE j.proc_name IN ('policy_compression', 'policy_retention', \
+                                   'policy_refresh_continuous_aggregate') \
+               AND (j.hypertable_schema = $1 \
+                    OR (j.proc_name = 'policy_refresh_continuous_aggregate' \
+                        AND (j.hypertable_schema, j.hypertable_name) IN ( \
+                            SELECT materialization_hypertable_schema, \
+                                   materialization_hypertable_name \
+                            FROM timescaledb_information.continuous_aggregates \
+                            WHERE view_schema = $1)))",
+            drop_after = config("drop_after"),
+            compress_after = config("compress_after"),
+            start_offset = config("start_offset"),
+            end_offset = config("end_offset"),
+            schedule = interval_parts_sql("j.schedule_interval", "schedule_interval"),
+        )
+    }
 
-    /// `(view_name, hypertable_name, materialization_hypertable_name, materialized_only,
-    /// view_definition, comment)`.
+    /// `(view_name, hypertable_name, materialization_hypertable_name,
+    /// materialized_only, view_definition, view_comment)`.
     ///
     /// `hypertable_name` is qualified as `schema.name` when the aggregate reads
     /// a hypertable of another schema (a parent aggregate's materialization
     /// hypertable is left bare), so it never matches this schema's hypertables.
-    pub const AGGREGATES: &str = "SELECT a.view_name::text, \
+    pub const AGGREGATES: &str = "SELECT a.view_name::text AS view_name, \
          CASE WHEN a.hypertable_schema = $1 \
                 OR (a.hypertable_schema, a.hypertable_name) IN ( \
                     SELECT p.materialization_hypertable_schema, \
@@ -155,25 +172,135 @@ pub mod queries {
                     FROM timescaledb_information.continuous_aggregates p \
                     WHERE p.view_schema = $1) \
               THEN a.hypertable_name::text \
-              ELSE (a.hypertable_schema || '.' || a.hypertable_name)::text END, \
-         a.materialization_hypertable_name::text, a.materialized_only, \
-         a.view_definition::text, \
+              ELSE (a.hypertable_schema || '.' || a.hypertable_name)::text END \
+              AS hypertable_name, \
+         a.materialization_hypertable_name::text AS materialization_hypertable_name, \
+         a.materialized_only AS materialized_only, \
+         a.view_definition::text AS view_definition, \
          obj_description(format('%I.%I', a.view_schema, a.view_name)::regclass, 'pg_class') \
+              AS view_comment \
          FROM timescaledb_information.continuous_aggregates a WHERE a.view_schema = $1";
 
-    /// `(table_name, column_name, udt_name, is_nullable)` for the aggregates' views.
-    pub const COLUMNS: &str = "SELECT table_name::text, column_name::text, udt_name::text, \
-         is_nullable = 'YES' \
+    /// `(relation, column_name, udt_name, nullable)` for the aggregates' views.
+    pub const COLUMNS: &str = "SELECT table_name::text AS relation, \
+         column_name::text AS column_name, udt_name::text AS udt_name, \
+         is_nullable = 'YES' AS nullable \
          FROM information_schema.columns \
          WHERE table_schema = $1 AND table_name IN ( \
              SELECT view_name FROM timescaledb_information.continuous_aggregates \
              WHERE view_schema = $1) \
          ORDER BY table_name, ordinal_position";
 
-    /// `(relname, is_materialized)` for views and materialized views.
-    pub const VIEWS: &str = "SELECT c.relname::text, c.relkind = 'm' \
+    /// `(view_name, is_materialized)` for views and materialized views.
+    pub const VIEWS: &str = "SELECT c.relname::text AS view_name, \
+         c.relkind = 'm' AS is_materialized \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('v', 'm')";
+}
+
+/// Column indices of each `queries` result, in `SELECT` order. An interval
+/// index names the first of its three `(months, days, micros)` columns. Not a
+/// stable API.
+#[doc(hidden)]
+pub mod cols {
+    /// Number of columns an interval occupies: `(months, days, micros)`.
+    pub const INTERVAL_WIDTH: usize = 3;
+
+    /// `queries::EXTENSIONS`.
+    pub mod extensions {
+        /// Extension name.
+        pub const NAME: usize = 0;
+        /// Extension version.
+        pub const VERSION: usize = 1;
+    }
+
+    /// `queries::HYPERTABLES`.
+    pub mod hypertables {
+        /// Hypertable name.
+        pub const TABLE: usize = 0;
+        /// Whether columnstore is enabled.
+        pub const COLUMNSTORE_ENABLED: usize = 1;
+    }
+
+    /// `queries::dimensions_sql`.
+    pub mod dimensions {
+        /// Hypertable name.
+        pub const TABLE: usize = 0;
+        /// Dimension column.
+        pub const COLUMN: usize = 1;
+        /// Whether this is a time dimension.
+        pub const IS_TIME: usize = 2;
+        /// Chunk interval (three columns).
+        pub const CHUNK_INTERVAL: usize = 3;
+        /// Partition count.
+        pub const PARTITIONS: usize = CHUNK_INTERVAL + super::INTERVAL_WIDTH;
+    }
+
+    /// `queries::COLUMNSTORE_SETTINGS`.
+    pub mod columnstore_settings {
+        /// Hypertable as regclass text.
+        pub const RELATION: usize = 0;
+        /// `segmentby` list.
+        pub const SEGMENT_BY: usize = 1;
+        /// `orderby` list.
+        pub const ORDER_BY: usize = 2;
+    }
+
+    /// `queries::jobs_sql`.
+    pub mod jobs {
+        use super::INTERVAL_WIDTH;
+
+        /// Job procedure name.
+        pub const PROC_NAME: usize = 0;
+        /// Relation the job targets.
+        pub const RELATION: usize = 1;
+        /// Retention `drop_after` (three columns).
+        pub const DROP_AFTER: usize = 2;
+        /// Columnstore `compress_after` (three columns).
+        pub const COMPRESS_AFTER: usize = DROP_AFTER + INTERVAL_WIDTH;
+        /// Refresh `start_offset` (three columns).
+        pub const START_OFFSET: usize = COMPRESS_AFTER + INTERVAL_WIDTH;
+        /// Refresh `end_offset` (three columns).
+        pub const END_OFFSET: usize = START_OFFSET + INTERVAL_WIDTH;
+        /// Job schedule interval (three columns).
+        pub const SCHEDULE_INTERVAL: usize = END_OFFSET + INTERVAL_WIDTH;
+    }
+
+    /// `queries::AGGREGATES`.
+    pub mod aggregates {
+        /// View name.
+        pub const VIEW: usize = 0;
+        /// Source hypertable (possibly `schema.name`).
+        pub const HYPERTABLE: usize = 1;
+        /// Own materialization hypertable.
+        pub const MATERIALIZATION_HYPERTABLE: usize = 2;
+        /// Whether the view is materialized-only.
+        pub const MATERIALIZED_ONLY: usize = 3;
+        /// Postgres-normalized view definition.
+        pub const VIEW_DEFINITION: usize = 4;
+        /// View comment.
+        pub const COMMENT: usize = 5;
+    }
+
+    /// `queries::COLUMNS`.
+    pub mod columns {
+        /// View name.
+        pub const RELATION: usize = 0;
+        /// Column name.
+        pub const NAME: usize = 1;
+        /// Postgres `udt_name`.
+        pub const UDT_NAME: usize = 2;
+        /// Whether the column is nullable.
+        pub const NULLABLE: usize = 3;
+    }
+
+    /// `queries::VIEWS`.
+    pub mod views {
+        /// View name.
+        pub const NAME: usize = 0;
+        /// Whether it is a materialized view.
+        pub const IS_MATERIALIZED: usize = 1;
+    }
 }
 
 /// Row of `pg_extension`.
@@ -253,7 +380,8 @@ pub struct AggregateRow {
     pub materialized_only: bool,
     /// Postgres-normalized view definition.
     pub view_definition: String,
-    /// View comment (may hold the §5.2 record).
+    /// View comment. When Prax created the aggregate it holds the authored
+    /// SQL, prefixed by [`CAGG_RECORD_MARKER`] (see [`aggregate_record`]).
     pub comment: Option<String>,
 }
 
@@ -400,83 +528,106 @@ fn interval(parts: IntervalParts) -> PgInterval {
     PgInterval::new(parts.0, parts.1, parts.2)
 }
 
-/// Reduce regclass text to the relation name: the last identifier of an
-/// optionally schema-qualified name, split on unquoted dots (`""` becomes `"`).
-fn unquote_relation(s: &str) -> String {
-    let mut parts: Vec<String> = vec![String::new()];
-    let mut chars = s.trim().chars().peekable();
-    let mut quoted = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '"' if quoted && chars.peek() == Some(&'"') => {
-                chars.next();
-                if let Some(p) = parts.last_mut() {
-                    p.push('"');
-                }
-            }
-            '"' => quoted = !quoted,
-            '.' if !quoted => parts.push(String::new()),
-            _ => {
-                if let Some(p) = parts.last_mut() {
-                    p.push(c);
-                }
+/// Read one SQL identifier from `chars`: a double-quoted identifier (`""`
+/// inside it becomes `"`), or an unquoted run ending before whitespace or a
+/// char in `stops`. The terminating char is left unread.
+fn read_identifier(chars: &mut Peekable<Chars<'_>>, stops: &[char]) -> String {
+    let mut name = String::new();
+    if chars.next_if_eq(&'"').is_some() {
+        while let Some(c) = chars.next() {
+            if c != '"' {
+                name.push(c);
+            } else if chars.next_if_eq(&'"').is_some() {
+                name.push('"');
+            } else {
+                break;
             }
         }
+    } else {
+        while let Some(c) = chars.next_if(|c| !c.is_whitespace() && !stops.contains(c)) {
+            name.push(c);
+        }
     }
-    parts.pop().unwrap_or_default()
+    name
+}
+
+/// Reduce regclass text to the relation name: the last identifier of an
+/// optionally schema-qualified name, split on unquoted dots.
+fn unquote_relation(s: &str) -> String {
+    let mut chars = s.trim().chars().peekable();
+    let mut name = read_identifier(&mut chars, &['.']);
+    while chars.next_if_eq(&'.').is_some() {
+        name = read_identifier(&mut chars, &['.']);
+    }
+    name
 }
 
 /// Parse a Timescale `segmentby`/`orderby` list into `(column, descending)`.
-pub(crate) fn parse_column_list(s: &str) -> Vec<(String, bool)> {
+///
+/// Each column may carry `ASC` or `DESC` and the NULLS ordering that is the
+/// default for that direction (`NULLS LAST` for ascending, `NULLS FIRST` for
+/// descending).
+///
+/// # Errors
+///
+/// Returns a reason naming the column when it carries a non-default NULLS
+/// ordering or any other modifier, which Prax cannot represent.
+pub(crate) fn parse_column_list(s: &str) -> Result<Vec<(String, bool)>, String> {
     let mut out = Vec::new();
     let mut chars = s.chars().peekable();
     loop {
-        while chars.peek().is_some_and(|c| c.is_whitespace() || *c == ',') {
-            chars.next();
+        while chars.next_if(|c| c.is_whitespace() || *c == ',').is_some() {}
+        if chars.peek().is_none() {
+            break;
         }
-        let Some(&first) = chars.peek() else { break };
-        let mut name = String::new();
-        if first == '"' {
-            chars.next();
-            while let Some(c) = chars.next() {
-                if c == '"' {
-                    if chars.peek() == Some(&'"') {
-                        chars.next();
-                        name.push('"');
-                    } else {
-                        break;
-                    }
-                } else {
-                    name.push(c);
-                }
-            }
-        } else {
-            while let Some(&c) = chars.peek() {
-                if c.is_whitespace() || c == ',' {
-                    break;
-                }
-                name.push(c);
-                chars.next();
-            }
-        }
-        // Modifiers up to the next comma: only ASC/DESC matter.
-        let mut descending = false;
+        let name = read_identifier(&mut chars, &[',']);
         let mut modifiers = String::new();
-        while let Some(&c) = chars.peek() {
-            if c == ',' {
-                break;
-            }
+        while let Some(c) = chars.next_if(|c| *c != ',') {
             modifiers.push(c);
-            chars.next();
         }
-        for word in modifiers.split_whitespace() {
-            if word.eq_ignore_ascii_case("desc") {
-                descending = true;
-            }
-        }
+        let descending = parse_ordering(&modifiers).ok_or_else(|| {
+            format!(
+                "column \"{name}\" has ordering \"{}\"; only ASC or DESC with the default \
+                 NULLS ordering is supported",
+                modifiers.trim()
+            )
+        })?;
         out.push((name, descending));
     }
-    out
+    Ok(out)
+}
+
+/// Parse a column's ordering modifiers into whether it is descending, or
+/// `None` when they hold a non-default NULLS ordering or an unknown word.
+fn parse_ordering(modifiers: &str) -> Option<bool> {
+    let mut descending = None;
+    let mut nulls_first = None;
+    let mut words = modifiers.split_whitespace();
+    while let Some(word) = words.next() {
+        if descending.is_none() && nulls_first.is_none() && word.eq_ignore_ascii_case("asc") {
+            descending = Some(false);
+        } else if descending.is_none() && nulls_first.is_none() && word.eq_ignore_ascii_case("desc")
+        {
+            descending = Some(true);
+        } else if nulls_first.is_none() && word.eq_ignore_ascii_case("nulls") {
+            let position = words.next()?;
+            if position.eq_ignore_ascii_case("first") {
+                nulls_first = Some(true);
+            } else if position.eq_ignore_ascii_case("last") {
+                nulls_first = Some(false);
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    }
+    let descending = descending.unwrap_or(false);
+    // Postgres defaults: NULLS LAST when ascending, NULLS FIRST when descending.
+    match nulls_first {
+        Some(first) if first != descending => None,
+        _ => Some(descending),
+    }
 }
 
 fn malformed(relation: &str, what: &str) -> MigrationError {
@@ -490,11 +641,16 @@ impl TimescaleCatalog {
     /// extension is not installed.
     ///
     /// Valid state Prax cannot represent lands in `unsupported` with a reason
-    /// instead of failing: a hypertable with an integer time dimension or a
-    /// columnstore or retention policy without its interval
-    /// (`*_created_before`), and every continuous aggregate built (directly or
-    /// through parent aggregates) on such a hypertable or on a relation that
-    /// is not a hypertable of this schema.
+    /// instead of failing: a hypertable with an integer time dimension, more
+    /// than one time or space dimension, a columnstore column with a
+    /// non-default NULLS ordering, or a columnstore or retention policy
+    /// without its interval (`*_created_before`), and every continuous
+    /// aggregate built (directly or through parent aggregates) on such a
+    /// hypertable or on a relation that is not a hypertable of this schema.
+    ///
+    /// An installed extension older than [`TIMESCALE_MIN_VERSION`] is still
+    /// reported: the caller reads no other rows, so the catalog holds only the
+    /// version.
     ///
     /// # Errors
     ///
@@ -509,11 +665,22 @@ impl TimescaleCatalog {
         let mut hypertables = BTreeMap::new();
         let mut unsupported = BTreeMap::new();
         for h in &rows.hypertables {
-            let time = rows
+            let (time_dims, space_dims): (Vec<&DimensionRow>, Vec<&DimensionRow>) = rows
                 .dimensions
                 .iter()
-                .find(|d| d.table == h.table && d.is_time)
-                .ok_or_else(|| malformed(&h.table, "hypertable has no time dimension"))?;
+                .filter(|d| d.table == h.table)
+                .partition(|d| d.is_time);
+            let Some(time) = time_dims.first() else {
+                return Err(malformed(&h.table, "hypertable has no time dimension"));
+            };
+            if time_dims.len() > 1 || space_dims.len() > 1 {
+                unsupported.insert(
+                    h.table.clone(),
+                    "hypertables with more than one time or space dimension are not supported"
+                        .to_string(),
+                );
+                continue;
+            }
             let Some(chunk_interval) = time.interval.map(interval) else {
                 unsupported.insert(
                     h.table.clone(),
@@ -521,10 +688,8 @@ impl TimescaleCatalog {
                 );
                 continue;
             };
-            let space = rows
-                .dimensions
-                .iter()
-                .find(|d| d.table == h.table && !d.is_time && d.partitions.is_some())
+            let space = space_dims
+                .first()
                 .and_then(|d| d.partitions.map(|p| (d.column.clone(), p)));
 
             let columnstore = if h.columnstore_enabled {
@@ -532,19 +697,27 @@ impl TimescaleCatalog {
                     .columnstore_settings
                     .iter()
                     .find(|s| unquote_relation(&s.relation) == h.table);
-                Some(ColumnstoreState {
-                    settings: ColumnstoreSettings {
-                        segment_by: settings
-                            .and_then(|s| s.segment_by.as_deref())
-                            .map(|s| parse_column_list(s).into_iter().map(|(n, _)| n).collect())
-                            .unwrap_or_default(),
-                        order_by: settings
-                            .and_then(|s| s.order_by.as_deref())
-                            .map(parse_column_list)
-                            .unwrap_or_default(),
-                    },
-                    after: None,
-                })
+                let parse = |list: Option<&str>, label: &str| {
+                    list.map(parse_column_list)
+                        .transpose()
+                        .map(Option::unwrap_or_default)
+                        .map_err(|why| format!("columnstore {label} {why}"))
+                };
+                let segment_by = parse(settings.and_then(|s| s.segment_by.as_deref()), "segmentby");
+                let order_by = parse(settings.and_then(|s| s.order_by.as_deref()), "orderby");
+                match (segment_by, order_by) {
+                    (Ok(segment_by), Ok(order_by)) => Some(ColumnstoreState {
+                        settings: ColumnstoreSettings {
+                            segment_by: segment_by.into_iter().map(|(n, _)| n).collect(),
+                            order_by,
+                        },
+                        after: None,
+                    }),
+                    (Err(why), _) | (_, Err(why)) => {
+                        unsupported.insert(h.table.clone(), why);
+                        continue;
+                    }
+                }
             } else {
                 None
             };
@@ -644,7 +817,8 @@ impl TimescaleCatalog {
             }
         }
 
-        // Aggregates built on a relation Prax cannot represent (spec non-goals)
+        // Aggregates built on a relation Prax cannot represent (an unsupported
+        // hypertable, or a relation that is not a hypertable of this schema)
         // can never be declared in a schema, so they are left unmanaged.
         let mut unsupported_aggregates = BTreeSet::new();
         for (view, reason) in unsupported_aggregate_reasons(&aggregates, &hypertables, &unsupported)
@@ -906,13 +1080,118 @@ mod tests {
     fn test_parse_column_list() {
         assert_eq!(
             parse_column_list("\"time\" DESC, device_id"),
-            vec![("time".to_string(), true), ("device_id".to_string(), false)]
+            Ok(vec![
+                ("time".to_string(), true),
+                ("device_id".to_string(), false)
+            ])
         );
         assert_eq!(
             parse_column_list("\"we\"\"ird\" ASC NULLS LAST"),
-            vec![("we\"ird".to_string(), false)]
+            Ok(vec![("we\"ird".to_string(), false)])
         );
-        assert_eq!(parse_column_list(""), Vec::<(String, bool)>::new());
+        assert_eq!(
+            parse_column_list("\"a,b\" desc nulls first,c nulls last"),
+            Ok(vec![("a,b".to_string(), true), ("c".to_string(), false)])
+        );
+        assert_eq!(parse_column_list(""), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn test_parse_column_list_rejects_non_default_nulls_ordering() {
+        for list in [
+            "\"time\" DESC NULLS LAST",
+            "device_id NULLS FIRST",
+            "device_id ASC NULLS FIRST",
+        ] {
+            let err = parse_column_list(list).unwrap_err();
+            assert!(err.contains("NULLS"), "{list}: {err}");
+        }
+        let err = parse_column_list("ok, \"time\" DESC NULLS LAST").unwrap_err();
+        assert!(err.contains("column \"time\""), "{err}");
+    }
+
+    #[test]
+    fn test_parse_column_list_rejects_unknown_modifiers() {
+        for list in [
+            "\"time\" COLLATE \"C\"",
+            "time DESC DESC",
+            "time NULLS",
+            "time NULLS MIDDLE",
+            "time NULLS FIRST DESC",
+        ] {
+            let err = parse_column_list(list).unwrap_err();
+            assert!(err.contains("column \"time\""), "{list}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_non_default_nulls_ordering_hypertable_is_unsupported() {
+        let mut rows = metric_rows();
+        rows.columnstore_settings[0].order_by = Some("\"time\" DESC NULLS LAST".into());
+        add_hierarchy(&mut rows, "Metric");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(!cat.hypertables.contains_key("Metric"));
+        let reason = &cat.unsupported["Metric"];
+        assert!(
+            reason.contains("orderby") && reason.contains("column \"time\""),
+            "{reason}"
+        );
+        assert_hierarchy_unsupported(&cat, &["built on \"Metric\"", "NULLS LAST"]);
+    }
+
+    #[test]
+    fn test_multiple_space_dimensions_hypertable_is_unsupported() {
+        let mut rows = metric_rows();
+        rows.dimensions.push(DimensionRow {
+            table: "Metric".into(),
+            column: "siteId".into(),
+            is_time: false,
+            interval: None,
+            partitions: Some(2),
+        });
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(cat.hypertables.is_empty());
+        assert!(
+            cat.unsupported["Metric"].contains("more than one time or space dimension"),
+            "{}",
+            cat.unsupported["Metric"]
+        );
+    }
+
+    #[test]
+    fn test_multiple_time_dimensions_hypertable_is_unsupported() {
+        let mut rows = metric_rows();
+        rows.dimensions.push(DimensionRow {
+            table: "Metric".into(),
+            column: "recordedAt".into(),
+            is_time: true,
+            interval: Some((0, 7, 0)),
+            partitions: None,
+        });
+        add_hierarchy(&mut rows, "Metric");
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert!(cat.hypertables.is_empty());
+        assert!(cat.unsupported["Metric"].contains("more than one time or space dimension"));
+        assert_hierarchy_unsupported(&cat, &["more than one time or space dimension"]);
+    }
+
+    #[test]
+    fn test_old_version_extension_row_yields_version_only_catalog() {
+        // Below TIMESCALE_MIN_VERSION the CLI reads only the extension row.
+        let rows = CatalogRows {
+            extensions: vec![ExtensionRow {
+                name: "timescaledb".into(),
+                version: "2.17.2".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(!timescale_version_supported("2.17.2"));
+        let cat = TimescaleCatalog::from_rows(rows).unwrap().unwrap();
+        assert_eq!(cat.version, "2.17.2");
+        assert!(cat.hypertables.is_empty());
+        assert!(cat.aggregates.is_empty());
+        assert!(cat.unsupported.is_empty());
+        assert!(cat.other_views.is_empty());
     }
 
     #[test]
@@ -1089,23 +1368,204 @@ mod tests {
         assert!(timescale_version_supported("2.30.2"));
         assert!(timescale_version_supported("3.0.0"));
         assert!(!timescale_version_supported("garbage"));
+        let (major, minor) = TIMESCALE_MIN_VERSION;
+        assert!(timescale_version_supported(&format!("{major}.{minor}.0")));
+        assert!(!timescale_version_supported(&format!(
+            "{major}.{}.9",
+            minor - 1
+        )));
     }
 
     #[test]
     fn test_queries_are_schema_scoped() {
         use super::queries::*;
         for (name, sql) in [
-            ("HYPERTABLES", HYPERTABLES),
-            ("DIMENSIONS", DIMENSIONS),
-            ("COLUMNSTORE_SETTINGS", COLUMNSTORE_SETTINGS),
-            ("JOBS", JOBS),
-            ("AGGREGATES", AGGREGATES),
-            ("COLUMNS", COLUMNS),
-            ("VIEWS", VIEWS),
+            ("HYPERTABLES", HYPERTABLES.to_string()),
+            ("dimensions_sql", dimensions_sql()),
+            ("COLUMNSTORE_SETTINGS", COLUMNSTORE_SETTINGS.to_string()),
+            ("jobs_sql", jobs_sql()),
+            ("AGGREGATES", AGGREGATES.to_string()),
+            ("COLUMNS", COLUMNS.to_string()),
+            ("VIEWS", VIEWS.to_string()),
         ] {
             assert!(sql.contains("= $1"), "{name} is not scoped to the schema");
         }
         assert!(!EXTENSIONS.contains('$'));
+    }
+
+    /// The alias of each top-level `SELECT` output column of `sql`, in order
+    /// (empty for a column without `AS`). Skips parenthesized and
+    /// single-quoted text, and stops at the top-level `FROM`.
+    fn select_aliases(sql: &str) -> Vec<String> {
+        let body = sql.trim_start().strip_prefix("SELECT ").unwrap();
+        let mut items = Vec::new();
+        let mut depth = 0usize;
+        let mut quoted = false;
+        let mut start = 0;
+        let mut end = body.len();
+        for (i, c) in body.char_indices() {
+            match c {
+                '\'' => quoted = !quoted,
+                _ if quoted => {}
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    items.push(&body[start..i]);
+                    start = i + 1;
+                }
+                _ if depth == 0 && body[i..].starts_with(" FROM ") => {
+                    end = i;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        items.push(&body[start..end]);
+        items
+            .iter()
+            .map(|item| {
+                item.trim()
+                    .rsplit_once(" AS ")
+                    .map(|(_, alias)| alias.trim().to_string())
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// `(index, alias)` for the three columns of an interval at `idx`.
+    fn interval_cols(idx: usize, alias: &str) -> [(usize, String); 3] {
+        [
+            (idx, format!("{alias}_months")),
+            (idx + 1, format!("{alias}_days")),
+            (idx + 2, format!("{alias}_micros")),
+        ]
+    }
+
+    #[test]
+    fn test_query_aliases_match_column_indices() {
+        fn named(pairs: &[(usize, &str)]) -> Vec<(usize, String)> {
+            pairs.iter().map(|(i, a)| (*i, (*a).to_string())).collect()
+        }
+
+        let mut dimensions = named(&[
+            (cols::dimensions::TABLE, "table_name"),
+            (cols::dimensions::COLUMN, "column_name"),
+            (cols::dimensions::IS_TIME, "is_time"),
+            (cols::dimensions::PARTITIONS, "num_partitions"),
+        ]);
+        dimensions.extend(interval_cols(
+            cols::dimensions::CHUNK_INTERVAL,
+            "chunk_interval",
+        ));
+
+        let mut jobs = named(&[
+            (cols::jobs::PROC_NAME, "proc_name"),
+            (cols::jobs::RELATION, "relation"),
+        ]);
+        for (idx, alias) in [
+            (cols::jobs::DROP_AFTER, "drop_after"),
+            (cols::jobs::COMPRESS_AFTER, "compress_after"),
+            (cols::jobs::START_OFFSET, "start_offset"),
+            (cols::jobs::END_OFFSET, "end_offset"),
+            (cols::jobs::SCHEDULE_INTERVAL, "schedule_interval"),
+        ] {
+            jobs.extend(interval_cols(idx, alias));
+        }
+
+        let cases = [
+            (
+                "EXTENSIONS",
+                queries::EXTENSIONS.to_string(),
+                named(&[
+                    (cols::extensions::NAME, "name"),
+                    (cols::extensions::VERSION, "version"),
+                ]),
+            ),
+            (
+                "HYPERTABLES",
+                queries::HYPERTABLES.to_string(),
+                named(&[
+                    (cols::hypertables::TABLE, "table_name"),
+                    (
+                        cols::hypertables::COLUMNSTORE_ENABLED,
+                        "columnstore_enabled",
+                    ),
+                ]),
+            ),
+            ("dimensions_sql", queries::dimensions_sql(), dimensions),
+            (
+                "COLUMNSTORE_SETTINGS",
+                queries::COLUMNSTORE_SETTINGS.to_string(),
+                named(&[
+                    (cols::columnstore_settings::RELATION, "relation"),
+                    (cols::columnstore_settings::SEGMENT_BY, "segment_by"),
+                    (cols::columnstore_settings::ORDER_BY, "order_by"),
+                ]),
+            ),
+            ("jobs_sql", queries::jobs_sql(), jobs),
+            (
+                "AGGREGATES",
+                queries::AGGREGATES.to_string(),
+                named(&[
+                    (cols::aggregates::VIEW, "view_name"),
+                    (cols::aggregates::HYPERTABLE, "hypertable_name"),
+                    (
+                        cols::aggregates::MATERIALIZATION_HYPERTABLE,
+                        "materialization_hypertable_name",
+                    ),
+                    (cols::aggregates::MATERIALIZED_ONLY, "materialized_only"),
+                    (cols::aggregates::VIEW_DEFINITION, "view_definition"),
+                    (cols::aggregates::COMMENT, "view_comment"),
+                ]),
+            ),
+            (
+                "COLUMNS",
+                queries::COLUMNS.to_string(),
+                named(&[
+                    (cols::columns::RELATION, "relation"),
+                    (cols::columns::NAME, "column_name"),
+                    (cols::columns::UDT_NAME, "udt_name"),
+                    (cols::columns::NULLABLE, "nullable"),
+                ]),
+            ),
+            (
+                "VIEWS",
+                queries::VIEWS.to_string(),
+                named(&[
+                    (cols::views::NAME, "view_name"),
+                    (cols::views::IS_MATERIALIZED, "is_materialized"),
+                ]),
+            ),
+        ];
+
+        for (name, sql, mut expected) in cases {
+            expected.sort();
+            let aliases = select_aliases(&sql);
+            let expected_aliases: Vec<String> = expected.iter().map(|(_, a)| a.clone()).collect();
+            let indices: Vec<usize> = expected.iter().map(|(i, _)| *i).collect();
+            assert_eq!(
+                indices,
+                (0..expected.len()).collect::<Vec<_>>(),
+                "{name}: column indices are not 0..{}",
+                expected.len()
+            );
+            assert_eq!(aliases, expected_aliases, "{name}: SELECT aliases");
+        }
+    }
+
+    #[test]
+    fn test_select_aliases_helper() {
+        assert_eq!(
+            select_aliases(
+                "SELECT f(a, 'x,y') AS one, CASE WHEN b IN (SELECT c FROM d) THEN 1 END AS two \
+                 FROM t WHERE e AS f"
+            ),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(
+            select_aliases("SELECT a, b AS c FROM t"),
+            vec![String::new(), "c".into()]
+        );
     }
 
     #[test]
@@ -1119,7 +1579,15 @@ mod tests {
 
     #[test]
     fn test_interval_parts_sql_casts() {
-        let s = interval_parts_sql("x");
+        let s = interval_parts_sql("x", "iv");
         assert!(s.contains("::int4") && s.contains("::int8"));
+        assert!(
+            s.contains("* 3600000000") && s.contains("* 60000000"),
+            "{s}"
+        );
+        assert_eq!(
+            select_aliases(&format!("SELECT {s} FROM t")),
+            vec!["iv_months", "iv_days", "iv_micros"]
+        );
     }
 }

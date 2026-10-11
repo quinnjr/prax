@@ -1,11 +1,12 @@
 //! Diff the target schema's TimescaleDB state against the live catalog.
 //!
 //! Source state comes from the [`TimescaleCatalog`], never from the source
-//! schema (spec §4.3). Both sides are compared in table/column-name form; see
-//! [`resolve_hypertables`].
+//! schema: an introspected schema cannot express hypertable, columnstore or
+//! policy settings, so only the catalog knows what the database has. Both
+//! sides are compared in table/column-name form; see [`resolve_hypertables`].
 
 use prax_schema::Schema;
-use prax_schema::ast::{Model, PgInterval};
+use prax_schema::ast::{Attribute, Model, PgInterval};
 
 use crate::diff::{SchemaDiff, index_column_name, primary_key_columns};
 use crate::error::{MigrateResult, MigrationError};
@@ -14,10 +15,12 @@ use crate::timescale::catalog::{
     AggregatePolicy, AggregateState, ColumnstoreSettings, ColumnstoreState, HypertableState,
     TimescaleCatalog, timescale_version_at_least,
 };
-use crate::timescale::resolve::resolve_hypertables;
+use crate::timescale::quote::quote_ident;
+use crate::timescale::resolve::{model_timescale, resolve_hypertables};
 
 /// TimescaleDB changes between the live database and the target schema.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct TimescaleDiff {
     /// Changes grouped by table, tables in name order.
     pub changes: Vec<TimescaleChange>,
@@ -47,10 +50,13 @@ impl TimescaleDiff {
 
 /// One TimescaleDB change.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct TimescaleChange {
     /// What changes.
     pub kind: TimescaleChangeKind,
-    /// Whether the change needs `--allow-destructive` (spec §4.1).
+    /// Whether the change needs `--allow-destructive`: it discards rows
+    /// (retention dropping chunks, dropping a continuous aggregate or a
+    /// materialized view) or rewrites every columnstore chunk.
     pub gated: bool,
     /// User-facing explanation, emitted as a migration warning.
     pub note: Option<String>,
@@ -68,6 +74,7 @@ impl TimescaleChange {
 
 /// The kinds of TimescaleDB change. Each carries the old value for down SQL.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum TimescaleChangeKind {
     /// Turn a table into a hypertable (and add its space dimension).
     CreateHypertable {
@@ -137,24 +144,11 @@ pub enum TimescaleChangeKind {
         new: Option<PgInterval>,
     },
     /// Drop continuous aggregates and the views they replace, then create
-    /// aggregates (spec §5.5, §5.6). A diff holds at most one ungated set
-    /// (creates and plain-view drops) and one gated set.
-    AggregateSet {
-        /// Aggregates to drop, children before parents.
-        drop_aggregates: Vec<AggregateState>,
-        /// Non-aggregate views to drop before an aggregate of the same name is
-        /// created; the flag is `true` for a materialized view.
-        drop_views: Vec<(String, bool)>,
-        /// Aggregates to create, parents before children.
-        create: Vec<AggregateState>,
-        /// Dropped aggregates the target declares as plain or materialized
-        /// views; the generic pipeline creates those views
-        /// (`SchemaDiff::create_views`).
-        handoff_views: Vec<String>,
-        /// `(table, column)` type changes and drops in the generic diff that
-        /// force this recreation (spec §4.8).
-        coupled_columns: Vec<(String, String)>,
-    },
+    /// aggregates. A diff holds at most one ungated set (creates and
+    /// plain-view drops) and one gated set (everything that discards
+    /// materialized rows, plus every create that depends on it), so stripping
+    /// the gated set never leaves half a recreation behind.
+    AggregateSet(AggregateSetChange),
     /// Add, change or remove a continuous aggregate's refresh policy.
     ReplaceAggregatePolicy {
         /// View name.
@@ -175,6 +169,27 @@ pub enum TimescaleChangeKind {
     },
 }
 
+/// The contents of a [`TimescaleChangeKind::AggregateSet`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct AggregateSetChange {
+    /// Aggregates to drop, children before parents.
+    pub drop_aggregates: Vec<AggregateState>,
+    /// Non-aggregate views to drop before an aggregate of the same name is
+    /// created; the flag is `true` for a materialized view.
+    pub drop_views: Vec<(String, bool)>,
+    /// Aggregates to create, parents before children.
+    pub create: Vec<AggregateState>,
+    /// Dropped aggregates the target declares as plain or materialized
+    /// views; the generic pipeline creates those views
+    /// (`SchemaDiff::create_views`).
+    pub handoff_views: Vec<String>,
+    /// `(table, column)` type changes and drops in the generic diff that
+    /// force this recreation: Postgres refuses `ALTER COLUMN ... TYPE` and
+    /// `DROP COLUMN` on a column a view depends on.
+    pub coupled_columns: Vec<(String, String)>,
+}
+
 impl TimescaleChangeKind {
     /// The variant name and the relation it applies to.
     fn label(&self) -> (&'static str, &str) {
@@ -186,18 +201,13 @@ impl TimescaleChangeKind {
             Self::DisableColumnstore { table, .. } => ("DisableColumnstore", table),
             Self::ReplaceColumnstorePolicy { table, .. } => ("ReplaceColumnstorePolicy", table),
             Self::ReplaceRetentionPolicy { table, .. } => ("ReplaceRetentionPolicy", table),
-            Self::AggregateSet {
-                drop_aggregates,
-                drop_views,
-                create,
-                ..
-            } => (
+            Self::AggregateSet(set) => (
                 "AggregateSet",
-                create
+                set.create
                     .first()
-                    .or_else(|| drop_aggregates.first())
+                    .or_else(|| set.drop_aggregates.first())
                     .map(|a| a.view.as_str())
-                    .or_else(|| drop_views.first().map(|(v, _)| v.as_str()))
+                    .or_else(|| set.drop_views.first().map(|(v, _)| v.as_str()))
                     .unwrap_or_default(),
             ),
             Self::ReplaceAggregatePolicy { view, .. } => ("ReplaceAggregatePolicy", view),
@@ -213,23 +223,27 @@ impl TimescaleChangeKind {
 /// empty (adding its retention policy is not gated), while a table in `source`
 /// that it does not create already exists and is converted with
 /// `migrate_data`. Its column type changes and drops force the recreation of
-/// the aggregates reading that table (spec §4.8). Without a catalog the database
-/// has no Timescale state. Hypertable changes come first, tables in name
-/// order, then aggregate changes, so `changes` is stable.
+/// the aggregates reading that table, because Postgres refuses those changes
+/// on a column a view depends on. Without a catalog the database has no
+/// Timescale state. Hypertable changes come first, tables in name order, then
+/// aggregate changes, so `changes` is stable.
 ///
 /// # Errors
 ///
-/// Returns [`MigrationError::InvalidMigration`] when a change cannot be made in
-/// place (spec §4.3): changing a hypertable's time column; adding, removing or
-/// changing its space column; adding `space` to an existing table; a hypertable
-/// whose model does not declare `@@timescale.hypertable`; declaring
-/// `@@timescale.*` on a relation the catalog lists as unsupported (including
-/// a continuous aggregate built on one); declaring a
-/// continuous aggregate `source` that differs from the database while its SQL
-/// is unchanged; declaring a continuous aggregate without SQL; or, on a
+/// Returns [`MigrationError::InvalidMigration`] for invalid `@@timescale.*`
+/// attributes, and when a change cannot be made in place because TimescaleDB
+/// offers no way to alter an existing hypertable or aggregate that way:
+/// changing a hypertable's time column; adding, removing or changing its space
+/// column; adding `space` to an existing table; converting an existing table
+/// whose primary key or a unique constraint omits a partitioning column; a
+/// hypertable whose model does not declare `@@timescale.hypertable`;
+/// declaring `@@timescale.*` on a relation the catalog lists as unsupported
+/// (including a continuous aggregate built on one); declaring a continuous
+/// aggregate `source` that differs from the database while its SQL is
+/// unchanged; declaring a continuous aggregate without SQL; or, on a
 /// hypertable whose columnstore is enabled, changing a column's type, dropping
-/// a `segmentby`/`orderby` column, or (before TimescaleDB 2.30) making a column
-/// `NOT NULL` (spec §8 item 10).
+/// a `segmentby`/`orderby` column, or (before TimescaleDB 2.30) making a
+/// column `NOT NULL`.
 pub fn diff_timescale(
     target: &Schema,
     source: Option<&Schema>,
@@ -250,7 +264,11 @@ pub fn diff_timescale(
             }
         }
         for table in catalog.hypertables.keys() {
-            if target_model(table).is_some_and(|m| m.timescale().is_none()) {
+            // Parsed strictly, so an invalid attribute reports its own error
+            // instead of reading as "no hypertable declared".
+            if let Some(model) = target_model(table)
+                && model_timescale(model)?.is_none()
+            {
                 return Err(invalid(format!(
                     "Table \"{table}\" is a hypertable in the database, but its model does not \
                      declare @@timescale.hypertable. Declare @@timescale.hypertable on the model, \
@@ -264,7 +282,7 @@ pub fn diff_timescale(
     }
 
     let mut diff = TimescaleDiff::default();
-    for (table, want) in resolve_hypertables(target) {
+    for (table, want) in resolve_hypertables(target)? {
         match catalog.and_then(|c| c.hypertables.get(&table)) {
             Some(have) => alter_hypertable(have, &want, &mut diff.changes)?,
             None => {
@@ -298,23 +316,41 @@ pub fn opts_into_timescale(target: &Schema) -> bool {
             .iter()
             .any(|e| prax_schema::ast::canonical_extension_name(&e.name) == "timescaledb")
     });
-    let declared = |attrs: &[prax_schema::ast::Attribute]| {
-        attrs
-            .iter()
-            .any(|a| a.name.as_str().starts_with("timescale."))
-    };
     extension
-        || target.models.values().any(|m| declared(&m.attributes))
-        || target.views.values().any(|v| declared(&v.attributes))
+        || target
+            .models
+            .values()
+            .any(|m| m.attributes.iter().any(Attribute::is_timescale))
+        || target
+            .views
+            .values()
+            .any(|v| v.attributes.iter().any(Attribute::is_timescale))
 }
 
-fn invalid(message: String) -> MigrationError {
+/// An [`MigrationError::InvalidMigration`] carrying `message`.
+pub(crate) fn invalid(message: String) -> MigrationError {
     MigrationError::InvalidMigration(message)
 }
 
+/// A [`TimescaleChange`].
+pub(crate) fn change(
+    kind: TimescaleChangeKind,
+    gated: bool,
+    note: Option<String>,
+) -> TimescaleChange {
+    TimescaleChange { kind, gated, note }
+}
+
+/// `one` when `n` is 1, `many` otherwise; for the singular/plural words of
+/// change notes and error messages.
+pub(crate) fn plural<'a>(n: usize, one: &'a str, many: &'a str) -> &'a str {
+    if n == 1 { one } else { many }
+}
+
 /// The first TimescaleDB version observed to accept `SET NOT NULL` on a
-/// hypertable with columnstore chunks; 2.18 rejects it (spec §8 item 10).
-/// Versions in between were not probed and are treated as rejecting it.
+/// hypertable with columnstore chunks: 2.18 rejects it and 2.30 accepts it
+/// (verified live on 2.18.2 and 2.30.2). Versions in between were not probed
+/// and are treated as rejecting it.
 const SET_NOT_NULL_ON_COLUMNSTORE_SINCE: (u32, u32) = (2, 30);
 
 /// How to make a column change TimescaleDB rejects while the columnstore is
@@ -325,8 +361,9 @@ const DISABLE_COLUMNSTORE_FIRST: &str = "Disable the columnstore in a separate m
      @@timescale.columnstore.";
 
 /// Refuse the column changes TimescaleDB rejects on a hypertable whose
-/// columnstore is enabled (spec §4.8, §8 item 10): changing a column's type,
-/// dropping a `segmentby` or `orderby` column, and (before 2.30) `SET NOT NULL`.
+/// columnstore is enabled: changing a column's type, dropping a `segmentby`
+/// or `orderby` column (columnstore chunks keep using them), and (before 2.30)
+/// `SET NOT NULL`. Failing here beats failing halfway through the migration.
 fn check_columnstore_column_alters(
     catalog: &TimescaleCatalog,
     generic: &SchemaDiff,
@@ -378,15 +415,9 @@ fn check_columnstore_column_alters(
     Ok(())
 }
 
+/// Whether `model` carries any `@@timescale.*` attribute, valid or not.
 fn declares_timescale(model: &Model) -> bool {
-    model
-        .attributes
-        .iter()
-        .any(|a| a.name.as_str().starts_with("timescale."))
-}
-
-fn change(kind: TimescaleChangeKind, gated: bool, note: Option<String>) -> TimescaleChange {
-    TimescaleChange { kind, gated, note }
+    model.attributes.iter().any(Attribute::is_timescale)
 }
 
 /// A table without a hypertable in the catalog. `created`: the table is created
@@ -452,103 +483,79 @@ fn create_hypertable(
 /// column, and Prax never changes the keys of an existing table, so
 /// `create_hypertable` would fail when the migration is applied.
 fn check_existing_keys(model: &Model, want: &HypertableState) -> MigrateResult<()> {
-    let table = &want.table;
+    let table = quote_ident(&want.table);
     let mut required = vec![want.time_column.clone()];
     if let Some((column, _)) = &want.space {
         required.push(column.clone());
     }
-    let missing = |columns: &[String]| -> Vec<String> {
-        required
-            .iter()
-            .filter(|r| !columns.contains(r))
-            .cloned()
-            .collect()
-    };
     let quoted = |columns: &[String]| -> String {
         columns
             .iter()
-            .map(|c| format!("\"{c}\""))
+            .map(|c| quote_ident(c))
             .collect::<Vec<_>>()
             .join(", ")
     };
 
     // (description, example fix) per key that omits a partitioning column.
+    // The constraint names are not known here, so the example names them
+    // generically.
     let mut offending: Vec<(String, String)> = Vec::new();
-    let primary_key = primary_key_columns(model);
-    if !primary_key.is_empty() {
-        let lacking = missing(&primary_key);
-        if !lacking.is_empty() {
-            let fixed = [primary_key.clone(), lacking].concat();
-            offending.push((
-                format!("primary key ({})", quoted(&primary_key)),
-                format!(
-                    "ALTER TABLE \"{table}\" DROP CONSTRAINT \"{table}_pkey\", ADD PRIMARY KEY ({})",
-                    quoted(&fixed)
-                ),
-            ));
-        }
-    }
-    let mut unique_sets: Vec<(Option<String>, Vec<String>)> = model
-        .fields
-        .values()
-        .filter(|f| f.has_attribute("unique"))
-        .map(|f| (None, vec![index_column_name(model, f.name())]))
-        .collect();
-    for attr in model.attributes.iter().filter(|a| a.name() == "unique") {
-        let fields: Vec<String> = match attr.first_arg() {
-            Some(prax_schema::ast::AttributeValue::FieldRef(f)) => vec![f.to_string()],
-            Some(prax_schema::ast::AttributeValue::FieldRefList(l)) => {
-                l.iter().map(ToString::to_string).collect()
-            }
-            _ => continue,
-        };
-        let name = attr
-            .get_arg("map")
-            .or_else(|| attr.get_arg("name"))
-            .and_then(|v| v.as_string())
-            .map(str::to_string);
-        let columns = fields.iter().map(|f| index_column_name(model, f)).collect();
-        unique_sets.push((name, columns));
-    }
-    for (name, columns) in unique_sets {
-        let lacking = missing(&columns);
+    let mut check = |kind: &str, columns: Vec<String>, constraint: &str, add: &str| {
+        let lacking: Vec<String> = required
+            .iter()
+            .filter(|r| !columns.contains(r))
+            .cloned()
+            .collect();
         if lacking.is_empty() {
-            continue;
+            return;
         }
-        let constraint = name
-            .clone()
-            .unwrap_or_else(|| format!("{table}_{}_key", columns.join("_")));
         let fixed = [columns.clone(), lacking].concat();
         offending.push((
-            match &name {
-                Some(name) => format!("unique constraint \"{name}\" ({})", quoted(&columns)),
-                None => format!("unique constraint ({})", quoted(&columns)),
-            },
+            format!("{kind} ({})", quoted(&columns)),
             format!(
-                "ALTER TABLE \"{table}\" DROP CONSTRAINT \"{constraint}\", ADD UNIQUE ({})",
+                "ALTER TABLE {table} DROP CONSTRAINT <{constraint}>, ADD {add} ({})",
                 quoted(&fixed)
             ),
         ));
+    };
+    let primary_key = primary_key_columns(model);
+    if !primary_key.is_empty() {
+        check(
+            "primary key",
+            primary_key,
+            "primary key constraint",
+            "PRIMARY KEY",
+        );
+    }
+    for key in model.unique_key_sets() {
+        if key.label == "@unique" || key.label == "@@unique" {
+            let columns = key
+                .fields
+                .iter()
+                .map(|f| index_column_name(model, f))
+                .collect();
+            check("unique constraint", columns, "unique constraint", "UNIQUE");
+        }
     }
     let Some((_, example)) = offending.first() else {
         return Ok(());
     };
 
-    let mut columns = format!("the time column \"{}\"", want.time_column);
+    let mut columns = format!("the time column {}", quote_ident(&want.time_column));
     if let Some((space, _)) = &want.space {
-        columns.push_str(&format!(" and the space column \"{space}\""));
+        columns.push_str(&format!(" and the space column {}", quote_ident(space)));
     }
-    let one = offending.len() == 1;
+    let n = offending.len();
     let keys: Vec<&str> = offending.iter().map(|(d, _)| d.as_str()).collect();
     Err(invalid(format!(
-        "Cannot convert existing table \"{table}\" to a hypertable: TimescaleDB requires every \
+        "Cannot convert existing table {table} to a hypertable: TimescaleDB requires every \
          primary key and unique constraint or index of a hypertable to include {columns}, but \
          its {} {} not. Prax does not change the keys of an existing table, so recreate {} \
          manually to include {columns} (for example: {example}; for a unique index, drop it and \
          create it again with the column), then re-run the migration.",
         keys.join(", "),
-        if one { "does" } else { "do" },
-        if one { "it" } else { "them" },
+        plural(n, "does", "do"),
+        plural(n, "it", "them"),
     )))
 }
 
@@ -785,7 +792,8 @@ mod tests {
         prax_schema::parse_schema(prax).unwrap()
     }
 
-    /// The §3.1 `Metric` model carrying the given model attributes.
+    /// The reference `Metric` model (time, device, value; keyed on device and
+    /// time) carrying the given model attributes.
     fn metric(attrs: &[&str]) -> String {
         format!(
             "{DATASOURCE}\nmodel Metric {{\n  time     DateTime\n  deviceId String\n  value    Float\n\n  @@id([deviceId, time])\n  {}\n}}\n",
@@ -793,7 +801,7 @@ mod tests {
         )
     }
 
-    /// The §3.1 model with every Timescale attribute.
+    /// `Metric` with a hypertable, columnstore and retention policy.
     fn full_metric() -> String {
         metric(&[HYPERTABLE, COLUMNSTORE, RETENTION])
     }
@@ -960,6 +968,49 @@ mod tests {
     }
 
     #[test]
+    fn test_existing_table_key_hint_is_generic() {
+        let source = reading(
+            "  id    Int      @id\n  time  DateTime\n  email String\n  value Float @map(\"val\")",
+        );
+        let msg = invalid(run(&reading(READING_HYPERTABLE), Some(&source), None));
+        assert!(
+            msg.contains(
+                "ALTER TABLE \"Reading\" DROP CONSTRAINT <primary key constraint>, ADD PRIMARY \
+                 KEY (\"id\", \"time\")"
+            ),
+            "{msg}"
+        );
+        assert!(!msg.contains("_pkey"), "{msg}");
+    }
+
+    #[test]
+    fn test_malformed_hypertable_attribute_is_invalid_not_plain_table() {
+        let target = metric(&["@@timescale.hypertable(time, chunkInterval: \"bogus\")"]);
+        // Without a catalog, a broken attribute must not diff as a plain table.
+        let msg = invalid(run(&target, Some(&plain_metric()), None));
+        assert!(msg.contains("invalid TimescaleDB attributes"), "{msg}");
+        assert!(msg.contains("\"Metric\""), "{msg}");
+
+        // With the table already a hypertable, the parse error is reported
+        // rather than "does not declare @@timescale.hypertable".
+        let msg = invalid(run(
+            &target,
+            Some(&plain_metric()),
+            Some(catalog(vec![metric_state()])),
+        ));
+        assert!(msg.contains("invalid TimescaleDB attributes"), "{msg}");
+        assert!(!msg.contains("does not declare"), "{msg}");
+    }
+
+    #[test]
+    fn test_columnstore_without_hypertable_is_invalid() {
+        let target = metric(&[COLUMNSTORE]);
+        let msg = invalid(run(&target, Some(&plain_metric()), None));
+        assert!(msg.contains("\"Metric\""), "{msg}");
+        assert!(msg.contains("@@timescale.hypertable"), "{msg}");
+    }
+
+    #[test]
     fn test_existing_table_with_unique_missing_time_is_invalid() {
         // Field-level `@unique` (a mapped column) and `@@unique`.
         for (body, needle) in [
@@ -969,7 +1020,7 @@ mod tests {
             ),
             (
                 "  id    Int\n  time  DateTime\n  email String\n  value Float @map(\"val\")\n\n  @@id([id, time])\n  @@unique([email, value], map: \"reading_email_val_key\")",
-                "unique constraint \"reading_email_val_key\" (\"email\", \"val\")",
+                "unique constraint (\"email\", \"val\")",
             ),
         ] {
             let msg = invalid(run(
@@ -1000,7 +1051,8 @@ mod tests {
     #[test]
     fn test_new_table_keys_are_not_checked_against_a_source() {
         // Only an existing table is checked; a new one is created with the
-        // target's keys (validated by rule 5).
+        // target's keys, which schema validation already requires to include
+        // the partitioning columns.
         let source = reading(
             "  id    Int      @id\n  time  DateTime\n  email String\n  value Float @map(\"val\")",
         );
@@ -1465,7 +1517,7 @@ mod tests {
         let target = format!(
             "{DATASOURCE}\nmodel Metric {{\n  ts       DateTime @map(\"time\")\n  deviceId String   @map(\"device_id\")\n\n  @@map(\"metrics\")\n  @@timescale.hypertable(ts, space: hash(deviceId, 2))\n}}\n"
         );
-        let resolved = crate::timescale::resolve_hypertables(&schema(&target));
+        let resolved = crate::timescale::resolve_hypertables(&schema(&target)).unwrap();
         let state = &resolved["metrics"];
         assert_eq!(state.table, "metrics");
         assert_eq!(state.time_column, "time");

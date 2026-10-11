@@ -844,12 +844,13 @@ fn data_loss_warnings(diff: &crate::diff::SchemaDiff) -> Vec<String> {
         }
     }
 
-    warnings.extend(diff.timescale.gated_notes().into_iter().map(|note| {
-        format!(
-            "{}. Set allow_data_loss=true to proceed.",
-            note.trim_end_matches('.')
-        )
-    }));
+    let proceed = "Set allow_data_loss=true to proceed.";
+    warnings.extend(
+        diff.timescale
+            .gated_notes()
+            .iter()
+            .map(|note| crate::diff::append_sentence(note, proceed)),
+    );
     warnings
 }
 
