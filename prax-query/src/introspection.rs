@@ -1094,7 +1094,9 @@ pub fn sanitize_identifier(raw: &str) -> String {
 /// backslashes first, then quotes, so the written file parses back to the
 /// exact raw value. Never substitute characters — a MySQL enum value is
 /// arbitrary text and the diff source must carry it verbatim.
-fn escape_map_value(raw: &str) -> String {
+///
+/// Public so other crates (e.g. the CLI) can reuse it instead of copying it.
+pub fn escape_map_value(raw: &str) -> String {
     raw.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
@@ -1237,9 +1239,12 @@ fn generate_relation(fk: &ForeignKeyInfo, all_tables: &[TableInfo]) -> String {
 fn generate_model_attributes(table: &TableInfo) -> String {
     let mut output = String::new();
 
-    // @@map if table name differs from model name
+    // Pin the real table name whenever it differs *exactly* from the model
+    // name. A case-insensitive comparison would skip `metrics` -> `Metrics`,
+    // but `Model::table_name()` falls back to the model name, so the pulled
+    // schema would target `"Metrics"` instead of `metrics`.
     let model_name = pascal_case(&table.name);
-    if model_name.to_lowercase() != table.name.to_lowercase() {
+    if model_name != table.name {
         output.push_str(&format!(
             "    @@map(\"{}\")\n",
             escape_map_value(&table.name)
@@ -1831,9 +1836,27 @@ mod tests {
 
         let schema = generate_model_with(&table, &[], &[]);
         assert!(schema.contains("model Users"));
+        // `Users` != `users`, so the real table name must be pinned.
+        assert!(schema.contains("@@map(\"users\")"));
         assert!(schema.contains("id Int @id @auto"));
         assert!(schema.contains("email String @unique"));
         assert!(schema.contains("createdAt DateTime?"));
+    }
+
+    #[test]
+    fn test_lowercase_single_word_table_pins_map() {
+        let table = TableInfo {
+            name: "metrics".to_string(),
+            columns: vec![ColumnInfo {
+                name: "id".to_string(),
+                ..Default::default()
+            }],
+            primary_key: vec!["id".to_string()],
+            ..Default::default()
+        };
+        let schema = generate_model_with(&table, &[], &[]);
+        assert!(schema.contains("model Metrics"));
+        assert!(schema.contains("@@map(\"metrics\")"));
     }
 
     #[test]
