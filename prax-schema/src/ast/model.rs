@@ -1,21 +1,44 @@
 //! Model definitions for the Prax schema AST.
 
+use std::fmt;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use super::{
-    Attribute, ContinuousAggregateConfig, Documentation, Field, Ident, Schema, Span,
-    TimescaleModelConfig,
-};
+use super::{Attribute, Documentation, Field, Ident, Schema, Span};
+
+/// Kind of a uniqueness constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// A primary key (`@id` / `@@id`).
+    Id,
+    /// A unique key (`@unique` / `@@unique`).
+    Unique,
+}
 
 /// One uniqueness constraint of a model (a primary key or unique key).
+///
+/// Displays as the declaring attribute: `@id`, `@unique`, `@@id` or `@@unique`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UniqueKeySet {
-    /// Where the key was declared: `"@id"`, `"@unique"`, `"@@id"` or `"@@unique"`.
-    pub label: String,
+    /// Primary key or unique key.
+    pub kind: KeyKind,
+    /// Whether it was declared at model level (`@@`) rather than on a field (`@`).
+    pub model_level: bool,
     /// Field NAMES (not column names) that make up the key.
     pub fields: Vec<String>,
+}
+
+impl fmt::Display for UniqueKeySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = if self.model_level { "@@" } else { "@" };
+        let name = match self.kind {
+            KeyKind::Id => "id",
+            KeyKind::Unique => "unique",
+        };
+        write!(f, "{prefix}{name}")
+    }
 }
 
 /// A model definition (maps to a database table).
@@ -37,14 +60,10 @@ pub struct Model {
 }
 
 impl Model {
-    /// Typed `@@timescale.*` configuration.
-    ///
-    /// Returns `None` both when the model has no `@@timescale.*` attribute and
-    /// when the configuration is invalid. Migration and diff code must call
-    /// [`TimescaleModelConfig::from_model`] instead so that invalid
-    /// configuration surfaces as an error rather than silently disappearing.
-    pub fn timescale(&self) -> Option<TimescaleModelConfig> {
-        TimescaleModelConfig::from_model(self).ok().flatten()
+    /// Whether the model carries any `@@timescale.*` attribute (the bare
+    /// `@@timescale` included, so that it can be reported as invalid).
+    pub fn declares_timescale(&self) -> bool {
+        self.attributes.iter().any(Attribute::is_timescale)
     }
 
     /// Every uniqueness constraint declared on this model.
@@ -56,19 +75,20 @@ impl Model {
     pub fn unique_key_sets(&self) -> Vec<UniqueKeySet> {
         let mut sets = Vec::new();
         for f in self.fields.values() {
-            for label in ["id", "unique"] {
-                if f.has_attribute(label) {
+            for (name, kind) in [("id", KeyKind::Id), ("unique", KeyKind::Unique)] {
+                if f.has_attribute(name) {
                     sets.push(UniqueKeySet {
-                        label: format!("@{label}"),
+                        kind,
+                        model_level: false,
                         fields: vec![f.name().to_string()],
                     });
                 }
             }
         }
         for a in &self.attributes {
-            let label = match a.name() {
-                "id" => "@@id",
-                "unique" => "@@unique",
+            let kind = match a.name() {
+                "id" => KeyKind::Id,
+                "unique" => KeyKind::Unique,
                 _ => continue,
             };
             let Some(names) = a
@@ -79,7 +99,8 @@ impl Model {
                 continue;
             };
             sets.push(UniqueKeySet {
-                label: label.to_string(),
+                kind,
+                model_level: true,
                 fields: names.into_iter().map(str::to_string).collect(),
             });
         }
@@ -338,15 +359,10 @@ pub struct View {
 }
 
 impl View {
-    /// Typed `@@timescale.continuous` configuration.
-    ///
-    /// Returns `None` both when the view has no `@@timescale.continuous`
-    /// attribute and when the configuration is invalid. Migration and diff
-    /// code must call [`ContinuousAggregateConfig::from_view`] instead so that
-    /// invalid configuration surfaces as an error rather than silently
-    /// disappearing.
-    pub fn continuous_aggregate(&self) -> Option<ContinuousAggregateConfig> {
-        ContinuousAggregateConfig::from_view(self).ok().flatten()
+    /// Whether the view carries any `@@timescale.*` attribute (the bare
+    /// `@@timescale` included, so that it can be reported as invalid).
+    pub fn declares_timescale(&self) -> bool {
+        self.attributes.iter().any(Attribute::is_timescale)
     }
 
     /// Resolve the SQL defining this view: the inline `@@sql` attribute if
@@ -922,23 +938,40 @@ mod tests {
             make_span(),
         ));
         let sets = model.unique_key_sets();
-        let got: Vec<(&str, Vec<&str>)> = sets
+        let got: Vec<(String, Vec<&str>)> = sets
             .iter()
-            .map(|s| {
-                (
-                    s.label.as_str(),
-                    s.fields.iter().map(String::as_str).collect(),
-                )
-            })
+            .map(|s| (s.to_string(), s.fields.iter().map(String::as_str).collect()))
             .collect();
         assert_eq!(
             got,
             vec![
-                ("@id", vec!["id"]),
-                ("@unique", vec!["id"]),
-                ("@@unique", vec!["id", "ts"]),
-                ("@@id", vec!["ts"]),
+                ("@id".to_string(), vec!["id"]),
+                ("@unique".to_string(), vec!["id"]),
+                ("@@unique".to_string(), vec!["id", "ts"]),
+                ("@@id".to_string(), vec!["ts"]),
             ]
         );
+    }
+
+    #[test]
+    fn test_declares_timescale() {
+        let mut model = Model::new(make_ident("T"), make_span());
+        assert!(!model.declares_timescale());
+        model
+            .attributes
+            .push(Attribute::simple(make_ident("map"), make_span()));
+        assert!(!model.declares_timescale());
+        model
+            .attributes
+            .push(Attribute::simple(make_ident("timescale"), make_span()));
+        assert!(model.declares_timescale());
+
+        let mut view = View::new(make_ident("V"), make_span());
+        assert!(!view.declares_timescale());
+        view.attributes.push(Attribute::simple(
+            make_ident("timescale.continuous"),
+            make_span(),
+        ));
+        assert!(view.declares_timescale());
     }
 }

@@ -297,8 +297,14 @@ impl Ctx {
             Owner::Model => "model",
             Owner::View => "view",
         };
+        // An empty `attr` denotes the bare `@@timescale` attribute.
+        let attribute = if attr.is_empty() {
+            "@@timescale".to_string()
+        } else {
+            format!("@@timescale.{attr}")
+        };
         SchemaError::InvalidAttribute {
-            attribute: format!("@@timescale.{attr}"),
+            attribute,
             message: format!("{kind} `{}`: {msg}", self.name),
         }
     }
@@ -384,6 +390,17 @@ fn check_name(ctx: &Ctx, name: &str, allowed: &[&str]) -> Result<(), SchemaError
     if allowed.contains(&name) {
         return Ok(());
     }
+    if name.is_empty() {
+        let expected = allowed
+            .iter()
+            .map(|a| format!("`@@timescale.{a}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ctx.err(
+            "",
+            format!("unknown attribute `@@timescale`; expected one of: {expected}"),
+        ));
+    }
     const ALL: [&str; 4] = ["hypertable", "columnstore", "retention", "continuous"];
     if ALL.contains(&name) {
         let other = match ctx.owner {
@@ -402,6 +419,15 @@ fn check_name(ctx: &Ctx, name: &str, allowed: &[&str]) -> Result<(), SchemaError
             allowed.join(", ")
         ),
     ))
+}
+
+/// Store `value` in `slot`, rejecting a second `@@timescale.<name>`.
+fn set_once<T>(ctx: &Ctx, name: &str, slot: &mut Option<T>, value: T) -> Result<(), SchemaError> {
+    if slot.is_some() {
+        return Err(ctx.err(name, format!("`@@timescale.{name}` is repeated")));
+    }
+    *slot = Some(value);
+    Ok(())
 }
 
 fn field_list(
@@ -468,28 +494,31 @@ impl TimescaleModelConfig {
         let mut hypertable = None;
         let mut columnstore = None;
         let mut retention = None;
-        let mut any = false;
-        for attribute in &model.attributes {
-            let Some(name) = attribute.name.as_str().strip_prefix("timescale.") else {
-                continue;
-            };
-            any = true;
+        for attribute in model.attributes.iter().filter(|a| a.is_timescale()) {
+            // A bare `@@timescale` has an empty sub-name and fails `check_name`.
+            let name = attribute
+                .name
+                .as_str()
+                .strip_prefix("timescale.")
+                .unwrap_or_default();
             check_name(&ctx, name, &["hypertable", "columnstore", "retention"])?;
-            let repeated = match name {
-                "hypertable" => hypertable.is_some(),
-                "columnstore" => columnstore.is_some(),
-                _ => retention.is_some(),
-            };
-            if repeated {
-                return Err(ctx.err(name, format!("`@@timescale.{name}` is repeated")));
-            }
             match name {
-                "hypertable" => hypertable = Some(parse_hypertable(&ctx, attribute)?),
-                "columnstore" => columnstore = Some(attribute),
-                _ => retention = Some(parse_retention(&ctx, attribute)?),
+                "hypertable" => set_once(
+                    &ctx,
+                    name,
+                    &mut hypertable,
+                    parse_hypertable(&ctx, attribute)?,
+                )?,
+                "columnstore" => set_once(&ctx, name, &mut columnstore, attribute)?,
+                _ => set_once(
+                    &ctx,
+                    name,
+                    &mut retention,
+                    parse_retention(&ctx, attribute)?,
+                )?,
             }
         }
-        if !any {
+        if hypertable.is_none() && columnstore.is_none() && retention.is_none() {
             return Ok(None);
         }
         let Some(hypertable) = hypertable else {
@@ -610,15 +639,14 @@ impl ContinuousAggregateConfig {
             name: view.name().to_string(),
         };
         let mut found: Option<&Attribute> = None;
-        for attribute in &view.attributes {
-            let Some(name) = attribute.name.as_str().strip_prefix("timescale.") else {
-                continue;
-            };
+        for attribute in view.attributes.iter().filter(|a| a.is_timescale()) {
+            let name = attribute
+                .name
+                .as_str()
+                .strip_prefix("timescale.")
+                .unwrap_or_default();
             check_name(&ctx, name, &["continuous"])?;
-            if found.is_some() {
-                return Err(ctx.err(name, "`@@timescale.continuous` is repeated"));
-            }
-            found = Some(attribute);
+            set_once(&ctx, name, &mut found, attribute)?;
         }
         let Some(attribute) = found else {
             return Ok(None);
@@ -864,7 +892,7 @@ model Metric {
     fn test_hypertable_full() {
         let schema = parse_schema(METRIC).unwrap();
         let m = schema.models.get("Metric").unwrap();
-        let c = m.timescale().unwrap();
+        let c = TimescaleModelConfig::from_model(m).unwrap().unwrap();
         assert_eq!(c.hypertable.chunk_interval, PgInterval::new(0, 1, 0));
         assert_eq!(
             c.hypertable.space,
@@ -936,7 +964,7 @@ model Metric {
     #[test]
     fn test_continuous_defaults_and_full() {
         let v = view(r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour")"#);
-        let c = v.continuous_aggregate().unwrap();
+        let c = ContinuousAggregateConfig::from_view(&v).unwrap().unwrap();
         assert_eq!(c.source, "Metric");
         assert_eq!(c.schedule_interval, PgInterval::new(0, 0, 3_600_000_000));
         assert!(c.materialized_only);
@@ -945,14 +973,19 @@ model Metric {
         let v = view(
             r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour", startOffset: "3 days", endOffset: "1 hour")"#,
         );
-        let c = v.continuous_aggregate().unwrap();
+        let c = ContinuousAggregateConfig::from_view(&v).unwrap().unwrap();
         assert_eq!(c.start_offset, Some(PgInterval::new(0, 3, 0)));
         assert_eq!(c.end_offset, Some(PgInterval::new(0, 0, 3_600_000_000)));
 
         let v = view(
             r#"@@timescale.continuous(source: Metric, scheduleInterval: "1 hour", materializedOnly: false)"#,
         );
-        assert!(!v.continuous_aggregate().unwrap().materialized_only);
+        assert!(
+            !ContinuousAggregateConfig::from_view(&v)
+                .unwrap()
+                .unwrap()
+                .materialized_only
+        );
     }
 
     #[test]

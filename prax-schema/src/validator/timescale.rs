@@ -1,6 +1,6 @@
 //! TimescaleDB attribute validation (`@@timescale.*`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use super::Validator;
 use crate::ast::*;
@@ -8,8 +8,8 @@ use crate::error::SchemaError;
 
 /// Parsed TimescaleDB configurations of a schema, keyed by model / view name.
 struct TimescaleMaps<'a> {
-    hypertables: HashMap<&'a str, TimescaleModelConfig>,
-    continuous: HashMap<&'a str, ContinuousAggregateConfig>,
+    hypertables: BTreeMap<&'a str, TimescaleModelConfig>,
+    continuous: BTreeMap<&'a str, ContinuousAggregateConfig>,
 }
 
 impl Validator {
@@ -24,26 +24,17 @@ impl Validator {
     /// Validate every `@@timescale.*` attribute in the schema.
     pub(super) fn validate_timescale(&mut self, schema: &Schema) {
         let mut maps = TimescaleMaps {
-            hypertables: HashMap::new(),
-            continuous: HashMap::new(),
+            hypertables: BTreeMap::new(),
+            continuous: BTreeMap::new(),
         };
-        let mut uses_timescale = false;
 
         // Surface structural errors (unknown attributes, bad arguments,
-        // missing `hypertable`) from the typed parsers.
+        // missing `hypertable`) from the typed parsers, and validate each
+        // hypertable as soon as it parses.
         for model in schema.models.values() {
-            if model.attributes.iter().any(|a| a.is("timescale")) {
-                self.timescale_error(
-                    "timescale",
-                    format!(
-                        "model `{}`: unknown attribute `@@timescale`; expected `@@timescale.hypertable`, `@@timescale.columnstore` or `@@timescale.retention`",
-                        model.name()
-                    ),
-                );
-            }
-            uses_timescale |= model.attributes.iter().any(Attribute::is_timescale);
             match TimescaleModelConfig::from_model(model) {
                 Ok(Some(cfg)) => {
+                    self.validate_hypertable(model, &cfg);
                     maps.hypertables.insert(model.name(), cfg);
                 }
                 Ok(None) => {}
@@ -51,16 +42,6 @@ impl Validator {
             }
         }
         for view in schema.views.values() {
-            if view.attributes.iter().any(|a| a.is("timescale")) {
-                self.timescale_error(
-                    "timescale",
-                    format!(
-                        "view `{}`: unknown attribute `@@timescale`; expected `@@timescale.continuous`",
-                        view.name()
-                    ),
-                );
-            }
-            uses_timescale |= view.attributes.iter().any(Attribute::is_timescale);
             match ContinuousAggregateConfig::from_view(view) {
                 Ok(Some(cfg)) => {
                     maps.continuous.insert(view.name(), cfg);
@@ -72,7 +53,7 @@ impl Validator {
 
         // Using any `@@timescale.*` attribute requires a PostgreSQL datasource
         // that lists the `timescaledb` extension.
-        if uses_timescale {
+        if schema.uses_timescale_attributes() {
             match schema.datasource.as_ref() {
                 Some(ds)
                     if ds.provider == DatabaseProvider::PostgreSQL
@@ -81,12 +62,6 @@ impl Validator {
                     "timescale",
                     "`@@timescale.*` requires `provider = \"postgresql\"` and `timescaledb` in the datasource `extensions`".to_string(),
                 ),
-            }
-        }
-
-        for (name, cfg) in &maps.hypertables {
-            if let Some(model) = schema.models.get(*name) {
-                self.validate_hypertable(model, cfg);
             }
         }
 
@@ -158,7 +133,7 @@ impl Validator {
                         "timescale.hypertable",
                         format!(
                             "model `{m}`: `{}` ({}) must include hypertable dimension field `{required}`",
-                            set.label,
+                            set,
                             set.fields.join(", ")
                         ),
                     );
