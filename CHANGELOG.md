@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `prax migrate` no longer reports "No changes" when changes were skipped for lacking `--allow-destructive`; skipped changes are listed.
 - `db pull` no longer emits field-level `@id` on members of a composite primary key (previously both `@id` and `@@id`, which failed validation).
 - `db pull` now emits `@@map` whenever the model or view name differs from the table or view name, including case-only differences (previously the table `users` became `model Users` without `@@map`).
+- SQLite introspection now reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run.
 
 ### Security
 

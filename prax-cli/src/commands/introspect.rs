@@ -1761,10 +1761,10 @@ pub mod sqlite {
                 name,
                 db_type: decl_type,
                 normalized_type: normalized,
-                // Nullability comes solely from the column's NOT NULL flag;
-                // PK membership is represented separately via is_primary_key
-                // (→ @id), so a composite PK with a nullable member is not
-                // silently forced non-null.
+                // Nullability comes from the column's NOT NULL flag (plus the
+                // rowid-alias case below); PK membership is represented
+                // separately via is_primary_key (→ @id), so a composite PK
+                // with a nullable member is not silently forced non-null.
                 nullable: !not_null,
                 default: json_str(row, "dflt_value"),
                 // rowid INTEGER PRIMARY KEY columns auto-increment; detected
@@ -1780,6 +1780,9 @@ pub mod sqlite {
         table.primary_key = pk_positions.into_iter().map(|(_, name)| name).collect();
 
         // A single INTEGER PRIMARY KEY is an alias for rowid (auto-increment).
+        // It can never hold NULL (inserting NULL assigns the next rowid), but
+        // PRAGMA table_info reports notnull = 0 unless NOT NULL was spelled
+        // out, so mark it non-null here to match `Int @id @auto`.
         if table.primary_key.len() == 1
             && let Some(col) = table
                 .columns
@@ -1788,6 +1791,7 @@ pub mod sqlite {
             && col.db_type.to_ascii_lowercase().contains("int")
         {
             col.auto_increment = true;
+            col.nullable = false;
         }
 
         // PRAGMA foreign_key_list: id, seq, table, from, to, on_update, on_delete, match
