@@ -951,8 +951,9 @@ fn field_type_to_rust(
     };
 
     match modifier {
-        TypeModifier::Optional | TypeModifier::OptionalList => format!("Option<{}>", base_type),
+        TypeModifier::Optional => format!("Option<{}>", base_type),
         TypeModifier::List => format!("Vec<{}>", base_type),
+        TypeModifier::OptionalList => format!("Option<Vec<{}>>", base_type),
         TypeModifier::Required => base_type,
     }
 }
@@ -1213,6 +1214,64 @@ mod tests {
         assert!(
             code.contains("pub item_kind:"),
             "mapped field should be item_kind"
+        );
+    }
+
+    #[test]
+    fn scalar_list_fields_map_to_vec_and_option_vec() {
+        use prax_schema::ast::{FieldType, ScalarType, TypeModifier};
+
+        let string = FieldType::Scalar(ScalarType::String);
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::List),
+            "Vec<String>"
+        );
+        // `String[]?` is a nullable array, not a nullable scalar.
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::OptionalList),
+            "Option<Vec<String>>"
+        );
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::Optional),
+            "Option<String>"
+        );
+    }
+
+    #[test]
+    fn string_list_fields_decode_and_encode_as_vec_string() {
+        // Shape of the lexmata `access_grants` / `firm_roles` models.
+        let schema = prax_schema::parse_schema(
+            r#"
+            datasource db { provider = "postgresql" url = "x" }
+            model AccessGrant {
+              id             String   @id
+              scopes         String[]
+              allowed_scopes String[] @default(dbgenerated("ARRAY[]::TEXT[]"))
+              @@map("access_grants")
+            }
+            "#,
+        )
+        .expect("schema parses");
+        let model = schema
+            .models
+            .values()
+            .find(|m| m.name() == "AccessGrant")
+            .expect("AccessGrant");
+        let code = generate_model_module(model, &[], &HashMap::new()).expect("generate");
+
+        assert!(code.contains("pub scopes: Vec<String>,"), "{code}");
+        assert!(code.contains("pub allowed_scopes: Vec<String>,"), "{code}");
+        assert!(
+            code.contains(
+                r#"<Vec<String> as prax_query::row::FromColumn>::from_column(row, "scopes")"#
+            ),
+            "{code}"
+        );
+        assert!(
+            code.contains(
+                "<Vec<String> as prax_query::filter::ToFilterValue>::to_filter_value(&self.scopes)"
+            ),
+            "{code}"
         );
     }
 

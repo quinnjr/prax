@@ -46,6 +46,8 @@ enum Value {
     Uuid(uuid::Uuid),
     Json(serde_json::Value),
     Decimal(rust_decimal::Decimal),
+    /// Postgres `TEXT[]` / `VARCHAR[]` / `CHAR[]` / `NAME[]`.
+    TextArray(Vec<String>),
 }
 
 /// A driver-agnostic decoded row produced by the sqlx engine. Holds owned
@@ -152,6 +154,11 @@ fn decode_pg_cell(r: &sqlx::postgres::PgRow, i: usize) -> Result<Value, RowError
         "UUID" => decode_cell!(r, i, column, uuid::Uuid, Value::Uuid),
         "JSON" | "JSONB" => decode_cell!(r, i, column, serde_json::Value, Value::Json),
         "BYTEA" => decode_cell!(r, i, column, Vec<u8>, Value::Bytes),
+        // A NULL element inside the array is a decode error: `Vec<String>`
+        // has no slot for it.
+        "TEXT[]" | "VARCHAR[]" | "CHAR[]" | "NAME[]" => {
+            decode_cell!(r, i, column, Vec<String>, Value::TextArray)
+        }
         other => {
             // User-defined enums, domains, arrays, ranges, MONEY, etc.:
             // try a text decode; if the driver rejects the pairing, fail
@@ -624,6 +631,17 @@ impl RowRef for SqlxRowRef {
             Some(_) => Err(tc(c, "not a decimal")),
         }
     }
+    fn get_string_array(&self, c: &str) -> Result<Vec<String>, RowError> {
+        match self
+            .values
+            .get(c)
+            .ok_or_else(|| RowError::ColumnNotFound(c.into()))?
+        {
+            Value::TextArray(items) => Ok(items.clone()),
+            Value::Null => Err(RowError::UnexpectedNull(c.into())),
+            _ => Err(tc(c, "not a text array")),
+        }
+    }
     /// Override the trait default (which delegates to `get_str_opt` and
     /// therefore *errors* on any non-text, non-null cell — I64, F64,
     /// Bool, Bytes, ...) with a direct snapshot probe. This is what the
@@ -745,6 +763,48 @@ mod tests {
         assert_eq!(r.get_naive_datetime("t").unwrap(), ndt);
         // The UTC getter assumes naive timestamps are UTC.
         assert_eq!(r.get_datetime_utc("t").unwrap(), ndt.and_utc());
+    }
+
+    /// `String[]` scalar-list fields decode through `get_string_array`, and
+    /// the blanket `Option<T>` impl maps a NULL array to `None`.
+    #[test]
+    fn text_array_cells_decode_as_vec_string() {
+        let r = row(vec![
+            (
+                "scopes",
+                Value::TextArray(vec!["read".into(), "write".into()]),
+            ),
+            ("empty", Value::TextArray(vec![])),
+            ("null_tags", Value::Null),
+            ("name", Value::Text("x".into())),
+        ]);
+        assert_eq!(
+            Vec::<String>::from_column(&r, "scopes").unwrap(),
+            vec!["read".to_string(), "write".to_string()]
+        );
+        assert!(Vec::<String>::from_column(&r, "empty").unwrap().is_empty());
+        assert_eq!(
+            Option::<Vec<String>>::from_column(&r, "scopes").unwrap(),
+            Some(vec!["read".to_string(), "write".to_string()])
+        );
+        assert_eq!(
+            Option::<Vec<String>>::from_column(&r, "null_tags").unwrap(),
+            None
+        );
+        assert!(!r.is_null("scopes").unwrap());
+        // A NULL array is not a `Vec<String>`, and a scalar is not an array.
+        assert!(matches!(
+            Vec::<String>::from_column(&r, "null_tags"),
+            Err(RowError::UnexpectedNull(_))
+        ));
+        assert!(matches!(
+            Vec::<String>::from_column(&r, "name"),
+            Err(RowError::TypeConversion { .. })
+        ));
+        assert!(matches!(
+            Vec::<String>::from_column(&r, "missing"),
+            Err(RowError::ColumnNotFound(_))
+        ));
     }
 
     // NOTE: decoding correctness of `decode_*_cell` against real wire

@@ -246,4 +246,9 @@ impl RowRef for PgRow {
     fn get_decimal_opt(&self, c: &str) -> Result<Option<rust_decimal::Decimal>, RowError> {
         into_row_error(c, self.try_get::<_, Option<rust_decimal::Decimal>>(c))
     }
+    /// `TEXT[]` / `VARCHAR[]` / `CHAR[]` / `NAME[]` columns. A NULL element
+    /// inside the array is a decode error: `Vec<String>` has no slot for it.
+    fn get_string_array(&self, c: &str) -> Result<Vec<String>, RowError> {
+        into_row_error(c, self.try_get::<_, Vec<String>>(c))
+    }
 }
