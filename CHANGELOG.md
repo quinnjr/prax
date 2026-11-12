@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A new `prax-cli` integration test compiles a generated client for a schema with `String[]` fields against the workspace `prax-query`.
 - **build**: require `async-trait` 0.1.92 or later. 0.1.89 added `#[must_use]` to every `#[async_trait]` method, which clippy 1.99 reports as `double_must_use`.
 
+### Security
+
+- Updated `rustls` 0.23 (0.23.46), `rustls-webpki` 0.103 (0.103.17), `webpki-roots` 1.x (1.0.12), `tokio` (1.54.1), `ctutils`, `zstd` / `zstd-safe` / `zstd-sys` in `Cargo.lock` for RUSTSEC-2026-0346/0347/0348/0349, 0381, 0382, 0385, 0386, 0391, 0398, 0403 and 0410. `prax-cassandra` now depends on `webpki-roots` 1.x.
+- `deny.toml` ignores, with resolution paths, the advisories that only a major upstream upgrade can fix: `rustls` 0.21 / `rustls-webpki` 0.101 / `webpki-roots` 0.25 (via mongodb 2.8), the `webpki-roots` 0.26 shim (via mysql_async), `zip` < 9 (build-dependency of libduckdb-sys), and bundled SQLite in `libsqlite3-sys` 0.30 (RUSTSEC-2026-0459, via rusqlite 0.32 and sqlx-sqlite 0.8; opt-in SQLite backends; fixed by the rusqlite/sqlx upgrade planned for 0.13).
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed
