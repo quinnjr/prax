@@ -29,7 +29,7 @@ cdrs-tokio = { workspace = true, features = ["rust-tls"] }
 # verify_hostname=false custom verifier).
 rustls = { version = "0.23" }
 tokio-rustls = "0.26"
-webpki-roots = "0.26"
+webpki-roots = "1"
 rustls-pemfile = "2"
 
 # Serialization

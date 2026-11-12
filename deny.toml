@@ -45,6 +45,28 @@ ignore = [
     { id = "RUSTSEC-2026-0098", reason = "rustls-webpki 0.101 URI name-constraint issue (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
     { id = "RUSTSEC-2026-0099", reason = "rustls-webpki 0.101 wildcard name-constraint issue (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
     { id = "RUSTSEC-2026-0104", reason = "rustls-webpki 0.101 CRL parsing panic (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); resolves on mongodb 3.x + tiberius 0.13+" },
+    { id = "RUSTSEC-2026-0382", reason = "rustls-webpki 0.101 distrusted-intermediate acceptance (via rustls 0.21 via mongodb 2.8 + tiberius 0.12); the 0.103 line is patched in Cargo.lock; resolves on mongodb 3.x + tiberius 0.13+" },
+    # rustls 0.21 advisories: only the rustls 0.21 copy pulled in by mongodb
+    # 2.8 is affected; the rustls 0.23 line is patched (>= 0.23.46) in Cargo.lock.
+    { id = "RUSTSEC-2026-0346", reason = "rustls 0.21 Debug impls expose TLS secrets (via mongodb 2.8); rustls 0.23 is patched; resolves on mongodb 3.x migration" },
+    { id = "RUSTSEC-2026-0349", reason = "rustls 0.21 ServerHello key-exchange downgrade (via mongodb 2.8); rustls 0.23 is patched; resolves on mongodb 3.x migration" },
+    # webpki-roots: 0.25.4 comes from mongodb 2.8. 0.26.11 (via mysql_async)
+    # is a shim that re-exports webpki-roots 1.x, which Cargo.lock pins at a
+    # patched 1.0.12; prax-cassandra now depends on webpki-roots 1.x directly.
+    { id = "RUSTSEC-2026-0381", reason = "distrusted emSign roots in webpki-roots 0.25 (mongodb 2.8) and the 0.26 shim (mysql_async, re-exports patched 1.0.12); resolves on mongodb 3.x + mysql_async moving to webpki-roots 1.x" },
+    # zip < 9: only reached as a build-dependency of libduckdb-sys, which
+    # extracts its own bundled DuckDB source archive at build time. No
+    # user-supplied archives are ever extracted.
+    { id = "RUSTSEC-2026-0367", reason = "zip SUID/SGID preservation: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
+    { id = "RUSTSEC-2026-0368", reason = "zip symlink targets outside destination: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
+    { id = "RUSTSEC-2026-0369", reason = "zip permissions through symlinks: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
+    { id = "RUSTSEC-2026-0429", reason = "zip abort on large symlink entry: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
+    # libsqlite3-sys < 0.39 bundles a SQLite affected by CVE-2026-119375.
+    # Reached via rusqlite 0.32 (prax-sqlite, opt-in backend) and
+    # sqlx-sqlite 0.8 (prax-sqlx `sqlite` feature). Both pin
+    # libsqlite3-sys 0.30 (`links = "sqlite3"`), so the fix is the
+    # rusqlite / sqlx major upgrade, planned for 0.13.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite CVE-2026-119375 via libsqlite3-sys 0.30 (rusqlite 0.32 in prax-sqlite, sqlx-sqlite 0.8); opt-in SQLite backends only; resolves on the rusqlite/sqlx upgrade planned for 0.13" },
 ]
 
 # This section is considered when running `cargo deny check licenses`
