@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`String[]` scalar-list fields** (`prax-query`, `prax-postgres`, `prax-sqlx`, `prax-codegen`, `prax-cli`). A schema with a `String[]` field generated code that did not compile (E0277): nothing implemented `FromColumn` or `ToFilterValue` for `Vec<String>`.
+  - `FromColumn` and `ToFilterValue` for `Vec<String>`, backed by a new `RowRef::get_string_array` hook. The hook has a default implementation that errors as unsupported, so other drivers are unaffected. `Option<Vec<String>>` works through the existing blanket impls.
+  - `prax-postgres` and `prax-sqlx` (Postgres) decode `TEXT[]` / `VARCHAR[]` / `CHAR[]` / `NAME[]` columns, and bind a `FilterValue::List` made only of strings (or an empty list) as a text array. That's what `String[]` writes produce, and it also lets raw queries pass text-array parameters (`scopes && $1`). Lists of other element types are still rejected.
+  - `prax_schema!` generates `<field>::set(...)` with the full field type for list fields (`Vec<String>`, `Option<Vec<String>>`). It used to take the element type, which did not match `SetParam` and failed to compile.
+  - `prax generate` emits `Option<Vec<T>>` for optional list fields (`String[]?`). It used to emit `Option<T>`, dropping the list.
+  - A new `prax-cli` integration test compiles a generated client for a schema with `String[]` fields against the workspace `prax-query`.
+- **build**: require `async-trait` 0.1.92 or later. 0.1.89 added `#[must_use]` to every `#[async_trait]` method, which clippy 1.99 reports as `double_must_use`.
+
 ## [0.12.5] - 2026-09-17
 
 ### Fixed
