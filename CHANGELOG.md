@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `prax_schema!` generates `<field>::set(...)` with the full field type for list fields (`Vec<String>`, `Option<Vec<String>>`). It used to take the element type, which did not match `SetParam` and failed to compile.
   - `prax generate` emits `Option<Vec<T>>` for optional list fields (`String[]?`). It used to emit `Option<T>`, dropping the list.
   - A new `prax-cli` integration test compiles a generated client for a schema with `String[]` fields against the workspace `prax-query`.
+- SQLite introspection reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run (backport from `develop`).
 - **build**: require `async-trait` 0.1.92 or later. 0.1.89 added `#[must_use]` to every `#[async_trait]` method, which clippy 1.99 reports as `double_must_use`.
 
 ### Security
