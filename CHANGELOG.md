@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-11-12
+
 ### Fixed
 
 - **`String[]` scalar-list fields** (`prax-query`, `prax-postgres`, `prax-sqlx`, `prax-codegen`, `prax-cli`). A schema with a `String[]` field generated code that did not compile (E0277): nothing implemented `FromColumn` or `ToFilterValue` for `Vec<String>`.
