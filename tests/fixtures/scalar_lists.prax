@@ -1,0 +1,10 @@
+/// `String[]` scalar-list fields, in the shape of the lexmata
+/// `access_grants` model.
+model AccessGrant {
+    id             Int       @id @auto
+    scopes         String[]
+    allowed_scopes String[]  @default(dbgenerated("ARRAY[]::TEXT[]"))
+    labels         String[]?
+
+    @@map("access_grants")
+}

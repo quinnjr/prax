@@ -3,7 +3,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use prax_schema::ast::{Field, FieldType, Model, TypeModifier};
+use prax_schema::ast::{Field, FieldType, Model};
 
 use super::{generate_doc_comment, pascal_ident, snake_ident};
 use crate::types::field_type_to_rust;
@@ -12,8 +12,7 @@ use crate::types::field_type_to_rust;
 pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
     let field_name = snake_ident(field.name());
     let field_name_pascal = pascal_ident(field.name());
-    let field_type = field_type_to_rust(&field.field_type, &TypeModifier::Required);
-    let _full_field_type = field_type_to_rust(&field.field_type, &field.modifier);
+    let full_field_type = field_type_to_rust(&field.field_type, &field.modifier);
 
     let doc = generate_doc_comment(field.documentation.as_ref().map(|d| d.text.as_str()));
 
@@ -50,11 +49,10 @@ pub fn generate_field_module(field: &Field, model: &Model) -> TokenStream {
 
     // Generate set operations for updates
     let set_ops = if !is_relation {
-        let set_type = if is_optional {
-            quote! { Option<#field_type> }
-        } else {
-            field_type.clone()
-        };
+        // The full field type: `Option<T>`, `Vec<T>` for scalar lists
+        // (`String[]`), `Option<Vec<T>>` for optional lists. `SetParam`
+        // carries the same type.
+        let set_type = full_field_type;
 
         quote! {
             /// Set this field to a new value.
@@ -327,7 +325,7 @@ pub fn generate_set_param(model: &Model) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prax_schema::ast::{Ident, ScalarType, Span};
+    use prax_schema::ast::{Ident, ScalarType, Span, TypeModifier};
 
     fn make_span() -> Span {
         Span::new(0, 0)
