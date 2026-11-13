@@ -481,9 +481,10 @@ fn bind_pg_param<'q>(
             // Lists are deliberately unsupported in raw binds. Typed IN
             // filters expand to scalar placeholders upstream
             // (prax-query/src/filter.rs), so this arm only fires for
-            // hand-built raw queries.
+            // hand-built raw queries. Arrays (including `Vec<String>` /
+            // `String[]` values) use `FilterValue::Array`.
             return Err(SqlxError::type_conversion(
-                "list values not supported in raw binds; use typed IN filters",
+                "list values not supported in raw binds; use typed IN filters or FilterValue::Array",
             ));
         }
         FilterValue::Bytes(b) => query.bind(b.as_slice()),
@@ -1277,6 +1278,30 @@ mod tests {
         assert_eq!(row.get("n"), Some(&FilterValue::Int(3)));
         assert!(!matches!(row.get("n"), Some(FilterValue::Bool(_))));
         assert_eq!(row.get("avg_id"), Some(&FilterValue::Float(2.0)));
+    }
+
+    /// A string array (what `Vec<String>` / `String[]` fields encode to)
+    /// binds as a Postgres text array; a `FilterValue::List` is rejected.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn bind_pg_param_binds_string_arrays_and_rejects_lists() {
+        let scopes = FilterValue::Array(vec![
+            FilterValue::String("read".into()),
+            FilterValue::String("write".into()),
+        ]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &scopes).is_ok());
+
+        let empty = FilterValue::Array(vec![]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &empty).is_ok());
+
+        let list = FilterValue::List(vec![FilterValue::String("read".into())]);
+        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &list)
+            .err()
+            .expect("list bind must be rejected");
+        assert!(
+            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("list")),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "sqlite")]

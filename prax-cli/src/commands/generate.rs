@@ -308,6 +308,10 @@ fn generate_client_module(
     code.push_str("    /// implement both `Model` (for the table association) and\n");
     code.push_str("    /// `FromRow` (for row decoding); the generator emits both\n");
     code.push_str("    /// impls on every model in this client.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn query_raw<T>(&self, sql: prax_query::raw::Sql)\n");
     code.push_str("        -> prax_query::error::QueryResult<Vec<T>>\n");
     code.push_str("    where\n");
@@ -323,6 +327,10 @@ fn generate_client_module(
     code.push_str("    /// (INSERT / UPDATE / DELETE / DDL). Returns the\n");
     code.push_str("    /// driver-reported affected-row count. Mirrors\n");
     code.push_str("    /// `prax_orm::PraxClient::execute_raw`.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn execute_raw(&self, sql: prax_query::raw::Sql)\n");
     code.push_str("        -> prax_query::error::QueryResult<u64>\n");
     code.push_str("    {\n");
@@ -339,6 +347,10 @@ fn generate_client_module(
     code.push_str("    /// Nested `transaction()` calls on the same engine currently\n");
     code.push_str("    /// return `QueryError::internal(...)` until dialect-aware\n");
     code.push_str("    /// SAVEPOINT support lands.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn transaction<R, Fut, F>(&self, f: F)\n");
     code.push_str("        -> prax_query::error::QueryResult<R>\n");
     code.push_str("    where\n");
@@ -951,8 +963,9 @@ fn field_type_to_rust(
     };
 
     match modifier {
-        TypeModifier::Optional | TypeModifier::OptionalList => format!("Option<{}>", base_type),
+        TypeModifier::Optional => format!("Option<{}>", base_type),
         TypeModifier::List => format!("Vec<{}>", base_type),
+        TypeModifier::OptionalList => format!("Option<Vec<{}>>", base_type),
         TypeModifier::Required => base_type,
     }
 }
@@ -1213,6 +1226,64 @@ mod tests {
         assert!(
             code.contains("pub item_kind:"),
             "mapped field should be item_kind"
+        );
+    }
+
+    #[test]
+    fn scalar_list_fields_map_to_vec_and_option_vec() {
+        use prax_schema::ast::{FieldType, ScalarType, TypeModifier};
+
+        let string = FieldType::Scalar(ScalarType::String);
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::List),
+            "Vec<String>"
+        );
+        // `String[]?` is a nullable array, not a nullable scalar.
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::OptionalList),
+            "Option<Vec<String>>"
+        );
+        assert_eq!(
+            field_type_to_rust(&string, TypeModifier::Optional),
+            "Option<String>"
+        );
+    }
+
+    #[test]
+    fn string_list_fields_decode_and_encode_as_vec_string() {
+        // Shape of the lexmata `access_grants` / `firm_roles` models.
+        let schema = prax_schema::parse_schema(
+            r#"
+            datasource db { provider = "postgresql" url = "x" }
+            model AccessGrant {
+              id             String   @id
+              scopes         String[]
+              allowed_scopes String[] @default(dbgenerated("ARRAY[]::TEXT[]"))
+              @@map("access_grants")
+            }
+            "#,
+        )
+        .expect("schema parses");
+        let model = schema
+            .models
+            .values()
+            .find(|m| m.name() == "AccessGrant")
+            .expect("AccessGrant");
+        let code = generate_model_module(model, &[], &HashMap::new()).expect("generate");
+
+        assert!(code.contains("pub scopes: Vec<String>,"), "{code}");
+        assert!(code.contains("pub allowed_scopes: Vec<String>,"), "{code}");
+        assert!(
+            code.contains(
+                r#"<Vec<String> as prax_query::row::FromColumn>::from_column(row, "scopes")"#
+            ),
+            "{code}"
+        );
+        assert!(
+            code.contains(
+                "<Vec<String> as prax_query::filter::ToFilterValue>::to_filter_value(&self.scopes)"
+            ),
+            "{code}"
         );
     }
 

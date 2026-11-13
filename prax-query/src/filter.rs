@@ -531,6 +531,14 @@ impl ToFilterValue for Vec<f32> {
         FilterValue::Array(self.iter().map(|f| FilterValue::Float(*f as f64)).collect())
     }
 }
+/// Text arrays (`String[]` fields): since 0.13 a `Vec<String>` lowers to a
+/// single [`FilterValue::Array`] of [`FilterValue::String`] parameters, which
+/// Postgres drivers bind as a native `TEXT[]`.
+impl ToFilterValue for Vec<String> {
+    fn to_filter_value(&self) -> FilterValue {
+        FilterValue::Array(self.iter().cloned().map(FilterValue::String).collect())
+    }
+}
 impl<T: ToFilterValue> ToFilterValue for Option<T> {
     fn to_filter_value(&self) -> FilterValue {
         self.as_ref()
@@ -1964,6 +1972,26 @@ mod tests {
         assert_eq!(
             FilterValue::from("hello".to_string()),
             FilterValue::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn vec_string_to_filter_value_is_an_array_of_strings() {
+        let scopes = vec!["read".to_string(), "write".to_string()];
+        assert_eq!(
+            scopes.to_filter_value(),
+            FilterValue::Array(vec![
+                FilterValue::String("read".into()),
+                FilterValue::String("write".into()),
+            ])
+        );
+        assert_eq!(
+            Vec::<String>::new().to_filter_value(),
+            FilterValue::Array(vec![])
+        );
+        assert_eq!(
+            Option::<Vec<String>>::None.to_filter_value(),
+            FilterValue::Null
         );
     }
 

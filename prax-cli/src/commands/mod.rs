@@ -9,5 +9,6 @@ pub mod introspect;
 pub mod migrate;
 pub mod schema_from_db;
 pub mod seed;
+pub mod timescale_pull;
 pub mod validate;
 pub mod version;

@@ -107,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`let QueryError { code, message, context, source } = err`) no longer
   compile: add `..`. Use `QueryError::new` or one of the named
   constructors to build one. Its public fields are unchanged.
+- **core**: `Vec<String>` (`String[]` fields, added in 0.12.6) now lowers to
+  `FilterValue::Array` of strings instead of a `FilterValue::List`, like the
+  other `Vec<T>` conversions. Postgres drivers bind it as `TEXT[]`; a
+  hand-built `FilterValue::List` of strings is rejected again (use
+  `FilterValue::Array`).
 
 ### Repairing `Bytes` data written by 0.12.x
 
@@ -243,6 +248,17 @@ Safety:
   checkout (for example `53300` too many connections, `28P01` wrong
   password, `3D000` missing database), which stays a connection error.
   `QueryError::with_sqlstate` sets it.
+- **TimescaleDB schema + migrations** (`prax-schema`, `prax-migrate`, `prax-cli`) - `@@timescale.hypertable`, `@@timescale.columnstore`, `@@timescale.retention`, and `@@timescale.continuous`. Generated, introspected, and diffed DDL for TimescaleDB 2.18 or later; `prax db pull` emits the attributes.
+  - Opt-in: `prax migrate` reads and diffs the database's TimescaleDB state only when the schema lists `timescaledb` in the datasource `extensions` or declares an `@@timescale.*` attribute. For other schemas the TimescaleDB behaviour is unchanged: hypertables created by hand are migrated as plain tables, as before. Once opted in, TimescaleDB 2.18 or later is required, and a hypertable modeled without `@@timescale.hypertable` is refused (converting back to a plain table is not supported).
+  - Converting an existing table requires its primary key and every unique constraint or index to include the time column (TimescaleDB rule). Prax does not change the keys of an existing table, so such a conversion is refused at diff time with the manual steps.
+  - Hypertables with an integer time dimension or a `*_created_before` policy, and continuous aggregates built on them or on a relation outside the introspected schema, are left unmanaged: never altered or dropped, and refused if declared with `@@timescale.*`. `db pull` renders such hypertables as plain models and reports them, and such aggregates, in a `// prax:` comment.
+  - `prax db pull` adds `extensions = [timescaledb]` to the datasource when TimescaleDB 2.18 or later is installed, and reads the TimescaleDB catalog to render the attributes and continuous-aggregate views. If that read fails, or the installed TimescaleDB is older, it warns and pulls the tables and views without TimescaleDB attributes. A hypertable or aggregate whose names cannot be written as `.prax` identifiers, or an aggregate without a refresh policy or SQL definition, is reported in a `// prax:` comment instead.
+
+### Changed
+
+- **BREAKING**: `SchemaDiff` gains a public `timescale` field. It is not `#[non_exhaustive]`, so struct-literal construction without `..Default::default()` breaks.
+- `prax migrate` now emits `CREATE EXTENSION IF NOT EXISTS` for each datasource `extensions = [...]` entry not installed in the database (installed extensions are read from `pg_extension`). It is create-only: removing an entry never drops the extension. Aliases such as `pgvector` are normalized.
+- Generated migrations record changes skipped for lacking `--allow-destructive` as `-- SKIPPED (needs --allow-destructive): …` comment lines. `prax migrate dev` also prints them, with a count, when the migration has other statements.
 
 ### Fixed
 
@@ -302,6 +318,9 @@ Safety:
 - **postgres**: the `FilterValue::List` bind error now points to
   `Filter::In` or `FilterValue::Array` with `= ANY($1)`; `Array` string
   elements adapt to uuid, timestamp, date, time and enum element types.
+- `prax migrate` no longer reports "No changes" when changes were skipped for lacking `--allow-destructive`; skipped changes are listed.
+- `db pull` no longer emits field-level `@id` on members of a composite primary key (previously both `@id` and `@@id`, which failed validation).
+- `db pull` now emits `@@map` whenever the model or view name differs from the table or view name, including case-only differences (previously the table `users` became `model Users` without `@@map`).
 
 ### Removed
 
@@ -324,6 +343,32 @@ Safety:
   makes it parse oddly (for example `u:8/x@host`, read as port 8) has its
   whole user info redacted. `PgPool` now implements `Debug` too, showing
   the redacted config and the pool status.
+- Database-sourced names in generated migration comments (`-- WARNING:`, `-- SKIPPED`) and in `db pull` `// prax:` comments are kept on one line, so a name containing a newline can no longer end the comment and inject SQL or schema text.
+
+## [0.12.7] - 2026-11-13
+
+### Fixed
+
+- `prax generate` output is clippy-clean on clippy 1.99: the generated `PraxClient::query_raw`, `execute_raw` and `transaction` carry `#[allow(clippy::result_large_err)]`. They return `QueryResult` (a large `QueryError`) directly, so consumers that run `clippy -D warnings` over the generated tree failed. `QueryError` itself is unchanged.
+- `prax-cli/tests/generate_compiles.rs` also runs `cargo clippy -- -D warnings` on the generated client (required on CI; the Test and Code Coverage jobs now install clippy).
+
+## [0.12.6] - 2026-11-12
+
+### Fixed
+
+- **`String[]` scalar-list fields** (`prax-query`, `prax-postgres`, `prax-sqlx`, `prax-codegen`, `prax-cli`). A schema with a `String[]` field generated code that did not compile (E0277): nothing implemented `FromColumn` or `ToFilterValue` for `Vec<String>`.
+  - `FromColumn` and `ToFilterValue` for `Vec<String>`, backed by a new `RowRef::get_string_array` hook. The hook has a default implementation that errors as unsupported, so other drivers are unaffected. `Option<Vec<String>>` works through the existing blanket impls.
+  - `prax-postgres` and `prax-sqlx` (Postgres) decode `TEXT[]` / `VARCHAR[]` / `CHAR[]` / `NAME[]` columns, and bind a `FilterValue::List` made only of strings (or an empty list) as a text array. That's what `String[]` writes produce, and it also lets raw queries pass text-array parameters (`scopes && $1`). Lists of other element types are still rejected.
+  - `prax_schema!` generates `<field>::set(...)` with the full field type for list fields (`Vec<String>`, `Option<Vec<String>>`). It used to take the element type, which did not match `SetParam` and failed to compile.
+  - `prax generate` emits `Option<Vec<T>>` for optional list fields (`String[]?`). It used to emit `Option<T>`, dropping the list.
+  - A new `prax-cli` integration test compiles a generated client for a schema with `String[]` fields against the workspace `prax-query`.
+- SQLite introspection reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run (backport from `develop`).
+- **build**: require `async-trait` 0.1.92 or later. 0.1.89 added `#[must_use]` to every `#[async_trait]` method, which clippy 1.99 reports as `double_must_use`.
+
+### Security
+
+- Updated `rustls` 0.23 (0.23.46), `rustls-webpki` 0.103 (0.103.17), `webpki-roots` 1.x (1.0.12), `tokio` (1.54.1), `ctutils`, `zstd` / `zstd-safe` / `zstd-sys` in `Cargo.lock` for RUSTSEC-2026-0346/0347/0348/0349, 0381, 0382, 0385, 0386, 0391, 0398, 0403 and 0410. `prax-cassandra` now depends on `webpki-roots` 1.x.
+- `deny.toml` ignores, with resolution paths, the advisories that only a major upstream upgrade can fix: `rustls` 0.21 / `rustls-webpki` 0.101 / `webpki-roots` 0.25 (via mongodb 2.8), the `webpki-roots` 0.26 shim (via mysql_async), `zip` < 9 (build-dependency of libduckdb-sys), and bundled SQLite in `libsqlite3-sys` 0.30 (RUSTSEC-2026-0459, via rusqlite 0.32 and sqlx-sqlite 0.8; opt-in SQLite backends; fixed by the rusqlite/sqlx upgrade planned for 0.13).
 
 ## [0.12.5] - 2026-09-17
 

@@ -562,6 +562,48 @@ mod tests {
     }
 
     #[test]
+    fn string_array_binds_as_a_text_array() {
+        // What `Vec<String>` (a `String[]` field) lowers to.
+        let array = FilterValue::Array(vec![
+            FilterValue::String("read".into()),
+            FilterValue::String("write".into()),
+        ]);
+        let param = filter_value_to_sql(&array).expect("string array binds");
+        let mut buf = bytes::BytesMut::new();
+        let encoded = param
+            .to_sql_checked(&Type::TEXT_ARRAY, &mut buf)
+            .expect("encodes as TEXT[]");
+        assert!(matches!(encoded, IsNull::No));
+        assert!(
+            param
+                .to_sql_checked(&Type::VARCHAR_ARRAY, &mut bytes::BytesMut::new())
+                .is_ok()
+        );
+        // A text array never satisfies a scalar column.
+        assert!(
+            param
+                .to_sql_checked(&Type::TEXT, &mut bytes::BytesMut::new())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_array_binds_as_an_empty_text_array() {
+        let param = filter_value_to_sql(&FilterValue::Array(vec![])).expect("empty array binds");
+        assert!(
+            param
+                .to_sql_checked(&Type::TEXT_ARRAY, &mut bytes::BytesMut::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn string_list_is_rejected_in_favour_of_array() {
+        let list = FilterValue::List(vec![FilterValue::String("read".into())]);
+        assert!(filter_value_to_sql(&list).is_err());
+    }
+
+    #[test]
     fn test_pg_type_mapping() {
         use pg_types::*;
 
