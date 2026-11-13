@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # ubuntu-latest (26.04) ships libmysqlclient whose pkg-config version is
+  # the library ABI (24.x), which mysqlclient-sys 0.4 (via the diesel dev-dep)
+  # rejects. Name the MySQL server line its bundled bindings target instead.
+  MYSQLCLIENT_VERSION: "8.4.0"
 
 jobs:
   check:
