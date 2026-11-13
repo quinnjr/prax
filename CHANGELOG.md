@@ -7,9 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> The 0.13.0 release itself is cut on `release/0.13.0` after the scalar-lists
-> work lands; no version bump is made here.
-
 ### Breaking
 
 - **core**: `FilterValue` is `#[non_exhaustive]`; downstream matches need a
