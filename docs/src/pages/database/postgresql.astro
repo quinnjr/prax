@@ -476,6 +476,18 @@ SET hnsw.ef_search = 100;  -- Higher = better recall, slower`;
         <CodeBlock code={extensionsMigration} lang="sql" />
       </section>
 
+      <section id="timescaledb">
+        <h2 class="text-2xl font-semibold mb-4">TimescaleDB</h2>
+        <p class="text-muted mb-4">
+          With <code>extensions = [timescaledb]</code> in the datasource block, models can declare hypertables,
+          columnstore, retention policies, and continuous aggregates via <code>@@timescale.*</code> attributes.
+          Migrations generate and diff the DDL for TimescaleDB 2.18 or later, and <code>prax db pull</code>
+          reads it back. Self-hosted servers need <code>timescaledb</code> in <code>shared_preload_libraries</code>.
+          See the <a href="/schema/attributes#timescaledb" class="text-accent hover:underline">TimescaleDB attribute reference</a>
+          for the full syntax, gated destructive changes, and aggregate backfill.
+        </p>
+      </section>
+
       <!-- ============================================================ -->
       <!-- VECTOR TYPES SECTION -->
       <!-- ============================================================ -->

@@ -1,10 +1,45 @@
 //! Model definitions for the Prax schema AST.
 
+use std::fmt;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
-use super::{Attribute, Documentation, Field, Ident, Span};
+use super::{Attribute, Documentation, Field, Ident, Schema, Span};
+
+/// Kind of a uniqueness constraint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// A primary key (`@id` / `@@id`).
+    Id,
+    /// A unique key (`@unique` / `@@unique`).
+    Unique,
+}
+
+/// One uniqueness constraint of a model (a primary key or unique key).
+///
+/// Displays as the declaring attribute: `@id`, `@unique`, `@@id` or `@@unique`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueKeySet {
+    /// Primary key or unique key.
+    pub kind: KeyKind,
+    /// Whether it was declared at model level (`@@`) rather than on a field (`@`).
+    pub model_level: bool,
+    /// Field NAMES (not column names) that make up the key.
+    pub fields: Vec<String>,
+}
+
+impl fmt::Display for UniqueKeySet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = if self.model_level { "@@" } else { "@" };
+        let name = match self.kind {
+            KeyKind::Id => "id",
+            KeyKind::Unique => "unique",
+        };
+        write!(f, "{prefix}{name}")
+    }
+}
 
 /// A model definition (maps to a database table).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,6 +60,53 @@ pub struct Model {
 }
 
 impl Model {
+    /// Whether the model carries any `@@timescale.*` attribute (the bare
+    /// `@@timescale` included, so that it can be reported as invalid).
+    pub fn declares_timescale(&self) -> bool {
+        self.attributes.iter().any(Attribute::is_timescale)
+    }
+
+    /// Every uniqueness constraint declared on this model.
+    ///
+    /// Field-level `@id` / `@unique` yield one set per field (`fields` is that
+    /// field's name); model-level `@@id` / `@@unique` yield the listed field
+    /// names (positional list or named `fields:` argument). Model-level
+    /// attributes whose argument is not a plain field list are skipped.
+    pub fn unique_key_sets(&self) -> Vec<UniqueKeySet> {
+        let mut sets = Vec::new();
+        for f in self.fields.values() {
+            for (name, kind) in [("id", KeyKind::Id), ("unique", KeyKind::Unique)] {
+                if f.has_attribute(name) {
+                    sets.push(UniqueKeySet {
+                        kind,
+                        model_level: false,
+                        fields: vec![f.name().to_string()],
+                    });
+                }
+            }
+        }
+        for a in &self.attributes {
+            let kind = match a.name() {
+                "id" => KeyKind::Id,
+                "unique" => KeyKind::Unique,
+                _ => continue,
+            };
+            let Some(names) = a
+                .get_arg("fields")
+                .or_else(|| a.first_arg())
+                .and_then(|v| v.as_field_names())
+            else {
+                continue;
+            };
+            sets.push(UniqueKeySet {
+                kind,
+                model_level: true,
+                fields: names.into_iter().map(str::to_string).collect(),
+            });
+        }
+        sets
+    }
+
     /// Create a new model.
     pub fn new(name: Ident, span: Span) -> Self {
         Self {
@@ -277,6 +359,26 @@ pub struct View {
 }
 
 impl View {
+    /// Whether the view carries any `@@timescale.*` attribute (the bare
+    /// `@@timescale` included, so that it can be reported as invalid).
+    pub fn declares_timescale(&self) -> bool {
+        self.attributes.iter().any(Attribute::is_timescale)
+    }
+
+    /// Resolve the SQL defining this view: the inline `@@sql` attribute if
+    /// present, otherwise a top-level `@@sql` definition (`schema.raw_sql`)
+    /// whose name matches the view's database name (`@@map`) or model name.
+    pub fn resolved_sql<'a>(&'a self, schema: &'a Schema) -> Option<&'a str> {
+        if let Some(sql) = self.sql_query() {
+            return Some(sql);
+        }
+        schema
+            .raw_sql
+            .iter()
+            .find(|r| r.name.as_str() == self.view_name() || r.name.as_str() == self.name())
+            .map(|r| r.sql.as_str())
+    }
+
     /// Create a new view.
     pub fn new(name: Ident, span: Span) -> Self {
         Self {
@@ -809,5 +911,67 @@ mod tests {
         let v2 = View::new(make_ident("Stats"), make_span());
 
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn test_unique_key_sets() {
+        let mut model = Model::new(make_ident("T"), make_span());
+        let mut id = make_id_field();
+        id.attributes
+            .push(Attribute::simple(make_ident("unique"), make_span()));
+        model.add_field(id);
+        model.attributes.push(Attribute::new(
+            make_ident("unique"),
+            vec![AttributeArg::positional(
+                AttributeValue::FieldRefList(vec!["id".into(), "ts".into()]),
+                make_span(),
+            )],
+            make_span(),
+        ));
+        model.attributes.push(Attribute::new(
+            make_ident("id"),
+            vec![AttributeArg::named(
+                make_ident("fields"),
+                AttributeValue::Array(vec![AttributeValue::Ident("ts".into())]),
+                make_span(),
+            )],
+            make_span(),
+        ));
+        let sets = model.unique_key_sets();
+        let got: Vec<(String, Vec<&str>)> = sets
+            .iter()
+            .map(|s| (s.to_string(), s.fields.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("@id".to_string(), vec!["id"]),
+                ("@unique".to_string(), vec!["id"]),
+                ("@@unique".to_string(), vec!["id", "ts"]),
+                ("@@id".to_string(), vec!["ts"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_declares_timescale() {
+        let mut model = Model::new(make_ident("T"), make_span());
+        assert!(!model.declares_timescale());
+        model
+            .attributes
+            .push(Attribute::simple(make_ident("map"), make_span()));
+        assert!(!model.declares_timescale());
+        model
+            .attributes
+            .push(Attribute::simple(make_ident("timescale"), make_span()));
+        assert!(model.declares_timescale());
+
+        let mut view = View::new(make_ident("V"), make_span());
+        assert!(!view.declares_timescale());
+        view.attributes.push(Attribute::simple(
+            make_ident("timescale.continuous"),
+            make_span(),
+        ));
+        assert!(view.declares_timescale());
     }
 }

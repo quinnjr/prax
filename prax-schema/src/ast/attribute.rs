@@ -69,6 +69,26 @@ impl AttributeValue {
             _ => None,
         }
     }
+
+    /// Try to get the value as a plain list of field names.
+    ///
+    /// - `FieldRefList` yields all of its names.
+    /// - `Array` yields the names of its `Ident` / `FieldRef` items, or `None`
+    ///   if any item has another shape.
+    /// - Every other shape yields `None`.
+    pub fn as_field_names(&self) -> Option<Vec<&str>> {
+        match self {
+            Self::FieldRefList(v) => Some(v.iter().map(SmolStr::as_str).collect()),
+            Self::Array(items) => items
+                .iter()
+                .map(|i| match i {
+                    Self::Ident(s) | Self::FieldRef(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            _ => None,
+        }
+    }
 }
 
 /// An attribute argument (named or positional).
@@ -136,6 +156,13 @@ impl Attribute {
     /// Get the attribute name as a string.
     pub fn name(&self) -> &str {
         self.name.as_str()
+    }
+
+    /// Whether this is a TimescaleDB attribute: the bare `timescale` name or
+    /// any `timescale.<sub-name>` form (e.g. `@@timescale.hypertable`).
+    pub fn is_timescale(&self) -> bool {
+        let name = self.name.as_str();
+        name == "timescale" || name.starts_with("timescale.")
     }
 
     /// Check if this attribute has the given name.
@@ -353,6 +380,29 @@ impl ReferentialAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_timescale() {
+        let mk = |n: &str| Attribute::simple(Ident::new(n, Span::new(0, 1)), Span::new(0, 1));
+        assert!(mk("timescale").is_timescale());
+        assert!(mk("timescale.hypertable").is_timescale());
+        assert!(!mk("timescaledb").is_timescale());
+        assert!(!mk("map").is_timescale());
+    }
+
+    #[test]
+    fn test_as_field_names() {
+        let list = AttributeValue::FieldRefList(vec!["a".into(), "b".into()]);
+        assert_eq!(list.as_field_names(), Some(vec!["a", "b"]));
+        let arr = AttributeValue::Array(vec![
+            AttributeValue::Ident("a".into()),
+            AttributeValue::FieldRef("b".into()),
+        ]);
+        assert_eq!(arr.as_field_names(), Some(vec!["a", "b"]));
+        let bad = AttributeValue::Array(vec![AttributeValue::Int(1)]);
+        assert_eq!(bad.as_field_names(), None);
+        assert_eq!(AttributeValue::Int(1).as_field_names(), None);
+    }
 
     // ==================== AttributeValue Tests ====================
 

@@ -35,6 +35,7 @@
 - 📦 **Migrations** - Schema diffing, SQL generation, and migration tracking
 - 🛠️ **Code Generation** - Proc-macros for compile-time model generation
 - 🗄️ **Multi-Database** - PostgreSQL, MySQL, SQLite, MSSQL, MongoDB, DuckDB, ScyllaDB
+- ⏱️ **TimescaleDB** - Hypertables, columnstore, retention, and continuous aggregates declared in the schema
 - 🧠 **Vector Search** - pgvector integration for AI/ML embeddings and similarity search
 - 🔌 **Framework Integration** - First-class support for [Armature](https://github.com/quinnjr/armature), Axum, and Actix-web
 - 🏢 **Multi-Tenancy** - Row-level security, schema-based, and database-based isolation

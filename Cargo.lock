@@ -4898,6 +4898,7 @@ dependencies = [
  "pest",
  "pest_derive",
  "pretty_assertions",
+ "proptest",
  "regex-lite",
  "serde",
  "serde_json",
