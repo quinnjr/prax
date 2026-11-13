@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `prax generate` output is clippy-clean on clippy 1.99: the generated `PraxClient::query_raw`, `execute_raw` and `transaction` carry `#[allow(clippy::result_large_err)]`. They return `QueryResult` (a large `QueryError`) directly, so consumers that run `clippy -D warnings` over the generated tree failed. `QueryError` itself is unchanged.
+- `prax-cli/tests/generate_compiles.rs` also runs `cargo clippy -- -D warnings` on the generated client (required on CI; the Test and Code Coverage jobs now install clippy).
+
 ## [0.12.6] - 2026-11-12
 
 ### Fixed
