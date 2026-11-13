@@ -303,11 +303,14 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindManyOperation<E, M> {
             });
         }
 
-        // LIMIT/OFFSET clause (the cursor predicate lives in WHERE).
-        if self.pagination.take.is_some() || self.pagination.skip.is_some() {
-            sql.push(' ');
-            self.pagination.write_sql(&mut sql);
-        }
+        // LIMIT/OFFSET clause (the cursor predicate lives in WHERE), in
+        // the dialect's syntax (T-SQL uses OFFSET .. FETCH NEXT).
+        dialect.write_limit_offset(
+            &mut sql,
+            self.pagination.take,
+            self.pagination.skip,
+            !self.order_by.is_empty() || cursor.is_some(),
+        );
 
         lock_sql.push_suffix(&mut sql);
 

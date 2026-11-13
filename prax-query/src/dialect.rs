@@ -161,6 +161,29 @@ pub trait SqlDialect: Send + Sync + sealed::Sealed {
     fn rollback_sql(&self) -> &'static str {
         "ROLLBACK"
     }
+
+    /// Append the row-limiting clause for `take` / `skip`, leading space
+    /// included; nothing is written when both are `None`.
+    ///
+    /// `has_order_by` says whether the statement already ends in an
+    /// `ORDER BY`. The default is `LIMIT n OFFSET m`.
+    fn write_limit_offset(
+        &self,
+        sql: &mut String,
+        take: Option<u64>,
+        skip: Option<u64>,
+        has_order_by: bool,
+    ) {
+        let _ = has_order_by;
+        if let Some(take) = take {
+            sql.push_str(" LIMIT ");
+            sql.push_str(&take.to_string());
+        }
+        if let Some(skip) = skip {
+            sql.push_str(" OFFSET ");
+            sql.push_str(&skip.to_string());
+        }
+    }
 }
 
 /// PostgreSQL dialect: `$N` placeholders, `RETURNING`, `"ident"` quoting,
@@ -344,6 +367,32 @@ impl SqlDialect for Mysql {
 }
 
 impl SqlDialect for Mssql {
+    /// T-SQL has no `LIMIT`: `OFFSET m ROWS FETCH NEXT n ROWS ONLY`, which
+    /// needs an `ORDER BY`, so an unordered statement gets
+    /// `ORDER BY (SELECT NULL)` (no particular order, as with `LIMIT`).
+    fn write_limit_offset(
+        &self,
+        sql: &mut String,
+        take: Option<u64>,
+        skip: Option<u64>,
+        has_order_by: bool,
+    ) {
+        if take.is_none() && skip.is_none() {
+            return;
+        }
+        if !has_order_by {
+            sql.push_str(" ORDER BY (SELECT NULL)");
+        }
+        sql.push_str(" OFFSET ");
+        sql.push_str(&skip.unwrap_or(0).to_string());
+        sql.push_str(" ROWS");
+        if let Some(take) = take {
+            sql.push_str(" FETCH NEXT ");
+            sql.push_str(&take.to_string());
+            sql.push_str(" ROWS ONLY");
+        }
+    }
+
     fn row_lock_sql(&self, lock: &RowLock) -> QueryResult<RowLockSql> {
         if !lock.of_tables.is_empty() {
             return Err(QueryError::unsupported(
@@ -577,5 +626,40 @@ mod tests {
         // crate.
         use crate::dialect::{Postgres, SqlDialect};
         let _p: &dyn SqlDialect = &Postgres;
+    }
+
+    #[test]
+    fn limit_offset_default_is_limit_offset() {
+        use crate::dialect::{Postgres, SqlDialect};
+        let mut sql = String::from("SELECT 1");
+        Postgres.write_limit_offset(&mut sql, Some(20), Some(10), false);
+        assert_eq!(sql, "SELECT 1 LIMIT 20 OFFSET 10");
+        let mut sql = String::from("SELECT 1");
+        Postgres.write_limit_offset(&mut sql, None, None, false);
+        assert_eq!(sql, "SELECT 1");
+    }
+
+    #[test]
+    fn limit_offset_mssql_uses_offset_fetch() {
+        use crate::dialect::{Mssql, SqlDialect};
+        let mut sql = String::from("SELECT * FROM t ORDER BY id");
+        Mssql.write_limit_offset(&mut sql, Some(5), Some(10), true);
+        assert_eq!(
+            sql,
+            "SELECT * FROM t ORDER BY id OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY"
+        );
+        // OFFSET .. FETCH requires ORDER BY.
+        let mut sql = String::from("SELECT * FROM t");
+        Mssql.write_limit_offset(&mut sql, Some(1), None, false);
+        assert_eq!(
+            sql,
+            "SELECT * FROM t ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 1 ROWS ONLY"
+        );
+        let mut sql = String::from("SELECT * FROM t ORDER BY id");
+        Mssql.write_limit_offset(&mut sql, None, Some(3), true);
+        assert_eq!(sql, "SELECT * FROM t ORDER BY id OFFSET 3 ROWS");
+        let mut sql = String::from("SELECT 1");
+        Mssql.write_limit_offset(&mut sql, None, None, false);
+        assert_eq!(sql, "SELECT 1");
     }
 }

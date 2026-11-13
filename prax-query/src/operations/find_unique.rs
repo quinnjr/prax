@@ -179,8 +179,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindUniqueOperation<E, M> {
         }
         params.extend(where_params);
 
-        // LIMIT 1 for unique query
-        sql.push_str(" LIMIT 1");
+        // At most one row, in the dialect's syntax.
+        dialect.write_limit_offset(&mut sql, Some(1), None, false);
 
         lock_sql.push_suffix(&mut sql);
 

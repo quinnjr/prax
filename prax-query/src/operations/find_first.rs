@@ -203,8 +203,8 @@ impl<E: QueryEngine, M: Model + crate::row::FromRow> FindFirstOperation<E, M> {
             sql.push_str(&self.order_by.to_sql());
         }
 
-        // LIMIT 1
-        sql.push_str(" LIMIT 1");
+        // First row only, in the dialect's syntax.
+        dialect.write_limit_offset(&mut sql, Some(1), None, !self.order_by.is_empty());
 
         lock_sql.push_suffix(&mut sql);
 

@@ -262,6 +262,12 @@ Safety:
 
 ### Fixed
 
+- **query**: on MSSQL, `find_many` with `take`/`skip`, `find_unique` and
+  `find_first` emitted `LIMIT`, which T-SQL rejects. Row limits now go
+  through `SqlDialect::write_limit_offset`: `OFFSET m ROWS FETCH NEXT n ROWS
+  ONLY` on MSSQL (with `ORDER BY (SELECT NULL)` when the query has no
+  `ORDER BY`), `LIMIT n OFFSET m` elsewhere as before.
+
 - **core**: `Bytes` update inputs stored base64 text, and `Vec<u8>` create
   inputs a JSON integer array, in binary columns (data corruption; see
   [Repairing `Bytes` data written by 0.12.x](#repairing-bytes-data-written-by-012x)).
