@@ -308,6 +308,10 @@ fn generate_client_module(
     code.push_str("    /// implement both `Model` (for the table association) and\n");
     code.push_str("    /// `FromRow` (for row decoding); the generator emits both\n");
     code.push_str("    /// impls on every model in this client.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn query_raw<T>(&self, sql: prax_query::raw::Sql)\n");
     code.push_str("        -> prax_query::error::QueryResult<Vec<T>>\n");
     code.push_str("    where\n");
@@ -323,6 +327,10 @@ fn generate_client_module(
     code.push_str("    /// (INSERT / UPDATE / DELETE / DDL). Returns the\n");
     code.push_str("    /// driver-reported affected-row count. Mirrors\n");
     code.push_str("    /// `prax_orm::PraxClient::execute_raw`.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn execute_raw(&self, sql: prax_query::raw::Sql)\n");
     code.push_str("        -> prax_query::error::QueryResult<u64>\n");
     code.push_str("    {\n");
@@ -339,6 +347,10 @@ fn generate_client_module(
     code.push_str("    /// Nested `transaction()` calls on the same engine currently\n");
     code.push_str("    /// return `QueryError::internal(...)` until dialect-aware\n");
     code.push_str("    /// SAVEPOINT support lands.\n");
+    // `QueryError` is large (clippy 1.99+ `result_large_err`). Boxing it
+    // would change `QueryResult` for every caller, so allow the lint on the
+    // generated methods that return it directly.
+    code.push_str("    #[allow(clippy::result_large_err)]\n");
     code.push_str("    pub async fn transaction<R, Fut, F>(&self, f: F)\n");
     code.push_str("        -> prax_query::error::QueryResult<R>\n");
     code.push_str("    where\n");
