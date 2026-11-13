@@ -9,7 +9,10 @@
 
 use prax_orm::Model;
 use prax_query::filter::Filter;
-use prax_query::inputs::{BoolFilter, IntNullableFilter, StringFilter, WhereInput};
+use prax_query::filter::FilterValue;
+use prax_query::inputs::{
+    BoolFilter, BytesFieldUpdate, IntNullableFilter, StringFilter, WhereInput, WriteOp,
+};
 
 #[derive(Model, Debug, Clone)]
 #[prax(table = "users")]
@@ -258,4 +261,153 @@ fn user_update_input_lowers_unset_on_nullable() {
         .iter()
         .any(|(c, op)| c == "name" && matches!(op, WriteOp::Unset));
     assert!(has_unset, "expected name = Unset; got {payload:?}");
+}
+
+#[derive(Model, Debug, Clone)]
+#[prax(table = "u8_fixtures")]
+pub struct U8Fixture {
+    #[prax(id, auto)]
+    pub id: i64,
+    pub level: u8,
+    pub opt_level: Option<u8>,
+    pub q_level: Option<core::primitive::u8>,
+    pub q_plain: core::primitive::u8,
+    pub std_level: std::option::Option<u8>,
+}
+
+#[test]
+fn u8_fields_still_lower_to_int() {
+    use prax_query::filter::FilterValue;
+
+    let f: Filter = u_8_fixture::level::gt(3).into();
+    assert!(matches!(f, Filter::Gt(ref c, FilterValue::Int(3)) if c == "level"));
+    let f: Filter = u_8_fixture::opt_level::equals(Some(4)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(4))));
+    let f: Filter = u_8_fixture::level::in_(vec![1, 2]).into();
+    assert!(
+        matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1), FilterValue::Int(2)])
+    );
+}
+
+#[test]
+fn u8_fields_with_qualified_paths_lower_to_int() {
+    use prax_query::filter::FilterValue;
+
+    let f: Filter = u_8_fixture::q_level::equals(Some(4)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(4))));
+    let f: Filter = u_8_fixture::q_level::equals(None).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Null)));
+    let f: Filter = u_8_fixture::q_plain::equals(7).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(7))));
+    let f: Filter = u_8_fixture::std_level::equals(Some(5)).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Int(5))));
+    let f: Filter = u_8_fixture::std_level::equals(None).into();
+    assert!(matches!(f, Filter::Equals(_, FilterValue::Null)));
+    let f: Filter = u_8_fixture::std_level::in_(vec![Some(1)]).into();
+    assert!(matches!(f, Filter::In(_, ref vs) if vs == &vec![FilterValue::Int(1)]));
+    let f: Filter = u_8_fixture::level::not(3).into();
+    assert!(matches!(f, Filter::NotEquals(_, FilterValue::Int(3))));
+    let f: Filter = u_8_fixture::level::not_in(vec![1]).into();
+    assert!(matches!(f, Filter::NotIn(_, ref vs) if vs == &vec![FilterValue::Int(1)]));
+}
+
+#[test]
+fn audit_event_create_input_payload_lowers_to_bytes() {
+    use prax_query::inputs::CreateInput;
+    let ir = audit_event::AuditEventCreateInput {
+        event_id: ::uuid::Uuid::nil(),
+        occurred_at: ::chrono::Utc::now(),
+        payload: vec![0, 159, 255],
+        metadata: ::serde_json::json!({}),
+        amount: None,
+    }
+    .into_ir();
+    assert!(
+        ir.iter().any(|(c, v)| c == "payload"
+            && matches!(v, FilterValue::Bytes(b) if b == &vec![0, 159, 255])),
+        "got {ir:?}"
+    );
+}
+
+#[test]
+fn audit_event_update_payload_lowers_to_bytes() {
+    use prax_query::inputs::UpdateInput;
+    let ir = audit_event::AuditEventUpdateInput {
+        payload: Some(BytesFieldUpdate {
+            set: Some(vec![0, 159, 255]),
+        }),
+        ..Default::default()
+    }
+    .into_ir();
+    assert!(ir.iter().any(|(c, op)| c == "payload"
+        && matches!(op, WriteOp::Set(FilterValue::Bytes(b)) if b == &vec![0, 159, 255])));
+}
+
+#[derive(Model, Debug, Clone)]
+#[prax(table = "bytes_unique_items")]
+pub struct BytesUniqueItem {
+    #[prax(id, auto)]
+    pub id: i64,
+    #[prax(unique)]
+    pub token: Vec<u8>,
+}
+
+#[test]
+fn bytes_unique_where_unique_lowers_to_bytes() {
+    use prax_query::inputs::WhereUniqueInput;
+    let w = bytes_unique_item::BytesUniqueItemWhereUniqueInput::Token(vec![0, 159, 255]);
+    assert_eq!(
+        w.into_ir(),
+        Filter::Equals("token".into(), FilterValue::Bytes(vec![0, 159, 255]))
+    );
+}
+
+// `Option` is recognised by its last path segment, so fully qualified
+// spellings are nullable columns like plain `Option<T>`.
+#[derive(Model, Debug, Clone)]
+#[prax(table = "qualified_options")]
+pub struct QualifiedOption {
+    #[prax(id, auto)]
+    pub id: i64,
+    pub nick: std::option::Option<String>,
+    pub score: ::core::option::Option<i32>,
+}
+
+#[test]
+fn qualified_option_fields_get_null_filters() {
+    let f: Filter = qualified_option::nick::is_null().into();
+    assert_eq!(f, Filter::IsNull("nick".into()));
+    let f: Filter = qualified_option::score::is_not_null().into();
+    assert_eq!(f, Filter::IsNotNull("score".into()));
+
+    // The generated inputs treat them as nullable too.
+    let w = qualified_option::QualifiedOptionWhereInput {
+        score: Some(IntNullableFilter {
+            is_null: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(w.into_ir(), Filter::IsNull("score".into()));
+
+    use prax_query::inputs::{CreateInput, IntNullableFieldUpdate, UpdateInput};
+    let ir = qualified_option::QualifiedOptionCreateInput {
+        nick: None,
+        score: None,
+    }
+    .into_ir();
+    assert!(ir.is_empty(), "omitted nullable columns: {ir:?}");
+    let ir = qualified_option::QualifiedOptionUpdateInput {
+        score: Some(IntNullableFieldUpdate {
+            unset: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .into_ir();
+    assert!(
+        ir.iter()
+            .any(|(c, op)| c == "score" && matches!(op, WriteOp::Unset)),
+        "got {ir:?}"
+    );
 }

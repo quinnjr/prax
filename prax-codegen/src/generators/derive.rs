@@ -885,10 +885,16 @@ fn parse_field(field: &syn::Field) -> Result<FieldInfo, syn::Error> {
     })
 }
 
-/// Check if a type is `Option<T>`.
+/// Check if a type is `Option<T>`, including qualified spellings such as
+/// `std::option::Option<T>` and `::core::option::Option<T>`.
+///
+/// Matches on the last path segment, like [`extract_inner_type_name`] and
+/// [`classify_field_type`], so every generator agrees on which fields are
+/// nullable.
 fn is_option_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty
-        && let Some(segment) = type_path.path.segments.first()
+        && type_path.qself.is_none()
+        && let Some(segment) = type_path.path.segments.last()
     {
         return segment.ident == "Option";
     }
@@ -927,10 +933,10 @@ fn is_vec_type(ty: &Type) -> bool {
 /// than a defensive recursive unwrap.
 fn extract_inner_type_name(ty: &Type) -> Option<String> {
     if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first()
+        if let Some(segment) = type_path.path.segments.last()
             && segment.ident == "Option"
         {
-            // Unwrap Option<T> and recurse on the inner type.
+            // Unwrap Option<T> (also `std::option::Option<T>`) and recurse.
             if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
                 && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
             {
@@ -959,21 +965,7 @@ enum TypeCategory {
 /// Option<T> to classify the inner type. Returns the category that drives
 /// conditional emission of comparison, string, and IN operators.
 fn classify_field_type(ty: &Type) -> TypeCategory {
-    // Unwrap Option<T> to get the inner type.
-    let type_name = if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.first()
-            && segment.ident == "Option"
-            && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
-            && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-        {
-            // Recurse to classify the inner type.
-            return classify_field_type(inner);
-        }
-        // Not Option — extract the last segment as the type name.
-        type_path.path.segments.last().map(|s| s.ident.to_string())
-    } else {
-        None
-    };
+    let type_name = extract_inner_type_name(ty);
 
     match type_name.as_deref() {
         Some(
@@ -985,6 +977,15 @@ fn classify_field_type(ty: &Type) -> TypeCategory {
         Some("bool") => TypeCategory::Boolean,
         _ => TypeCategory::Other,
     }
+}
+
+/// True when `ty` is `u8` or `Option<u8>` (including path-qualified forms such
+/// as `core::primitive::u8` and `std::option::Option<u8>`).
+///
+/// `FilterValue` has no `From<u8>` (so `Vec<u8>` can convert to `Bytes`),
+/// so `u8` fields must lower through `ToFilterValue` instead of `.into()`.
+fn is_u8_type(ty: &Type) -> bool {
+    extract_inner_type_name(ty).as_deref() == Some("u8")
 }
 
 /// Generate a field module from derive macro field info.
@@ -1028,9 +1029,22 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
     }
 
     // Collect to_filter match arms in the same conditional shape.
+    //
+    // `FilterValue` has no `From<u8>`, so `u8` / `Option<u8>` fields cannot
+    // use `.into()`.
+    // `ToFilterValue` handles both `u8` and `Option<u8>` (whichever way the
+    // option is spelled), so u8 fields route every conversion through it.
+    let (scalar, each) = if is_u8_type(ty) {
+        (
+            quote! { ::prax_query::filter::ToFilterValue::to_filter_value(&v) },
+            quote! { .map(|v| ::prax_query::filter::ToFilterValue::to_filter_value(&v)) },
+        )
+    } else {
+        (quote! { v.into() }, quote! { .map(Into::into) })
+    };
     let mut arms = vec![
-        quote! { Self::Equals(v) => Filter::Equals(col, v.into()) },
-        quote! { Self::Not(v) => Filter::NotEquals(col, v.into()) },
+        quote! { Self::Equals(v) => Filter::Equals(col, #scalar) },
+        quote! { Self::Not(v) => Filter::NotEquals(col, #scalar) },
     ];
 
     if is_optional {
@@ -1040,23 +1054,19 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
 
     match category {
         TypeCategory::Numeric => {
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, v.into()) });
-            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, v.into()) });
-            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, v.into()) });
-            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, v.into()) });
+            arms.push(quote! { Self::Gt(v) => Filter::Gt(col, #scalar) });
+            arms.push(quote! { Self::Gte(v) => Filter::Gte(col, #scalar) });
+            arms.push(quote! { Self::Lt(v) => Filter::Lt(col, #scalar) });
+            arms.push(quote! { Self::Lte(v) => Filter::Lte(col, #scalar) });
         }
         TypeCategory::String => {
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
             arms.push(
                 quote! { Self::Contains(v) => Filter::Contains(col, FilterValue::String(v)) },
@@ -1070,11 +1080,9 @@ fn generate_field_module_from_derive(field: &FieldInfo) -> TokenStream {
         }
         TypeCategory::Boolean => {}
         TypeCategory::Other => {
+            arms.push(quote! { Self::In(vs) => Filter::In(col, vs.into_iter() #each .collect()) });
             arms.push(
-                quote! { Self::In(vs) => Filter::In(col, vs.into_iter().map(Into::into).collect()) },
-            );
-            arms.push(
-                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter().map(Into::into).collect()) },
+                quote! { Self::NotIn(vs) => Filter::NotIn(col, vs.into_iter() #each .collect()) },
             );
         }
     }
@@ -1201,6 +1209,32 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
+    fn is_u8_type_recognises_all_spellings() {
+        let yes: Vec<Type> = vec![
+            parse_quote!(u8),
+            parse_quote!(core::primitive::u8),
+            parse_quote!(Option<u8>),
+            parse_quote!(std::option::Option<u8>),
+            parse_quote!(::core::option::Option<u8>),
+            parse_quote!(Option<core::primitive::u8>),
+        ];
+        for ty in &yes {
+            assert!(is_u8_type(ty), "expected u8: {}", quote!(#ty));
+        }
+        let no: Vec<Type> = vec![
+            parse_quote!(u16),
+            parse_quote!(i64),
+            parse_quote!(Option<u16>),
+            parse_quote!(std::option::Option<String>),
+            parse_quote!(Vec<u8>),
+            parse_quote!(&[u8]),
+        ];
+        for ty in &no {
+            assert!(!is_u8_type(ty), "expected not u8: {}", quote!(#ty));
+        }
+    }
+
+    #[test]
     fn test_parse_simple_model() {
         let input: DeriveInput = parse_quote! {
             #[prax(table = "users")]
@@ -1240,6 +1274,24 @@ mod tests {
         assert!(is_option_type(&ty));
 
         let ty: Type = parse_quote!(String);
+        assert!(!is_option_type(&ty));
+    }
+
+    #[test]
+    fn is_option_type_matches_qualified_paths() {
+        for ty in [
+            parse_quote!(std::option::Option<String>),
+            parse_quote!(::std::option::Option<i32>),
+            parse_quote!(core::option::Option<u8>),
+            parse_quote!(::core::option::Option<core::primitive::u8>),
+        ] {
+            let ty: Type = ty;
+            assert!(is_option_type(&ty), "{}", quote!(#ty));
+            // Same answer as the type classification, which unwraps it.
+            assert!(classify_field_type(&ty) != TypeCategory::Other);
+        }
+        // `Option` elsewhere in the path is not an `Option` type.
+        let ty: Type = parse_quote!(Option::Wrapper);
         assert!(!is_option_type(&ty));
     }
 

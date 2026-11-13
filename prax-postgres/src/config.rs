@@ -1,12 +1,17 @@
 //! PostgreSQL connection configuration.
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{PgError, PgResult};
 
 /// PostgreSQL connection configuration.
-#[derive(Debug, Clone)]
+///
+/// `Debug` output redacts [`password`](Self::password) and any password in
+/// [`url`](Self::url).
+#[non_exhaustive]
+#[derive(Clone)]
 pub struct PgConfig {
     /// Database URL.
     pub url: String,
@@ -49,6 +54,133 @@ pub struct PgConfig {
     pub application_name: Option<String>,
     /// Additional options.
     pub options: Vec<(String, String)>,
+}
+
+impl fmt::Debug for PgConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConfig")
+            .field("url", &redact_url(&self.url, self.password.as_deref()))
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("application_name", &self.application_name)
+            .field(
+                "options",
+                &self
+                    .options
+                    .iter()
+                    .map(|(key, value)| {
+                        let value = if is_password_key(key) {
+                            REDACTED
+                        } else {
+                            value
+                        };
+                        (key.as_str(), value)
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// Shown in place of a password in `Debug` output.
+const REDACTED: &str = "REDACTED";
+
+/// `url` with its password replaced by [`REDACTED`], for `Debug` output.
+/// Only the password inside the user info (`user:password@`) is touched;
+/// the rest of the URL is kept exactly as written.
+///
+/// `password` is the config's password, when known. It is matched right
+/// after `user:` first, because the config builder writes it into the URL
+/// without percent-encoding, where an `@` or `/` in it would not parse as
+/// one URL password. Otherwise the parser locates the password. When it
+/// finds none although an `@` follows the scheme and no user name parsed
+/// (an unencoded password starting with digits and then `/`, `?` or `#`
+/// parses as a port), or the URL does not parse at all, everything between
+/// the scheme and its last `@` is redacted. libpq-style `password` query
+/// parameters are redacted too.
+pub(crate) fn redact_url(url: &str, password: Option<&str>) -> String {
+    let Some(start) = url.find("://").map(|i| i + 3) else {
+        return url.to_owned();
+    };
+    let redacted = redact_userinfo(url, start, password);
+    redact_query_passwords(&redacted, start)
+}
+
+/// The user-info part of [`redact_url`].
+fn redact_userinfo(url: &str, start: usize, password: Option<&str>) -> String {
+    if let Some(password) = password.filter(|p| !p.is_empty())
+        && let Some(redacted) = splice_password(url, start, password)
+    {
+        return redacted;
+    }
+    match url::Url::parse(url) {
+        Ok(parsed) => match parsed.password() {
+            Some(password) => splice_password(url, start, password)
+                .unwrap_or_else(|| redact_to_last_at(url, start)),
+            None if parsed.username().is_empty() && url[start..].contains('@') => {
+                redact_to_last_at(url, start)
+            }
+            None => url.to_owned(),
+        },
+        Err(_) => redact_to_last_at(url, start),
+    }
+}
+
+/// `url` with the value of every `password` query parameter (any case,
+/// percent-decoded key) replaced. The query is searched from `start`.
+fn redact_query_passwords(url: &str, start: usize) -> String {
+    let Some(query_start) = url[start..].find('?').map(|i| start + i + 1) else {
+        return url.to_owned();
+    };
+    let query_end = url[query_start..]
+        .find('#')
+        .map_or(url.len(), |i| query_start + i);
+    let query = url[query_start..query_end]
+        .split('&')
+        .map(|pair| {
+            let key = pair.split_once('=').map_or(pair, |(key, _)| key);
+            if is_password_key(key) {
+                format!("{key}={REDACTED}")
+            } else {
+                pair.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{}{query}{}", &url[..query_start], &url[query_end..])
+}
+
+/// Whether a (possibly percent-encoded) query or option key names a
+/// password.
+fn is_password_key(key: &str) -> bool {
+    url::form_urlencoded::parse(key.as_bytes())
+        .next()
+        .is_some_and(|(key, _)| key.eq_ignore_ascii_case("password"))
+}
+
+/// `url` with `password` replaced, when it follows the first `:` of the
+/// user info (which starts at `start`) and is followed by `@`.
+fn splice_password(url: &str, start: usize, password: &str) -> Option<String> {
+    let from = start + url[start..].find(':')? + 1;
+    let after = url[from..].strip_prefix(password)?;
+    after
+        .starts_with('@')
+        .then(|| format!("{}{REDACTED}{after}", &url[..from]))
+}
+
+/// `url` with everything from `start` to its last `@` replaced.
+fn redact_to_last_at(url: &str, start: usize) -> String {
+    match url[start..].rfind('@') {
+        Some(at) => format!("{}{REDACTED}{}", &url[..start], &url[start + at..]),
+        None => url.to_owned(),
+    }
 }
 
 /// SSL mode for connections.
@@ -98,12 +230,77 @@ fn is_safe_guc_value(value: &str) -> bool {
         .any(|c| c.is_whitespace() || c == '\\' || c == '\'')
 }
 
+/// How to fix a URL whose password breaks its structure.
+const PERCENT_ENCODE_HINT: &str = "percent-encode reserved characters in the password \
+     (`@` as %40, `/` as %2F, `?` as %3F, `#` as %23, `:` as %3A)";
+
+/// Reject a URL in which an unencoded `/`, `?` or `#` in the password ended
+/// the authority early, so the rest of the password and the real host
+/// landed in the path, query or fragment (`postgres://u:8/x@host/db` parses
+/// as host `u`, port 8 and database `x@host/db`). The telltale is an `@`
+/// after the authority: in the path, the fragment, or a query key (a query
+/// *value* such as `application_name=me@work` is fine). An `@` in a
+/// database name must be written `%40`. The error never repeats the URL.
+fn reject_unencoded_userinfo(parsed: &url::Url) -> PgResult<()> {
+    let in_query_key = parsed.query().is_some_and(|query| {
+        query.split('&').any(|pair| {
+            pair.split_once('=')
+                .map_or(pair, |(key, _)| key)
+                .contains('@')
+        })
+    });
+    if parsed.path().contains('@')
+        || parsed
+            .fragment()
+            .is_some_and(|fragment| fragment.contains('@'))
+        || in_query_key
+    {
+        return Err(PgError::config(format!(
+            "invalid database URL: an `@` follows the host, so the password \
+             seems to contain unencoded reserved characters; {PERCENT_ENCODE_HINT}"
+        )));
+    }
+    Ok(())
+}
+
+/// Percent-decode a URL component (`what` names it in the error), as libpq
+/// does for the user, password and database name.
+fn percent_decode(component: &str, what: &str) -> PgResult<String> {
+    percent_encoding::percent_decode_str(component)
+        .decode_utf8()
+        .map(|decoded| decoded.into_owned())
+        .map_err(|_| {
+            PgError::config(format!(
+                "invalid database URL: the {what} is not valid UTF-8 once percent-decoded"
+            ))
+        })
+}
+
 impl PgConfig {
     /// Create a new configuration from a database URL.
+    ///
+    /// The user name, password and database name are percent-decoded, as
+    /// libpq does: write reserved characters in them (`@`, `/`, `?`, `#`,
+    /// `:`) percent-encoded. A URL whose password evidently contains them
+    /// unencoded (an `@` after the host) is rejected with a configuration
+    /// error rather than parsed into the wrong host, port or database.
+    ///
+    /// As with libpq, `user` and `password` query parameters set the
+    /// credentials (overriding the user info). Other unrecognised
+    /// parameters become [`options`](Self::options).
     pub fn from_url(url: impl Into<String>) -> PgResult<Self> {
         let url = url.into();
-        let parsed = url::Url::parse(&url)
-            .map_err(|e| PgError::config(format!("invalid database URL: {}", e)))?;
+        let parsed = url::Url::parse(&url).map_err(|e| {
+            // An unencoded `/`, `?` or `#` in the password ends the authority
+            // early, which often leaves an invalid port behind.
+            let hint = if url.contains('@') {
+                format!("; {PERCENT_ENCODE_HINT}")
+            } else {
+                String::new()
+            };
+            PgError::config(format!("invalid database URL: {e}{hint}"))
+        })?;
+        reject_unencoded_userinfo(&parsed)?;
 
         if parsed.scheme() != "postgresql" && parsed.scheme() != "postgres" {
             return Err(PgError::config(format!(
@@ -119,19 +316,35 @@ impl PgConfig {
 
         let port = parsed.port().unwrap_or(5432);
 
-        let database = parsed.path().trim_start_matches('/').to_string();
+        let database = percent_decode(parsed.path().trim_start_matches('/'), "database name")?;
 
         if database.is_empty() {
             return Err(PgError::config("missing database name in URL"));
         }
 
-        let user = if parsed.username().is_empty() {
+        let mut user = if parsed.username().is_empty() {
             "postgres".to_string()
         } else {
-            parsed.username().to_string()
+            percent_decode(parsed.username(), "user name")?
         };
 
-        let password = parsed.password().map(String::from);
+        let mut password = parsed
+            .password()
+            .map(|password| percent_decode(password, "password"))
+            .transpose()?;
+
+        // libpq-style `user=` / `password=` query parameters set the
+        // credentials (overriding the user info; the last one wins). Their
+        // values are percent-decoded like libpq's, so a `+` stays a plus
+        // sign (unlike form decoding, which `query_pairs` uses).
+        for pair in parsed.query().unwrap_or_default().split('&') {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            match percent_decode(key, "query parameter name")?.as_str() {
+                "user" => user = percent_decode(value, "user name")?,
+                "password" => password = Some(percent_decode(value, "password")?),
+                _ => {}
+            }
+        }
 
         // Parse query parameters
         let mut ssl_mode = SslMode::Prefer;
@@ -175,6 +388,8 @@ impl PgConfig {
                 "sslrootcert" => {
                     ssl_root_cert = Some(PathBuf::from(value_str));
                 }
+                // Credentials, taken above; never a server startup option.
+                "user" | "password" => {}
                 _ => {
                     options.push((key_str.to_string(), value_str.to_string()));
                 }
@@ -277,7 +492,9 @@ impl PgConfig {
 }
 
 /// Builder for PostgreSQL configuration.
-#[derive(Debug, Default)]
+///
+/// `Debug` output redacts the password, also inside the URL.
+#[derive(Default)]
 pub struct PgConfigBuilder {
     url: Option<String>,
     host: Option<String>,
@@ -290,6 +507,30 @@ pub struct PgConfigBuilder {
     connect_timeout: Option<Duration>,
     statement_timeout: Option<Duration>,
     application_name: Option<String>,
+}
+
+impl fmt::Debug for PgConfigBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConfigBuilder")
+            .field(
+                "url",
+                &self
+                    .url
+                    .as_deref()
+                    .map(|url| redact_url(url, self.password.as_deref())),
+            )
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| REDACTED))
+            .field("ssl_mode", &self.ssl_mode)
+            .field("ssl_root_cert", &self.ssl_root_cert)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("statement_timeout", &self.statement_timeout)
+            .field("application_name", &self.application_name)
+            .finish()
+    }
 }
 
 impl PgConfigBuilder {
@@ -600,6 +841,256 @@ mod tests {
 
         assert_eq!(config.host, "localhost");
         assert_eq!(config.database, "mydb");
+    }
+
+    const SENTINEL: &str = "hunter2-sentinel";
+
+    #[test]
+    fn debug_redacts_the_password_and_the_url_password() {
+        let config = PgConfig::from_url(format!(
+            "postgres://prax:{SENTINEL}@db.internal:5432/prax?application_name=app"
+        ))
+        .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        // Everything else stays visible.
+        for visible in [
+            "db.internal",
+            "5432",
+            "prax",
+            "application_name=app",
+            "REDACTED",
+        ] {
+            assert!(debug.contains(visible), "{visible}: {debug}");
+        }
+        let alternate = format!("{config:#?}");
+        assert!(!alternate.contains(SENTINEL), "{alternate}");
+    }
+
+    #[test]
+    fn debug_redacts_unencoded_builder_passwords() {
+        // The builder writes the password into `url` verbatim, so `@` and
+        // `/` in it do not parse as one URL password.
+        let config = PgConfig::builder()
+            .host("db.internal")
+            .database("prax")
+            .user("prax")
+            .password(format!("{SENTINEL}@x/y"))
+            .build()
+            .unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("hunter2"), "{debug}");
+        assert!(!debug.contains("x/y"), "{debug}");
+
+        // A URL that does not parse is redacted up to its last `@`.
+        let mut config = config;
+        config.url = format!("postgres://prax:{SENTINEL}@bad host/prax");
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[test]
+    fn url_redaction_touches_only_the_password() {
+        // A password equal to the user, host or database name (or a single
+        // letter of them) must not be replaced anywhere else.
+        assert_eq!(
+            redact_url(
+                "postgres://postgres:postgres@localhost:5432/postgres",
+                Some("postgres")
+            ),
+            "postgres://postgres:REDACTED@localhost:5432/postgres"
+        );
+        assert_eq!(
+            redact_url(
+                "postgres://app:a@db.internal:5432/app_db?sslmode=disable",
+                Some("a")
+            ),
+            "postgres://app:REDACTED@db.internal:5432/app_db?sslmode=disable"
+        );
+        // Without a hint the parser finds the password; the rest of the URL
+        // is kept as written.
+        assert_eq!(
+            redact_url("postgres://app:a@db.internal/app_db", None),
+            "postgres://app:REDACTED@db.internal/app_db"
+        );
+        let config =
+            PgConfig::from_url("postgres://postgres:postgres@localhost:5432/postgres").unwrap();
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains("\"postgres://postgres:REDACTED@localhost:5432/postgres\""),
+            "{debug}"
+        );
+        assert!(debug.contains("database: \"postgres\""), "{debug}");
+    }
+
+    #[test]
+    fn url_redaction_without_a_password_hint() {
+        // An unencoded password starting with digits and then `/`, `?` or
+        // `#` parses as a port, so the parser reports no password.
+        for url in [
+            format!("postgres://u:8/{SENTINEL}@host/db"),
+            format!("postgres://u:123#{SENTINEL}@host/db"),
+            format!("postgres://u:123?{SENTINEL}@host/db"),
+        ] {
+            let redacted = redact_url(&url, None);
+            assert!(!redacted.contains(SENTINEL), "{url} -> {redacted}");
+            assert_eq!(redacted, "postgres://REDACTED@host/db", "{url}");
+        }
+        // libpq-style `?password=` (key case and encoding ignored).
+        for url in [
+            format!("postgres://u@host/db?password={SENTINEL}&sslmode=disable"),
+            format!("postgres://u@host/db?sslmode=disable&PASSWORD={SENTINEL}#frag"),
+            format!("postgres://u@host/db?pass%77ord={SENTINEL}"),
+        ] {
+            let redacted = redact_url(&url, None);
+            assert!(!redacted.contains(SENTINEL), "{url} -> {redacted}");
+            assert!(redacted.starts_with("postgres://u@host/db?"), "{redacted}");
+        }
+        assert_eq!(
+            redact_url(
+                &format!("postgres://u@host/db?password={SENTINEL}&sslmode=disable"),
+                None
+            ),
+            "postgres://u@host/db?password=REDACTED&sslmode=disable"
+        );
+        // A user name without a password stays.
+        assert_eq!(
+            redact_url("postgres://u@host/db", None),
+            "postgres://u@host/db"
+        );
+    }
+
+    #[test]
+    fn debug_redacts_password_options_and_query() {
+        let url = format!("postgres://u@db.internal/prax?password={SENTINEL}&search_path=app");
+        let config = PgConfig::from_url(&url).unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("search_path"), "{debug}");
+
+        // Not the libpq keyword (case differs), so it stays an option, which
+        // Debug redacts all the same.
+        let config =
+            PgConfig::from_url(format!("postgres://u@db.internal/prax?PASSWORD={SENTINEL}"))
+                .unwrap();
+        assert!(config.options.iter().any(|(k, _)| k == "PASSWORD"));
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+
+        let builder = crate::pool::PgPoolBuilder::new().url(&url);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+
+        let builder = crate::pool::PgPoolBuilder::new()
+            .url(format!("postgres://u:8/{SENTINEL}@db.internal/prax"));
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[test]
+    fn debug_keeps_urls_without_a_password() {
+        let config = PgConfig::from_url("postgres://prax@db.internal/prax").unwrap();
+        let debug = format!("{config:?}");
+        assert!(
+            debug.contains("postgres://prax@db.internal/prax"),
+            "{debug}"
+        );
+        assert!(debug.contains("password: None"), "{debug}");
+    }
+
+    #[test]
+    fn config_builder_debug_redacts_secrets() {
+        let builder = PgConfig::builder()
+            .url(format!("postgres://prax:{SENTINEL}@db.internal/prax"))
+            .password(SENTINEL);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("db.internal"), "{debug}");
+    }
+
+    #[test]
+    fn from_url_rejects_passwords_with_unencoded_reserved_characters() {
+        for url in [
+            "postgres://u:8/Hx@host/db",
+            "postgres://u:123#456@host/db",
+            "postgres://u:123?x@host/db",
+            "postgres://u:a@b/c@host/db",
+            "postgres://u:8/x:y@host:5432/db?sslmode=disable",
+        ] {
+            match PgConfig::from_url(url) {
+                Err(PgError::Config(message)) => {
+                    assert!(message.contains("percent-encode"), "{url}: {message}");
+                    // The error never repeats the URL (or the password).
+                    assert!(
+                        !message.contains("Hx") && !message.contains("456"),
+                        "{message}"
+                    );
+                }
+                other => panic!("{url}: expected a config error, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn from_url_decodes_percent_encoded_credentials_and_database() {
+        let config = PgConfig::from_url("postgres://u:8%2FHx@host/db").unwrap();
+        assert_eq!(
+            (
+                config.user.as_str(),
+                config.password.as_deref(),
+                config.host.as_str()
+            ),
+            ("u", Some("8/Hx"), "host")
+        );
+        assert_eq!((config.port, config.database.as_str()), (5432, "db"));
+
+        let config = PgConfig::from_url("postgres://u:123%23456@host:6543/db").unwrap();
+        assert_eq!(config.password.as_deref(), Some("123#456"));
+        assert_eq!(config.port, 6543);
+
+        let config =
+            PgConfig::from_url("postgres://app%40corp:p%40ss%3Aw%2B@host/my%40db").unwrap();
+        assert_eq!(config.user, "app@corp");
+        assert_eq!(config.password.as_deref(), Some("p@ss:w+"));
+        assert_eq!(config.database, "my@db");
+        let pg_config = config.to_pg_config();
+        assert_eq!(pg_config.get_password(), Some(&b"p@ss:w+"[..]));
+        assert_eq!(pg_config.get_user(), Some("app@corp"));
+
+        // An `@` inside a query value is not mistaken for user info.
+        let config =
+            PgConfig::from_url("postgres://u:pw@host/db?application_name=me@work").unwrap();
+        assert_eq!(config.application_name.as_deref(), Some("me@work"));
+        assert_eq!(config.password.as_deref(), Some("pw"));
+    }
+
+    #[test]
+    fn from_url_takes_credentials_from_query_parameters() {
+        let config = PgConfig::from_url(format!(
+            "postgres://db.internal/prax?user=alice&password={SENTINEL}&sslmode=disable"
+        ))
+        .unwrap();
+        assert_eq!(config.user, "alice");
+        assert_eq!(config.password.as_deref(), Some(SENTINEL));
+        assert_eq!(config.ssl_mode, SslMode::Disable);
+        // Credentials, not server startup options.
+        assert!(config.options.is_empty(), "{:?}", config.options);
+        let pg_config = config.to_pg_config();
+        assert_eq!(pg_config.get_user(), Some("alice"));
+        assert_eq!(pg_config.get_password(), Some(SENTINEL.as_bytes()));
+        assert_eq!(pg_config.get_options(), None);
+        // Debug still redacts the password (field and URL).
+        let debug = format!("{config:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("alice"), "{debug}");
+
+        // They override the user info; values are percent-decoded like
+        // libpq, so `+` stays a plus sign.
+        let config =
+            PgConfig::from_url("postgres://bob:old@host/db?password=n%26w+1&user=carol").unwrap();
+        assert_eq!(config.user, "carol");
+        assert_eq!(config.password.as_deref(), Some("n&w+1"));
+        assert!(config.options.is_empty(), "{:?}", config.options);
     }
 
     #[test]

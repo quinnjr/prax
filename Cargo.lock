@@ -4837,6 +4837,7 @@ dependencies = [
  "deadpool-postgres",
  "futures",
  "lru 0.18.4",
+ "percent-encoding",
  "postgres-types",
  "postgres_rustls",
  "prax-query",

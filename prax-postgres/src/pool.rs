@@ -3,12 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::NoTls;
 use tracing::{debug, info, warn};
 
-use crate::config::{PgConfig, SslMode};
+use crate::config::{PgConfig, redact_url};
 use crate::connection::PgConnection;
+use crate::connector::{Connector, select_connector};
 use crate::error::{PgError, PgResult};
 use crate::statement::PreparedStatementCache;
 
@@ -18,6 +19,16 @@ pub struct PgPool {
     inner: Pool,
     config: Arc<PgConfig>,
     statement_cache: Arc<PreparedStatementCache>,
+}
+
+/// Shows the configuration (password redacted) and the pool status.
+impl std::fmt::Debug for PgPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgPool")
+            .field("config", &self.config)
+            .field("status", &self.status())
+            .finish_non_exhaustive()
+    }
 }
 
 impl PgPool {
@@ -31,46 +42,16 @@ impl PgPool {
         let pg_config = config.to_pg_config();
 
         let mgr_config = ManagerConfig {
-            recycling_method: RecyclingMethod::Fast,
+            recycling_method: pool_config.recycling.to_deadpool(),
         };
 
-        // Select the TLS connector by ssl_mode. `Disable` is always
-        // plaintext; TLS-requiring modes use rustls when the `tls` feature is
-        // enabled and fail loudly otherwise (never a silent downgrade).
-        // `Prefer` also connects without the feature, since plaintext is
-        // within its contract.
-        #[cfg(feature = "tls")]
-        let mgr = match config.ssl_mode {
-            SslMode::Disable => Manager::from_config(pg_config, NoTls, mgr_config),
-            // `Prefer` keeps tokio-postgres's built-in behavior: TLS when the
-            // server offers it, plaintext only when the server declines.
-            //
-            // `ssl_root_cert` replaces the webpki roots when set; the error is
-            // raised here rather than at first connect so a bad path or an
-            // unreadable bundle fails pool construction with a message naming
-            // the file, instead of surfacing later as a handshake failure.
-            _ => Manager::from_config(
-                pg_config,
-                crate::tls::make_tls_connector_with_root_cert(config.ssl_root_cert.as_deref())?,
-                mgr_config,
-            ),
-        };
-        #[cfg(not(feature = "tls"))]
-        let mgr = match config.ssl_mode {
-            SslMode::Disable => Manager::from_config(pg_config, NoTls, mgr_config),
-            // Plaintext is within `Prefer`'s contract, so a no-tls build
-            // still connects — nothing is downgraded below what the mode
-            // promises. (Against a server that *offers* TLS the driver
-            // still attempts the handshake and fails with the connector's
-            // no-TLS error; use `Disable` for such servers.)
-            SslMode::Prefer => Manager::from_config(pg_config, NoTls, mgr_config),
-            other => {
-                return Err(PgError::config(format!(
-                    "ssl_mode {:?} requires TLS support; rebuild prax-postgres \
-                     with the `tls` feature (enabled by default)",
-                    other
-                )));
-            }
+        // Select the TLS connector by ssl_mode (see `select_connector` for the
+        // rules). A TLS-requiring mode without the `tls` feature, or an
+        // unreadable `ssl_root_cert`, fails pool construction here.
+        let mgr = match select_connector(&config)? {
+            Connector::NoTls => Manager::from_config(pg_config, NoTls, mgr_config),
+            #[cfg(feature = "tls")]
+            Connector::Rustls(connector) => Manager::from_config(pg_config, connector, mgr_config),
         };
 
         // Build pool - set runtime to tokio for timeout support
@@ -82,8 +63,44 @@ impl PgPool {
                 .wait_timeout(Some(timeout))
                 .create_timeout(Some(timeout));
         }
-        if let Some(timeout) = pool_config.idle_timeout {
+        // Bounds the recycle check (Verified/Clean round trip) at checkout.
+        // A recycle that times out discards the connection and a new one is
+        // created, so a hung connection cannot stall `get()` forever.
+        if let Some(timeout) = pool_config.recycle_timeout {
             builder = builder.recycle_timeout(Some(timeout));
+        }
+
+        // Enforce `max_lifetime` and `idle_timeout`: deadpool runs
+        // `pre_recycle` hooks at checkout, and a hook error discards the
+        // object and creates a new one. Connections are therefore retired
+        // lazily, when an aged or idle one is next checked out. Each
+        // connection's lifetime deadline is shortened by a stable
+        // per-connection jitter (up to ~10%) so a batch of connections
+        // created together does not expire together.
+        if let Some(policy) =
+            RetirementPolicy::new(pool_config.max_lifetime, pool_config.idle_timeout)
+        {
+            builder = builder.pre_recycle(Hook::sync_fn(move |_, metrics| {
+                let age = metrics.age();
+                // deadpool records when a connection was last handed out
+                // (`recycled`, else `created`), not when it was returned.
+                let idle = metrics.last_used();
+                let jitter = policy.max_lifetime.map_or(Duration::ZERO, |max_lifetime| {
+                    lifetime_jitter(max_lifetime, &metrics.created)
+                });
+                match policy.check(age, idle, jitter) {
+                    None => Ok(()),
+                    Some(reason) => {
+                        debug!(
+                            age = ?age,
+                            idle = ?idle,
+                            reason = reason.as_str(),
+                            "retiring pooled connection"
+                        );
+                        Err(HookError::message(reason.as_str()))
+                    }
+                }
+            }));
         }
 
         // Set runtime for timeout support
@@ -306,7 +323,74 @@ impl PgPool {
     }
 }
 
+/// Why the pool replaces a connection at checkout instead of handing it out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Retirement {
+    /// Older than `max_lifetime` (less its jitter).
+    MaxLifetime,
+    /// Not handed out for longer than `idle_timeout`.
+    IdleTimeout,
+}
+
+impl Retirement {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxLifetime => "max_lifetime exceeded",
+            Self::IdleTimeout => "idle_timeout exceeded",
+        }
+    }
+}
+
+/// The limits the pool's `pre_recycle` hook enforces at checkout.
+#[derive(Debug, Clone, Copy)]
+struct RetirementPolicy {
+    max_lifetime: Option<Duration>,
+    idle_timeout: Option<Duration>,
+}
+
+impl RetirementPolicy {
+    /// `None` when neither limit is set (no hook is needed).
+    fn new(max_lifetime: Option<Duration>, idle_timeout: Option<Duration>) -> Option<Self> {
+        (max_lifetime.is_some() || idle_timeout.is_some()).then_some(Self {
+            max_lifetime,
+            idle_timeout,
+        })
+    }
+
+    /// Whether a connection `age` old, last handed out `idle` ago and with
+    /// lifetime `jitter`, must be replaced. The lifetime is checked first.
+    fn check(&self, age: Duration, idle: Duration, jitter: Duration) -> Option<Retirement> {
+        if let Some(max_lifetime) = self.max_lifetime
+            && age > max_lifetime.saturating_sub(jitter)
+        {
+            return Some(Retirement::MaxLifetime);
+        }
+        if let Some(idle_timeout) = self.idle_timeout
+            && idle > idle_timeout
+        {
+            return Some(Retirement::IdleTimeout);
+        }
+        None
+    }
+}
+
+/// Stable per-connection offset in `[0, max_lifetime / 10)`, derived from the
+/// connection's creation instant so it is identical on every checkout.
+fn lifetime_jitter(max_lifetime: Duration, created: &std::time::Instant) -> Duration {
+    use std::hash::{Hash, Hasher};
+
+    let window = (max_lifetime / 10).as_nanos();
+    if window == 0 {
+        return Duration::ZERO;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    created.hash(&mut hasher);
+    let nanos = (hasher.finish() as u128) % window;
+    Duration::from_nanos(nanos as u64)
+}
+
 /// Pool status information.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PoolStatus {
     /// Number of available (idle) connections.
@@ -319,7 +403,54 @@ pub struct PoolStatus {
     pub waiting: usize,
 }
 
+/// How the pool validates a connection when it is checked out again.
+///
+/// None of these methods roll back an open transaction; `Clean` resets
+/// session state but runs inside whatever transaction is still open.
+///
+/// **Session state and multi-tenant / RLS use.** Under `Fast` and `Verified`,
+/// session state (`SET`, `SET ROLE`, `search_path`, custom GUCs such as a
+/// tenant id read by row-level-security policies, advisory locks, temp
+/// tables) persists across checkouts: the next caller of the same physical
+/// connection inherits it. If you rely on such state for isolation, use
+/// [`PgRecycling::Clean`] or scope it with `SET LOCAL` inside a transaction.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PgRecycling {
+    /// Only discard connections that are already closed (default).
+    ///
+    /// Does **not** reset session state; see the type-level warning about
+    /// leaking `SET` / `SET ROLE` / tenant GUCs between checkouts. Prefer
+    /// [`PgRecycling::Clean`] for RLS or tenant-scoped workloads.
+    #[default]
+    Fast,
+    /// Run a trivial query to verify the connection is alive.
+    ///
+    /// The check is bounded by [`PoolConfig::recycle_timeout`]. Session
+    /// state is **not** reset (see the type-level warning).
+    Verified,
+    /// `Verified` plus a session-state reset: closes cursors, resets
+    /// session settings and authorization, `UNLISTEN *`, releases advisory
+    /// locks, and drops temp tables and sequence state. Prepared
+    /// statements are preserved, so Prax's statement cache stays valid.
+    ///
+    /// The check and reset are bounded by [`PoolConfig::recycle_timeout`].
+    /// Recommended for RLS / tenant users.
+    Clean,
+}
+
+impl PgRecycling {
+    pub(crate) fn to_deadpool(self) -> RecyclingMethod {
+        match self {
+            PgRecycling::Fast => RecyclingMethod::Fast,
+            PgRecycling::Verified => RecyclingMethod::Verified,
+            PgRecycling::Clean => RecyclingMethod::Clean,
+        }
+    }
+}
+
 /// Configuration for the connection pool.
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Maximum number of connections in the pool.
@@ -332,18 +463,42 @@ pub struct PoolConfig {
     pub min_connections: usize,
     /// Maximum time to wait for a connection.
     pub connection_timeout: Option<Duration>,
-    /// Timeout for recycling a connection when it is returned to the pool.
+    /// Idle timeout: a connection that was not handed out for longer than
+    /// this is discarded and replaced at its next checkout instead of being
+    /// reused (so a connection a server, proxy or NAT may have dropped while
+    /// idle is not handed out).
     ///
-    /// Mapped to deadpool's `recycle_timeout`, which bounds the recycle check
-    /// performed on connection return — it is **not** an idle-reaping timeout.
-    /// deadpool-postgres 0.14 exposes no true idle timeout, so connections are
-    /// not closed after a fixed idle period.
+    /// Enforced at checkout, like [`max_lifetime`](Self::max_lifetime):
+    /// idle connections are not reaped in the background. The idle time is
+    /// measured from when the connection was last **handed out** (deadpool
+    /// does not record when it is returned), so a connection held for
+    /// longer than this is also replaced at its next checkout.
+    /// `Duration::ZERO` replaces every reused connection; `None` disables
+    /// the limit. It does not bound the recycle check; use
+    /// [`PoolConfig::recycle_timeout`] for that. Default: 10 minutes.
     pub idle_timeout: Option<Duration>,
+    /// Upper bound on the recycle check run when a connection is checked out
+    /// again (the `Verified` / `Clean` round trip).
+    ///
+    /// Mapped to deadpool's `recycle_timeout`. A recycle that exceeds it
+    /// discards the connection and a fresh one is created. `None` disables
+    /// the bound. Default: 5 seconds.
+    pub recycle_timeout: Option<Duration>,
     /// Maximum lifetime of a connection.
     ///
-    /// **Not yet applied**: deadpool-postgres 0.14 exposes no connection
-    /// lifetime knob, so this value is stored but currently unused.
+    /// Enforced at checkout: a connection older than this is discarded and
+    /// replaced instead of being handed out. Connections are not reaped
+    /// while idle. Each connection's limit is shortened by a stable jitter of
+    /// up to ~10% so connections created together do not all expire at once.
+    /// `Duration::ZERO` replaces the connection on every checkout, which
+    /// effectively disables pooling.
     pub max_lifetime: Option<Duration>,
+    /// Recycling method applied when a connection is checked out again.
+    ///
+    /// Defaults to [`PgRecycling::Fast`], which does not reset session state
+    /// (`SET`, `SET ROLE`, tenant GUCs persist across checkouts). Use
+    /// [`PgRecycling::Clean`] for RLS / tenant-scoped workloads.
+    pub recycling: PgRecycling,
     /// Number of SQL strings tracked for prepared-statement cache metrics.
     ///
     /// [`PreparedStatementCache`] records only which SQL strings have been
@@ -359,18 +514,32 @@ impl Default for PoolConfig {
             min_connections: 1,
             connection_timeout: Some(Duration::from_secs(30)),
             idle_timeout: Some(Duration::from_secs(600)), // 10 minutes
+            recycle_timeout: Some(Duration::from_secs(5)),
             max_lifetime: Some(Duration::from_secs(1800)), // 30 minutes
+            recycling: PgRecycling::Fast,
             statement_cache_size: 100,
         }
     }
 }
 
 /// Builder for creating a connection pool.
-#[derive(Debug, Default)]
+///
+/// `Debug` output redacts passwords (in the config and in the URL).
+#[derive(Default)]
 pub struct PgPoolBuilder {
     config: Option<PgConfig>,
     url: Option<String>,
     pool_config: PoolConfig,
+}
+
+impl std::fmt::Debug for PgPoolBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgPoolBuilder")
+            .field("config", &self.config)
+            .field("url", &self.url.as_deref().map(|url| redact_url(url, None)))
+            .field("pool_config", &self.pool_config)
+            .finish()
+    }
 }
 
 impl PgPoolBuilder {
@@ -413,15 +582,29 @@ impl PgPoolBuilder {
         self
     }
 
-    /// Set the idle timeout.
-    pub fn idle_timeout(mut self, timeout: Duration) -> Self {
-        self.pool_config.idle_timeout = Some(timeout);
+    /// Set the idle timeout enforced at checkout (see
+    /// [`PoolConfig::idle_timeout`]). Pass `None` to disable.
+    pub fn idle_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.idle_timeout = timeout.into();
         self
     }
 
-    /// Set the maximum connection lifetime.
-    pub fn max_lifetime(mut self, lifetime: Duration) -> Self {
-        self.pool_config.max_lifetime = Some(lifetime);
+    /// Set the bound on the recycle check at checkout
+    /// (see [`PoolConfig::recycle_timeout`]). Pass `None` to disable.
+    pub fn recycle_timeout(mut self, timeout: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.recycle_timeout = timeout.into();
+        self
+    }
+
+    /// Set the maximum connection lifetime. Pass `None` to disable.
+    pub fn max_lifetime(mut self, lifetime: impl Into<Option<Duration>>) -> Self {
+        self.pool_config.max_lifetime = lifetime.into();
+        self
+    }
+
+    /// Set the recycling method used when a connection is checked out again.
+    pub fn recycling(mut self, recycling: PgRecycling) -> Self {
+        self.pool_config.recycling = recycling;
         self
     }
 
@@ -455,6 +638,155 @@ mod tests {
         assert_eq!(config.max_connections, 10);
         assert_eq!(config.min_connections, 1);
         assert_eq!(config.statement_cache_size, 100);
+    }
+
+    #[test]
+    fn test_pool_config_default_recycling_is_fast() {
+        assert_eq!(PoolConfig::default().recycling, PgRecycling::Fast);
+    }
+
+    #[test]
+    fn test_pg_recycling_maps_to_deadpool() {
+        assert!(matches!(
+            PgRecycling::Fast.to_deadpool(),
+            RecyclingMethod::Fast
+        ));
+        assert!(matches!(
+            PgRecycling::Verified.to_deadpool(),
+            RecyclingMethod::Verified
+        ));
+        assert!(matches!(
+            PgRecycling::Clean.to_deadpool(),
+            RecyclingMethod::Clean
+        ));
+    }
+
+    #[test]
+    fn test_recycle_timeout_default_and_plumbing() {
+        assert_eq!(
+            PoolConfig::default().recycle_timeout,
+            Some(Duration::from_secs(5))
+        );
+        let b = PgPoolBuilder::new().recycle_timeout(Duration::from_millis(250));
+        assert_eq!(
+            b.pool_config.recycle_timeout,
+            Some(Duration::from_millis(250))
+        );
+        let b = PgPoolBuilder::new().recycle_timeout(None);
+        assert_eq!(b.pool_config.recycle_timeout, None);
+    }
+
+    #[test]
+    fn test_max_lifetime_accepts_duration_and_none() {
+        let b = PgPoolBuilder::new().max_lifetime(Duration::from_secs(60));
+        assert_eq!(b.pool_config.max_lifetime, Some(Duration::from_secs(60)));
+        let b = PgPoolBuilder::new().max_lifetime(None);
+        assert_eq!(b.pool_config.max_lifetime, None);
+    }
+
+    #[test]
+    fn test_lifetime_jitter_bounds_and_stability() {
+        let max = Duration::from_secs(1800);
+        let created = std::time::Instant::now();
+        let j = lifetime_jitter(max, &created);
+        assert!(j < max / 10);
+        assert_eq!(j, lifetime_jitter(max, &created), "stable per connection");
+        assert_eq!(
+            lifetime_jitter(Duration::ZERO, &created),
+            Duration::ZERO,
+            "ZERO guarded"
+        );
+    }
+
+    #[test]
+    fn retirement_checks_lifetime_then_idle_time() {
+        let minutes = |m: u64| Duration::from_secs(m * 60);
+        let policy = RetirementPolicy::new(Some(minutes(30)), Some(minutes(10))).unwrap();
+        let none = Duration::ZERO;
+        assert_eq!(policy.check(minutes(5), minutes(1), none), None);
+        assert_eq!(
+            policy.check(minutes(31), minutes(1), none),
+            Some(Retirement::MaxLifetime)
+        );
+        // The jitter brings the lifetime deadline forward.
+        assert_eq!(
+            policy.check(minutes(29), minutes(1), minutes(2)),
+            Some(Retirement::MaxLifetime)
+        );
+        assert_eq!(
+            policy.check(minutes(20), minutes(11), none),
+            Some(Retirement::IdleTimeout)
+        );
+        // Only idle *longer* than the timeout retires.
+        assert_eq!(policy.check(minutes(20), minutes(10), none), None);
+        // Both exceeded: the lifetime is reported.
+        assert_eq!(
+            policy.check(minutes(31), minutes(11), none),
+            Some(Retirement::MaxLifetime)
+        );
+    }
+
+    #[test]
+    fn retirement_limits_apply_independently() {
+        let secs = Duration::from_secs;
+        assert!(
+            RetirementPolicy::new(None, None).is_none(),
+            "no hook needed"
+        );
+        let idle_only = RetirementPolicy::new(None, Some(secs(60))).unwrap();
+        assert_eq!(idle_only.check(secs(86_400), secs(1), Duration::ZERO), None);
+        assert_eq!(
+            idle_only.check(secs(5), secs(61), Duration::ZERO),
+            Some(Retirement::IdleTimeout)
+        );
+        let lifetime_only = RetirementPolicy::new(Some(secs(60)), None).unwrap();
+        assert_eq!(
+            lifetime_only.check(secs(5), secs(86_400), Duration::ZERO),
+            None
+        );
+        // `Duration::ZERO` idle timeout replaces every reused connection.
+        let zero = RetirementPolicy::new(None, Some(Duration::ZERO)).unwrap();
+        assert_eq!(
+            zero.check(secs(1), Duration::from_nanos(1), Duration::ZERO),
+            Some(Retirement::IdleTimeout)
+        );
+    }
+
+    #[test]
+    fn test_idle_timeout_accepts_duration_and_none() {
+        let b = PgPoolBuilder::new().idle_timeout(Duration::from_secs(60));
+        assert_eq!(b.pool_config.idle_timeout, Some(Duration::from_secs(60)));
+        let b = PgPoolBuilder::new().idle_timeout(None);
+        assert_eq!(b.pool_config.idle_timeout, None);
+    }
+
+    const SENTINEL: &str = "hunter2-sentinel";
+
+    #[test]
+    fn pool_builder_debug_redacts_passwords() {
+        let url = format!("postgres://prax:{SENTINEL}@db.internal/prax");
+        let builder = PgPoolBuilder::new().url(&url);
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("db.internal"), "{debug}");
+
+        let builder = PgPoolBuilder::new().config(PgConfig::from_url(&url).unwrap());
+        let debug = format!("{builder:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn pool_debug_redacts_passwords() {
+        // deadpool connects lazily: nothing listens on port 1.
+        let pool = PgPoolBuilder::new()
+            .url(format!("postgres://prax:{SENTINEL}@127.0.0.1:1/prax"))
+            .min_connections(0)
+            .build()
+            .await
+            .unwrap();
+        let debug = format!("{pool:?}");
+        assert!(!debug.contains(SENTINEL), "{debug}");
+        assert!(debug.contains("127.0.0.1"), "{debug}");
     }
 
     #[test]

@@ -1,9 +1,7 @@
 //! `String[]` scalar-list fields round-trip through Postgres text arrays:
-//! `Vec<String>: ToFilterValue` produces a `FilterValue::List` of strings,
+//! `Vec<String>: ToFilterValue` produces a `FilterValue::Array` of strings,
 //! which the engine binds as `TEXT[]`, and `Vec<String>: FromColumn` reads
-//! the column back through `PgRow::get_string_array`. Before this, the
-//! engine rejected every `FilterValue::List` and no row type could decode an
-//! array, so a schema with a `String[]` field did not compile.
+//! the column back through `PgRow::get_string_array`.
 //!
 //! Gated by `PRAX_E2E=1` and requires `POSTGRES_URL` pointing at a
 //! reachable Postgres instance, like `uuid_binding.rs`.
@@ -84,12 +82,14 @@ async fn string_lists_round_trip_through_text_array_columns() {
         .await
         .expect("INSERT binding string lists into TEXT[] / VARCHAR[] columns");
 
-    // A string list also binds wherever SQL expects a text array, e.g. an
+    // A string array also binds wherever SQL expects a text array, e.g. an
     // overlap filter in a raw query.
     let touched = engine
         .execute_raw(
             &format!("UPDATE {table} SET id = id WHERE scopes && $1"),
-            vec![FilterValue::List(vec![FilterValue::String("write".into())])],
+            vec![FilterValue::Array(vec![FilterValue::String(
+                "write".into(),
+            )])],
         )
         .await
         .expect("text-array parameter in a raw filter");

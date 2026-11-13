@@ -5,7 +5,7 @@
 use prax_mysql::MysqlEngine;
 use prax_query::capabilities::{
     SupportsCorrelatedSubquery, SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath,
-    SupportsNestedWrites, SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsNestedWrites, SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 
 fn assert_all<E>()
@@ -15,6 +15,7 @@ where
         + SupportsJsonPath
         + SupportsFullTextSearch
         + SupportsGeneratedColumns
+        + SupportsRowLocks
         + SupportsScalarSubqueryInSelect
         + SupportsNestedWrites,
 {

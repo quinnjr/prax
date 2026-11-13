@@ -6,7 +6,7 @@ use prax_postgres::PgEngine;
 use prax_query::capabilities::{
     SupportsArrayOps, SupportsCaseInsensitiveMode, SupportsCorrelatedSubquery,
     SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath, SupportsNestedWrites,
-    SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 
 fn assert_all<E>()
@@ -18,6 +18,7 @@ where
         + SupportsFullTextSearch
         + SupportsArrayOps
         + SupportsGeneratedColumns
+        + SupportsRowLocks
         + SupportsScalarSubqueryInSelect
         + SupportsNestedWrites,
 {

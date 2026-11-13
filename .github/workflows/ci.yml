@@ -13,6 +13,11 @@ env:
   # the library ABI (24.x), which mysqlclient-sys 0.4 (via the diesel dev-dep)
   # rejects. Name the MySQL server line its bundled bindings target instead.
   MYSQLCLIENT_VERSION: "8.4.0"
+  # pkg-config, when the runner has libmysqlclient-dev, wins over
+  # MYSQLCLIENT_VERSION and reports the 24.x ABI again; skip it and link the
+  # system library directly so the version above is used.
+  MYSQLCLIENT_NO_PKG_CONFIG: "1"
+  MYSQLCLIENT_LIB_DIR: /usr/lib/x86_64-linux-gnu
 
 jobs:
   check:

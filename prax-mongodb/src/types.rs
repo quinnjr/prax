@@ -54,13 +54,18 @@ fn filter_value_to_bson_inner(value: &FilterValue, coerce_object_id: bool) -> Mo
             })?;
             Ok(bson)
         }
-        FilterValue::List(list) => {
+        FilterValue::List(list) | FilterValue::Array(list) => {
             let bson_values: Result<Vec<Bson>, _> = list
                 .iter()
                 .map(|v| filter_value_to_bson_inner(v, coerce_object_id))
                 .collect();
             Ok(Bson::Array(bson_values?))
         }
+        FilterValue::Bytes(b) => Ok(Bson::Binary(bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: b.clone(),
+        })),
+        _ => Err(MongoError::serialization("unsupported FilterValue variant")),
     }
 }
 
@@ -283,6 +288,25 @@ pub mod aggregation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_bson() {
+        assert_eq!(
+            filter_value_to_bson(&FilterValue::Bytes(vec![0, 255])).unwrap(),
+            Bson::Binary(bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![0, 255],
+            })
+        );
+        assert_eq!(
+            filter_value_to_bson(&FilterValue::Array(vec![
+                FilterValue::Int(1),
+                FilterValue::String("a".into())
+            ]))
+            .unwrap(),
+            Bson::Array(vec![Bson::Int64(1), Bson::String("a".into())])
+        );
+    }
 
     #[test]
     #[allow(clippy::approx_constant)]

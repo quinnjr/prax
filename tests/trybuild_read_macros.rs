@@ -135,3 +135,17 @@ fn computed_fields_ui() {
         std::env::remove_var("PRAX_SCHEMA");
     }
 }
+
+/// Compile-fail fixtures that lock the `SupportsRowLocks` capability gate:
+/// engines that cannot lock rows must not satisfy the bound.
+///
+/// ```bash
+/// TRYBUILD=overwrite cargo test --test trybuild_read_macros \
+///     --features ui-tests row_locks_ui
+/// ```
+#[cfg(feature = "ui-tests")]
+#[test]
+fn row_locks_ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/row_locks/*.rs");
+}

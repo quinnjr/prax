@@ -70,74 +70,90 @@
 //! assert!(!sql.sql().contains("DROP TABLE"));
 //! ```
 
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use tracing::debug;
 
+use crate::dialect::SqlDialect;
 use crate::error::QueryResult;
 use crate::filter::FilterValue;
 use crate::sql::DatabaseType;
 use crate::traits::{Model, QueryEngine};
 
+/// A piece of a [`Sql`] query: literal text, or the placeholder of the
+/// parameter with this 1-based index (rendered when the query is built).
+#[derive(Debug, Clone)]
+enum Segment {
+    Text(String),
+    Param(usize),
+}
+
 /// A raw SQL query with parameterized values.
+///
+/// Placeholders are rendered when the query is built, not when a value is
+/// bound: [`build`](Self::build) and [`sql`](Self::sql) use the database
+/// type (PostgreSQL `$N` unless [`with_db_type`](Self::with_db_type) set
+/// another), while [`build_for_dialect`](Self::build_for_dialect) (used by
+/// `PraxClient::query_raw` / `execute_raw`) uses the executing engine's
+/// dialect unless `with_db_type` was called.
 #[derive(Debug, Clone)]
 pub struct Sql {
-    /// The SQL string parts (between parameters).
-    parts: Vec<String>,
+    /// The SQL text and parameter positions, in order.
+    segments: Vec<Segment>,
     /// The parameter values.
     params: Vec<FilterValue>,
     /// The database type for parameter formatting.
     db_type: DatabaseType,
+    /// Whether `db_type` was set with [`Sql::with_db_type`].
+    db_type_explicit: bool,
 }
 
 impl Sql {
     /// Create a new raw SQL query.
     pub fn new(sql: impl Into<String>) -> Self {
         Self {
-            parts: vec![sql.into()],
+            segments: vec![Segment::Text(sql.into())],
             params: Vec::new(),
             db_type: DatabaseType::PostgreSQL,
+            db_type_explicit: false,
         }
     }
 
     /// Create an empty SQL query.
     pub fn empty() -> Self {
         Self {
-            parts: Vec::new(),
+            segments: Vec::new(),
             params: Vec::new(),
             db_type: DatabaseType::PostgreSQL,
+            db_type_explicit: false,
         }
     }
 
     /// Set the database type for parameter formatting.
+    ///
+    /// It applies to every placeholder, including those of values bound
+    /// before this call, and takes precedence over the engine's dialect in
+    /// [`build_for_dialect`](Self::build_for_dialect).
     pub fn with_db_type(mut self, db_type: DatabaseType) -> Self {
         self.db_type = db_type;
+        self.db_type_explicit = true;
         self
     }
 
     /// Append a literal SQL string.
     pub fn push(mut self, sql: impl Into<String>) -> Self {
-        if let Some(last) = self.parts.last_mut() {
-            last.push_str(&sql.into());
-        } else {
-            self.parts.push(sql.into());
+        let sql = sql.into();
+        match self.segments.last_mut() {
+            Some(Segment::Text(last)) => last.push_str(&sql),
+            _ => self.segments.push(Segment::Text(sql)),
         }
         self
     }
 
-    /// Bind a parameter value.
+    /// Bind a parameter value; its placeholder is appended to the query.
     pub fn bind(mut self, value: impl Into<FilterValue>) -> Self {
-        let index = self.params.len() + 1;
-        let placeholder = self.db_type.placeholder(index);
-
-        if let Some(last) = self.parts.last_mut() {
-            // push_str accepts &str, which Cow<str> derefs to
-            last.push_str(&placeholder);
-        } else {
-            // Convert to owned string for storage
-            self.parts.push(placeholder.into_owned());
-        }
-
         self.params.push(value.into());
+        self.segments.push(Segment::Param(self.params.len()));
         self
     }
 
@@ -187,16 +203,49 @@ impl Sql {
         }
     }
 
-    /// Build the final SQL string and parameters.
+    /// Build the final SQL string and parameters, with the placeholders of
+    /// the database type (PostgreSQL `$N` unless
+    /// [`with_db_type`](Self::with_db_type) set another).
     pub fn build(self) -> (String, Vec<FilterValue>) {
-        let sql = self.parts.join("");
+        let sql = self.sql();
         debug!(sql_len = sql.len(), param_count = self.params.len(), db_type = ?self.db_type, "Sql::build()");
         (sql, self.params)
     }
 
-    /// Get the SQL string (without consuming).
+    /// Build the final SQL string and parameters for an engine with
+    /// `dialect`: its placeholders (`$N`, `?`, `?N`, `@PN`) are used unless
+    /// [`with_db_type`](Self::with_db_type) was called, which wins. A
+    /// dialect that does not emit SQL (MongoDB's) keeps the database
+    /// type's placeholders.
+    pub fn build_for_dialect(self, dialect: &dyn SqlDialect) -> (String, Vec<FilterValue>) {
+        if self.db_type_explicit || !dialect.supports_sql_emission() {
+            return self.build();
+        }
+        let sql = self.render(|i| Cow::Owned(dialect.placeholder(i)));
+        debug!(
+            sql_len = sql.len(),
+            param_count = self.params.len(),
+            "Sql::build_for_dialect()"
+        );
+        (sql, self.params)
+    }
+
+    /// Get the SQL string (without consuming), with the placeholders of the
+    /// database type.
     pub fn sql(&self) -> String {
-        self.parts.join("")
+        self.render(|i| self.db_type.placeholder(i))
+    }
+
+    /// Join the segments, rendering each parameter with `placeholder`.
+    fn render<'a>(&self, placeholder: impl Fn(usize) -> Cow<'a, str>) -> String {
+        let mut sql = String::new();
+        for segment in &self.segments {
+            match segment {
+                Segment::Text(text) => sql.push_str(text),
+                Segment::Param(index) => sql.push_str(&placeholder(*index)),
+            }
+        }
+        sql
     }
 
     /// Get the parameters (without consuming).
@@ -211,7 +260,9 @@ impl Sql {
 
     /// Check if the query is empty.
     pub fn is_empty(&self) -> bool {
-        self.parts.is_empty() || self.parts.iter().all(|p| p.is_empty())
+        self.segments
+            .iter()
+            .all(|segment| matches!(segment, Segment::Text(text) if text.is_empty()))
     }
 }
 
@@ -223,7 +274,7 @@ impl Default for Sql {
 
 impl std::fmt::Display for Sql {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.parts.join(""))
+        f.write_str(&self.sql())
     }
 }
 
@@ -312,19 +363,19 @@ where
 
     /// Execute the query and return all matching records.
     pub async fn exec(self) -> QueryResult<Vec<M>> {
-        let (sql, params) = self.sql.build();
+        let (sql, params) = self.sql.build_for_dialect(self.engine.dialect());
         self.engine.query_many(&sql, params).await
     }
 
     /// Execute the query and return a single record.
     pub async fn exec_one(self) -> QueryResult<M> {
-        let (sql, params) = self.sql.build();
+        let (sql, params) = self.sql.build_for_dialect(self.engine.dialect());
         self.engine.query_one(&sql, params).await
     }
 
     /// Execute the query and return an optional record.
     pub async fn exec_optional(self) -> QueryResult<Option<M>> {
-        let (sql, params) = self.sql.build();
+        let (sql, params) = self.sql.build_for_dialect(self.engine.dialect());
         self.engine.query_optional(&sql, params).await
     }
 }
@@ -350,7 +401,7 @@ where
 
     /// Execute the mutation and return the number of affected rows.
     pub async fn exec(self) -> QueryResult<u64> {
-        let (sql, params) = self.sql.build();
+        let (sql, params) = self.sql.build_for_dialect(self.engine.dialect());
         self.engine.execute_raw(&sql, params).await
     }
 }
@@ -530,6 +581,69 @@ mod tests {
         let (query, params) = sql.build();
         assert_eq!(query, "SELECT * FROM users WHERE id = ?");
         assert_eq!(params.len(), 1);
+    }
+
+    fn two_binds() -> Sql {
+        Sql::new("SELECT * FROM users WHERE id = ")
+            .bind(42i32)
+            .push(" AND name = ")
+            .bind("John")
+    }
+
+    #[test]
+    fn same_sql_renders_each_dialects_placeholders() {
+        use crate::dialect::{Mssql, Mysql, Postgres, Sqlite};
+        let cases: [(&dyn SqlDialect, &str); 4] = [
+            (&Postgres, "SELECT * FROM users WHERE id = $1 AND name = $2"),
+            (&Mysql, "SELECT * FROM users WHERE id = ? AND name = ?"),
+            (&Sqlite, "SELECT * FROM users WHERE id = ?1 AND name = ?2"),
+            (&Mssql, "SELECT * FROM users WHERE id = @P1 AND name = @P2"),
+        ];
+        for (dialect, expected) in cases {
+            let (query, params) = two_binds().build_for_dialect(dialect);
+            assert_eq!(query, expected);
+            assert_eq!(params.len(), 2);
+        }
+        // `build` keeps the default Postgres placeholders.
+        assert_eq!(
+            two_binds().build().0,
+            "SELECT * FROM users WHERE id = $1 AND name = $2"
+        );
+    }
+
+    #[test]
+    fn explicit_db_type_wins_over_the_dialect() {
+        use crate::dialect::{Mssql, Mysql};
+        let (query, _) = two_binds()
+            .with_db_type(DatabaseType::PostgreSQL)
+            .build_for_dialect(&Mysql);
+        assert_eq!(query, "SELECT * FROM users WHERE id = $1 AND name = $2");
+        let (query, _) = two_binds()
+            .with_db_type(DatabaseType::MySQL)
+            .build_for_dialect(&Mssql);
+        assert_eq!(query, "SELECT * FROM users WHERE id = ? AND name = ?");
+    }
+
+    #[test]
+    fn db_type_applies_to_parameters_bound_before_it() {
+        let (query, _) = two_binds().with_db_type(DatabaseType::MSSQL).build();
+        assert_eq!(query, "SELECT * FROM users WHERE id = @P1 AND name = @P2");
+    }
+
+    #[test]
+    fn non_sql_dialect_keeps_the_default_placeholders() {
+        let (query, _) = two_binds().build_for_dialect(&crate::dialect::NotSql);
+        assert_eq!(query, "SELECT * FROM users WHERE id = $1 AND name = $2");
+    }
+
+    #[test]
+    fn binds_after_sql_with_params_continue_the_numbering() {
+        let sql = sql_with_params("SELECT * FROM t WHERE a = $1", vec![FilterValue::Int(1)])
+            .push(" AND b = ")
+            .bind(2i32);
+        let (query, params) = sql.build_for_dialect(&crate::dialect::Mssql);
+        assert_eq!(query, "SELECT * FROM t WHERE a = $1 AND b = @P2");
+        assert_eq!(params.len(), 2);
     }
 
     #[test]

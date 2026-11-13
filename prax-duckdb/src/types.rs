@@ -5,6 +5,7 @@ use prax_query::filter::FilterValue;
 use serde_json::Value as JsonValue;
 
 /// Convert a FilterValue to a DuckDB Value.
+#[deny(clippy::wildcard_enum_match_arm)]
 pub fn filter_value_to_duckdb(value: &FilterValue) -> Value {
     match value {
         FilterValue::Null => Value::Null,
@@ -13,28 +14,16 @@ pub fn filter_value_to_duckdb(value: &FilterValue) -> Value {
         FilterValue::Float(f) => Value::Double(*f),
         FilterValue::String(s) => Value::Text(s.clone()),
         FilterValue::Json(j) => Value::Text(j.to_string()),
-        FilterValue::List(list) => {
-            // DuckDB supports arrays, but for simplicity convert to JSON
-            let json_array: Vec<JsonValue> = list.iter().map(filter_value_to_json).collect();
-            Value::Text(serde_json::to_string(&json_array).unwrap_or_default())
+        FilterValue::Bytes(b) => Value::Blob(b.clone()),
+        // Arrays bind as JSON text; SQL converts them (see scalar-lists design).
+        FilterValue::List(_) | FilterValue::Array(_) => {
+            Value::Text(value.to_json_value().to_string())
         }
-    }
-}
-
-/// Convert a FilterValue to a JSON value.
-pub fn filter_value_to_json(value: &FilterValue) -> JsonValue {
-    match value {
-        FilterValue::Null => JsonValue::Null,
-        FilterValue::Bool(b) => JsonValue::Bool(*b),
-        FilterValue::Int(i) => JsonValue::Number((*i).into()),
-        FilterValue::Float(f) => serde_json::Number::from_f64(*f)
-            .map(JsonValue::Number)
-            .unwrap_or(JsonValue::Null),
-        FilterValue::String(s) => JsonValue::String(s.clone()),
-        FilterValue::Json(j) => j.clone(),
-        FilterValue::List(list) => {
-            JsonValue::Array(list.iter().map(filter_value_to_json).collect())
-        }
+        // `FilterValue` is `#[non_exhaustive]`, so a catch-all is required.
+        // Every current variant is listed above; when a new variant is added,
+        // `#[deny(clippy::wildcard_enum_match_arm)]` makes this arm fail
+        // clippy until the variant gets its own arm.
+        _ => Value::Text(value.to_json_value().to_string()),
     }
 }
 
@@ -281,26 +270,26 @@ pub struct DuckDbParam<'a>(pub &'a FilterValue);
 
 impl duckdb::ToSql for DuckDbParam<'_> {
     fn to_sql(&self) -> duckdb::Result<ToSqlOutput<'_>> {
-        match self.0 {
-            FilterValue::Null => Ok(ToSqlOutput::Owned(Value::Null)),
-            FilterValue::Bool(b) => Ok(ToSqlOutput::Owned(Value::Boolean(*b))),
-            FilterValue::Int(i) => Ok(ToSqlOutput::Owned(Value::BigInt(*i))),
-            FilterValue::Float(f) => Ok(ToSqlOutput::Owned(Value::Double(*f))),
-            FilterValue::String(s) => Ok(ToSqlOutput::Owned(Value::Text(s.clone()))),
-            FilterValue::Json(j) => Ok(ToSqlOutput::Owned(Value::Text(j.to_string()))),
-            FilterValue::List(list) => {
-                let json_array: Vec<JsonValue> = list.iter().map(filter_value_to_json).collect();
-                Ok(ToSqlOutput::Owned(Value::Text(
-                    serde_json::to_string(&json_array).unwrap_or_default(),
-                )))
-            }
-        }
+        Ok(ToSqlOutput::Owned(filter_value_to_duckdb(self.0)))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bytes_and_array_convert_to_duckdb_values() {
+        assert!(matches!(
+            filter_value_to_duckdb(&FilterValue::Bytes(vec![0, 255])),
+            Value::Blob(ref b) if b == &[0u8, 255]
+        ));
+        let array = FilterValue::Array(vec![FilterValue::Int(1), FilterValue::String("a".into())]);
+        assert!(matches!(
+            filter_value_to_duckdb(&array),
+            Value::Text(ref t) if t == "[1,\"a\"]"
+        ));
+    }
 
     #[test]
     fn test_filter_value_to_duckdb() {
@@ -316,23 +305,6 @@ mod tests {
             filter_value_to_duckdb(&FilterValue::Int(42)),
             Value::BigInt(42)
         ));
-    }
-
-    #[test]
-    fn test_filter_value_to_json() {
-        assert_eq!(filter_value_to_json(&FilterValue::Null), JsonValue::Null);
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Bool(true)),
-            JsonValue::Bool(true)
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::Int(42)),
-            JsonValue::Number(42.into())
-        );
-        assert_eq!(
-            filter_value_to_json(&FilterValue::String("test".to_string())),
-            JsonValue::String("test".to_string())
-        );
     }
 
     #[test]
