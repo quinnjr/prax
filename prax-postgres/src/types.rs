@@ -183,16 +183,27 @@ pub fn filter_value_to_sql(value: &FilterValue) -> PgResult<Box<dyn ToSql + Sync
         FilterValue::Float(f) => Ok(Box::new(*f)),
         FilterValue::String(s) => Ok(Box::new(PgString(s.clone()))),
         FilterValue::Json(j) => Ok(Box::new(j.clone())),
-        FilterValue::List(_) => {
-            // Lists are deliberately unsupported in raw binds. Typed IN
-            // filters expand to scalar placeholders upstream
-            // (prax-query/src/filter.rs), so this arm only fires for
-            // hand-built raw queries via `Sql::bind`. Callers needing list
-            // binds should use `= ANY($n)` array binds or the typed filter
-            // path.
-            Err(PgError::type_conversion(
-                "list values should be handled specially",
-            ))
+        FilterValue::List(items) => {
+            // A list of strings (or an empty list) is a text array: what a
+            // `String[]` field writes and what `= ANY($n)` raw binds want.
+            // `Vec<String>: ToSql` binds it against TEXT[] / VARCHAR[] /
+            // CHAR[] / NAME[] parameters. Typed IN filters never get here:
+            // they expand to scalar placeholders upstream
+            // (prax-query/src/filter.rs). Other element types have no
+            // native mapping yet and stay unsupported.
+            let strings: Option<Vec<String>> = items
+                .iter()
+                .map(|item| match item {
+                    FilterValue::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            match strings {
+                Some(strings) => Ok(Box::new(strings)),
+                None => Err(PgError::type_conversion(
+                    "only lists of strings bind as Postgres arrays (TEXT[] and friends)",
+                )),
+            }
         }
     }
 }
@@ -265,6 +276,47 @@ mod tests {
 
         let result = filter_value_to_sql(&FilterValue::Bool(true));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn string_list_binds_as_a_text_array() {
+        let list = FilterValue::List(vec![
+            FilterValue::String("read".into()),
+            FilterValue::String("write".into()),
+        ]);
+        let param = filter_value_to_sql(&list).expect("string list binds");
+        let mut buf = bytes::BytesMut::new();
+        let encoded = param
+            .to_sql_checked(&Type::TEXT_ARRAY, &mut buf)
+            .expect("encodes as TEXT[]");
+        assert!(matches!(encoded, IsNull::No));
+        assert!(
+            param
+                .to_sql_checked(&Type::VARCHAR_ARRAY, &mut bytes::BytesMut::new())
+                .is_ok()
+        );
+        // A text array never satisfies a scalar column.
+        assert!(
+            param
+                .to_sql_checked(&Type::TEXT, &mut bytes::BytesMut::new())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_list_binds_as_an_empty_text_array() {
+        let param = filter_value_to_sql(&FilterValue::List(vec![])).expect("empty list binds");
+        assert!(
+            param
+                .to_sql_checked(&Type::TEXT_ARRAY, &mut bytes::BytesMut::new())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn non_string_list_is_still_rejected() {
+        let list = FilterValue::List(vec![FilterValue::Int(1), FilterValue::Int(2)]);
+        assert!(filter_value_to_sql(&list).is_err());
     }
 
     #[test]

@@ -477,14 +477,28 @@ fn bind_pg_param<'q>(
         FilterValue::Bool(b) => query.bind(*b),
         FilterValue::Null => query.bind(UntypedNull),
         FilterValue::Json(j) => query.bind(j.clone()),
-        FilterValue::List(_) => {
-            // Lists are deliberately unsupported in raw binds. Typed IN
-            // filters expand to scalar placeholders upstream
-            // (prax-query/src/filter.rs), so this arm only fires for
-            // hand-built raw queries.
-            return Err(SqlxError::type_conversion(
-                "list values not supported in raw binds; use typed IN filters",
-            ));
+        FilterValue::List(items) => {
+            // A list of strings (or an empty list) is a text array: what a
+            // `String[]` field writes, and what `= ANY($n)` / `&& $n` raw
+            // binds want. Typed IN filters never get here: they expand to
+            // scalar placeholders upstream (prax-query/src/filter.rs).
+            // Other element types have no native mapping yet.
+            let strings: Option<Vec<String>> = items
+                .iter()
+                .map(|item| match item {
+                    FilterValue::String(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            match strings {
+                Some(strings) => query.bind(strings),
+                None => {
+                    return Err(SqlxError::type_conversion(
+                        "only lists of strings bind as Postgres arrays (TEXT[]); \
+                         use typed IN filters for other lists",
+                    ));
+                }
+            }
         }
     })
 }
@@ -1190,6 +1204,30 @@ mod tests {
         assert_eq!(row.get("n"), Some(&FilterValue::Int(3)));
         assert!(!matches!(row.get("n"), Some(FilterValue::Bool(_))));
         assert_eq!(row.get("avg_id"), Some(&FilterValue::Float(2.0)));
+    }
+
+    /// A list of strings (what `Vec<String>` / `String[]` fields encode
+    /// to) binds as a Postgres text array; other lists are still rejected.
+    #[cfg(feature = "postgres")]
+    #[test]
+    fn bind_pg_param_binds_string_lists_as_text_arrays() {
+        let scopes = FilterValue::List(vec![
+            FilterValue::String("read".into()),
+            FilterValue::String("write".into()),
+        ]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &scopes).is_ok());
+
+        let empty = FilterValue::List(vec![]);
+        assert!(bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &empty).is_ok());
+
+        let ints = FilterValue::List(vec![FilterValue::Int(1)]);
+        let err = bind_pg_param(sqlx::query::<sqlx::Postgres>("SELECT $1"), &ints)
+            .err()
+            .expect("non-string list bind must be rejected");
+        assert!(
+            matches!(err, SqlxError::TypeConversion(ref msg) if msg.contains("list")),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(feature = "sqlite")]

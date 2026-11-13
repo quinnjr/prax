@@ -26,11 +26,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `prax migrate` no longer reports "No changes" when changes were skipped for lacking `--allow-destructive`; skipped changes are listed.
 - `db pull` no longer emits field-level `@id` on members of a composite primary key (previously both `@id` and `@@id`, which failed validation).
 - `db pull` now emits `@@map` whenever the model or view name differs from the table or view name, including case-only differences (previously the table `users` became `model Users` without `@@map`).
-- SQLite introspection now reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run.
 
 ### Security
 
 - Database-sourced names in generated migration comments (`-- WARNING:`, `-- SKIPPED`) and in `db pull` `// prax:` comments are kept on one line, so a name containing a newline can no longer end the comment and inject SQL or schema text.
+
+## [0.12.6] - 2026-11-12
+
+### Fixed
+
+- **`String[]` scalar-list fields** (`prax-query`, `prax-postgres`, `prax-sqlx`, `prax-codegen`, `prax-cli`). A schema with a `String[]` field generated code that did not compile (E0277): nothing implemented `FromColumn` or `ToFilterValue` for `Vec<String>`.
+  - `FromColumn` and `ToFilterValue` for `Vec<String>`, backed by a new `RowRef::get_string_array` hook. The hook has a default implementation that errors as unsupported, so other drivers are unaffected. `Option<Vec<String>>` works through the existing blanket impls.
+  - `prax-postgres` and `prax-sqlx` (Postgres) decode `TEXT[]` / `VARCHAR[]` / `CHAR[]` / `NAME[]` columns, and bind a `FilterValue::List` made only of strings (or an empty list) as a text array. That's what `String[]` writes produce, and it also lets raw queries pass text-array parameters (`scopes && $1`). Lists of other element types are still rejected.
+  - `prax_schema!` generates `<field>::set(...)` with the full field type for list fields (`Vec<String>`, `Option<Vec<String>>`). It used to take the element type, which did not match `SetParam` and failed to compile.
+  - `prax generate` emits `Option<Vec<T>>` for optional list fields (`String[]?`). It used to emit `Option<T>`, dropping the list.
+  - A new `prax-cli` integration test compiles a generated client for a schema with `String[]` fields against the workspace `prax-query`.
+- SQLite introspection reports an `INTEGER PRIMARY KEY` (rowid alias) column as non-null. SQLite reports it as nullable unless `NOT NULL` is spelled out, so diffing `Int @id @auto` against the database proposed altering the key on every run (backport from `develop`).
+- **build**: require `async-trait` 0.1.92 or later. 0.1.89 added `#[must_use]` to every `#[async_trait]` method, which clippy 1.99 reports as `double_must_use`.
+
+### Security
+
+- Updated `rustls` 0.23 (0.23.46), `rustls-webpki` 0.103 (0.103.17), `webpki-roots` 1.x (1.0.12), `tokio` (1.54.1), `ctutils`, `zstd` / `zstd-safe` / `zstd-sys` in `Cargo.lock` for RUSTSEC-2026-0346/0347/0348/0349, 0381, 0382, 0385, 0386, 0391, 0398, 0403 and 0410. `prax-cassandra` now depends on `webpki-roots` 1.x.
+- `deny.toml` ignores, with resolution paths, the advisories that only a major upstream upgrade can fix: `rustls` 0.21 / `rustls-webpki` 0.101 / `webpki-roots` 0.25 (via mongodb 2.8), the `webpki-roots` 0.26 shim (via mysql_async), `zip` < 9 (build-dependency of libduckdb-sys), and bundled SQLite in `libsqlite3-sys` 0.30 (RUSTSEC-2026-0459, via rusqlite 0.32 and sqlx-sqlite 0.8; opt-in SQLite backends; fixed by the rusqlite/sqlx upgrade planned for 0.13).
 
 ## [0.12.5] - 2026-09-17
 

@@ -183,6 +183,16 @@ pub trait RowRef {
         Err(unsupported_get(column, "vector"))
     }
 
+    /// Get a text-array column (`TEXT[]`, `VARCHAR[]`, ...) as `Vec<String>`.
+    ///
+    /// Default impl errors with `unsupported_get`; drivers with native
+    /// array support (`prax-postgres`) override it. Used by
+    /// `FromColumn for Vec<String>`, which is what schema-generated
+    /// structs use for `String[]` scalar-list fields.
+    fn get_string_array(&self, column: &str) -> Result<Vec<String>, RowError> {
+        Err(unsupported_get(column, "string_array"))
+    }
+
     /// Check whether the named column is NULL in this row.
     ///
     /// The default implementation delegates to `get_str_opt` — every
@@ -481,6 +491,15 @@ impl FromColumn for Vec<f32> {
     }
 }
 
+/// Text-array columns decode into `Vec<String>`. The schema-generated
+/// client uses this for `String[]` scalar-list fields. Drivers without
+/// array support surface an unsupported error at query time.
+impl FromColumn for Vec<String> {
+    fn from_column(row: &impl RowRef, column: &str) -> Result<Self, RowError> {
+        row.get_string_array(column)
+    }
+}
+
 /// Blanket impl so every `FromColumn` type also satisfies
 /// `FromColumn` through `Option<T>` without each consumer needing a
 /// hand-written nullable wrapper — schema-generated enum types can't
@@ -668,6 +687,99 @@ mod tests {
 
         let owned: RowData = RowData::owned("world".to_string());
         assert_eq!(owned.as_str(), "world");
+    }
+
+    /// `MockRow` plus a `get_string_array` override that reads `"a,b"`
+    /// (empty string = empty array), like a driver with array support.
+    struct ArrayRow(MockRow);
+
+    impl RowRef for ArrayRow {
+        fn get_i32(&self, c: &str) -> Result<i32, RowError> {
+            self.0.get_i32(c)
+        }
+        fn get_i32_opt(&self, c: &str) -> Result<Option<i32>, RowError> {
+            self.0.get_i32_opt(c)
+        }
+        fn get_i64(&self, c: &str) -> Result<i64, RowError> {
+            self.0.get_i64(c)
+        }
+        fn get_i64_opt(&self, c: &str) -> Result<Option<i64>, RowError> {
+            self.0.get_i64_opt(c)
+        }
+        fn get_f64(&self, c: &str) -> Result<f64, RowError> {
+            self.0.get_f64(c)
+        }
+        fn get_f64_opt(&self, c: &str) -> Result<Option<f64>, RowError> {
+            self.0.get_f64_opt(c)
+        }
+        fn get_bool(&self, c: &str) -> Result<bool, RowError> {
+            self.0.get_bool(c)
+        }
+        fn get_bool_opt(&self, c: &str) -> Result<Option<bool>, RowError> {
+            self.0.get_bool_opt(c)
+        }
+        fn get_str(&self, c: &str) -> Result<&str, RowError> {
+            self.0.get_str(c)
+        }
+        fn get_str_opt(&self, c: &str) -> Result<Option<&str>, RowError> {
+            self.0.get_str_opt(c)
+        }
+        fn get_bytes(&self, c: &str) -> Result<&[u8], RowError> {
+            self.0.get_bytes(c)
+        }
+        fn get_bytes_opt(&self, c: &str) -> Result<Option<&[u8]>, RowError> {
+            self.0.get_bytes_opt(c)
+        }
+        fn get_string_array(&self, c: &str) -> Result<Vec<String>, RowError> {
+            let raw = self.get_str(c)?;
+            Ok(if raw.is_empty() {
+                vec![]
+            } else {
+                raw.split(',').map(str::to_string).collect()
+            })
+        }
+    }
+
+    fn array_row(pairs: &[(&str, &str)]) -> ArrayRow {
+        let data = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        ArrayRow(MockRow { data })
+    }
+
+    #[test]
+    fn vec_string_decodes_through_get_string_array() {
+        let row = array_row(&[("scopes", "read,write"), ("none", "")]);
+        assert_eq!(
+            Vec::<String>::from_column(&row, "scopes").unwrap(),
+            vec!["read".to_string(), "write".to_string()]
+        );
+        assert!(Vec::<String>::from_column(&row, "none").unwrap().is_empty());
+    }
+
+    #[test]
+    fn option_vec_string_maps_null_to_none() {
+        let row = array_row(&[("scopes", "NULL"), ("tags", "a")]);
+        assert_eq!(
+            Option::<Vec<String>>::from_column(&row, "scopes").unwrap(),
+            None
+        );
+        assert_eq!(
+            Option::<Vec<String>>::from_column(&row, "tags").unwrap(),
+            Some(vec!["a".to_string()])
+        );
+    }
+
+    #[test]
+    fn default_string_array_method_errors() {
+        let mut data = std::collections::HashMap::new();
+        data.insert("scopes".into(), "read".into());
+        let row = MockRow { data };
+        assert!(matches!(
+            Vec::<String>::from_column(&row, "scopes"),
+            Err(RowError::TypeConversion { message, .. }) if message.contains("string_array")
+        ));
     }
 
     #[test]
