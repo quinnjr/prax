@@ -1,4 +1,5 @@
-//! `prax generate` output must compile against `prax-query`.
+//! `prax generate` output must compile against `prax-query`, and be
+//! clippy-clean under `-D warnings`.
 //!
 //! The string assertions in `cli_tests.rs` cannot catch a generated field
 //! whose type lacks a runtime trait impl. That is how `String[]` fields
@@ -11,6 +12,13 @@
 //! runs `cargo check` on it. It reuses the workspace `Cargo.lock` and runs
 //! offline, so it only needs the registry sources the workspace build has
 //! already fetched.
+//!
+//! It then runs `cargo clippy -- -D warnings` on the same crate. Consumers
+//! gate CI on clippy over the generated tree, so a lint in generated code
+//! (for example `result_large_err` on the client's `query_raw` /
+//! `execute_raw` / `transaction`, flagged from clippy 1.99) fails their
+//! build. When clippy is not installed the clippy step is skipped, except
+//! on CI (`CI` set), where it is required.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -127,18 +135,41 @@ rust_decimal = {{ version = "1", features = ["serde"] }}
     fs::copy(root.join("Cargo.lock"), krate.join("Cargo.lock")).unwrap();
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let output = Command::new(cargo)
+    let target_dir = root.join("target").join("generated-compile-check");
+    let output = Command::new(&cargo)
         .args(["check", "--offline", "--quiet", "--manifest-path"])
         .arg(krate.join("Cargo.toml"))
-        .env(
-            "CARGO_TARGET_DIR",
-            root.join("target").join("generated-compile-check"),
-        )
+        .env("CARGO_TARGET_DIR", &target_dir)
         .output()
         .expect("run cargo check");
     assert!(
         output.status.success(),
         "generated client failed to compile:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let clippy_available = Command::new(&cargo)
+        .args(["clippy", "--version"])
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !clippy_available {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "clippy is required on CI to lint the generated client"
+        );
+        eprintln!("skipping clippy on the generated client: cargo clippy is not installed");
+        return;
+    }
+    let output = Command::new(&cargo)
+        .args(["clippy", "--offline", "--quiet", "--manifest-path"])
+        .arg(krate.join("Cargo.toml"))
+        .args(["--", "-D", "warnings"])
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("run cargo clippy");
+    assert!(
+        output.status.success(),
+        "generated client is not clippy-clean (-D warnings):\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }
