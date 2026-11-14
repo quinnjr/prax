@@ -1,96 +1,87 @@
-//! Builder for CREATE VIRTUAL TABLE ... USING vector(...) DDL.
+//! Builder for `CREATE VIRTUAL TABLE ... USING vector(...)` DDL.
+//!
+//! sqlite-vector-rs stores **one vector per row** of a virtual table:
+//!
+//! ```sql
+//! CREATE VIRTUAL TABLE "documents_embedding_vectors" USING vector(dim=1536, type=float4, metric=cosine, mode=hnsw);
+//! ```
+//!
+//! The table's `rowid` is the link back to the owning row: insert each
+//! vector with the owning row's integer primary key as its `rowid`
+//! (`INSERT INTO t(rowid, vector) VALUES (?1, vector_from_json(?2, 'float4'))`).
+//! A model with several vector fields uses one virtual table per field
+//! (`{table}_{column}_vectors`, see [`vector_table_name`]).
 
 use crate::vector::metric::{DistanceMetric, VectorElementType, VectorIndexKind};
 
-/// A single column in a vector virtual table.
+/// Conventional virtual-table name for the vector field `column` of
+/// `table`: `{table}_{column}_vectors`. The migration generator uses the
+/// same convention.
+pub fn vector_table_name(table: &str, column: &str) -> String {
+    format!("{table}_{column}_vectors")
+}
+
+/// Builder for one sqlite-vector-rs virtual table (one vector per row).
 #[derive(Debug, Clone)]
-pub struct VectorColumnDef {
-    name: String,
+pub struct VectorIndex {
+    table_name: String,
     element_type: VectorElementType,
     dimensions: u32,
     metric: DistanceMetric,
     index: Option<VectorIndexKind>,
 }
 
-/// Builder for CREATE VIRTUAL TABLE DDL for sqlite-vector-rs.
-#[derive(Debug, Clone)]
-pub struct VectorIndex {
-    table_name: String,
-    rowid_column: Option<String>,
-    columns: Vec<VectorColumnDef>,
-}
-
 impl VectorIndex {
-    /// Create a new builder for a virtual table.
-    pub fn new(table_name: impl Into<String>) -> Self {
-        Self {
-            table_name: table_name.into(),
-            rowid_column: None,
-            columns: Vec::new(),
-        }
-    }
-
-    /// Set the rowid column name (for joins back to the main table).
-    pub fn rowid_column(mut self, name: impl Into<String>) -> Self {
-        self.rowid_column = Some(name.into());
-        self
-    }
-
-    /// Add a column with a specific element type, dimensions, metric, and
-    /// optional index kind.
-    pub fn column(
-        mut self,
-        name: impl Into<String>,
+    /// Start a builder for the virtual table `table_name` holding vectors of
+    /// `dimensions` elements of `element_type`, compared with `metric`.
+    ///
+    /// The search mode defaults to an HNSW index; see [`index`](Self::index).
+    pub fn new(
+        table_name: impl Into<String>,
         element_type: VectorElementType,
         dimensions: u32,
         metric: DistanceMetric,
-        index: Option<VectorIndexKind>,
     ) -> Self {
-        self.columns.push(VectorColumnDef {
-            name: name.into(),
+        Self {
+            table_name: table_name.into(),
             element_type,
             dimensions,
             metric,
-            index,
-        });
+            index: Some(VectorIndexKind::Hnsw),
+        }
+    }
+
+    /// Choose the search mode: `Some(VectorIndexKind::Hnsw)` (the default)
+    /// for an approximate HNSW index, `None` for exact (brute-force) search.
+    pub fn index(mut self, index: Option<VectorIndexKind>) -> Self {
+        self.index = index;
         self
     }
 
-    /// Render the CREATE VIRTUAL TABLE statement.
+    /// The virtual table name.
+    pub fn table_name(&self) -> &str {
+        &self.table_name
+    }
+
+    /// Render the `CREATE VIRTUAL TABLE` statement.
     ///
-    /// Column names and the rowid column are escaped for single-quoted
-    /// string values inside the `USING vector(...)` parameter list, and
-    /// the table name and column keys are escaped as SQL identifiers.
-    /// Schema-level identifier validation (alphanumeric + `_`) is the
-    /// primary defense; this layer provides defense-in-depth.
+    /// The table name is quoted as an identifier; every module argument is
+    /// a fixed keyword or a number, so no user text reaches the argument
+    /// list.
     pub fn to_create_sql(&self) -> String {
-        use crate::vector::{escape_sql_literal, quote_ident};
+        use crate::vector::quote_ident;
 
-        let mut clauses: Vec<String> = Vec::new();
-
-        if let Some(rowid) = &self.rowid_column {
-            clauses.push(format!("rowid_column='{}'", escape_sql_literal(rowid)));
-        }
-
-        for col in &self.columns {
-            let index_part = match col.index {
-                Some(k) => format!(" {}", k.as_sql()),
-                None => String::new(),
-            };
-            clauses.push(format!(
-                "{}='{}[{}] {}{}'",
-                quote_ident(&col.name),
-                col.element_type.as_sql(),
-                col.dimensions,
-                col.metric.as_sql(),
-                index_part
-            ));
-        }
-
+        let mode = match self.index {
+            Some(kind) => kind.as_sql(),
+            None => "exact",
+        };
         format!(
-            "CREATE VIRTUAL TABLE {} USING vector(\n    {}\n);",
+            "CREATE VIRTUAL TABLE {} USING vector(dim={}, type={}, metric={}, mode={});",
             quote_ident(&self.table_name),
-            clauses.join(",\n    ")
+            self.dimensions,
+            self.element_type.as_sql(),
+            self.metric.as_sql(),
+            mode
         )
     }
 
@@ -106,67 +97,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_single_column_with_rowid_and_hnsw() {
-        let sql = VectorIndex::new("documents_vectors")
-            .rowid_column("document_id")
-            .column(
-                "embedding",
-                VectorElementType::Float4,
-                1536,
-                DistanceMetric::Cosine,
-                Some(VectorIndexKind::Hnsw),
-            )
-            .to_create_sql();
-
-        assert!(sql.contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector("));
-        assert!(sql.contains("rowid_column='document_id'"));
-        assert!(sql.contains("\"embedding\"='float4[1536] cosine hnsw'"));
+    fn test_hnsw_table() {
+        let sql = VectorIndex::new(
+            "documents_embedding_vectors",
+            VectorElementType::Float4,
+            1536,
+            DistanceMetric::Cosine,
+        )
+        .to_create_sql();
+        assert_eq!(
+            sql,
+            "CREATE VIRTUAL TABLE \"documents_embedding_vectors\" USING vector(\
+             dim=1536, type=float4, metric=cosine, mode=hnsw);"
+        );
     }
 
     #[test]
-    fn test_column_without_index() {
-        let sql = VectorIndex::new("vec_tbl")
-            .column(
-                "v",
-                VectorElementType::Float8,
-                128,
-                DistanceMetric::L2,
-                None,
-            )
-            .to_create_sql();
-        assert!(sql.contains("\"v\"='float8[128] l2'"));
-        assert!(!sql.contains(" hnsw"));
+    fn test_exact_mode_without_index() {
+        let sql = VectorIndex::new(
+            "vec_tbl",
+            VectorElementType::Float8,
+            128,
+            DistanceMetric::L2,
+        )
+        .index(None)
+        .to_create_sql();
+        assert!(sql.contains("dim=128, type=float8, metric=l2, mode=exact"));
     }
 
     #[test]
-    fn test_multiple_columns() {
-        let sql = VectorIndex::new("multi")
-            .rowid_column("id")
-            .column(
-                "a",
-                VectorElementType::Float4,
-                4,
-                DistanceMetric::Cosine,
-                Some(VectorIndexKind::Hnsw),
-            )
-            .column(
-                "b",
-                VectorElementType::Int1,
-                8,
-                DistanceMetric::InnerProduct,
-                None,
-            )
-            .to_create_sql();
-        assert!(sql.contains("\"a\"='float4[4] cosine hnsw'"));
-        assert!(sql.contains("\"b\"='int1[8] inner'"));
+    fn test_inner_product_metric_is_ip() {
+        let sql = VectorIndex::new(
+            "v",
+            VectorElementType::Int1,
+            8,
+            DistanceMetric::InnerProduct,
+        )
+        .to_create_sql();
+        assert!(sql.contains("type=int1, metric=ip"));
+    }
+
+    #[test]
+    fn test_table_name_is_quoted() {
+        let sql = VectorIndex::new(
+            "evil\"name",
+            VectorElementType::Float4,
+            2,
+            DistanceMetric::Cosine,
+        )
+        .to_create_sql();
+        assert!(sql.contains("\"evil\"\"name\""));
+    }
+
+    #[test]
+    fn test_vector_table_name_convention() {
+        assert_eq!(
+            vector_table_name("documents", "embedding"),
+            "documents_embedding_vectors"
+        );
     }
 
     #[test]
     fn test_drop_sql() {
-        let idx = VectorIndex::new("documents_vectors");
+        let idx = VectorIndex::new(
+            "documents_embedding_vectors",
+            VectorElementType::Float4,
+            4,
+            DistanceMetric::Cosine,
+        );
         assert_eq!(
             idx.to_drop_sql(),
-            "DROP TABLE IF EXISTS \"documents_vectors\";"
+            "DROP TABLE IF EXISTS \"documents_embedding_vectors\";"
         );
     }
 }

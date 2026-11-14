@@ -221,6 +221,54 @@ jobs:
       - name: Run TimescaleDB round-trip suite
         run: cargo test -p prax-orm-cli --features postgres --test timescale_roundtrip -- --ignored
 
+  sqlite-vector:
+    name: SQLite vector extension
+    runs-on: ubuntu-latest
+    env:
+      # Tag of quinnjr/sqlite-vector-rs whose loadable extension the
+      # prax-sqlite `vector` tests run against.
+      SQLITE_VECTOR_RS_REF: v0.3.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            ${{ runner.temp }}/sqlite-vector-rs
+          key: ${{ runner.os }}-cargo-sqlite-vector-${{ env.SQLITE_VECTOR_RS_REF }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-sqlite-vector-${{ env.SQLITE_VECTOR_RS_REF }}-
+
+      - name: Build the sqlite-vector-rs extension
+        # Outside the checkout, so cargo doesn't treat it as part of this
+        # workspace.
+        run: |
+          dir="$RUNNER_TEMP/sqlite-vector-rs"
+          if [ ! -d "$dir/.git" ]; then
+            GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch "$SQLITE_VECTOR_RS_REF" \
+              https://github.com/quinnjr/sqlite-vector-rs "$dir"
+          fi
+          cargo build --release --lib --manifest-path "$dir/Cargo.toml"
+          echo "SQLITE_VECTOR_RS_LIB=$dir/target/release/libsqlite_vector_rs.so" >> "$GITHUB_ENV"
+
+      - name: Run vector tests against the extension
+        env:
+          # Fail instead of skipping if the library is not configured.
+          PRAX_VECTOR_E2E: "1"
+        run: cargo test -p prax-sqlite --features vector -- --include-ignored
+
+      - name: Run the vector_rag example
+        run: cargo run -p prax-sqlite --features vector --example vector_rag
+
   doc:
     name: Documentation
     runs-on: ubuntu-latest

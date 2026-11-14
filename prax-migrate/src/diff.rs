@@ -1445,7 +1445,7 @@ fn parse_vector_metric(value: &str) -> VectorDistanceMetric {
     match value {
         "cosine" => VectorDistanceMetric::Cosine,
         "l2" => VectorDistanceMetric::L2,
-        "inner" => VectorDistanceMetric::InnerProduct,
+        "ip" | "inner" => VectorDistanceMetric::InnerProduct,
         other => {
             eprintln!("Warning: invalid vector metric '{}' - using cosine", other);
             VectorDistanceMetric::Cosine
@@ -1917,7 +1917,7 @@ impl VectorDistanceMetric {
         match self {
             VectorDistanceMetric::Cosine => "cosine",
             VectorDistanceMetric::L2 => "l2",
-            VectorDistanceMetric::InnerProduct => "inner",
+            VectorDistanceMetric::InnerProduct => "ip",
         }
     }
 }
@@ -2580,7 +2580,7 @@ mod tests {
     fn test_metric_sql_strings() {
         assert_eq!(VectorDistanceMetric::Cosine.as_sql(), "cosine");
         assert_eq!(VectorDistanceMetric::L2.as_sql(), "l2");
-        assert_eq!(VectorDistanceMetric::InnerProduct.as_sql(), "inner");
+        assert_eq!(VectorDistanceMetric::InnerProduct.as_sql(), "ip");
     }
 
     #[test]
