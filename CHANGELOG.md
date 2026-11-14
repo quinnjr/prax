@@ -37,6 +37,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v0.3.1 and runs the `vector` tests and the `vector_rag` example against
   it (`PRAX_VECTOR_E2E=1` fails the tests if the library is missing).
 
+### Fixed
+
+- **release**: `scripts/publish.sh` sends a User-Agent to crates.io, which
+  rejects anonymous API requests (HTTP 403). It checks the exact version
+  (`/api/v1/crates/<name>/<version>`), retries a failed lookup and then
+  aborts instead of treating it as "not published" and re-publishing
+  everything. It also looks up `prax-cli` under its package name
+  `prax-orm-cli` (it used to query the unrelated `prax-cli` crate).
+
 ## [0.13.0] - 2026-11-14
 
 ### Breaking
