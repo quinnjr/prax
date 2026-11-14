@@ -60,9 +60,13 @@ and top-k similarity search backed by [sqlite-vector-rs](https://crates.io/crate
 prax-sqlite = { version = "0.7", features = ["vector"] }
 ```
 
-When the feature is enabled, every new connection opened by `SqlitePool`
-auto-registers the extension, so `vector_from_json`, `vector_distance`,
-and the `vector` virtual table module are available without extra setup.
+sqlite-vector-rs is a loadable extension: build its library
+(`cargo build --release --lib` in a checkout of
+[sqlite-vector-rs](https://github.com/quinnjr/sqlite-vector-rs)) and point
+`SQLITE_VECTOR_RS_LIB` at it, or place it next to your binary. Every new
+connection opened by `SqlitePool` then loads the extension, so
+`vector_from_json`, `knn_match` and the `vector` virtual table module are
+available without extra setup.
 
 ### Schema
 
@@ -84,10 +88,16 @@ CREATE TABLE "documents" (
     "content" TEXT NOT NULL
 );
 
-CREATE VIRTUAL TABLE "documents_vectors" USING vector(
-    rowid_column='document_id',
-    embedding='float4[1536] cosine hnsw'
-);
+CREATE VIRTUAL TABLE "documents_embedding_vectors" USING vector(dim=1536, type=float4, metric=cosine, mode=hnsw);
+```
+
+sqlite-vector-rs holds one vector per row, so each vector field gets its own
+`{table}_{field}_vectors` table. Store a document's vector under the
+document's id as the `rowid`:
+
+```sql
+INSERT INTO documents_embedding_vectors (rowid, vector)
+VALUES (?1, vector_from_json(?2, 'float4'));
 ```
 
 ### Similarity search
@@ -99,18 +109,23 @@ let embedding = Embedding::new(vec![/* 1536 floats */])?;
 
 let sql = VectorSearchBuilder::new("documents", "embedding")
     .query_embedding(&embedding)
-    .metric(DistanceMetric::Cosine)
     .limit(10)
     .to_sql()?;
+// SELECT "documents".*, v.distance AS distance
+// FROM (SELECT rowid AS match_id, distance FROM "documents_embedding_vectors"
+//       WHERE knn_match(distance, vector_from_json('[...]', 'float4')) LIMIT 10) v
+// JOIN "documents" ON "documents"."id" = v.match_id
+// ORDER BY v.distance ASC
 ```
+
+The distance metric belongs to the vector table (`metric=` in its DDL), so
+the search doesn't take one.
 
 ### Hybrid (vector + fts5) search via RRF
 
 ```rust
 let sql = HybridSearchBuilder::new("documents")
-    .vector_table("documents_vectors")
-    .rowid_column("document_id")
-    .vector_column("embedding")
+    .vector_table(vector_table_name("documents", "embedding"))
     .fts_table("documents_fts")
     .query_embedding(&embedding)
     .query_text("large wild cats")

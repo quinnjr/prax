@@ -17,7 +17,7 @@ impl DistanceMetric {
         match self {
             DistanceMetric::Cosine => "cosine",
             DistanceMetric::L2 => "l2",
-            DistanceMetric::InnerProduct => "inner",
+            DistanceMetric::InnerProduct => "ip",
         }
     }
 }
@@ -77,7 +77,7 @@ mod tests {
     fn test_distance_metric_as_sql() {
         assert_eq!(DistanceMetric::Cosine.as_sql(), "cosine");
         assert_eq!(DistanceMetric::L2.as_sql(), "l2");
-        assert_eq!(DistanceMetric::InnerProduct.as_sql(), "inner");
+        assert_eq!(DistanceMetric::InnerProduct.as_sql(), "ip");
     }
 
     #[test]

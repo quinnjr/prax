@@ -335,43 +335,86 @@ get_crate_version() {
     fi
 }
 
-# Check if a specific version of a crate is already published on crates.io
+# crates.io rejects API requests without a User-Agent (HTTP 403), see
+# https://crates.io/data-access. Identify this script.
+CRATES_IO_USER_AGENT="prax-publish (https://github.com/quinnjr/prax)"
+
+# The crates.io package name of a workspace member directory (`prax-cli`
+# publishes as `prax-orm-cli`, the root as `prax-orm`).
+get_package_name() {
+    local crate=$1
+    local crate_toml
+
+    if [[ "$crate" == "prax-orm" ]]; then
+        crate_toml="Cargo.toml"
+    else
+        crate_toml="$crate/Cargo.toml"
+    fi
+
+    # First `name = "..."` in the file is the [package] name.
+    grep -m1 '^name = ' "$crate_toml" | sed 's/name = "\(.*\)"/\1/'
+}
+
+# Check whether a specific version of a crate is on crates.io.
+#
+# Returns 0 if published, 1 if not (HTTP 404), and 2 if the lookup failed
+# (network error or any other status) after retries. A failed lookup must
+# not be read as "not published": that re-publishes crates that are
+# already up and aborts the run.
 is_version_published() {
     local crate=$1
     local version=$2
+    local url="https://crates.io/api/v1/crates/$crate/$version"
+    local status
+    local attempt
 
-    # Query crates.io API for the crate, with timeouts so a hung connection
-    # can't stall the whole publish run (21 crates x unbounded wait).
-    local response
-    response=$(curl -s --max-time 15 --connect-timeout 5 "https://crates.io/api/v1/crates/$crate" 2>/dev/null) || true
-
-    # An empty response (curl failure/timeout, or crate not yet on crates.io)
-    # is treated as "unknown" -> falls through to "not published" so we
-    # attempt the publish rather than silently skipping or aborting.
-    if echo "$response" | grep -q "\"num\":\"$version\""; then
-        return 0  # Version is published
-    else
-        return 1  # Version is not published (or lookup failed -> attempt publish)
-    fi
+    for attempt in 1 2 3; do
+        status=$(curl -s -o /dev/null -w '%{http_code}' \
+            -A "$CRATES_IO_USER_AGENT" \
+            --max-time 15 --connect-timeout 5 "$url" 2>/dev/null) || status="000"
+        case "$status" in
+            200)
+                return 0
+                ;;
+            404)
+                return 1
+                ;;
+        esac
+        log_warn "crates.io lookup for $crate $version returned HTTP $status (attempt $attempt/3)"
+        sleep $((attempt * 5))
+    done
+    return 2
 }
 
-# Check if crate needs to be published
+# Check if crate needs to be published. Exits the script if crates.io
+# can't be asked.
 should_publish_crate() {
     local crate=$1
+    local package
     local version
+    local rc=0
 
+    package=$(get_package_name "$crate")
     version=$(get_crate_version "$crate")
 
-    if [[ -z "$version" ]]; then
-        log_warn "Could not determine version for $crate, will attempt to publish"
-        return 0  # Attempt to publish
+    if [[ -z "$package" || -z "$version" ]]; then
+        log_error "Could not determine package name/version for $crate"
+        exit 1
     fi
 
-    if is_version_published "$crate" "$version"; then
-        return 1  # Already published
-    else
-        return 0  # Needs publishing
-    fi
+    is_version_published "$package" "$version" || rc=$?
+    case "$rc" in
+        0)
+            return 1  # Already published
+            ;;
+        1)
+            return 0  # Needs publishing
+            ;;
+        *)
+            log_error "Could not check whether $package v$version is on crates.io; aborting (use --skip-version-check to bypass)"
+            exit 1
+            ;;
+    esac
 }
 
 publish_tier() {

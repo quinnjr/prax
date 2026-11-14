@@ -29,7 +29,7 @@ pub mod types;
 
 pub use error::{VectorError, VectorResult};
 pub use hybrid::HybridSearchBuilder;
-pub use index::{VectorColumnDef, VectorIndex};
+pub use index::{VectorIndex, vector_table_name};
 pub use metric::{DistanceMetric, VectorElementType, VectorIndexKind};
 pub use register::{
     VECTOR_LIB_ENV, find_vector_extension, load_vector_extension, register_vector_extension,
@@ -41,7 +41,7 @@ pub use types::{DoubleEmbedding, Embedding, IntVector, IntVectorElement};
 pub mod prelude {
     pub use super::error::{VectorError, VectorResult};
     pub use super::hybrid::HybridSearchBuilder;
-    pub use super::index::{VectorColumnDef, VectorIndex};
+    pub use super::index::{VectorIndex, vector_table_name};
     pub use super::metric::{DistanceMetric, VectorElementType, VectorIndexKind};
     pub use super::register::register_vector_extension;
     pub use super::search::VectorSearchBuilder;
