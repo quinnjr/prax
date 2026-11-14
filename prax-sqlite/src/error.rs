@@ -13,7 +13,10 @@ pub enum SqliteError {
     /// Pool error.
     Pool(String),
     /// SQLite driver error.
-    Sqlite(tokio_rusqlite::Error),
+    Sqlite(rusqlite::Error),
+    /// The connection's background thread has stopped, so it can't run
+    /// queries (see [`AsyncConnectionError::ConnectionClosed`](crate::AsyncConnectionError)).
+    ConnectionClosed,
     /// Configuration error.
     Config(String),
     /// Connection error.
@@ -80,6 +83,7 @@ impl fmt::Display for SqliteError {
         match self {
             Self::Pool(msg) => write!(f, "Pool error: {}", msg),
             Self::Sqlite(e) => write!(f, "SQLite error: {}", e),
+            Self::ConnectionClosed => write!(f, "SQLite connection is closed"),
             Self::Config(msg) => write!(f, "Configuration error: {}", msg),
             Self::Connection(msg) => write!(f, "Connection error: {}", msg),
             Self::Query(msg) => write!(f, "Query error: {}", msg),
@@ -104,15 +108,18 @@ impl std::error::Error for SqliteError {
     }
 }
 
-impl From<tokio_rusqlite::Error> for SqliteError {
-    fn from(err: tokio_rusqlite::Error) -> Self {
-        Self::Sqlite(err)
+impl From<crate::async_conn::AsyncConnectionError> for SqliteError {
+    fn from(err: crate::async_conn::AsyncConnectionError) -> Self {
+        match err {
+            crate::async_conn::AsyncConnectionError::Sqlite(e) => Self::Sqlite(e),
+            crate::async_conn::AsyncConnectionError::ConnectionClosed => Self::ConnectionClosed,
+        }
     }
 }
 
 impl From<rusqlite::Error> for SqliteError {
     fn from(err: rusqlite::Error) -> Self {
-        Self::Sqlite(tokio_rusqlite::Error::Rusqlite(err))
+        Self::Sqlite(err)
     }
 }
 
@@ -128,6 +135,9 @@ impl From<SqliteError> for QueryError {
         match err {
             SqliteError::Pool(msg) => QueryError::connection(msg),
             SqliteError::Sqlite(e) => QueryError::database(e.to_string()),
+            SqliteError::ConnectionClosed => {
+                QueryError::connection("SQLite connection is closed".to_string())
+            }
             SqliteError::Config(msg) => QueryError::internal(format!("config: {}", msg)),
             SqliteError::Connection(msg) => QueryError::connection(msg),
             SqliteError::Query(msg) => QueryError::database(msg),

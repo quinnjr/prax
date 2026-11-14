@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **Merge blocker:** this depends on a temporary `[patch.crates-io]` git pin
+> of sqlx (launchbadge/sqlx#4502). Swap it for the first sqlx release that
+> contains #4502 before merging or releasing.
+
+### Breaking
+
+- **sqlite**: prax-sqlite moves from rusqlite 0.32 / tokio-rusqlite to
+  rusqlite 0.41 (libsqlite3-sys 0.39.1, bundled SQLite 3.54.1), fixing
+  RUSTSEC-2026-0459 (CVE-2026-119375). tokio-rusqlite has no release for
+  rusqlite 0.41, so prax-sqlite runs each connection on its own thread
+  through a new `prax_sqlite::AsyncConnection` (`call(|conn| ...)` takes a
+  closure returning `rusqlite::Result`).
+  - `SqliteConnection::inner()` returns `&AsyncConnection` (was
+    `&tokio_rusqlite::Connection`).
+  - `SqliteError::Sqlite` wraps `rusqlite::Error` (was
+    `tokio_rusqlite::Error`); a stopped connection thread is the new
+    `SqliteError::ConnectionClosed`. `From<tokio_rusqlite::Error>` is
+    replaced by `From<AsyncConnectionError>`.
+  - rusqlite 0.41 changes some of its own API (e.g.
+    `Statement::column_names()` returns an iterator).
+- **sqlite**: the `vector` feature no longer depends on the
+  `sqlite-vector-rs` crate (its library API pins rusqlite < 0.40). prax-sqlite
+  loads the extension library itself (`find_vector_extension`,
+  `load_vector_extension`, `VECTOR_LIB_ENV`); it is found the same way as
+  before (`SQLITE_VECTOR_RS_LIB`, next to the executable, or `target/`).
+- **sqlx**: prax-sqlx moves to sqlx 0.9 (its `sqlite` feature now links
+  libsqlite3-sys 0.39). Raw SQL passed to sqlx is wrapped in
+  `AssertSqlSafe`; `SqliteHelpers::get_columns` quotes the table name.
+- **build**: MSRV is now Rust 1.94 (required by sqlx 0.9).
+
+### Security
+
+- RUSTSEC-2026-0459 (bundled SQLite CVE-2026-119375) is fixed in every
+  crate that links SQLite; its `deny.toml` ignore is removed, as are eight
+  diesel ignores that diesel 2.4 made stale. The ORM-comparison benches move
+  to sea-orm 2.0, diesel 2.4 and diesel-async 0.10.
+
 ## [0.13.0] - 2026-11-14
 
 ### Breaking

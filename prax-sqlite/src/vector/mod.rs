@@ -1,6 +1,6 @@
 //! Vector support for prax-sqlite (LLM/RAG).
 //!
-//! Gated behind the `vector` feature. Integrates sqlite-vector-rs for typed
+//! Gated behind the `vector` feature. Uses the sqlite-vector-rs loadable extension for typed
 //! vector columns, HNSW indexing, and similarity search.
 
 use prax_query::dialect::{SqlDialect, Sqlite};
@@ -31,7 +31,9 @@ pub use error::{VectorError, VectorResult};
 pub use hybrid::HybridSearchBuilder;
 pub use index::{VectorColumnDef, VectorIndex};
 pub use metric::{DistanceMetric, VectorElementType, VectorIndexKind};
-pub use register::register_vector_extension;
+pub use register::{
+    VECTOR_LIB_ENV, find_vector_extension, load_vector_extension, register_vector_extension,
+};
 pub use search::VectorSearchBuilder;
 pub use types::{DoubleEmbedding, Embedding, IntVector, IntVectorElement};
 

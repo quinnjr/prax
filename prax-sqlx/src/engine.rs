@@ -8,7 +8,7 @@ use crate::types::quote_identifier;
 use prax_query::QueryResult;
 use prax_query::filter::FilterValue;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
-use sqlx::{Column, Row};
+use sqlx::{AssertSqlSafe, Column, Row};
 use std::sync::Arc;
 use tracing::debug;
 
@@ -127,7 +127,7 @@ impl SqlxEngine {
         match &*self.pool {
             #[cfg(feature = "postgres")]
             SqlxPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_pg_param(query, param)?;
                 }
@@ -147,7 +147,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "mysql")]
             SqlxPool::MySql(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_mysql_param(query, param)?;
                 }
@@ -164,7 +164,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "sqlite")]
             SqlxPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_sqlite_param(query, param)?;
                 }
@@ -189,7 +189,7 @@ impl SqlxEngine {
         match &*self.pool {
             #[cfg(feature = "postgres")]
             SqlxPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_pg_param(query, param)?;
                 }
@@ -206,7 +206,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "mysql")]
             SqlxPool::MySql(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_mysql_param(query, param)?;
                 }
@@ -223,7 +223,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "sqlite")]
             SqlxPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_sqlite_param(query, param)?;
                 }
@@ -252,7 +252,7 @@ impl SqlxEngine {
         match &*self.pool {
             #[cfg(feature = "postgres")]
             SqlxPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_pg_param(query, param)?;
                 }
@@ -269,7 +269,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "mysql")]
             SqlxPool::MySql(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_mysql_param(query, param)?;
                 }
@@ -286,7 +286,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "sqlite")]
             SqlxPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_sqlite_param(query, param)?;
                 }
@@ -311,7 +311,7 @@ impl SqlxEngine {
         match &*self.pool {
             #[cfg(feature = "postgres")]
             SqlxPool::Postgres(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_pg_param(query, param)?;
                 }
@@ -328,7 +328,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "mysql")]
             SqlxPool::MySql(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_mysql_param(query, param)?;
                 }
@@ -345,7 +345,7 @@ impl SqlxEngine {
             }
             #[cfg(feature = "sqlite")]
             SqlxPool::Sqlite(pool) => {
-                let mut query = sqlx::query(sql);
+                let mut query = sqlx::query(AssertSqlSafe(sql.to_owned()));
                 for param in params {
                     query = bind_sqlite_param(query, param)?;
                 }
@@ -610,9 +610,9 @@ fn bind_mysql_param<'q>(
 
 #[cfg(feature = "sqlite")]
 fn bind_sqlite_param<'q>(
-    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>,
+    query: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     value: &'q FilterValue,
-) -> SqlxResult<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'q>>> {
+) -> SqlxResult<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>> {
     Ok(match value {
         FilterValue::String(s) => query.bind(s.as_str()),
         FilterValue::Int(i) => query.bind(*i),

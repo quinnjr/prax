@@ -3,8 +3,8 @@
 use crate::config::DatabaseBackend;
 use crate::error::{SqlxError, SqlxResult};
 use crate::types::quote_identifier;
-use sqlx::Row;
 use sqlx::postgres::{PgPool, PgRow};
+use sqlx::{AssertSqlSafe, Row};
 
 /// Longest channel name PostgreSQL keeps (`NAMEDATALEN` - 1).
 const MAX_CHANNEL_LEN: usize = 63;
@@ -45,7 +45,10 @@ pub struct PgHelpers;
 impl PgHelpers {
     /// Execute a query with RETURNING clause.
     pub async fn query_returning(pool: &PgPool, sql: &str) -> SqlxResult<Vec<PgRow>> {
-        let rows = sqlx::query(sql).fetch_all(pool).await?;
+        // Raw SQL from the caller, as with `SqlxEngine::raw_query_many`.
+        let rows = sqlx::query(AssertSqlSafe(sql.to_owned()))
+            .fetch_all(pool)
+            .await?;
         Ok(rows)
     }
 

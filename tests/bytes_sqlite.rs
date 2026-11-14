@@ -70,11 +70,11 @@ async fn raw_typeof_and_bytes(pool: &SqlitePool, id: i32) -> (String, Vec<u8>) {
     let conn = pool.get().await.expect("acquire conn");
     conn.inner()
         .call(move |c| {
-            Ok(c.query_row(
+            c.query_row(
                 "SELECT typeof(b), b FROM bytes_sqlite_blobs WHERE id = ?1",
                 [id],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
-            )?)
+            )
         })
         .await
         .expect("select typeof(b), b")

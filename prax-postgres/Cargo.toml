@@ -60,9 +60,8 @@ lru = { workspace = true }
 # and mysql_async all use rustls). `postgres_rustls` provides the
 # `MakeTlsConnect` impl deadpool-postgres needs; `webpki-roots` supplies the
 # Mozilla root store certificates are verified against.
-# Pinned to =0.1.5, the newest release inside the workspace MSRV of 1.93.1:
-# 0.1.5 raised its own rust-version to 1.93.1 (which is why the workspace MSRV
-# is 1.93.1 and not 1.93) and 0.1.6 went further to 1.97.0. Exact rather than a
+# Pinned to =0.1.5, the newest release inside the workspace MSRV (1.94, set by
+# sqlx 0.9): 0.1.5 needs rust 1.93.1 and 0.1.6 went further to 1.97.0. Exact rather than a
 # range, so a future patch release cannot raise our MSRV on our behalf.
 # Re-verify on an MSRV bump.
 postgres_rustls = { version = "=0.1.5", optional = true }

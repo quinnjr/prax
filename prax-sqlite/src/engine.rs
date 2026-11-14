@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use crate::async_conn::AsyncConnection as RusqliteConnection;
 use prax_query::error::{QueryError, QueryResult};
 use prax_query::filter::FilterValue;
 use prax_query::row::FromRow;
 use prax_query::traits::{BoxFuture, Model, QueryEngine};
 use rusqlite::types::Value as SqlValue;
-use tokio_rusqlite::Connection as RusqliteConnection;
 use tracing::{trace, warn};
 
 use crate::connection::SqliteConnection;
@@ -15,7 +15,7 @@ use crate::pool::SqlitePool;
 use crate::row_ref::SqliteRowRef;
 use crate::types::filter_value_to_sqlite;
 
-/// SQLite query engine backed by `tokio_rusqlite`.
+/// SQLite query engine backed by [`AsyncConnection`](crate::AsyncConnection).
 ///
 /// # Breaking changes (0.7)
 ///
@@ -47,7 +47,7 @@ use crate::types::filter_value_to_sqlite;
 ///   a fresh [`SqliteConnection`] from the pool and drops it after
 ///   the call.
 /// - **Transaction mode** (`tx_conn == Some(..)`): each query routes
-///   through the same [`tokio_rusqlite::Connection`] handle so the
+///   through the same [`AsyncConnection`](crate::AsyncConnection) handle so the
 ///   whole BEGIN…COMMIT block serialises onto the connection's
 ///   background thread in order. The `Arc<SqliteConnection>` keeps
 ///   the pool permit alive for the transaction's lifetime; dropping
@@ -74,7 +74,7 @@ impl SqliteEngine {
         &self.pool
     }
 
-    /// Resolve which raw [`tokio_rusqlite::Connection`] to run the
+    /// Resolve which [`AsyncConnection`](crate::AsyncConnection) to run the
     /// query against, along with an optional owned
     /// [`SqliteConnection`] guard whose `Drop` returns the
     /// connection to the idle pool once we're done with it.
@@ -197,7 +197,7 @@ impl SqliteEngine {
             .call(move |c| {
                 let refs: Vec<&dyn rusqlite::ToSql> =
                     bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-                Ok(c.execute(&sql, refs.as_slice())?)
+                c.execute(&sql, refs.as_slice())
             })
             .await
             .map_err(|e| QueryError::database(e.to_string()).with_source(e))?;
@@ -231,7 +231,7 @@ impl SqliteEngine {
 /// onto the runtime instead. That is still race-free: the guard is
 /// declared after `tx_conn`, so on unwind it drops *before* the
 /// `Arc<SqliteConnection>` returns the connection to the pool, and
-/// `tokio_rusqlite` executes queued `call(..)`s in FIFO order on the
+/// `AsyncConnection` executes queued `call(..)`s in FIFO order on the
 /// connection's single background thread — the spawned ROLLBACK is
 /// therefore enqueued ahead of any later checkout's statements.
 struct RollbackOnPanic {
@@ -382,7 +382,7 @@ impl QueryEngine for SqliteEngine {
                 .call(move |c| {
                     let mut stmt = c.prepare(&sql)?;
                     let column_names: Vec<String> =
-                        stmt.column_names().iter().map(|s| s.to_string()).collect();
+                        stmt.column_names().map(|s| s.to_string()).collect();
                     let refs: Vec<&dyn rusqlite::ToSql> =
                         bound.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
                     let mut rows = stmt.query(refs.as_slice())?;
@@ -440,7 +440,7 @@ impl QueryEngine for SqliteEngine {
             // Pin a single pooled connection. Wrapping it in `Arc`
             // keeps the pool permit alive for the whole transaction
             // and makes every engine clone share the same
-            // `tokio_rusqlite::Connection` handle — every query
+            // `AsyncConnection` handle — every query
             // dispatched through the closure's engine therefore
             // serialises onto the same background thread as our
             // initial `BEGIN`.

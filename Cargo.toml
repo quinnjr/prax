@@ -26,7 +26,7 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.13.0"
 edition = "2024"
-rust-version = "1.93.1"
+rust-version = "1.94"
 authors = ["Joseph Quinn <quinn.josephr@protonmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/quinnjr/prax"
@@ -91,8 +91,10 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chron
 deadpool-postgres = { version = "0.14", features = ["serde"] }
 postgres-types = { version = "0.2", features = ["derive"] }
 mysql_async = { version = "0.36", default-features = false, features = ["default-rustls"] }
-tokio-rusqlite = "0.6"
-rusqlite = { version = "0.32", features = ["bundled"] }
+# rusqlite 0.41 bundles libsqlite3-sys 0.39 (SQLite 3.54), the first release
+# patched for RUSTSEC-2026-0459. Stay on 0.41 (not 0.42 / libsqlite3-sys 0.40)
+# so the graph stays compatible with sqlx-sqlite, which allows `< 0.40`.
+rusqlite = { version = "0.41", features = ["bundled"] }
 tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
 bb8 = "0.8"
 bb8-tiberius = "0.15"
@@ -100,13 +102,10 @@ mongodb = { version = "2.8", default-features = false, features = ["tokio-runtim
 bson = { version = "2.13", features = ["chrono-0_4", "uuid-1", "serde_with"] }
 
 # SQLx (alternative backend with compile-time checking)
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "macros", "json", "chrono", "uuid"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls", "macros", "json", "chrono", "uuid"] }
 
 # pgvector (vector similarity search)
 pgvector = { version = "0.4", features = ["postgres"] }
-
-# Vector store for SQLite (LLM/RAG)
-sqlite-vector-rs = "0.2.2"
 
 # DuckDB (analytical database)
 duckdb = { version = "1.4", features = ["bundled", "json", "parquet", "chrono", "serde_json", "uuid"] }
@@ -223,9 +222,9 @@ rust_decimal = { workspace = true }
 trybuild = { workspace = true }
 
 # ORM comparison benchmarks (dev-only; not exposed to downstream crates)
-diesel = { version = "2.2", features = ["postgres", "mysql", "sqlite", "r2d2"] }
-diesel-async = { version = "0.5", features = ["postgres", "mysql", "deadpool"] }
-sea-orm = { version = "1.1", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
+diesel = { version = "2.4", features = ["postgres", "mysql", "sqlite", "r2d2"] }
+diesel-async = { version = "0.10", features = ["postgres", "mysql", "deadpool"] }
+sea-orm = { version = "2.0", features = ["sqlx-postgres", "sqlx-mysql", "sqlx-sqlite", "runtime-tokio-rustls", "macros"] }
 sqlx = { workspace = true, features = ["postgres", "mysql", "sqlite", "runtime-tokio"] }
 prax-postgres = { workspace = true }
 prax-mysql = { workspace = true }
@@ -339,3 +338,20 @@ opt-level = 0
 [profile.dev-opt]
 inherits = "dev"
 opt-level = 2
+
+# TODO(sqlite-cve): TEMPORARY - must be removed before this branch is merged.
+# sqlx 0.9.0 (crates.io) caps libsqlite3-sys at < 0.38, which conflicts with the
+# patched libsqlite3-sys 0.39 that rusqlite 0.41 needs (`links = "sqlite3"`).
+# launchbadge/sqlx#4502 (https://github.com/launchbadge/sqlx/pull/4502) raised
+# the cap to < 0.40 on main but is not released yet. Swap this git pin for the
+# first crates.io sqlx release that contains #4502 (bump `sqlx` above to it) and
+# delete this whole section; crates published from this workspace cannot depend
+# on git sources.
+[patch.crates-io]
+sqlx = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-core = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-macros = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-macros-core = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-mysql = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-postgres = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+sqlx-sqlite = { git = "https://github.com/launchbadge/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
