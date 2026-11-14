@@ -8,7 +8,7 @@
 use prax_query::capabilities::{
     SupportsArrayOps, SupportsCaseInsensitiveMode, SupportsCorrelatedSubquery,
     SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath, SupportsNestedWrites,
-    SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 
 use crate::engine::PgEngine;
@@ -22,3 +22,4 @@ impl SupportsArrayOps for PgEngine {}
 impl SupportsGeneratedColumns for PgEngine {}
 impl SupportsScalarSubqueryInSelect for PgEngine {}
 impl SupportsNestedWrites for PgEngine {}
+impl SupportsRowLocks for PgEngine {}

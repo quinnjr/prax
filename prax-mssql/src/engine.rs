@@ -779,4 +779,28 @@ mod tests {
             "SELECT * FROM users"
         );
     }
+
+    #[test]
+    fn raw_sql_placeholders_are_converted_once() {
+        use prax_query::dialect::Mssql;
+        use prax_query::raw::Sql;
+        use prax_query::sql::DatabaseType;
+
+        let sql = || {
+            Sql::new("SELECT * FROM users WHERE id = ")
+                .bind(1)
+                .push(" AND name = ")
+                .bind("x")
+        };
+        let expected = "SELECT * FROM users WHERE id = @P1 AND name = @P2";
+        // Rendered for the engine's dialect: already `@PN`, left alone.
+        let (rendered, _) = sql().build_for_dialect(&Mssql);
+        assert_eq!(rendered, expected);
+        assert_eq!(MssqlEngine::convert_params(&rendered), expected);
+        // An explicit Postgres query keeps `$N`, which the engine converts.
+        let (explicit, _) = sql()
+            .with_db_type(DatabaseType::PostgreSQL)
+            .build_for_dialect(&Mssql);
+        assert_eq!(MssqlEngine::convert_params(&explicit), expected);
+    }
 }

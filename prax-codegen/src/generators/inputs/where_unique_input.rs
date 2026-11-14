@@ -112,14 +112,7 @@ pub fn generate(
             FilterCategory::Uuid => {
                 quote! { ::prax_query::filter::FilterValue::String(value.to_string()) }
             }
-            FilterCategory::Bytes => quote! {
-                {
-                    use ::prax_query::base64::Engine as _;
-                    ::prax_query::filter::FilterValue::String(
-                        ::prax_query::base64::engine::general_purpose::STANDARD.encode(&value),
-                    )
-                }
-            },
+            FilterCategory::Bytes => quote! { ::prax_query::filter::FilterValue::Bytes(value) },
             FilterCategory::DateTime => {
                 quote! { ::prax_query::filter::FilterValue::String(value.to_rfc3339()) }
             }

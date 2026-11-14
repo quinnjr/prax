@@ -26,6 +26,8 @@
 //! let engine = engine.with_middleware(stack);
 //! ```
 
+#[doc(hidden)]
+pub mod backoff;
 mod chain;
 mod context;
 mod logging;

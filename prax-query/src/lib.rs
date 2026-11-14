@@ -187,6 +187,7 @@ pub mod introspection;
 pub mod json;
 pub mod lazy;
 pub mod logging;
+pub(crate) mod serde_base64;
 #[macro_use]
 pub mod macros;
 pub mod mem_optimize;
@@ -220,11 +221,9 @@ pub mod upsert;
 pub mod window;
 pub mod zero_copy;
 
-/// Re-exported `base64` crate for use by generated code emitted by
-/// `prax-codegen`. The codegen path for `Bytes`-typed `@unique` columns
-/// uses this to encode binary values to a stable string representation;
-/// re-exporting here avoids requiring downstream users to add `base64`
-/// to their own `Cargo.toml`.
+/// Re-exported `base64` crate, shared by the driver crates (and generated
+/// code) so they encode binary values consistently without each adding a
+/// `base64` dependency of their own.
 #[doc(hidden)]
 pub use base64;
 pub use error::{ErrorCode, ErrorContext, QueryError, QueryResult, Suggestion};
@@ -490,7 +489,7 @@ pub use smallvec;
 pub use crate::capabilities::{
     SupportsArrayOps, SupportsCaseInsensitiveMode, SupportsCorrelatedSubquery,
     SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath, SupportsNestedWrites,
-    SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 pub use crate::inputs::{
     // Containers.

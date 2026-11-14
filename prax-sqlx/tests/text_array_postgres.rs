@@ -1,6 +1,6 @@
 //! `String[]` scalar-list fields round-trip through Postgres text arrays on
-//! the SQLx engine: `Vec<String>: ToFilterValue` produces a list of
-//! strings, which `prax-sqlx` binds as `TEXT[]`, and the row decoder reads
+//! the SQLx engine: `Vec<String>: ToFilterValue` produces an array of
+//! strings (`FilterValue::Array`), which `prax-sqlx` binds as `TEXT[]`, and the row decoder reads
 //! `TEXT[]` / `VARCHAR[]` cells back so `Vec<String>: FromColumn` works.
 //!
 //! Gated by `PRAX_E2E=1` and requires `POSTGRES_URL` pointing at a
@@ -67,7 +67,9 @@ async fn string_lists_round_trip_through_text_array_columns() {
     let touched = engine
         .raw_execute(
             &format!("UPDATE {table} SET id = id WHERE scopes && $1"),
-            &[FilterValue::List(vec![FilterValue::String("write".into())])],
+            &[FilterValue::Array(vec![FilterValue::String(
+                "write".into(),
+            )])],
         )
         .await
         .expect("text-array parameter in a raw filter");

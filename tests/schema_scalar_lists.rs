@@ -129,7 +129,7 @@ fn string_list_fields_decode_from_a_row() {
 }
 
 #[test]
-fn string_list_fields_encode_as_lists_of_strings() {
+fn string_list_fields_encode_as_arrays_of_strings() {
     let grant = access_grant::AccessGrant {
         id: 1,
         scopes: vec!["read".into(), "write".into()],
@@ -138,14 +138,14 @@ fn string_list_fields_encode_as_lists_of_strings() {
     };
     assert_eq!(
         grant.get_column_value("scopes"),
-        Some(FilterValue::List(vec![
+        Some(FilterValue::Array(vec![
             FilterValue::String("read".into()),
             FilterValue::String("write".into()),
         ]))
     );
     assert_eq!(
         grant.get_column_value("allowed_scopes"),
-        Some(FilterValue::List(vec![]))
+        Some(FilterValue::Array(vec![]))
     );
     assert_eq!(grant.get_column_value("labels"), Some(FilterValue::Null));
 }

@@ -10,6 +10,20 @@
 //! - Prepared statement caching for improved performance
 //! - Type-safe parameter binding
 //! - Row deserialization into Prax models
+//! - [`PgListener`]: `LISTEN` / `NOTIFY` on a dedicated, auto-reconnecting
+//!   connection, with `PgConnection::notify` / `PgTransaction::notify` for
+//!   sending (any role can `NOTIFY` any channel, so treat payloads as
+//!   untrusted)
+//! - Pool recycling policy ([`PgRecycling`]: `Fast` (default), `Verified`,
+//!   `Clean`), bounded by `PoolConfig::recycle_timeout`, plus jittered
+//!   `max_lifetime` retirement. `Fast` keeps session state (`SET ROLE`,
+//!   `search_path`, tenant GUCs) across checkouts; use `Clean` when that
+//!   matters
+//! - Row locking (`FOR UPDATE` / `FOR SHARE`, `SKIP LOCKED`, `NOWAIT`,
+//!   `OF`) through [`PgEngine`] and `prax_query`'s `.lock(RowLock)`; `OF`
+//!   table names must be plain identifiers
+//! - Typed array binding for `FilterValue::Array` (use `= ANY($1)`) and raw
+//!   `bytea` for `FilterValue::Bytes`
 //!
 //! ## Example
 //!
@@ -35,9 +49,12 @@
 pub(crate) mod capabilities;
 pub mod config;
 pub mod connection;
+pub(crate) mod connector;
 pub mod deserialize;
 pub mod engine;
 pub mod error;
+pub mod listener;
+pub(crate) mod notify;
 pub mod pool;
 pub mod row;
 pub mod row_ref;
@@ -50,7 +67,10 @@ pub use config::{PgConfig, PgConfigBuilder};
 pub use connection::PgConnection;
 pub use engine::PgEngine;
 pub use error::{PgError, PgResult};
-pub use pool::{PgPool, PgPoolBuilder, PoolConfig, PoolStatus};
+pub use listener::{
+    PgListener, PgListenerBuilder, PgListenerEvent, PgListenerOptions, PgNotification,
+};
+pub use pool::{PgPool, PgPoolBuilder, PgRecycling, PoolConfig, PoolStatus};
 pub use row::PgRow;
 pub use statement::PreparedStatementCache;
 

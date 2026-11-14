@@ -7,7 +7,7 @@
 
 use prax_query::capabilities::{
     SupportsCorrelatedSubquery, SupportsFullTextSearch, SupportsGeneratedColumns, SupportsJsonPath,
-    SupportsNestedWrites, SupportsRelationFilter, SupportsScalarSubqueryInSelect,
+    SupportsNestedWrites, SupportsRelationFilter, SupportsRowLocks, SupportsScalarSubqueryInSelect,
 };
 
 use crate::engine::MssqlEngine;
@@ -19,3 +19,4 @@ impl SupportsFullTextSearch for MssqlEngine {}
 impl SupportsGeneratedColumns for MssqlEngine {}
 impl SupportsScalarSubqueryInSelect for MssqlEngine {}
 impl SupportsNestedWrites for MssqlEngine {}
+impl SupportsRowLocks for MssqlEngine {}

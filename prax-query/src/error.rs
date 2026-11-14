@@ -308,6 +308,9 @@ pub struct QueryError {
     /// The source error (if any).
     #[source]
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    /// The SQLSTATE of the database error behind this one; see
+    /// [`QueryError::sqlstate`].
+    sqlstate: Option<String>,
 }
 
 impl fmt::Display for QueryError {
@@ -324,7 +327,27 @@ impl QueryError {
             message: message.into(),
             context: ErrorContext::default(),
             source: None,
+            sqlstate: None,
         }
+    }
+
+    /// The five-character SQLSTATE code of the database error this came
+    /// from (for example `"23505"` unique violation or `"55P03"` lock not
+    /// available), when the driver reported one.
+    ///
+    /// Set by `prax-postgres` and by `prax-sqlx` for PostgreSQL errors.
+    /// `None` for errors that did not come from the server (timeouts,
+    /// pool errors, client-side validation) and for drivers that do not
+    /// report a SQLSTATE.
+    pub fn sqlstate(&self) -> Option<&str> {
+        self.sqlstate.as_deref()
+    }
+
+    /// Record the SQLSTATE of the database error behind this one (see
+    /// [`sqlstate`](Self::sqlstate)).
+    pub fn with_sqlstate(mut self, sqlstate: impl Into<String>) -> Self {
+        self.sqlstate = Some(sqlstate.into());
+        self
     }
 
     /// Add context about the operation.
@@ -843,6 +866,19 @@ macro_rules! query_error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sqlstate_is_none_unless_set() {
+        assert_eq!(QueryError::database("boom").sqlstate(), None);
+        let err = QueryError::database("could not obtain lock").with_sqlstate("55P03");
+        assert_eq!(err.sqlstate(), Some("55P03"));
+        // The classification and message are untouched.
+        assert_eq!(err.code, ErrorCode::DatabaseError);
+        assert!(
+            err.to_string().ends_with("] could not obtain lock"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn test_error_code_format() {
