@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **sqlite**: the `vector` feature's SQL now matches what sqlite-vector-rs
+  accepts. Before, the DDL used `rowid_column=` and `col='float4[N] ...'`
+  arguments and searches called `vector_distance` on a vector column; no
+  released sqlite-vector-rs accepts either, so creating a vector table or
+  searching failed at runtime (the tests that would have shown it were
+  skipped in CI).
+  - `VectorIndex::new(table, element_type, dimensions, metric)` renders
+    `CREATE VIRTUAL TABLE t USING vector(dim=, type=, metric=, mode=)`;
+    `.index(None)` selects `mode=exact` (default HNSW). One vector per
+    table: `rowid_column`, `column()` and `VectorColumnDef` are removed.
+    A vector row's `rowid` is the owning row's integer primary key.
+  - New `vector_table_name(table, column)`: `{table}_{column}_vectors`.
+    `prax migrate` (SQLite) creates one such table per vector field (it
+    used to create one `{table}_vectors` for all of them).
+  - `VectorSearchBuilder` queries `knn_match(distance, ...) LIMIT k` and
+    joins on the vector table's `rowid`; its default table is
+    `{table}_{column}_vectors`. `metric()` and `rowid_column()` are
+    removed (the metric is set on the table).
+  - `HybridSearchBuilder` ranks the vector side with `knn_match`, with a
+    new `candidates(n)` (default 100); `rowid_column()`,
+    `vector_column()` and `metric()` are removed.
+  - `DistanceMetric::InnerProduct` (and the migration generator) renders
+    `ip`; it rendered `inner`, which sqlite-vector-rs rejects. Schemas may
+    use `@metric("ip")` or `@metric("inner")`.
+- **ci**: a new "SQLite vector extension" job builds sqlite-vector-rs
+  v0.3.1 and runs the `vector` tests and the `vector_rag` example against
+  it (`PRAX_VECTOR_E2E=1` fails the tests if the library is missing).
+
 ### Fixed
 
 - **release**: `scripts/publish.sh` sends a User-Agent to crates.io, which

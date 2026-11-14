@@ -1008,17 +1008,13 @@ impl SqliteGenerator {
         let ordered_creates = diff.ordered_create_models();
         for model in &ordered_creates {
             up.push(self.create_table(model));
-            if let Some(vt) = self.create_vector_virtual_table(model) {
-                up.push(vt);
-            }
+            up.extend(self.create_vector_virtual_tables(model));
         }
 
         // Down drops virtual tables and main tables in reverse FK order so
         // dependent tables drop before the tables they reference.
         for model in ordered_creates.iter().rev() {
-            if let Some(dvt) = self.drop_vector_virtual_table(model) {
-                down.push(dvt);
-            }
+            down.extend(self.drop_vector_virtual_tables(model));
             down.push(self.drop_table(&model.table_name));
         }
 
@@ -1286,21 +1282,6 @@ impl SqliteGenerator {
         stmts
     }
 
-    /// Strip a single trailing 's' for rowid column naming ("documents" -> "document").
-    /// Irregular plurals require users to override the default outside migrations.
-    ///
-    /// NOTE: Keep in sync with the singularize fn in
-    /// prax-sqlite/src/vector/search.rs — the search-time default rowid column
-    /// name must match what the migration generator emits, or the default
-    /// JOIN in VectorSearchBuilder will miss the real column.
-    fn singularize(name: &str) -> String {
-        if name.ends_with('s') && !name.ends_with("ss") {
-            name[..name.len() - 1].to_string()
-        } else {
-            name.to_string()
-        }
-    }
-
     /// Quote a SQL identifier, doubling embedded double quotes.
     /// Mirrors prax-sqlite::vector::quote_ident (duplicated here to avoid
     /// a circular dependency between prax-migrate and prax-sqlite).
@@ -1308,61 +1289,51 @@ impl SqliteGenerator {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
 
-    /// Escape a single-quoted SQL string literal by doubling embedded single
-    /// quotes. Used for the string values inside `USING vector(...)` clauses.
-    fn escape_sql_literal(s: &str) -> String {
-        s.replace('\'', "''")
+    /// Name of the vector virtual table for one vector field. Mirrors
+    /// `prax_sqlite::vector::vector_table_name` (duplicated to avoid a
+    /// dependency from prax-migrate on prax-sqlite).
+    fn vector_table_name(table: &str, column: &str) -> String {
+        format!("{table}_{column}_vectors")
     }
 
-    /// Generate CREATE VIRTUAL TABLE for every vector column on this model.
-    /// Returns None if no fields are vector columns.
-    fn create_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
-        let vector_fields: Vec<&FieldDiff> =
-            model.fields.iter().filter(|f| f.vector.is_some()).collect();
-        if vector_fields.is_empty() {
-            return None;
-        }
-
-        let rowid = format!("{}_id", Self::singularize(&model.table_name));
-        let vtable = format!("{}_vectors", model.table_name);
-
-        let mut clauses = vec![format!(
-            "rowid_column='{}'",
-            Self::escape_sql_literal(&rowid)
-        )];
-        for f in vector_fields {
-            let v = f.vector.as_ref().unwrap();
-            let idx_part = match v.index {
-                Some(k) => format!(" {}", k.as_sql()),
-                None => String::new(),
-            };
-            clauses.push(format!(
-                "{}='{}[{}] {}{}'",
-                Self::quote_ident(&f.column_name),
-                v.element_type.as_sql(),
-                v.dimensions,
-                v.metric.as_sql(),
-                idx_part
-            ));
-        }
-
-        Some(format!(
-            "CREATE VIRTUAL TABLE {} USING vector(\n    {}\n);",
-            Self::quote_ident(&vtable),
-            clauses.join(",\n    ")
-        ))
+    /// Generate one `CREATE VIRTUAL TABLE ... USING vector(...)` per vector
+    /// field of the model (sqlite-vector-rs stores one vector per row). Each
+    /// vector row's `rowid` is the owning row's integer primary key.
+    fn create_vector_virtual_tables(&self, model: &ModelDiff) -> Vec<String> {
+        model
+            .fields
+            .iter()
+            .filter_map(|f| f.vector.as_ref().map(|v| (f, v)))
+            .map(|(f, v)| {
+                let mode = match v.index {
+                    Some(k) => k.as_sql(),
+                    None => "exact",
+                };
+                format!(
+                    "CREATE VIRTUAL TABLE {} USING vector(dim={}, type={}, metric={}, mode={});",
+                    Self::quote_ident(&Self::vector_table_name(&model.table_name, &f.column_name)),
+                    v.dimensions,
+                    v.element_type.as_sql(),
+                    v.metric.as_sql(),
+                    mode
+                )
+            })
+            .collect()
     }
 
-    /// Generate DROP VIRTUAL TABLE for the vector companion of a model, if any.
-    fn drop_vector_virtual_table(&self, model: &ModelDiff) -> Option<String> {
-        if model.fields.iter().any(|f| f.vector.is_some()) {
-            Some(format!(
-                "DROP TABLE IF EXISTS {};",
-                Self::quote_ident(&format!("{}_vectors", model.table_name))
-            ))
-        } else {
-            None
-        }
+    /// Generate a DROP for each vector virtual table of the model.
+    fn drop_vector_virtual_tables(&self, model: &ModelDiff) -> Vec<String> {
+        model
+            .fields
+            .iter()
+            .filter(|f| f.vector.is_some())
+            .map(|f| {
+                format!(
+                    "DROP TABLE IF EXISTS {};",
+                    Self::quote_ident(&Self::vector_table_name(&model.table_name, &f.column_name))
+                )
+            })
+            .collect()
     }
 
     /// Generate CREATE INDEX statement.
@@ -3314,25 +3285,24 @@ mod tests {
         assert!(sql.up.contains("CREATE TABLE \"documents\""));
         assert!(!sql.up.contains("\"embedding\" BLOB"));
 
-        // A companion virtual table should appear.
-        assert!(
-            sql.up
-                .contains("CREATE VIRTUAL TABLE \"documents_vectors\" USING vector")
-        );
-        assert!(sql.up.contains("rowid_column='document_id'"));
-        assert!(sql.up.contains("\"embedding\"='float4[1536] cosine hnsw'"));
+        // A companion virtual table in sqlite-vector-rs syntax should appear.
+        assert!(sql.up.contains(
+            "CREATE VIRTUAL TABLE \"documents_embedding_vectors\" USING vector(\
+             dim=1536, type=float4, metric=cosine, mode=hnsw);"
+        ));
+        assert!(!sql.up.contains("rowid_column"));
 
         // Down migration drops the virtual table before the main table.
         let vt_pos = sql
             .down
-            .find("DROP TABLE IF EXISTS \"documents_vectors\"")
+            .find("DROP TABLE IF EXISTS \"documents_embedding_vectors\"")
             .unwrap();
         let mt_pos = sql.down.find("DROP TABLE IF EXISTS \"documents\"").unwrap();
         assert!(vt_pos < mt_pos);
     }
 
     #[test]
-    fn test_sqlite_generator_combines_multiple_vector_columns_into_one_virtual_table() {
+    fn test_sqlite_generator_emits_one_virtual_table_per_vector_column() {
         use crate::diff::{
             FieldDiff, ModelDiff, SchemaDiff, VectorColumnInfo, VectorDistanceMetric,
             VectorElementType, VectorIndexKind,
@@ -3401,14 +3371,23 @@ mod tests {
 
         let sql = SqliteGenerator.generate(&diff);
 
-        // Exactly one virtual table with both columns listed.
-        let count = sql
-            .up
-            .matches("CREATE VIRTUAL TABLE \"documents_vectors\"")
-            .count();
-        assert_eq!(count, 1);
-        assert!(sql.up.contains("\"embedding\"='float4[1536] cosine hnsw'"));
-        assert!(sql.up.contains("\"summary_vec\"='float4[384] cosine hnsw'"));
+        // sqlite-vector-rs holds one vector per row: one table per field.
+        assert!(sql.up.contains(
+            "CREATE VIRTUAL TABLE \"documents_embedding_vectors\" USING vector(\
+             dim=1536, type=float4, metric=cosine, mode=hnsw);"
+        ));
+        assert!(sql.up.contains(
+            "CREATE VIRTUAL TABLE \"documents_summary_vec_vectors\" USING vector(\
+             dim=384, type=float4, metric=cosine, mode=hnsw);"
+        ));
+        assert!(
+            sql.down
+                .contains("DROP TABLE IF EXISTS \"documents_embedding_vectors\";")
+        );
+        assert!(
+            sql.down
+                .contains("DROP TABLE IF EXISTS \"documents_summary_vec_vectors\";")
+        );
     }
 
     #[test]

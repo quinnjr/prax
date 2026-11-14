@@ -13,18 +13,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pool = SqlitePool::new(SqliteConfig::memory()).await?;
     let conn = pool.get().await?;
 
-    // 1. Create the main documents table and its vector companion.
-    conn.execute_batch(
+    // 1. Create the main documents table and its vector companion: one
+    //    sqlite-vector-rs table per vector field, linked by rowid.
+    let vectors = VectorIndex::new(
+        vector_table_name("documents", "embedding"),
+        VectorElementType::Float4,
+        4,
+        DistanceMetric::Cosine,
+    );
+    conn.execute_batch(&format!(
         "CREATE TABLE documents (\n    \
          id INTEGER PRIMARY KEY,\n    \
          title TEXT NOT NULL,\n    \
          content TEXT NOT NULL\n\
-         );\n\
-         CREATE VIRTUAL TABLE documents_vectors USING vector(\n    \
-         rowid_column='document_id',\n    \
-         embedding='float4[4] cosine hnsw'\n\
-         );",
-    )
+         );\n{}",
+        vectors.to_create_sql()
+    ))
     .await?;
 
     // 2. Insert a few documents and their (fake) embeddings.
@@ -61,9 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
 
-        // Insert into vector table
+        // Insert into the vector table, keyed by the document's id
         conn.execute(&format!(
-            "INSERT INTO documents_vectors (document_id, embedding) \
+            "INSERT INTO documents_embedding_vectors (rowid, vector) \
              VALUES ({}, vector_from_json('{}', 'float4'))",
             id, json
         ))
@@ -74,7 +78,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query = Embedding::new(vec![1.0, 0.0, 0.0, 0.0])?;
     let search = VectorSearchBuilder::new("documents", "embedding")
         .query_embedding(&query)
-        .metric(DistanceMetric::Cosine)
         .limit(3)
         .to_sql()?;
 
