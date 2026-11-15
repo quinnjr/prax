@@ -49,6 +49,31 @@ impl<'a> FromSql<'a> for AnyText {
     }
 }
 
+/// `FromSql` shim decoding TIMESTAMPTZ *and* TIMESTAMP into
+/// `DateTime<Utc>`.
+///
+/// `chrono::DateTime<Utc>: FromSql` only accepts TIMESTAMPTZ, but schemas
+/// (Prisma's `DateTime` maps to `timestamp(3)`) often store UTC wall time
+/// in `timestamp without time zone` columns that generated models declare
+/// as `DateTime<Utc>`. A TIMESTAMP value is read as UTC, matching how
+/// `PgString` binds a `DateTime<Utc>` to a TIMESTAMP parameter.
+struct UtcDateTime(chrono::DateTime<chrono::Utc>);
+
+impl<'a> FromSql<'a> for UtcDateTime {
+    fn from_sql(ty: &Type, raw: &'a [u8]) -> Result<Self, Box<dyn StdError + Sync + Send>> {
+        if *ty == Type::TIMESTAMP {
+            let naive = chrono::NaiveDateTime::from_sql(ty, raw)?;
+            return Ok(UtcDateTime(naive.and_utc()));
+        }
+        Ok(UtcDateTime(chrono::DateTime::<chrono::Utc>::from_sql(
+            ty, raw,
+        )?))
+    }
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::TIMESTAMP || <chrono::DateTime<chrono::Utc> as FromSql>::accepts(ty)
+    }
+}
+
 /// `FromSql` shim used exclusively for null-probe logic.
 ///
 /// `NullProbe` accepts every Postgres wire type and discards the bytes
@@ -199,7 +224,7 @@ impl RowRef for PgRow {
         into_row_error(c, self.try_get::<_, Option<&[u8]>>(c))
     }
     fn get_datetime_utc(&self, c: &str) -> Result<chrono::DateTime<chrono::Utc>, RowError> {
-        into_row_error(c, self.try_get::<_, chrono::DateTime<chrono::Utc>>(c))
+        into_row_error(c, self.try_get::<_, UtcDateTime>(c).map(|v| v.0))
     }
     fn get_datetime_utc_opt(
         &self,
@@ -207,7 +232,8 @@ impl RowRef for PgRow {
     ) -> Result<Option<chrono::DateTime<chrono::Utc>>, RowError> {
         into_row_error(
             c,
-            self.try_get::<_, Option<chrono::DateTime<chrono::Utc>>>(c),
+            self.try_get::<_, Option<UtcDateTime>>(c)
+                .map(|v| v.map(|v| v.0)),
         )
     }
     fn get_naive_datetime(&self, c: &str) -> Result<chrono::NaiveDateTime, RowError> {
@@ -250,5 +276,46 @@ impl RowRef for PgRow {
     /// inside the array is a decode error: `Vec<String>` has no slot for it.
     fn get_string_array(&self, c: &str) -> Result<Vec<String>, RowError> {
         into_row_error(c, self.try_get::<_, Vec<String>>(c))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_postgres::types::ToSql;
+
+    fn encode(value: &(dyn ToSql + Sync), ty: &Type) -> bytes::BytesMut {
+        let mut buf = bytes::BytesMut::new();
+        value.to_sql_checked(ty, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn utc_datetime_reads_timestamp_as_utc() {
+        let naive = chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
+            .unwrap()
+            .and_hms_micro_opt(3, 4, 5, 123_456)
+            .unwrap();
+        let buf = encode(&naive, &Type::TIMESTAMP);
+        let decoded = UtcDateTime::from_sql(&Type::TIMESTAMP, &buf).unwrap();
+        assert_eq!(decoded.0, naive.and_utc());
+    }
+
+    #[test]
+    fn utc_datetime_reads_timestamptz_unchanged() {
+        let at = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let buf = encode(&at, &Type::TIMESTAMPTZ);
+        let decoded = UtcDateTime::from_sql(&Type::TIMESTAMPTZ, &buf).unwrap();
+        assert_eq!(decoded.0, at);
+    }
+
+    #[test]
+    fn utc_datetime_accepts_only_timestamp_types() {
+        assert!(<UtcDateTime as FromSql>::accepts(&Type::TIMESTAMP));
+        assert!(<UtcDateTime as FromSql>::accepts(&Type::TIMESTAMPTZ));
+        assert!(!<UtcDateTime as FromSql>::accepts(&Type::DATE));
+        assert!(!<UtcDateTime as FromSql>::accepts(&Type::TEXT));
     }
 }
