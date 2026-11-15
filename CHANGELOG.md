@@ -66,6 +66,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **postgres**: `chrono::DateTime<Utc>` works with `timestamp without time
+  zone` columns (Prisma's `DateTime` maps to `timestamp(3)`), read and
+  written as UTC wall time. Binding a `DateTime<Utc>` (or any RFC 3339
+  string with an offset) to a TIMESTAMP parameter converts it to UTC
+  instead of failing with "not a valid ISO-8601 naive datetime for
+  TIMESTAMP"; reading a TIMESTAMP column into `DateTime<Utc>` treats the
+  stored value as UTC instead of failing to deserialize. Generated models
+  that declare `DateTime<Utc>` on such columns can now `create`, `find` and
+  `update`. TIMESTAMPTZ behaviour is unchanged. prax-sqlx already decoded
+  TIMESTAMP as UTC; its TEXT-typed string parameters still need an
+  explicit `::timestamp` cast, which stores a `DateTime<Utc>`'s UTC wall
+  time.
 - **release**: `scripts/publish.sh` sends a User-Agent to crates.io, which
   rejects anonymous API requests (HTTP 403). It checks the exact version
   (`/api/v1/crates/<name>/<version>`), retries a failed lookup and then
