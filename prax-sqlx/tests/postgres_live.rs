@@ -299,3 +299,56 @@ async fn engine_errors_carry_the_sqlstate() {
         .expect_err("duplicate email in a transaction");
     assert_eq!(err.sqlstate(), Some("23505"), "{err:?}");
 }
+
+/// Parity with prax-postgres: a `DateTime<Utc>` bound for a
+/// `timestamp without time zone` column stores its UTC wall time, and
+/// reading the column into `DateTime<Utc>` treats it as UTC. SQLx binds
+/// `FilterValue::String` as TEXT, so the SQL casts (`$1::timestamp`), as for
+/// uuid columns; the cast drops the `Z`, which is the UTC wall time.
+/// TIMESTAMPTZ is unchanged.
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn datetime_utc_round_trips_through_timestamp_columns() {
+    use chrono::TimeZone;
+    use prax_query::filter::ToFilterValue;
+    use prax_query::row::RowRef;
+    use prax_sqlx::row_ref::SqlxRowRef;
+
+    let Some(url) = url() else { return };
+    let engine = engine(&url).await;
+    engine
+        .raw_execute(
+            "CREATE TEMP TABLE sqlx_ts_probe (id int4 PRIMARY KEY, at timestamp NOT NULL, \
+             at_tz timestamptz NOT NULL)",
+            &[],
+        )
+        .await
+        .expect("create");
+
+    let at = chrono::Utc
+        .with_ymd_and_hms(2026, 11, 16, 18, 8, 52)
+        .unwrap()
+        + chrono::Duration::microseconds(477_200);
+    engine
+        .raw_execute(
+            "INSERT INTO sqlx_ts_probe VALUES (1, $1::timestamp, $2::timestamptz)",
+            &[at.to_filter_value(), at.to_filter_value()],
+        )
+        .await
+        .expect("insert DateTime<Utc> into timestamp / timestamptz");
+
+    let row = engine
+        .raw_query_one(
+            "SELECT at, at_tz, at::text AS at_text FROM sqlx_ts_probe WHERE id = 1",
+            &[],
+        )
+        .await
+        .expect("select");
+    let r = SqlxRowRef::from_sqlx(&row).expect("row ref");
+    assert_eq!(r.get_datetime_utc("at").expect("decode at"), at);
+    assert_eq!(r.get_datetime_utc("at_tz").expect("decode at_tz"), at);
+    assert_eq!(
+        r.get_str("at_text").expect("text"),
+        "2026-11-16 18:08:52.4772"
+    );
+}
