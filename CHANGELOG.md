@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-15
+
+### Breaking
+
+- **sqlite**: the `vector` feature's SQL now matches what sqlite-vector-rs
+  accepts. Before, the DDL used `rowid_column=` and `col='float4[N] ...'`
+  arguments and searches called `vector_distance` on a vector column; no
+  released sqlite-vector-rs accepts either, so creating a vector table or
+  searching failed at runtime (the tests that would have shown it were
+  skipped in CI).
+  - `VectorIndex::new(table, element_type, dimensions, metric)` renders
+    `CREATE VIRTUAL TABLE t USING vector(dim=, type=, metric=, mode=)`;
+    `.index(None)` selects `mode=exact` (default HNSW). One vector per
+    table: `rowid_column`, `column()` and `VectorColumnDef` are removed.
+    A vector row's `rowid` is the owning row's integer primary key.
+  - New `vector_table_name(table, column)`: `{table}_{column}_vectors`.
+    `prax migrate` (SQLite) creates one such table per vector field (it
+    used to create one `{table}_vectors` for all of them).
+  - `VectorSearchBuilder` queries `knn_match(distance, ...) LIMIT k` and
+    joins on the vector table's `rowid`; its default table is
+    `{table}_{column}_vectors`. `metric()` and `rowid_column()` are
+    removed (the metric is set on the table).
+  - `HybridSearchBuilder` ranks the vector side with `knn_match`, with a
+    new `candidates(n)` (default 100); `rowid_column()`,
+    `vector_column()` and `metric()` are removed.
+  - `DistanceMetric::InnerProduct` (and the migration generator) renders
+    `ip`; it rendered `inner`, which sqlite-vector-rs rejects. Schemas may
+    use `@metric("ip")` or `@metric("inner")`.
+- **ci**: a new "SQLite vector extension" job builds sqlite-vector-rs
+  v0.3.1 and runs the `vector` tests and the `vector_rag` example against
+  it (`PRAX_VECTOR_E2E=1` fails the tests if the library is missing).
+
+### Fixed
+
+- **postgres**: `chrono::DateTime<Utc>` works with `timestamp without time
+  zone` columns (Prisma's `DateTime` maps to `timestamp(3)`), read and
+  written as UTC wall time. Binding a `DateTime<Utc>` (or any RFC 3339
+  string with an offset) to a TIMESTAMP parameter converts it to UTC
+  instead of failing with "not a valid ISO-8601 naive datetime for
+  TIMESTAMP"; reading a TIMESTAMP column into `DateTime<Utc>` treats the
+  stored value as UTC instead of failing to deserialize. Generated models
+  that declare `DateTime<Utc>` on such columns can now `create`, `find` and
+  `update`. TIMESTAMPTZ behaviour is unchanged. prax-sqlx already decoded
+  TIMESTAMP as UTC; its TEXT-typed string parameters still need an
+  explicit `::timestamp` cast, which stores a `DateTime<Utc>`'s UTC wall
+  time.
+- **release**: `scripts/publish.sh` sends a User-Agent to crates.io, which
+  rejects anonymous API requests (HTTP 403). It checks the exact version
+  (`/api/v1/crates/<name>/<version>`), retries a failed lookup and then
+  aborts instead of treating it as "not published" and re-publishing
+  everything. It also looks up `prax-cli` under its package name
+  `prax-orm-cli` (it used to query the unrelated `prax-cli` crate).
+
 ## [0.13.0] - 2026-11-14
 
 ### Breaking

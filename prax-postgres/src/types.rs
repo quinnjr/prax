@@ -72,6 +72,29 @@ impl PgString {
     }
 }
 
+/// Parse the text of a `FilterValue::String` bound to a TIMESTAMP
+/// (`timestamp without time zone`) parameter.
+///
+/// A naive ISO-8601 datetime (what `NaiveDateTime` lowers to) is stored
+/// as-is. An RFC 3339 datetime with an offset (what `DateTime<Utc>` lowers
+/// to, `...Z`) is converted to UTC and its naive UTC value stored, the
+/// convention `PgRow::get_datetime_utc` reads back.
+fn naive_timestamp_from_str(
+    s: &str,
+) -> Result<::chrono::NaiveDateTime, Box<dyn std::error::Error + Sync + Send>> {
+    if let Ok(naive) = ::chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Ok(naive);
+    }
+    match ::chrono::DateTime::parse_from_rfc3339(s) {
+        Ok(aware) => Ok(aware.naive_utc()),
+        Err(e) => Err(format!(
+            "FilterValue::String('{s}') is not a valid ISO-8601 naive or RFC 3339 \
+             datetime for TIMESTAMP: {e}"
+        )
+        .into()),
+    }
+}
+
 impl ToSql for PgString {
     fn to_sql(
         &self,
@@ -103,18 +126,7 @@ impl ToSql for PgString {
                         .with_timezone(&::chrono::Utc);
                 parsed.to_sql(ty, out)
             }
-            Type::TIMESTAMP => {
-                let parsed =
-                    ::chrono::NaiveDateTime::parse_from_str(&self.0, "%Y-%m-%dT%H:%M:%S%.f")
-                        .map_err(|e| {
-                            format!(
-                                "FilterValue::String('{}') is not a valid \
-                         ISO-8601 naive datetime for TIMESTAMP: {e}",
-                                self.0
-                            )
-                        })?;
-                parsed.to_sql(ty, out)
-            }
+            Type::TIMESTAMP => naive_timestamp_from_str(&self.0)?.to_sql(ty, out),
             Type::DATE => {
                 let parsed =
                     ::chrono::NaiveDate::parse_from_str(&self.0, "%Y-%m-%d").map_err(|e| {
@@ -441,6 +453,102 @@ mod tests {
         let decoded = <Vec<T> as tokio_postgres::types::FromSql>::from_sql(ty, &buf)
             .unwrap_or_else(|e| panic!("decoding {item:?} as {ty:?}: {e}"));
         assert_eq!(decoded, vec![expected], "{item:?} into {ty:?}");
+    }
+
+    /// Bind a `FilterValue::String` as a scalar parameter of type `ty` and
+    /// decode the bytes back as `T`.
+    fn scalar_roundtrip<T>(s: &str, ty: &Type) -> Result<T, String>
+    where
+        T: for<'a> tokio_postgres::types::FromSql<'a>,
+    {
+        let param =
+            filter_value_to_sql(&FilterValue::String(s.into())).map_err(|e| e.to_string())?;
+        let mut buf = bytes::BytesMut::new();
+        param
+            .to_sql_checked(ty, &mut buf)
+            .map_err(|e| e.to_string())?;
+        T::from_sql(ty, &buf).map_err(|e| e.to_string())
+    }
+
+    fn naive(s: &str) -> ::chrono::NaiveDateTime {
+        ::chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").unwrap()
+    }
+
+    #[test]
+    fn timestamp_accepts_naive_and_converts_offset_datetimes_to_utc() {
+        // NaiveDateTime's lowering: stored as-is.
+        assert_eq!(
+            scalar_roundtrip::<::chrono::NaiveDateTime>(
+                "2024-01-02T03:04:05.123456",
+                &Type::TIMESTAMP
+            ),
+            Ok(naive("2024-01-02T03:04:05.123456"))
+        );
+        // DateTime<Utc>'s lowering (`Z`): its UTC wall time.
+        assert_eq!(
+            scalar_roundtrip::<::chrono::NaiveDateTime>(
+                "2024-01-02T03:04:05.000001Z",
+                &Type::TIMESTAMP
+            ),
+            Ok(naive("2024-01-02T03:04:05.000001"))
+        );
+        // Any other offset is converted to UTC first.
+        assert_eq!(
+            scalar_roundtrip::<::chrono::NaiveDateTime>(
+                "2024-01-02T03:04:05+02:00",
+                &Type::TIMESTAMP
+            ),
+            Ok(naive("2024-01-02T01:04:05"))
+        );
+        let err =
+            scalar_roundtrip::<::chrono::NaiveDateTime>("yesterday", &Type::TIMESTAMP).unwrap_err();
+        assert!(err.contains("TIMESTAMP"), "{err}");
+    }
+
+    #[test]
+    fn timestamp_lowering_of_datetime_utc_binds() {
+        use prax_query::filter::ToFilterValue;
+        let at = ::chrono::DateTime::parse_from_rfc3339("2026-11-16T18:08:52.477200Z")
+            .unwrap()
+            .with_timezone(&::chrono::Utc);
+        let FilterValue::String(s) = at.to_filter_value() else {
+            panic!("DateTime<Utc> lowers to a string");
+        };
+        assert_eq!(
+            scalar_roundtrip::<::chrono::NaiveDateTime>(&s, &Type::TIMESTAMP),
+            Ok(at.naive_utc())
+        );
+    }
+
+    #[test]
+    fn timestamptz_binding_is_unchanged() {
+        let at = ::chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05+02:00")
+            .unwrap()
+            .with_timezone(&::chrono::Utc);
+        assert_eq!(
+            scalar_roundtrip::<::chrono::DateTime<::chrono::Utc>>(
+                "2024-01-02T03:04:05+02:00",
+                &Type::TIMESTAMPTZ
+            ),
+            Ok(at)
+        );
+        // A naive string is still not a valid TIMESTAMPTZ value.
+        assert!(
+            scalar_roundtrip::<::chrono::DateTime<::chrono::Utc>>(
+                "2024-01-02T03:04:05",
+                &Type::TIMESTAMPTZ
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn timestamp_array_elements_accept_offset_datetimes() {
+        assert_roundtrip(
+            FilterValue::String("2024-01-02T03:04:05Z".into()),
+            &Type::TIMESTAMP_ARRAY,
+            naive("2024-01-02T03:04:05"),
+        );
     }
 
     #[test]

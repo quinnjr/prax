@@ -1,24 +1,28 @@
 //! Hybrid search builder combining vector similarity with fts5 full-text search
 //! via Reciprocal Rank Fusion (RRF).
 
-use crate::vector::metric::{DistanceMetric, VectorElementType};
+use crate::vector::metric::VectorElementType;
 
 /// Builder for a hybrid search (vector + fts5) using RRF.
+///
+/// The vector side is a sqlite-vector-rs KNN query
+/// (`knn_match(distance, ...)`) returning the `candidates` nearest rows,
+/// ranked by distance; the text side is an fts5 `MATCH` ranked by `bm25`.
+/// Both are joined back to the main table on its primary key (the vector
+/// table's `rowid` and the fts5 table's `rowid`).
 #[derive(Debug, Clone)]
 pub struct HybridSearchBuilder {
     main_table: String,
     id_column: String,
     vector_table: Option<String>,
-    rowid_column: Option<String>,
-    vector_column: Option<String>,
     fts_table: Option<String>,
     element_type: VectorElementType,
-    metric: DistanceMetric,
     query_vector_json: Option<String>,
     query_text: Option<String>,
     vector_weight: f64,
     text_weight: f64,
     rrf_k: u32,
+    candidates: u32,
     limit: Option<u32>,
 }
 
@@ -30,16 +34,14 @@ impl HybridSearchBuilder {
             main_table: main,
             id_column: "id".to_string(),
             vector_table: None,
-            rowid_column: None,
-            vector_column: None,
             fts_table: None,
             element_type: VectorElementType::Float4,
-            metric: DistanceMetric::Cosine,
             query_vector_json: None,
             query_text: None,
             vector_weight: 0.5,
             text_weight: 0.5,
             rrf_k: 60,
+            candidates: 100,
             limit: None,
         }
     }
@@ -50,22 +52,10 @@ impl HybridSearchBuilder {
         self
     }
 
-    /// Set the vector virtual table name.
+    /// Set the vector virtual table name (see
+    /// [`vector_table_name`](crate::vector::vector_table_name)).
     pub fn vector_table(mut self, name: impl Into<String>) -> Self {
         self.vector_table = Some(name.into());
-        self
-    }
-
-    /// Set the rowid column name used on the virtual table to join back to
-    /// the main table.
-    pub fn rowid_column(mut self, name: impl Into<String>) -> Self {
-        self.rowid_column = Some(name.into());
-        self
-    }
-
-    /// Set the vector column name (on the virtual table).
-    pub fn vector_column(mut self, name: impl Into<String>) -> Self {
-        self.vector_column = Some(name.into());
         self
     }
 
@@ -75,15 +65,10 @@ impl HybridSearchBuilder {
         self
     }
 
-    /// Set the element type used for vector_from_json calls.
+    /// Element type of the query vector; must match the vector table's
+    /// `type` (default Float4).
     pub fn element_type(mut self, t: VectorElementType) -> Self {
         self.element_type = t;
-        self
-    }
-
-    /// Set the vector distance metric.
-    pub fn metric(mut self, m: DistanceMetric) -> Self {
-        self.metric = m;
         self
     }
 
@@ -124,6 +109,12 @@ impl HybridSearchBuilder {
         self
     }
 
+    /// Number of nearest vector matches fed into the fusion (default 100).
+    pub fn candidates(mut self, n: u32) -> Self {
+        self.candidates = n;
+        self
+    }
+
     /// Set the result limit.
     pub fn limit(mut self, n: u32) -> Self {
         self.limit = Some(n);
@@ -132,11 +123,11 @@ impl HybridSearchBuilder {
 
     /// Render the SELECT statement.
     ///
-    /// Returns [`VectorError::BuilderIncomplete`] if any of `vector_table`,
-    /// `rowid_column`, `vector_column`, `fts_table`, `query_vector_json`,
-    /// or `query_text` is unset. All identifiers are safely quoted with
-    /// doubled-double-quote escaping; the FTS query text is escaped with
-    /// doubled-single-quote.
+    /// Returns [`VectorError::BuilderIncomplete`](crate::vector::VectorError)
+    /// if any of `vector_table`, `fts_table`, `query_vector_json` or
+    /// `query_text` is unset. Identifiers are quoted with doubled-double-quote
+    /// escaping; the query vector and FTS text are escaped as string
+    /// literals.
     pub fn to_sql(&self) -> crate::vector::error::VectorResult<String> {
         use crate::vector::error::VectorError;
         use crate::vector::{escape_sql_literal, quote_ident};
@@ -146,18 +137,6 @@ impl HybridSearchBuilder {
             .as_deref()
             .ok_or(VectorError::BuilderIncomplete {
                 field: "vector_table",
-            })?;
-        let rowid = self
-            .rowid_column
-            .as_deref()
-            .ok_or(VectorError::BuilderIncomplete {
-                field: "rowid_column",
-            })?;
-        let vcol = self
-            .vector_column
-            .as_deref()
-            .ok_or(VectorError::BuilderIncomplete {
-                field: "vector_column",
             })?;
         let ftab = self
             .fts_table
@@ -183,9 +162,9 @@ impl HybridSearchBuilder {
 
         Ok(format!(
             "WITH vec_ranked AS (\n    \
-             SELECT {rowid} AS match_id, \
-             ROW_NUMBER() OVER (ORDER BY vector_distance({vcol}, vector_from_json('{qv}', '{et}'), '{metric}', '{et}')) AS rank\n    \
-             FROM {vtable}\n\
+             SELECT match_id, ROW_NUMBER() OVER (ORDER BY distance) AS rank\n    \
+             FROM (SELECT rowid AS match_id, distance FROM {vtable} \
+             WHERE knn_match(distance, vector_from_json('{qv}', '{et}')) LIMIT {cand})\n\
              ),\n\
              fts_ranked AS (\n    \
              SELECT rowid AS match_id, \
@@ -199,12 +178,10 @@ impl HybridSearchBuilder {
              LEFT JOIN fts_ranked f ON {main}.{id} = f.match_id\n\
              WHERE v.match_id IS NOT NULL OR f.match_id IS NOT NULL\n\
              ORDER BY score DESC{limit}",
-            rowid = quote_ident(rowid),
-            vcol = quote_ident(vcol),
             qv = escape_sql_literal(qv),
             et = self.element_type.as_sql(),
-            metric = self.metric.as_sql(),
             vtable = quote_ident(vtable),
+            cand = self.candidates,
             ftab = quote_ident(ftab),
             qt = escape_sql_literal(qt),
             main = quote_ident(&self.main_table),
@@ -223,9 +200,7 @@ mod tests {
 
     fn base() -> HybridSearchBuilder {
         HybridSearchBuilder::new("documents")
-            .vector_table("documents_vectors")
-            .rowid_column("document_id")
-            .vector_column("embedding")
+            .vector_table("documents_embedding_vectors")
             .fts_table("documents_fts")
             .query_vector_json("[0.1,0.2]")
             .query_text("machine learning")
@@ -265,7 +240,7 @@ mod tests {
     #[test]
     fn test_vector_table_and_fts_table_appear() {
         let sql = base().to_sql().unwrap();
-        assert!(sql.contains("FROM \"documents_vectors\""));
+        assert!(sql.contains("FROM \"documents_embedding_vectors\" WHERE knn_match(distance, vector_from_json('[0.1,0.2]', 'float4')) LIMIT 100"));
         assert!(sql.contains("FROM \"documents_fts\""));
         assert!(sql.contains("FROM \"documents\""));
     }
@@ -273,8 +248,6 @@ mod tests {
     #[test]
     fn test_missing_vector_table_returns_error() {
         let result = HybridSearchBuilder::new("docs")
-            .rowid_column("id")
-            .vector_column("v")
             .fts_table("docs_fts")
             .query_vector_json("[0.1]")
             .query_text("q")
@@ -292,5 +265,11 @@ mod tests {
         let sql = base().vector_table("tbl\"evil").to_sql().unwrap();
         // The double quote should be doubled ("") inside the SQL identifier.
         assert!(sql.contains("\"tbl\"\"evil\""));
+    }
+
+    #[test]
+    fn test_candidates_override() {
+        let sql = base().candidates(25).to_sql().unwrap();
+        assert!(sql.contains("'float4')) LIMIT 25)"));
     }
 }
