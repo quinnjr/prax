@@ -61,6 +61,31 @@ let pool = PgPool::with_pool_config(config, pool_config).await?;
 checkout) are enforced when a connection is checked out: an expired one is
 replaced instead of handed out.
 
+### Detecting dead connections
+
+By default the driver sends the first TCP keepalive after 2 hours idle and
+sets no `TCP_USER_TIMEOUT`, so a connection whose server disappeared
+without closing it (failover, network black-hole) can hang a query for
+~15 minutes or go unnoticed for hours. Bound that with the libpq URL
+parameters or the matching `PgConfig` fields / `PgConfigBuilder` setters:
+
+```text
+postgresql://user:pass@host/db?keepalives_idle=30&keepalives_interval=10&keepalives_count=3&tcp_user_timeout=30000
+```
+
+| URL parameter | `PgConfig` field | Unit |
+|---|---|---|
+| `keepalives` (`0` disables) | `keepalives: bool` | - |
+| `keepalives_idle` | `keepalives_idle: Option<Duration>` | seconds |
+| `keepalives_interval` | `keepalives_interval: Option<Duration>` | seconds |
+| `keepalives_count` (or `keepalives_retries`) | `keepalives_retries: Option<u32>` | probes |
+| `tcp_user_timeout` (Linux) | `tcp_user_timeout: Option<Duration>` | milliseconds |
+
+Unset or `0` keeps the driver/OS default. These are client socket settings
+and are never sent to the server as `-c` options. Combine them with
+`PgRecycling::Verified` (or `Clean`) so a connection that died while idle is
+replaced at checkout.
+
 ## LISTEN / NOTIFY
 
 ```rust
