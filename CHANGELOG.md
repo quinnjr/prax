@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **postgres**: a `PgEngine::transaction()` future cancelled (e.g. by
+  `tokio::time::timeout`) or panicking while `BEGIN`, `COMMIT` or
+  `ROLLBACK` was in flight could return its connection to the pool inside
+  an open transaction, so the next borrower's autocommit statements ran in
+  it; `Verified` recycling cannot detect this. The transaction guard is now
+  armed before `BEGIN` is sent and disarmed only once the transaction is
+  settled, so a cancellation at any of those awaits retires the connection
+  instead of recycling it. A failed `BEGIN`, or a `COMMIT` that fails with a
+  transport (non-server) error, also retires the connection.
+
 ## [0.13.2] - 2026-11-15
 
 ### Fixed
@@ -25,15 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server's option and `?keepalives_idle=` failed the connection. An
   invalid value is a configuration error; unset or `0` keeps the previous
   driver/OS defaults.
-- **postgres**: a `PgEngine::transaction()` future cancelled (e.g. by
-  `tokio::time::timeout`) or panicking while `BEGIN`, `COMMIT` or
-  `ROLLBACK` was in flight could return its connection to the pool inside
-  an open transaction, so the next borrower's autocommit statements ran in
-  it; `Verified` recycling cannot detect this. The transaction guard is now
-  armed before `BEGIN` is sent and disarmed only once the transaction is
-  settled, so a cancellation at any of those awaits retires the connection
-  instead of recycling it. A failed `BEGIN`, or a `COMMIT` that fails with a
-  transport (non-server) error, also retires the connection.
 
 ## [0.13.1] - 2026-11-15
 
