@@ -11,7 +11,8 @@ use std::time::Duration;
 mod common;
 
 use common::e2e_url as url;
-use prax_postgres::{PgPool, PgPoolBuilder, PgRecycling};
+use prax_postgres::{PgEngine, PgPool, PgPoolBuilder, PgRecycling};
+use prax_query::traits::QueryEngine;
 
 /// Per-test, per-process advisory-lock key (fits the 32-bit `objid` half).
 fn lock_key(test: i64) -> i64 {
@@ -214,6 +215,37 @@ async fn verified_recycling_replaces_terminated_connection() {
 
     let pid2 = backend_pid(&pool).await;
     assert_ne!(pid1, pid2, "terminated connection must be replaced");
+}
+
+/// A transaction future cancelled at any await — including while `BEGIN`
+/// is waiting for its reply — must not hand a connection that is inside an
+/// open transaction back to the pool. `Verified` recycling cannot detect
+/// that, so the next borrower's autocommit statements would run inside it.
+/// Sweeps the cancellation point across `BEGIN`, the closure and `COMMIT`.
+#[tokio::test]
+#[ignore = "requires PRAX_E2E=1 and a live POSTGRES_URL"]
+async fn cancelled_transaction_never_leaks_open_tx() {
+    let Some(url) = url() else { return };
+    let pool = pool(&url, PgRecycling::Verified, None).await;
+    let engine = PgEngine::new(pool.clone());
+
+    for step in 0..200_u64 {
+        let tx = engine.transaction(|tx| async move {
+            tx.execute_raw("SELECT 1", vec![]).await?;
+            Ok(())
+        });
+        let _ = tokio::time::timeout(Duration::from_micros(step * 20), tx).await;
+
+        // `SAVEPOINT` fails outside a transaction block; succeeding means
+        // the recycled session is still inside a leaked transaction.
+        let conn = pool.get().await.expect("conn");
+        let probe = conn.batch_execute("SAVEPOINT prax_tx_probe").await;
+        assert!(
+            probe.is_err(),
+            "connection recycled inside an open transaction (cancelled after {}us)",
+            step * 20
+        );
+    }
 }
 
 async fn pool_observer(url: &str) -> PgPool {
