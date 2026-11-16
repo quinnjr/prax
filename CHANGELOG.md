@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-15
+
 ## [0.13.1] - 2026-11-15
 
 ### Breaking
@@ -59,6 +61,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aborts instead of treating it as "not published" and re-publishing
   everything. It also looks up `prax-cli` under its package name
   `prax-orm-cli` (it used to query the unrelated `prax-cli` crate).
+- **postgres**: client-side TCP liveness can be configured, so a pooled
+  connection whose server vanished (RDS failover, network black-hole) is
+  detected instead of hanging a query for ~15 minutes (unacknowledged
+  data, `tcp_retries2`) to ~2h11m (idle, keepalive defaults). `PgConfig`
+  gains `keepalives`, `keepalives_idle`, `keepalives_interval`,
+  `keepalives_retries` and `tcp_user_timeout` (with matching
+  `PgConfigBuilder` setters), applied by `to_pg_config()`. The libpq URL
+  parameters `keepalives`, `keepalives_idle` / `keepalives_interval`
+  (seconds), `keepalives_count` (alias `keepalives_retries`) and
+  `tcp_user_timeout` (milliseconds) now set these client options; they used
+  to be forwarded to the server as `-c` GUCs, so `?tcp_user_timeout=` set
+  the server's option and `?keepalives_idle=` failed the connection. An
+  invalid value is a configuration error; unset or `0` keeps the previous
+  driver/OS defaults.
 
 ## [0.13.0] - 2026-11-14
 

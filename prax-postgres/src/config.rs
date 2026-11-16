@@ -52,6 +52,37 @@ pub struct PgConfig {
     pub statement_timeout: Option<Duration>,
     /// Application name (shown in pg_stat_activity).
     pub application_name: Option<String>,
+    /// Whether TCP keepalives are enabled on the client socket (default:
+    /// `true`, the tokio-postgres default). From the libpq-compatible
+    /// `keepalives` URL parameter (`0` disables, any other integer enables).
+    pub keepalives: bool,
+    /// Idle time before the first TCP keepalive probe is sent. `None` keeps
+    /// the driver default (2 hours). From the `keepalives_idle` URL parameter
+    /// (seconds; `0` keeps the default, as in libpq).
+    ///
+    /// Together with [`keepalives_interval`](Self::keepalives_interval) and
+    /// [`keepalives_retries`](Self::keepalives_retries) this bounds how long
+    /// an *idle* connection whose peer vanished (failover, network
+    /// black-hole) goes undetected.
+    pub keepalives_idle: Option<Duration>,
+    /// Interval between unanswered TCP keepalive probes. `None` keeps the
+    /// OS default. From the `keepalives_interval` URL parameter (seconds;
+    /// `0` keeps the default).
+    pub keepalives_interval: Option<Duration>,
+    /// Number of unanswered TCP keepalive probes before the connection is
+    /// dropped. `None` keeps the OS default. From the libpq
+    /// `keepalives_count` URL parameter (also accepted as tokio-postgres's
+    /// `keepalives_retries`; `0` keeps the default).
+    pub keepalives_retries: Option<u32>,
+    /// `TCP_USER_TIMEOUT`: how long transmitted data may stay unacknowledged
+    /// before the OS closes the connection (Linux only; ignored elsewhere).
+    /// `None` keeps the OS default (~15 minutes of retransmissions on
+    /// Linux). From the `tcp_user_timeout` URL parameter (milliseconds;
+    /// `0` keeps the default, as in libpq).
+    ///
+    /// This bounds how long a query sent on a connection whose peer vanished
+    /// hangs, which keepalives alone do not.
+    pub tcp_user_timeout: Option<Duration>,
     /// Additional options.
     pub options: Vec<(String, String)>,
 }
@@ -70,6 +101,11 @@ impl fmt::Debug for PgConfig {
             .field("connect_timeout", &self.connect_timeout)
             .field("statement_timeout", &self.statement_timeout)
             .field("application_name", &self.application_name)
+            .field("keepalives", &self.keepalives)
+            .field("keepalives_idle", &self.keepalives_idle)
+            .field("keepalives_interval", &self.keepalives_interval)
+            .field("keepalives_retries", &self.keepalives_retries)
+            .field("tcp_user_timeout", &self.tcp_user_timeout)
             .field(
                 "options",
                 &self
@@ -230,6 +266,21 @@ fn is_safe_guc_value(value: &str) -> bool {
         .any(|c| c.is_whitespace() || c == '\\' || c == '\'')
 }
 
+/// Parse a libpq-style non-negative integer URL parameter, naming `key` (but
+/// not the value) in the error.
+fn parse_client_param<T: std::str::FromStr>(key: &str, value: &str) -> PgResult<T> {
+    value
+        .trim()
+        .parse()
+        .map_err(|_| PgError::config(format!("invalid {key}: expected a non-negative integer")))
+}
+
+/// `Some(duration)` unless it is zero, which (as in libpq) means "keep the
+/// system default".
+fn non_zero(duration: Duration) -> Option<Duration> {
+    (!duration.is_zero()).then_some(duration)
+}
+
 /// How to fix a URL whose password breaks its structure.
 const PERCENT_ENCODE_HINT: &str = "percent-encode reserved characters in the password \
      (`@` as %40, `/` as %2F, `?` as %3F, `#` as %23, `:` as %3A)";
@@ -286,8 +337,13 @@ impl PgConfig {
     /// error rather than parsed into the wrong host, port or database.
     ///
     /// As with libpq, `user` and `password` query parameters set the
-    /// credentials (overriding the user info). Other unrecognised
-    /// parameters become [`options`](Self::options).
+    /// credentials (overriding the user info). The libpq client-side TCP
+    /// parameters `keepalives`, `keepalives_idle` (seconds),
+    /// `keepalives_interval` (seconds), `keepalives_count` (alias
+    /// `keepalives_retries`) and `tcp_user_timeout` (milliseconds) configure
+    /// the client socket; an invalid value is a configuration error. Other
+    /// unrecognised parameters become [`options`](Self::options) (server
+    /// GUCs).
     pub fn from_url(url: impl Into<String>) -> PgResult<Self> {
         let url = url.into();
         let parsed = url::Url::parse(&url).map_err(|e| {
@@ -352,6 +408,11 @@ impl PgConfig {
         let mut statement_timeout = None;
         let mut application_name = None;
         let mut ssl_root_cert = None;
+        let mut keepalives = true;
+        let mut keepalives_idle = None;
+        let mut keepalives_interval = None;
+        let mut keepalives_retries = None;
+        let mut tcp_user_timeout = None;
         let mut options = Vec::new();
 
         for (key, value) in parsed.query_pairs() {
@@ -388,6 +449,29 @@ impl PgConfig {
                 "sslrootcert" => {
                     ssl_root_cert = Some(PathBuf::from(value_str));
                 }
+                // Client-side TCP liveness (libpq names and units). These
+                // configure the socket, so they must never reach the server
+                // as GUCs: an unknown GUC fails the startup, and the server's
+                // own `tcp_user_timeout` is not the client's.
+                "keepalives" => {
+                    keepalives = parse_client_param::<i64>(key_str, value_str)? != 0;
+                }
+                "keepalives_idle" => {
+                    let secs: u64 = parse_client_param(key_str, value_str)?;
+                    keepalives_idle = non_zero(Duration::from_secs(secs));
+                }
+                "keepalives_interval" => {
+                    let secs: u64 = parse_client_param(key_str, value_str)?;
+                    keepalives_interval = non_zero(Duration::from_secs(secs));
+                }
+                "keepalives_count" | "keepalives_retries" => {
+                    let count: u32 = parse_client_param(key_str, value_str)?;
+                    keepalives_retries = (count != 0).then_some(count);
+                }
+                "tcp_user_timeout" => {
+                    let ms: u64 = parse_client_param(key_str, value_str)?;
+                    tcp_user_timeout = non_zero(Duration::from_millis(ms));
+                }
                 // Credentials, taken above; never a server startup option.
                 "user" | "password" => {}
                 _ => {
@@ -408,6 +492,11 @@ impl PgConfig {
             connect_timeout,
             statement_timeout,
             application_name,
+            keepalives,
+            keepalives_idle,
+            keepalives_interval,
+            keepalives_retries,
+            tcp_user_timeout,
             options,
         })
     }
@@ -422,7 +511,9 @@ impl PgConfig {
     /// Applies everything `tokio_postgres::Config` can express without a TLS
     /// connector: host/port/dbname/user/password, `application_name`,
     /// `connect_timeout`, the driver's [`tokio_postgres::config::SslMode`],
-    /// plus `statement_timeout` and any extra `options` (passed via the
+    /// the client TCP settings (`keepalives`, `keepalives_idle`,
+    /// `keepalives_interval`, `keepalives_retries`, `tcp_user_timeout`;
+    /// unset or zero values keep the driver/OS defaults), plus `statement_timeout` and any extra `options` (passed via the
     /// libpq-style `options` startup parameter as space-separated
     /// `-c key=value` pairs).
     ///
@@ -459,6 +550,23 @@ impl PgConfig {
             }
         };
         config.ssl_mode(driver_ssl_mode);
+
+        // Client TCP liveness. Unset (or zero) values keep the driver's
+        // defaults: keepalives on, 2h idle, OS interval/count, no
+        // TCP_USER_TIMEOUT.
+        config.keepalives(self.keepalives);
+        if let Some(idle) = self.keepalives_idle.and_then(non_zero) {
+            config.keepalives_idle(idle);
+        }
+        if let Some(interval) = self.keepalives_interval.and_then(non_zero) {
+            config.keepalives_interval(interval);
+        }
+        if let Some(retries) = self.keepalives_retries.filter(|&n| n != 0) {
+            config.keepalives_retries(retries);
+        }
+        if let Some(timeout) = self.tcp_user_timeout.and_then(non_zero) {
+            config.tcp_user_timeout(timeout);
+        }
 
         // `statement_timeout` and arbitrary GUC options ride the libpq-style
         // `options` startup parameter as space-separated `-c key=value` pairs.
@@ -507,6 +615,11 @@ pub struct PgConfigBuilder {
     connect_timeout: Option<Duration>,
     statement_timeout: Option<Duration>,
     application_name: Option<String>,
+    keepalives: Option<bool>,
+    keepalives_idle: Option<Duration>,
+    keepalives_interval: Option<Duration>,
+    keepalives_retries: Option<u32>,
+    tcp_user_timeout: Option<Duration>,
 }
 
 impl fmt::Debug for PgConfigBuilder {
@@ -529,6 +642,11 @@ impl fmt::Debug for PgConfigBuilder {
             .field("connect_timeout", &self.connect_timeout)
             .field("statement_timeout", &self.statement_timeout)
             .field("application_name", &self.application_name)
+            .field("keepalives", &self.keepalives)
+            .field("keepalives_idle", &self.keepalives_idle)
+            .field("keepalives_interval", &self.keepalives_interval)
+            .field("keepalives_retries", &self.keepalives_retries)
+            .field("tcp_user_timeout", &self.tcp_user_timeout)
             .finish()
     }
 }
@@ -607,6 +725,41 @@ impl PgConfigBuilder {
         self
     }
 
+    /// Enable or disable TCP keepalives (see [`PgConfig::keepalives`]).
+    pub fn keepalives(mut self, enabled: bool) -> Self {
+        self.keepalives = Some(enabled);
+        self
+    }
+
+    /// Set the idle time before the first TCP keepalive probe (see
+    /// [`PgConfig::keepalives_idle`]). Zero keeps the driver default.
+    pub fn keepalives_idle(mut self, idle: Duration) -> Self {
+        self.keepalives_idle = Some(idle);
+        self
+    }
+
+    /// Set the interval between TCP keepalive probes (see
+    /// [`PgConfig::keepalives_interval`]). Zero keeps the OS default.
+    pub fn keepalives_interval(mut self, interval: Duration) -> Self {
+        self.keepalives_interval = Some(interval);
+        self
+    }
+
+    /// Set the number of unanswered TCP keepalive probes before the
+    /// connection is dropped (see [`PgConfig::keepalives_retries`]). Zero
+    /// keeps the OS default.
+    pub fn keepalives_retries(mut self, retries: u32) -> Self {
+        self.keepalives_retries = Some(retries);
+        self
+    }
+
+    /// Set `TCP_USER_TIMEOUT` (see [`PgConfig::tcp_user_timeout`]). Zero
+    /// keeps the OS default.
+    pub fn tcp_user_timeout(mut self, timeout: Duration) -> Self {
+        self.tcp_user_timeout = Some(timeout);
+        self
+    }
+
     /// Build the configuration.
     pub fn build(self) -> PgResult<PgConfig> {
         if let Some(url) = self.url {
@@ -643,6 +796,21 @@ impl PgConfigBuilder {
             if let Some(name) = self.application_name {
                 config.application_name = Some(name);
             }
+            if let Some(keepalives) = self.keepalives {
+                config.keepalives = keepalives;
+            }
+            if let Some(idle) = self.keepalives_idle {
+                config.keepalives_idle = Some(idle);
+            }
+            if let Some(interval) = self.keepalives_interval {
+                config.keepalives_interval = Some(interval);
+            }
+            if let Some(retries) = self.keepalives_retries {
+                config.keepalives_retries = Some(retries);
+            }
+            if let Some(timeout) = self.tcp_user_timeout {
+                config.tcp_user_timeout = Some(timeout);
+            }
 
             Ok(config)
         } else {
@@ -678,6 +846,11 @@ impl PgConfigBuilder {
                 connect_timeout: self.connect_timeout.unwrap_or(Duration::from_secs(30)),
                 statement_timeout: self.statement_timeout,
                 application_name: self.application_name,
+                keepalives: self.keepalives.unwrap_or(true),
+                keepalives_idle: self.keepalives_idle,
+                keepalives_interval: self.keepalives_interval,
+                keepalives_retries: self.keepalives_retries,
+                tcp_user_timeout: self.tcp_user_timeout,
                 options: Vec::new(),
             })
         }
@@ -755,6 +928,171 @@ mod tests {
         let config = PgConfig::from_url("postgresql://localhost/mydb?a=b%5Cc&d=e%27f").unwrap();
         let pg_config = config.to_pg_config();
         assert_eq!(pg_config.get_options(), None);
+    }
+
+    #[test]
+    fn tcp_liveness_defaults_match_the_driver() {
+        let config = PgConfig::from_url("postgresql://localhost/mydb").unwrap();
+        assert!(config.keepalives);
+        assert_eq!(config.keepalives_idle, None);
+        assert_eq!(config.keepalives_interval, None);
+        assert_eq!(config.keepalives_retries, None);
+        assert_eq!(config.tcp_user_timeout, None);
+
+        let pg = config.to_pg_config();
+        let default = tokio_postgres::Config::new();
+        assert_eq!(pg.get_keepalives(), default.get_keepalives());
+        assert_eq!(pg.get_keepalives_idle(), default.get_keepalives_idle());
+        assert_eq!(
+            pg.get_keepalives_interval(),
+            default.get_keepalives_interval()
+        );
+        assert_eq!(
+            pg.get_keepalives_retries(),
+            default.get_keepalives_retries()
+        );
+        assert_eq!(pg.get_tcp_user_timeout(), None);
+    }
+
+    #[test]
+    fn parses_tcp_liveness_params_with_libpq_units() {
+        let config = PgConfig::from_url(
+            "postgresql://localhost/mydb?keepalives=1&keepalives_idle=30\
+             &keepalives_interval=10&keepalives_count=3&tcp_user_timeout=15000",
+        )
+        .unwrap();
+        assert!(config.keepalives);
+        assert_eq!(config.keepalives_idle, Some(Duration::from_secs(30)));
+        assert_eq!(config.keepalives_interval, Some(Duration::from_secs(10)));
+        assert_eq!(config.keepalives_retries, Some(3));
+        assert_eq!(config.tcp_user_timeout, Some(Duration::from_millis(15_000)));
+        assert!(config.options.is_empty());
+
+        let pg = config.to_pg_config();
+        assert!(pg.get_keepalives());
+        assert_eq!(pg.get_keepalives_idle(), Duration::from_secs(30));
+        assert_eq!(pg.get_keepalives_interval(), Some(Duration::from_secs(10)));
+        assert_eq!(pg.get_keepalives_retries(), Some(3));
+        assert_eq!(
+            pg.get_tcp_user_timeout(),
+            Some(&Duration::from_millis(15_000))
+        );
+    }
+
+    #[test]
+    fn tcp_liveness_params_are_not_forwarded_as_server_options() {
+        let config = PgConfig::from_url(
+            "postgresql://localhost/mydb?keepalives_idle=30&tcp_user_timeout=5000\
+             &keepalives_interval=5&keepalives_count=2&keepalives=1&search_path=public",
+        )
+        .unwrap();
+        assert_eq!(
+            config.options,
+            vec![("search_path".to_string(), "public".to_string())]
+        );
+        assert_eq!(
+            config.to_pg_config().get_options(),
+            Some("-c search_path=public")
+        );
+    }
+
+    #[test]
+    fn keepalives_zero_disables_and_retries_alias_is_accepted() {
+        let config =
+            PgConfig::from_url("postgresql://localhost/mydb?keepalives=0&keepalives_retries=4")
+                .unwrap();
+        assert!(!config.keepalives);
+        assert_eq!(config.keepalives_retries, Some(4));
+        let pg = config.to_pg_config();
+        assert!(!pg.get_keepalives());
+        assert_eq!(pg.get_keepalives_retries(), Some(4));
+        assert_eq!(pg.get_options(), None);
+    }
+
+    #[test]
+    fn zero_tcp_liveness_values_keep_the_defaults() {
+        let config = PgConfig::from_url(
+            "postgresql://localhost/mydb?keepalives_idle=0&keepalives_interval=0\
+             &keepalives_count=0&tcp_user_timeout=0",
+        )
+        .unwrap();
+        assert_eq!(config.keepalives_idle, None);
+        assert_eq!(config.keepalives_interval, None);
+        assert_eq!(config.keepalives_retries, None);
+        assert_eq!(config.tcp_user_timeout, None);
+
+        // Zero set programmatically is ignored by `to_pg_config` too.
+        let mut config = PgConfig::from_url("postgresql://localhost/mydb").unwrap();
+        config.keepalives_idle = Some(Duration::ZERO);
+        config.keepalives_interval = Some(Duration::ZERO);
+        config.keepalives_retries = Some(0);
+        config.tcp_user_timeout = Some(Duration::ZERO);
+        let pg = config.to_pg_config();
+        let default = tokio_postgres::Config::new();
+        assert_eq!(pg.get_keepalives_idle(), default.get_keepalives_idle());
+        assert_eq!(
+            pg.get_keepalives_interval(),
+            default.get_keepalives_interval()
+        );
+        assert_eq!(
+            pg.get_keepalives_retries(),
+            default.get_keepalives_retries()
+        );
+        assert_eq!(pg.get_tcp_user_timeout(), None);
+    }
+
+    #[test]
+    fn rejects_invalid_tcp_liveness_values() {
+        for query in [
+            "keepalives=yes",
+            "keepalives_idle=-1",
+            "keepalives_idle=30s",
+            "keepalives_interval=abc",
+            "keepalives_count=-2",
+            "keepalives_retries=99999999999",
+            "tcp_user_timeout=1.5",
+            "tcp_user_timeout=",
+        ] {
+            let err = PgConfig::from_url(format!("postgresql://localhost/mydb?{query}"))
+                .expect_err(query);
+            let key = query.split('=').next().unwrap();
+            assert!(err.to_string().contains(key), "{query}: {err}");
+        }
+    }
+
+    #[test]
+    fn builder_sets_tcp_liveness() {
+        let config = PgConfig::builder()
+            .database("mydb")
+            .keepalives(true)
+            .keepalives_idle(Duration::from_secs(60))
+            .keepalives_interval(Duration::from_secs(15))
+            .keepalives_retries(4)
+            .tcp_user_timeout(Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let pg = config.to_pg_config();
+        assert!(pg.get_keepalives());
+        assert_eq!(pg.get_keepalives_idle(), Duration::from_secs(60));
+        assert_eq!(pg.get_keepalives_interval(), Some(Duration::from_secs(15)));
+        assert_eq!(pg.get_keepalives_retries(), Some(4));
+        assert_eq!(pg.get_tcp_user_timeout(), Some(&Duration::from_secs(30)));
+
+        // Explicit builder values override the URL's.
+        let config = PgConfig::builder()
+            .url("postgresql://localhost/mydb?keepalives_idle=30&tcp_user_timeout=1000")
+            .keepalives(false)
+            .keepalives_idle(Duration::from_secs(90))
+            .tcp_user_timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        assert!(!config.keepalives);
+        assert_eq!(config.keepalives_idle, Some(Duration::from_secs(90)));
+        assert_eq!(config.tcp_user_timeout, Some(Duration::from_secs(5)));
+
+        let config = PgConfig::builder().database("mydb").build().unwrap();
+        assert!(config.keepalives);
+        assert_eq!(config.tcp_user_timeout, None);
     }
 
     #[test]
