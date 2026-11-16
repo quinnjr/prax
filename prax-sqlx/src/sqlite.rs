@@ -3,8 +3,8 @@
 use crate::config::DatabaseBackend;
 use crate::error::SqlxResult;
 use crate::types::quote_identifier;
-use sqlx::Row;
 use sqlx::sqlite::SqlitePool;
+use sqlx::{AssertSqlSafe, Row};
 
 /// SQLite-specific query helpers.
 pub struct SqliteHelpers;
@@ -109,8 +109,11 @@ impl SqliteHelpers {
 
     /// Get table columns.
     pub async fn get_columns(pool: &SqlitePool, table: &str) -> SqlxResult<Vec<String>> {
-        let sql = format!("PRAGMA table_info({})", table);
-        let rows = sqlx::query(&sql).fetch_all(pool).await?;
+        let sql = format!(
+            "PRAGMA table_info({})",
+            quote_identifier(DatabaseBackend::Sqlite, table)
+        );
+        let rows = sqlx::query(AssertSqlSafe(sql)).fetch_all(pool).await?;
         let columns: Vec<String> = rows
             .iter()
             .map(|r| r.try_get::<String, _>("name"))
@@ -129,14 +132,16 @@ impl SqliteHelpers {
     /// Set journal mode.
     pub async fn set_journal_mode(pool: &SqlitePool, mode: JournalMode) -> SqlxResult<()> {
         let sql = format!("PRAGMA journal_mode = {}", mode.as_str());
-        sqlx::query(&sql).execute(pool).await?;
+        // `mode` renders a fixed keyword from an enum.
+        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
         Ok(())
     }
 
     /// Set synchronous mode.
     pub async fn set_synchronous(pool: &SqlitePool, mode: SynchronousMode) -> SqlxResult<()> {
         let sql = format!("PRAGMA synchronous = {}", mode.as_str());
-        sqlx::query(&sql).execute(pool).await?;
+        // `mode` renders a fixed keyword from an enum.
+        sqlx::query(AssertSqlSafe(sql)).execute(pool).await?;
         Ok(())
     }
 

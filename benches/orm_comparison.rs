@@ -524,7 +524,7 @@ mod sqlx_benchmarks {
 
 mod sea_orm_benchmarks {
     use sea_orm::Condition;
-    use sea_orm::sea_query::Expr;
+    use sea_orm::sea_query::{Expr, ExprTrait};
 
     /// Create a simple equality filter using sea_query expressions
     pub fn simple_filter() -> Condition {

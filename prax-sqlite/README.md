@@ -4,7 +4,7 @@ SQLite query engine for Prax ORM.
 
 ## Overview
 
-`prax-sqlite` provides an async SQLite backend using `tokio-rusqlite`.
+`prax-sqlite` provides an async SQLite backend on `rusqlite` (bundled SQLite), running each connection on its own thread.
 
 ## Features
 

@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/quinnjr/prax"
 keywords = ["orm", "sqlite", "database", "async"]
 categories = ["database", "asynchronous"]
-rust-version = "1.85"
+rust-version = "1.89"
 
 [dependencies]
 prax-query.workspace = true
@@ -19,9 +19,7 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 
 # SQLite driver
-tokio-rusqlite = { workspace = true }
 rusqlite = { workspace = true }
-sqlite-vector-rs = { workspace = true, optional = true, features = ["library"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
@@ -61,4 +59,6 @@ required-features = ["vector"]
 [features]
 default = []
 bundled = ["rusqlite/bundled"]
-vector = ["dep:sqlite-vector-rs"]
+# Loads the sqlite-vector-rs loadable extension (a cdylib found at runtime)
+# into every pooled connection; see `prax_sqlite::vector`.
+vector = ["rusqlite/load_extension"]

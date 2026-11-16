@@ -3,12 +3,13 @@
 
 //! SQLite database driver for Prax ORM.
 //!
-//! This crate provides SQLite support for the Prax ORM, using `tokio-rusqlite`
-//! for asynchronous database operations.
+//! This crate provides SQLite support for the Prax ORM, using `rusqlite`
+//! with a bundled SQLite.
 //!
 //! # Features
 //!
-//! - Async/await support via `tokio-rusqlite`
+//! - Async/await support via [`AsyncConnection`], which runs each
+//!   `rusqlite` connection on its own thread
 //! - Connection pooling
 //! - Type-safe query building
 //! - Transaction support
@@ -31,6 +32,7 @@
 //!
 //! See [`SqliteEngine`]'s doc block for 0.7 breaking changes.
 
+pub mod async_conn;
 pub(crate) mod capabilities;
 pub mod config;
 pub mod connection;
@@ -45,6 +47,7 @@ pub mod types;
 #[cfg(feature = "vector")]
 pub mod vector;
 
+pub use async_conn::{AsyncConnection, AsyncConnectionError};
 pub use config::{DatabasePath, JournalMode, SqliteConfig, SynchronousMode};
 pub use connection::SqliteConnection;
 pub use engine::SqliteEngine;

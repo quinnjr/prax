@@ -16,23 +16,11 @@
 # version range, and the expected path to removal.
 ignore = [
     # --- Unmaintained transitive deps ---
-    { id = "RUSTSEC-2023-0071", reason = "proc-macro-error is unmaintained (via diesel dev-dep for ORM-comparison benchmarks); resolves when diesel drops it" },
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (via mysql_async); resolves when mysql_async upgrades" },
     { id = "RUSTSEC-2024-0388", reason = "derivative is unmaintained (via mongodb 2.8.x); resolves on mongodb 3.x migration" },
     { id = "RUSTSEC-2025-0057", reason = "fxhash is unmaintained (via cdrs-tokio); no safe upgrade — cdrs-tokio would need to migrate to rustc-hash upstream" },
 
     # --- Vulnerable / unsound transitive deps scoped to backends ---
-    # Diesel SQLite UTF-8 corruption: only affects Diesel's SQLite backend.
-    # Prax uses rusqlite / sqlx for SQLite, not Diesel. Diesel is a dev-dep
-    # solely for ORM-comparison benchmarks (benches/orm_comparison.rs) and
-    # is never shipped to users.
-    { id = "RUSTSEC-2026-0111", reason = "diesel SQLite UTF-8 unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0134", reason = "diesel Mysql date/time padding-bytes unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0135", reason = "diesel SQLite batch-insert debug/display transmute unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0136", reason = "diesel COPY FROM/TO command injection: dev-only (ORM benchmark comparison against Diesel); prax never calls diesel's COPY APIs and diesel is not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0137", reason = "diesel SqliteAggregate unaligned access: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0172", reason = "diesel SQLite deserialize_readonly_database use-after-free: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
-    { id = "RUSTSEC-2026-0138", reason = "diesel-async Mysql date/time padding-bytes unsoundness: dev-only (ORM benchmark comparison against Diesel); not in the runtime dep tree" },
     { id = "RUSTSEC-2026-0173", reason = "proc-macro-error2 is unmaintained (build-time proc-macro via mysql-common-derive and sea-bae, both reached only through the dev-only ORM benchmark crates); no safe upgrade and not in the runtime dep tree" },
 
     # idna 0.2.x Punycode bug: reached via trust-dns-proto 0.21 -> mongodb 2.8.
@@ -61,12 +49,6 @@ ignore = [
     { id = "RUSTSEC-2026-0368", reason = "zip symlink targets outside destination: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
     { id = "RUSTSEC-2026-0369", reason = "zip permissions through symlinks: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
     { id = "RUSTSEC-2026-0429", reason = "zip abort on large symlink entry: build-dep of libduckdb-sys (extracts its bundled source only); resolves when duckdb-rs moves to zip 9" },
-    # libsqlite3-sys < 0.39 bundles a SQLite affected by CVE-2026-119375.
-    # Reached via rusqlite 0.32 (prax-sqlite, opt-in backend) and
-    # sqlx-sqlite 0.8 (prax-sqlx `sqlite` feature). Both pin
-    # libsqlite3-sys 0.30 (`links = "sqlite3"`), so the fix is the
-    # rusqlite / sqlx major upgrade, planned for 0.13.
-    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite CVE-2026-119375 via libsqlite3-sys 0.30 (rusqlite 0.32 in prax-sqlite, sqlx-sqlite 0.8); opt-in SQLite backends only; resolves on the rusqlite/sqlx upgrade planned for 0.13" },
 ]
 
 # This section is considered when running `cargo deny check licenses`
@@ -123,3 +105,6 @@ unknown-registry = "warn"
 unknown-git = "warn"
 # List of allowed registries
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# TODO(sqlite-cve): TEMPORARY - remove with the `[patch.crates-io]` sqlx git
+# pin in Cargo.toml once an sqlx release contains launchbadge/sqlx#4502.
+allow-git = ["https://github.com/launchbadge/sqlx"]

@@ -16,7 +16,7 @@ categories = ["database", "asynchronous"]
 prax-query = { workspace = true }
 
 # SQLx with all database drivers
-sqlx = { version = "0.8", features = [
+sqlx = { version = "0.9", features = [
     "runtime-tokio",
     "tls-rustls",
     "macros",

@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::async_conn::AsyncConnection as Connection;
 use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
-use tokio_rusqlite::Connection;
 use tracing::trace;
 
 use crate::error::{SqliteError, SqliteResult};
@@ -81,8 +81,7 @@ impl SqliteConnection {
         self.conn()
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
-                let columns: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
                 let rows = stmt.query_map([], |row| {
                     let mut map = serde_json::Map::new();
@@ -93,8 +92,7 @@ impl SqliteConnection {
                     Ok(serde_json::Value::Object(map))
                 })?;
 
-                let results: Result<Vec<_>, _> = rows.collect();
-                Ok(results?)
+                rows.collect::<Result<Vec<_>, _>>()
             })
             .await
             .map_err(SqliteError::from)
@@ -112,8 +110,7 @@ impl SqliteConnection {
         self.conn()
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
-                let columns: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
                 let params_ref: Vec<&dyn rusqlite::ToSql> =
                     params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
@@ -127,8 +124,7 @@ impl SqliteConnection {
                     Ok(serde_json::Value::Object(map))
                 })?;
 
-                let results: Result<Vec<_>, _> = rows.collect();
-                Ok(results?)
+                rows.collect::<Result<Vec<_>, _>>()
             })
             .await
             .map_err(SqliteError::from)
@@ -142,17 +138,16 @@ impl SqliteConnection {
         self.conn()
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
-                let columns: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
-                Ok(stmt.query_row([], |row| {
+                stmt.query_row([], |row| {
                     let mut map = serde_json::Map::new();
                     for (i, col) in columns.iter().enumerate() {
                         let value = crate::types::get_value_at_index(row, i);
                         map.insert(col.clone(), value);
                     }
                     Ok(serde_json::Value::Object(map))
-                })?)
+                })
             })
             .await
             .map_err(SqliteError::from)
@@ -166,8 +161,7 @@ impl SqliteConnection {
         self.conn()
             .call(move |conn| {
                 let mut stmt = conn.prepare(&sql)?;
-                let columns: Vec<String> =
-                    stmt.column_names().iter().map(|s| s.to_string()).collect();
+                let columns: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
 
                 let result = stmt.query_row([], |row| {
                     let mut map = serde_json::Map::new();
@@ -181,7 +175,7 @@ impl SqliteConnection {
                 match result {
                     Ok(row) => Ok(Some(row)),
                     Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                    Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+                    Err(e) => Err(e),
                 }
             })
             .await
@@ -194,7 +188,7 @@ impl SqliteConnection {
         trace!(sql = %sql, "Executing statement");
 
         self.conn()
-            .call(move |conn| Ok(conn.execute(&sql, [])?))
+            .call(move |conn| conn.execute(&sql, []))
             .await
             .map_err(SqliteError::from)
     }
@@ -212,7 +206,7 @@ impl SqliteConnection {
             .call(move |conn| {
                 let params_ref: Vec<&dyn rusqlite::ToSql> =
                     params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-                Ok(conn.execute(&sql, params_ref.as_slice())?)
+                conn.execute(&sql, params_ref.as_slice())
             })
             .await
             .map_err(SqliteError::from)
@@ -258,12 +252,16 @@ impl SqliteConnection {
         trace!(sql = %sql, "Executing batch");
 
         self.conn()
-            .call(move |conn| Ok(conn.execute_batch(&sql)?))
+            .call(move |conn| conn.execute_batch(&sql))
             .await
             .map_err(SqliteError::from)
     }
 
-    /// Get the inner connection.
+    /// Get the underlying [`AsyncConnection`](crate::AsyncConnection)
+    /// handle (cloneable; run blocking rusqlite code on it with `call`).
+    ///
+    /// Since 0.13.1 this is prax-sqlite's own handle, not a
+    /// `tokio_rusqlite::Connection`.
     pub fn inner(&self) -> &Connection {
         self.conn()
     }
@@ -272,16 +270,16 @@ impl SqliteConnection {
 impl Drop for SqliteConnection {
     fn drop(&mut self) {
         // Return the connection to the pool if possible
-        if let Some(pool) = self.return_to_pool.take() {
-            if let Some(conn) = self.conn.take() {
-                trace!("Returning connection to pool");
-                let mut idle: parking_lot::MutexGuard<'_, VecDeque<PooledConnection>> = pool.lock();
-                idle.push_back(PooledConnection {
-                    conn,
-                    created_at: self.created_at,
-                    last_used: Instant::now(),
-                });
-            }
+        if let Some(pool) = self.return_to_pool.take()
+            && let Some(conn) = self.conn.take()
+        {
+            trace!("Returning connection to pool");
+            let mut idle: parking_lot::MutexGuard<'_, VecDeque<PooledConnection>> = pool.lock();
+            idle.push_back(PooledConnection {
+                conn,
+                created_at: self.created_at,
+                last_used: Instant::now(),
+            });
         }
         // Otherwise, the connection is just dropped
     }

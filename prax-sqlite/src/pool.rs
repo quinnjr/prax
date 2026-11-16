@@ -18,9 +18,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::async_conn::AsyncConnection as Connection;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
-use tokio_rusqlite::Connection;
 use tracing::{debug, info, trace, warn};
 
 use crate::config::SqliteConfig;
