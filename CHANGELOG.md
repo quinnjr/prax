@@ -36,6 +36,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   libsqlite3-sys 0.39). Raw SQL passed to sqlx is wrapped in
   `AssertSqlSafe`; `SqliteHelpers::get_columns` quotes the table name.
 - **build**: MSRV is now Rust 1.94 (required by sqlx 0.9).
+
+### Fixed
+
+- **postgres**: client-side TCP liveness can be configured, so a pooled
+  connection whose server vanished (RDS failover, network black-hole) is
+  detected instead of hanging a query for ~15 minutes (unacknowledged
+  data, `tcp_retries2`) to ~2h11m (idle, keepalive defaults). `PgConfig`
+  gains `keepalives`, `keepalives_idle`, `keepalives_interval`,
+  `keepalives_retries` and `tcp_user_timeout` (with matching
+  `PgConfigBuilder` setters), applied by `to_pg_config()`. The libpq URL
+  parameters `keepalives`, `keepalives_idle` / `keepalives_interval`
+  (seconds), `keepalives_count` (alias `keepalives_retries`) and
+  `tcp_user_timeout` (milliseconds) now set these client options; they used
+  to be forwarded to the server as `-c` GUCs, so `?tcp_user_timeout=` set
+  the server's option and `?keepalives_idle=` failed the connection. An
+  invalid value is a configuration error; unset or `0` keeps the previous
+  driver/OS defaults.
+
+### Security
+
+- RUSTSEC-2026-0459 (bundled SQLite CVE-2026-119375) is fixed in every
+  crate that links SQLite; its `deny.toml` ignore is removed, as are eight
+  diesel ignores that diesel 2.4 made stale. The ORM-comparison benches move
+  to sea-orm 2.0, diesel 2.4 and diesel-async 0.10.
+
+## [0.13.1] - 2026-11-15
+
+### Breaking
+
 - **sqlite**: the `vector` feature's SQL now matches what sqlite-vector-rs
   accepts. Before, the DDL used `rowid_column=` and `col='float4[N] ...'`
   arguments and searches called `vector_distance` on a vector column; no
@@ -84,13 +113,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aborts instead of treating it as "not published" and re-publishing
   everything. It also looks up `prax-cli` under its package name
   `prax-orm-cli` (it used to query the unrelated `prax-cli` crate).
-
-### Security
-
-- RUSTSEC-2026-0459 (bundled SQLite CVE-2026-119375) is fixed in every
-  crate that links SQLite; its `deny.toml` ignore is removed, as are eight
-  diesel ignores that diesel 2.4 made stale. The ORM-comparison benches move
-  to sea-orm 2.0, diesel 2.4 and diesel-async 0.10.
 
 ## [0.13.0] - 2026-11-14
 
